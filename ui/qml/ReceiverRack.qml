@@ -54,22 +54,23 @@ ColumnLayout {
 
         Item { Layout.fillWidth: true }
 
-        // Automatic P25 receivers: one on every P25 signal the detector
-        // verifies, kept for the session. models/p25_spawn.h has the rule.
+        // Automatic digital voice receivers: one on every P25, DMR, D-STAR,
+        // TETRA or M17 signal the detector verifies, kept for the session.
+        // models/dv_spawn.h has the rule.
         RButton {
             flat: true
             checkable: true
-            checked: engineLink.autoP25
-            text: "auto P25"
+            checked: engineLink.autoDv
+            text: "auto DV"
             ink: Theme.inkDim
             enabled: engineLink.sourceOpen
-            onClicked: engineLink.autoP25 = !engineLink.autoP25
+            onClicked: engineLink.autoDv = !engineLink.autoDv
 
             Tip {
                 visible: parent.hovered
-                text: engineLink.autoP25
-                      ? "opening a receiver on every P25 signal found; a receiver you remove stays removed"
-                      : "open a receiver on every P25 signal the detector finds, and keep it"
+                text: engineLink.autoDv
+                      ? "opening a receiver on every digital voice signal found; a receiver you remove stays removed"
+                      : "open a receiver on every P25, DMR, D-STAR, TETRA and M17 signal the detector finds, and keep it"
             }
         }
 

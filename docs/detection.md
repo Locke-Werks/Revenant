@@ -3103,17 +3103,23 @@ receivers, and `Session::detections` publishes the track list with each
 track's label. `ui/render/spectrum_item.cpp` resolves a click against it and
 tunes a receiver.
 
-**One label tunes without a click.** Since 2026-10-02 the rack header's "auto
+**One label tunes without a click.** Since 2026-10-03 the rack header's "auto
+DV" switch, while it is on, opens a held receiver, heard, on every live or
+held track labelled with a digital voice protocol (P25, DMR, D-STAR, TETRA or
+M17) and allowed to drive a receiver, which means `core/identify` verified
+that protocol's frame sync on it, at a frequency no receiver of any mode
+already covers within half the protocol's channel. The mode is the one a click
+on the track would set. Two such tracks inside that distance get one receiver,
+on the stronger. The switch never removes a receiver; one removed by hand
+stays removed until the switch is turned on again, and the switch is not
+remembered across a restart. `ui/models/dv_spawn.h` has the rule. The rack's
+limit went from eight receivers to 64 on 2026-10-02, so that every such signal
+on the span can have one.
+
+WHAT THIS PARAGRAPH USED TO SAY: "Since 2026-10-02 the rack header's "auto
 P25" switch, while it is on, opens a held `p25p1` receiver, heard, on every
-live or held track labelled with the P25 protocol and allowed to drive a
-receiver, which means `core/identify` verified a P25 frame sync on it, at a
-frequency no receiver of any mode already covers within half a 12.5 kHz
-channel. Two such tracks inside that distance get one receiver, on the
-stronger. The switch never removes a receiver; one removed by hand stays
-removed until the switch is turned on again, and the switch is not remembered
-across a restart. `ui/models/p25_spawn.h` has the rule. The rack's limit went
-from eight receivers to 64 the same day, so that every P25 signal on the span
-can have one.
+live or held track labelled with the P25 protocol". It was P25 only until the
+switch became "auto DV" on 2026-10-03.
 
 WHAT THE HEADING AND THE LAST SENTENCE USED TO SAY. The heading was "What a
 click resolves against exists; what it cannot reach is the classifier", and

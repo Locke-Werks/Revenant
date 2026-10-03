@@ -352,17 +352,29 @@ double click on a full rack keeps the first click's retune and says the rack
 is full. The rule is said in one line under the strips and in the ruler's
 tooltip. Ctrl+N and the rack's "+ add" put a new receiver on the span centre.
 
-**Auto P25.** The owner's request of 2026-10-02: a switch in the rack's
-header, "auto P25", which while it is on gives every P25 detection on a
-frequency no receiver covers a held p25p1 receiver of its own, heard, at the
-mode's 12.5 kHz channel. A detection counts when the detector verified a P25
-frame sync on it, live or held, and a receiver of any mode within 6250 Hz of
-its centre covers it; two in one pass inside that distance get one receiver,
-the stronger's. The switch never removes a receiver. One the operator removes
-while it is on stays removed until the switch is turned on again, and the
-switch itself is not remembered across a restart. It stops opening receivers
-when the rack is full. `ui/models/p25_spawn.h` has the rules with cases in
-`ui/tests/test_p25_spawn.cpp`, and `ui/models/rack_link.cpp` opens them.
+**Auto DV.** The owner's requests of 2026-10-02 and 2026-10-03: a switch in
+the rack's header, "auto DV", which while it is on gives every P25, DMR,
+D-STAR, TETRA or M17 detection on a frequency no receiver covers a held
+receiver of its own, heard, in the mode a click on the same detection would
+set (`label_tune`): p25p1, dmr, dstar and tetra for their own protocols and
+p25p1 for M17. A detection counts when the detector verified that protocol's
+frame sync on it, live or held, and a receiver of any mode within half the
+protocol's channel of its centre covers it: 6250 Hz for P25, DMR and M17,
+3125 Hz for D-STAR and 12500 Hz for TETRA. Two in one pass inside that
+distance get one receiver, the stronger's. The switch never removes a
+receiver. One the operator removes while it is on stays removed until the
+switch is turned on again, and the switch itself is not remembered across a
+restart. It stops opening receivers when the rack is full and says which
+protocol on which frequency it had no room for. A TETRA receiver makes no
+audio and an M17 one plays nothing, so those two are for the decode log once
+focused. `ui/models/dv_spawn.h` has the rules with cases in
+`ui/tests/test_dv_spawn.cpp`, and `ui/models/rack_link.cpp` opens them.
+
+WHAT THIS PARAGRAPH USED TO SAY. It was headed "Auto P25" and began "a switch
+in the rack's header, "auto P25", which while it is on gives every P25
+detection on a frequency no receiver covers a held p25p1 receiver of its
+own". The switch became "auto DV" on 2026-10-03 and spawns on every digital
+voice protocol the detector verifies.
 
 **Mute and solo** are the client's, not the wire's: the engine has no such
 field, and a receiver nobody hears is simply not subscribed. With a solo in

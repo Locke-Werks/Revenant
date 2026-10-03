@@ -2363,3 +2363,13 @@ phrase: three digital voice modes that hand their decoder
 retired: 2026-09-23
 commit: "Append a dmr demodulator that hands DMR its fine stage"
 instead: Four digital voice modes: p25p1, dstar, tetra and dmr. core/engine/vrx.h.
+
+phrase: switch in the rack's header, "auto P25", which while it is on
+phrase: opens a held receiver on every P25 signal the detector verifies
+phrase: the rack header's "auto P25" switch, while it is on, opens a held
+phrase: models/p25_spawn.h has the rule
+retired: 2026-10-03
+commit: "Turn auto P25 into auto DV, a receiver for every DV protocol"
+instead: The rack's "auto DV" switch opens a held receiver on every verified P25,
+    DMR, D-STAR, TETRA or M17 detection, in the mode a click would set.
+    ui/models/dv_spawn.h.

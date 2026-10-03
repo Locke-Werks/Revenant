@@ -216,7 +216,7 @@ qt_add_executable(revenant_ui
     models/auto_filter_link.cpp
     models/noise_controls.h
     models/noise_link.cpp
-    models/p25_spawn.h
+    models/dv_spawn.h
     models/label_tune.h
     models/rack_link.cpp
     models/rds_link.cpp
@@ -653,7 +653,7 @@ if(REVENANT_UI_TESTS)
             tests/test_mix_stages.cpp
             tests/test_resampler.cpp
             tests/test_voice_gain.cpp
-            tests/test_p25_spawn.cpp
+            tests/test_dv_spawn.cpp
             tests/test_auto_filter.cpp
             tests/test_band_plan.cpp
             tests/test_bookmarks.cpp

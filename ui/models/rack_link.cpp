@@ -33,7 +33,7 @@
 #include <QString>
 #include <QVariantMap>
 
-#include "models/p25_spawn.h"
+#include "models/dv_spawn.h"
 #include "models/receiver_palette.h"
 #include "models/window_raise.h"
 
@@ -601,7 +601,7 @@ void EngineLink::dismissReceiver(qulonglong key)
     // Recorded only while the switch is on. With it off nothing would spawn
     // there anyway, and turning it on clears the list, because on means all of
     // them.
-    if (auto_p25_) {
+    if (auto_dv_) {
         double hz = 0.0;
         if (which == pane_key_) {
             hz = static_cast<double>(receiver_absolute_hz_);
@@ -609,7 +609,7 @@ void EngineLink::dismissReceiver(qulonglong key)
             hz = static_cast<double>(view->absolute_hz);
         }
         if (hz != 0.0) {
-            auto_p25_dismissed_hz_.push_back(hz);
+            auto_dv_dismissed_hz_.push_back(hz);
         }
     }
 
@@ -620,24 +620,24 @@ void EngineLink::dismissReceiver(qulonglong key)
     }
 }
 
-void EngineLink::setAutoP25(bool on)
+void EngineLink::setAutoDv(bool on)
 {
-    if (auto_p25_ == on) {
+    if (auto_dv_ == on) {
         return;
     }
-    auto_p25_ = on;
-    auto_p25_dismissed_hz_.clear();
-    auto_p25_noted_hz_.clear();
-    emit autoP25Changed();
+    auto_dv_ = on;
+    auto_dv_dismissed_hz_.clear();
+    auto_dv_noted_hz_.clear();
+    emit autoDvChanged();
 
     // At once rather than at the next detection pass, so the switch answers
-    // with the P25 already on the span.
-    spawn_p25_receivers();
+    // with the digital voice already on the span.
+    spawn_dv_receivers();
 }
 
-void EngineLink::spawn_p25_receivers()
+void EngineLink::spawn_dv_receivers()
 {
-    if (!auto_p25_ || !connected_ || !sourceOpen()) {
+    if (!auto_dv_ || !connected_ || !sourceOpen()) {
         return;
     }
 
@@ -645,7 +645,7 @@ void EngineLink::spawn_p25_receivers()
     // held ones' from their views, which exist from the moment one is asked for.
     // So a receiver spawned last pass and not yet answered by the engine still
     // covers its frequency, and a pass cannot open it twice.
-    std::vector<double> covered = auto_p25_dismissed_hz_;
+    std::vector<double> covered = auto_dv_dismissed_hz_;
     for (const RackEntry& entry : rack_.entries()) {
         if (entry.key == pane_key_) {
             if (receiver_absolute_hz_ != 0) {
@@ -657,28 +657,31 @@ void EngineLink::spawn_p25_receivers()
     }
 
     const std::size_t room = kMaxReceivers - std::min(rack_.size(), kMaxReceivers);
-    const P25SpawnPlan plan = plan_p25_spawns(shown_.detections, covered, room);
+    const DvSpawnPlan plan = plan_dv_spawns(shown_.detections, covered, room);
 
     // Held, never focused: the pane stays on whatever the operator is looking
     // at. The params are the startup receivers' (place_startup_receiver): the
-    // mode and the mode's own filter, which for p25p1 is the 12.5 kHz channel.
-    for (const P25Spawn& spawn : plan.open) {
+    // mode and the mode's own filter, which is the protocol's channel.
+    for (const DvSpawn& spawn : plan.open) {
         const auto key = rack_.add();
         if (!key) {
             break;
         }
         rpc::VrxParams params;
-        params.demod = rpc::Demod::P25p1;
+        params.demod = spawn.demod;
         add_held_receiver(*key, spawn.centre_hz, params);
     }
 
-    for (const double hz : plan.no_room_hz) {
+    for (const DvSpawn& spawn : plan.no_room) {
+        const double hz = spawn.centre_hz;
         const bool noted =
-            std::any_of(auto_p25_noted_hz_.begin(), auto_p25_noted_hz_.end(),
-                        [hz](double seen) { return std::abs(seen - hz) <= kP25SpawnToleranceHz; });
+            std::any_of(auto_dv_noted_hz_.begin(), auto_dv_noted_hz_.end(),
+                        [&](double seen) { return std::abs(seen - hz) <= spawn.tolerance_hz; });
         if (!noted) {
-            auto_p25_noted_hz_.push_back(hz);
-            set_rack_note(QStringLiteral("auto P25: no receiver for %1 MHz, the rack is full")
+            auto_dv_noted_hz_.push_back(hz);
+            set_rack_note(QStringLiteral("auto DV: no receiver for %1 at %2 MHz, the rack is full")
+                              .arg(QString::fromUtf8(spawn.protocol.data(),
+                                                     static_cast<qsizetype>(spawn.protocol.size())))
                               .arg(hz / 1e6, 0, 'f', 4));
         }
     }

@@ -195,9 +195,9 @@ out into a window of their own: up to 64 receivers, each with a strip, a level,
 a gain, mute and solo, their audio mixed, and the focused one's dial, mode,
 fine-tuning display, AFT, auto filter, RDS and a decode log of what its
 decoders report. A DV slider beside the output lifts digital voice by up to
-30 dB ahead of the limiter, and an "auto P25" switch in the rack header opens a
-held receiver on every P25 signal the detector verifies on a frequency no
-receiver covers. The radio panel lists the vocoder plugins the engine loaded,
+30 dB ahead of the limiter, and an "auto DV" switch in the rack header opens a
+held receiver on every P25, DMR, D-STAR, TETRA or M17 signal the detector
+verifies on a frequency no receiver covers. The radio panel lists the vocoder plugins the engine loaded,
 what each serves and why any was refused. Every action has a key, one table
 decides them all, and a command palette on Ctrl+K lists every action and
 band. `docs/ui-spectrum.md` has each of those and what it measured.
@@ -205,7 +205,9 @@ band. `docs/ui-spectrum.md` has each of those and what it measured.
 WHAT THIS PARAGRAPH USED TO SAY: "The receivers have a window of their own: a
 rack of up to eight receivers". The limit went to 64 on 2026-10-02, which is
 what the engine carries audio for, and the rack has docked in the main window
-by default since 2026-09-23.
+by default since 2026-09-23. It also said "an "auto P25" switch in the rack
+header opens a held receiver on every P25 signal the detector verifies"; the
+switch became "auto DV" on 2026-10-03 and covers every digital voice protocol.
 
 A receiver belongs to the session that made it, and goes when that session
 ends unless it was added with `keep`, which is what a headless recorder asks
