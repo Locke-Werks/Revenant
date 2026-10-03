@@ -243,6 +243,52 @@ Rectangle {
             }
         }
 
+        // SPEECH TO TEXT: the engine's one switch, the owner's decision of
+        // 2026-10-03, beside the receivers because it acts on every one of
+        // them, and independent of the rack's auto DV, which only opens
+        // receivers. The engine's switch is shared by every session, so this
+        // is drawn from what the engine reports; models/transcription.h has
+        // what the chip beside it says. Greyed with its reason on hover for an
+        // engine that does not transcribe, rather than hidden, so the operator
+        // can find out why.
+        RButton {
+            id: speechButton
+            flat: true
+            checkable: true
+            visible: engineLink.connected
+            checked: engineLink.transcriptionOn
+            text: "speech"
+            ink: engineLink.transcriptionOffered ? Theme.inkDim : Theme.inkOff
+            onClicked: engineLink.toggleTranscription()
+
+            Tip {
+                visible: parent.hovered
+                text: !engineLink.transcriptionOffered
+                      ? engineLink.transcriptionDetail
+                      : (engineLink.transcriptionOn ? "turn speech to text off  "
+                                                     : "turn speech to text on  ")
+                        + KeyMap.keysText("transcription.toggle")
+                        + "\nWhile it is on the engine transcribes every receiver that makes "
+                        + "speech: digital voice by call, analogue by squelch, wfm only where "
+                        + "a receiver is chosen in. The text is drawn on the waterfall beside "
+                        + "its receiver and goes into the decode log. The first time it goes "
+                        + "on the engine downloads its speech model, about 1.6 GB."
+            }
+        }
+
+        // The model's download, its loading, a failure, or the queue, in a
+        // word or two with the engine's sentence on hover. Nothing while
+        // there is nothing to say.
+        StatusChip {
+            visible: engineLink.connected && engineLink.transcriptionOffered
+                     && engineLink.transcriptionLabel.length > 0
+            label: engineLink.transcriptionLabel
+            detail: engineLink.transcriptionDetail
+            ink: engineLink.transcriptionTone === "busy" ? Theme.accent
+                 : engineLink.transcriptionTone === "bad" ? Theme.inkBad
+                 : Theme.inkDim
+        }
+
         // Every notice the pill does not name, each a chip with its sentence
         // verbatim on hover; see controls/StatusChip.qml. The pill names the
         // first and these are the rest, so no notice is on screen twice.

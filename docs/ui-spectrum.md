@@ -31,7 +31,9 @@ Each fault is on screen once, in the top bar: the pill names the first, with
 its full sentence on hover, and any others are chips beside the pill, each
 with its sentence on hover. `ui/models/status_summary.h` decides which
 conditions are faults, which one the pill names and which are chips, and
-which are notes that wait in the drawer.
+which are notes that wait in the drawer. Beside the receivers button, since
+2026-10-03, is the "speech" switch with its own chip; see "Speech to text"
+below.
 
 **At launch.** Since 2026-09-27 the window starts an engine of its own when
 three things hold: the address it is pointed at is 127.0.0.1 or localhost,
@@ -256,6 +258,7 @@ receiver limit from eight to 64".
 | audio | mute or unmute the audio | `Ctrl+M` |
 | audio | turn the volume up | `Alt+=` |
 | audio | turn the volume down | `Alt+-` |
+| speech | turn speech to text on or off | `Ctrl+Shift+T` |
 | display | pin or unpin the spectrum floor | `Ctrl+[` |
 | display | pin or unpin the spectrum ceiling | `Ctrl+]` |
 | display | put the arrow keys on the detection threshold | `Ctrl+Shift+D` |
@@ -1660,9 +1663,15 @@ and `ui/qml/DecodePane.qml` the layout.
 **The menu is the engine's own list**, cut to the decoders whose
 `DecoderInfo::modes` include the receiver's mode, in the engine's order, with
 auto first wherever it would attach anything. A decoder added to the engine
-appears without the client knowing its name. The section is absent where
-nothing reads the mode, which is am, dsb and wfm, and sam since it arrived on
-2026-09-23; wfm keeps its RDS section.
+appears without the client knowing its name. The switch and the menu are
+absent where nothing reads the mode, which is am, dsb and wfm, and sam since
+it arrived on 2026-09-23; wfm keeps its RDS section. The log is shown under any
+receiver while it holds lines, since 2026-10-03, because transcripts land in
+it and an am or wfm receiver can be transcribed; see "Speech to text" below.
+
+WHAT THIS PARAGRAPH USED TO SAY: "The section is absent where nothing reads the
+mode". True until speech to text gave the log lines on receivers no decoder
+reads.
 
 | Receiver | Offered |
 | --- | --- |
@@ -1737,6 +1746,104 @@ status and message. p25p1 on a raw receiver at the channel centre, fed
 `siggen dv --mode p25p1 --rate 288000` twice clear on talkgroup 1201 and twice
 with `--algid 132` on talkgroup 2402, logged every header: the clear ones as
 lines, the encrypted ones as lines behind an "encrypted: talkgroup 2402" chip.
+
+## Speech to text
+
+Since 2026-10-03 the engine can transcribe what its receivers hear, and the
+window puts the text on the span waterfall beside the transmission it came
+from and in the decode log. The engine half, what is transcribed and how
+utterances are cut, is in `docs/rpc.md`, "Speech to text".
+`ui/models/transcription.h` holds the window's rules, with cases in
+`ui/tests/test_transcription.cpp`; `ui/models/transcribe_link.cpp` is the wire
+half; `ui/render/caption_layout.h` places the captions, with cases in
+`ui/tests/test_caption_layout.cpp`.
+
+**The switch.** "speech" in the top bar, beside the receivers button because
+it acts on every receiver, and `Ctrl+Shift+T`. It is the engine's one switch,
+shared by every session, so it is drawn from what the engine reports and
+another session turning it on shows as on here. It is independent of the
+rack's "auto DV", which only opens receivers. The window remembers the
+operator's last setting, `speech/transcribe` in `ui/models/settings.h`, and
+sends it again on every connection, the detection threshold's arrangement,
+since a restarted engine comes up with it off. It is written only when the
+operator moves it, and a window that has never been told anything sends
+nothing, so it does not undo another session's switch. Against an engine that
+does not transcribe the switch is greyed, with the engine's reason on hover,
+rather than hidden.
+
+**The chip beside it** says what the engine is doing in a word or two, with the
+sentence on hover, and nothing while there is nothing to say: "model 42%"
+while the model downloads, a floored percentage so 100% is only said of a
+finished download; "checking model" while it is verified; "loading model";
+"model failed" in the engine's own words, with the retry, which is turning the
+switch off and on; "ready"; and "N queued" in place of "ready" whenever
+utterances are waiting, because a number that climbs is a recogniser falling
+behind the band. The hover over "ready" carries the device, the receivers
+being transcribed, and the counters named apart: transcribed, dropped because
+the queue was full, and heard and judged not to be speech.
+
+**Per receiver.** "speech [auto|on|off]" in the receiver detail pane. Auto
+follows the engine's rule, every mode that makes speech except wfm; on takes
+the receiver in whatever its mode, which is how a wfm talk station is chosen;
+off leaves it out. A note beside it explains the state in words, "waiting for
+speech", "auto leaves wfm out", "no speech on cw", and the engine's own flag
+outranks the rule: a receiver it reports as transcribing reads "transcribing"
+whatever the rule would have said. A strip in the rack whose receiver is being
+transcribed shows "STT" in the receiver's colour, and nothing otherwise.
+Choices are reconciled rather than commanded, kept against the rack entry and
+sent only where they differ from what this connection already sent, so a
+receiver rebuilt under a new id gets its choice again and auto is never sent
+to a receiver nobody chose for.
+
+**Captions.** The owner's design of 2026-10-03. A caption is pinned to the
+rows of the span waterfall where its utterance ended, beside the receiver's
+passband, right of it where it fits and left where it does not, with a short
+leader to it in the receiver's colour. It scrolls down with the rows, so it
+stays next to the time the speech was on the air. At the bottom edge it does
+not scroll off: it holds there and fades out over the same length of time it
+took to cross the waterfall. Captions that would overlap stack rather than
+being dropped, and those crowding the hold stack upward from the bottom edge,
+oldest lowest. The owner first asked for half-speed scrolling and chose this
+instead, because text that moves at half the rows' speed is no longer beside
+the time it describes.
+
+The placement is by samples, not by seconds. A transcript carries its
+utterance in the engine's source sample index, the waterfall keeps the sample
+range of every row it holds, and the caption goes on the row holding the
+utterance's last sample. A nominal row rate would drift, because the engine
+paces rows at its own setting, a fast source makes one per block, and the
+client's hand-off drops rows when the GUI thread is late. The crossing time is
+the history's own span in samples at the moment the caption reaches the hold.
+For scale: a 2.4 MS/s dongle makes a row per 65536-sample block, 36.6 rows a
+second, so a docked waterfall 240 rows tall is crossed in about 6.5 s and a
+caption then fades for another 6.5 s. A retune moves nothing: a caption keeps
+the passband its receiver had when it heard the speech, in absolute hertz,
+and one whose passband the span no longer reaches is held inside the nearer
+edge with no leader rather than dropped.
+
+A caption is at most forty columns and three lines of Cascadia Mono, cut with
+an ellipsis; the window keeps 64 at once and lets the oldest go past that. A
+transcript the recogniser doubted, confidence under 0.5, is drawn dimmer.
+Hovering a caption opens a card in the waterfall's top right corner with the
+receiver, its mode and frequency, the call's talkgroup and source where the
+protocol gave them, the whole text, the confidence and how long after the
+speech the text was ready.
+
+**In the decode log.** Every transcript is a line with decoder "speech",
+under whichever receiver it came from, and the log is shown under any
+receiver while it holds lines, since an am or wfm receiver can be transcribed
+though no decoder reads it. The time column is the receiver's own stream, as
+for every other line; the expansion carries the passband, both sample spans,
+the confidence, the no-speech probability, the latency, the sequence and the
+call's fields. A doubtful line is dim and carries an "unsure" chip.
+
+**Testing it without an engine that transcribes.** `revenant-ui
+--fake-transcripts`, or `REVENANT_UI_FAKE_TRANSCRIPTS=1` for a run
+`scripts/frame-budget.ps1` starts with its own arguments, feeds a made-up
+transcript every 3.5 s through the path a real one takes: 2.5 s long, ended
+1.5 s before the newest row, beside a receiver in the rack. Every one says it
+is a test caption. It is for looking at and timing the captions, the card and
+the log lines, and nothing else.
 
 ## Identification, and why AFT does not have to wait for it
 

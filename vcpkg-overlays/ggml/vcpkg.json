@@ -1,0 +1,63 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "ggml",
+  "version-date": "2026-01-13",
+  "description": "Tensor library for machine learning. Revenant overlay: ggml-org/ggml b6d1f0f, the ggml whisper.cpp 1.8.3 was synced to, with the x86 CPU baseline pinned and Vulkan from the LunarG SDK",
+  "homepage": "https://github.com/ggml-org/ggml",
+  "license": "MIT",
+  "supports": "!uwp",
+  "dependencies": [
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ],
+  "features": {
+    "blas": {
+      "description": "Enable BLAS support",
+      "dependencies": [
+        "blas",
+        "cblas"
+      ]
+    },
+    "cuda": {
+      "description": "Enable CUDA support",
+      "supports": "!(windows & staticcrt)",
+      "dependencies": [
+        "cuda"
+      ]
+    },
+    "metal": {
+      "description": "Enable Metal support",
+      "supports": "osx"
+    },
+    "opencl": {
+      "description": "Enable OpenCL support",
+      "supports": "!arm32",
+      "dependencies": [
+        "opencl"
+      ]
+    },
+    "openmp": {
+      "description": "Enable OpenMP support",
+      "supports": "!osx"
+    },
+    "vulkan": {
+      "description": "Enable Vulkan support, against the LunarG SDK named by VULKAN_SDK rather than vcpkg's vulkan-loader",
+      "dependencies": [
+        {
+          "name": "ggml",
+          "host": true,
+          "default-features": false,
+          "features": [
+            "vulkan"
+          ]
+        }
+      ]
+    }
+  }
+}

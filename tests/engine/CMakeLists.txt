@@ -141,6 +141,11 @@ revenant_apply_warnings(revenant_lock_holder)
 # retune on a running receiver. It is where the levels in docs/rpc.md come
 # from.
 
+# test_engine_source_clock.cpp needs a GPU. It is AudioChunk::source_end on a
+# real receiver: a tone keyed on at a known source sample, heard through a USB
+# receiver and mapped back onto the source clock, which is where a transcript
+# is drawn on the waterfall.
+
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
@@ -159,6 +164,7 @@ add_executable(revenant_engine_tests
     test_engine_passband.cpp
     test_engine_probe.cpp
     test_engine_retune.cpp
+    test_engine_source_clock.cpp
     test_engine_spectrum.cpp
     test_pacing_window.cpp
     test_front_end_correction.cpp

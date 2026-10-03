@@ -111,6 +111,7 @@ Item {
         "audio.volume": (presses) => {
             audioPlayer.volume = KeyMap.stepVolume(audioPlayer.volume, Number(presses))
         },
+        "transcription.toggle": () => engineLink.toggleTranscription(),
         "scale.pin": (end) => {
             if (end === "floor") {
                 if (ScaleSettings.floorPinned)

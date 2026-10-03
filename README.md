@@ -209,6 +209,20 @@ by default since 2026-09-23. It also said "an "auto P25" switch in the rack
 header opens a held receiver on every P25 signal the detector verifies"; the
 switch became "auto DV" on 2026-10-03 and covers every digital voice protocol.
 
+Speech to text, since 2026-10-03. One switch, "speech" in the top bar or
+Ctrl+Shift+T, has the engine transcribe every receiver that makes speech: P25
+by call, D-STAR and DMR by call when a vocoder plugin gives them a voice, and
+analogue modes by squelch, or by a level detector where the squelch is open.
+WFM is left out unless a receiver is chosen in, and each receiver can be set
+to auto, on or off. The recogniser is whisper.cpp on the engine's own GPU
+through Vulkan, with its 1.6 GB model downloaded the first time the switch
+goes on. The text lands on the span waterfall beside the transmission it came
+from, pinned to the rows the speech was on, and in the decode log. On the RTX
+4090 it transcribes a 5 s clip in 80 ms, and beside a P25 receiver and four
+nfm receivers it lost nothing; `docs/rpc.md`, "Speech to text", has those
+measurements and the one that costs, which is a GPU-bound engine's headroom,
+halved while Whisper runs flat out.
+
 A receiver belongs to the session that made it, and goes when that session
 ends unless it was added with `keep`, which is what a headless recorder asks
 for. `revenant-engine` listens on port 17690 by default, which is where
@@ -223,7 +237,7 @@ reason the design exists, has nothing to search yet. The engine runs one radio
 at a time. Nothing saves a set of receivers across a restart; that one is in
 `docs/rpc.md` with what it would take and what the gap costs meanwhile. TETRA
 voice is not decoded, and D-STAR and DMR voice is silent without a vocoder
-plugin. RDS2's three extra
+plugin. Speech to text hears English only. RDS2's three extra
 subcarriers are not implemented, and RDS-TMC is recognised, counted and kept
 raw but not decoded into events and locations, because the field positions are
 in clauses of ISO 14819-1 nobody here has read; `docs/modes.md` has both.
@@ -416,6 +430,10 @@ without a radio.
 A sound card, if you want to listen rather than record. The monitor is
 WASAPI in shared mode.
 
+For speech to text, 1.6 GB free in `%LOCALAPPDATA%` and a network connection
+the first time it is turned on, when the engine downloads Whisper's model and
+verifies it. Nothing is fetched before then, or again once it is verified.
+
 macOS and Linux are not targets yet. The engine is written to the Vulkan API
 and does not use Windows-specific graphics, but nobody has built or run it
 elsewhere, and claiming a platform nobody has tested is how a project acquires
@@ -581,11 +599,11 @@ will comfortably outlast them.
 - [docs/modes.md](docs/modes.md), every mode Revenant will implement, what each one
   needs and which are out of reach
 - [docs/rpc.md](docs/rpc.md), why the client is a second process, what crosses
-  the wire and what does not
+  the wire and what does not, and speech to text in the engine
 - [docs/ui-spectrum.md](docs/ui-spectrum.md), the client: its windows, keys and
   receiver rack, how the spectrum and waterfall scale themselves, why the
-  fine-tuning display transforms a different stream, AFT, the auto filter and
-  the decode log
+  fine-tuning display transforms a different stream, AFT, the auto filter,
+  the decode log and the speech captions
 - [docs/detection.md](docs/detection.md), wideband detection and click-to-tune, and
   why the detection spectrum is built per channel rather than across the span
 - [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md), what the RTL2832U

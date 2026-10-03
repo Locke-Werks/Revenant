@@ -277,6 +277,14 @@ struct DecodedLine {
     std::uint64_t serial = 0;
 
     std::uint64_t vrx = 0;
+
+    // The rack colour slot of the receiver the line came from, which the
+    // decoder column is drawn in, or -1 to draw it in the focused receiver's
+    // as every decoder line always has been. A transcript can come from any
+    // receiver in the rack, not only the focused one, so it says which
+    // (models/transcription.h).
+    int slot = -1;
+
     std::string time;
     std::string decoder;
     std::string kind;

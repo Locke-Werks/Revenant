@@ -170,6 +170,54 @@ ColumnLayout {
                     + "allows."
         }
 
+        // SPEECH TO TEXT ON THIS RECEIVER: auto follows the engine's rule,
+        // every mode that makes speech except wfm; on takes it in whatever the
+        // mode, which is how a wfm talk station is chosen in; off leaves it
+        // out. The control shows what the engine reports and moves when its
+        // answer comes back. Nothing here on an engine that does not
+        // transcribe; the top bar's switch says why. models/transcription.h
+        // has the rule and the note beside it.
+        Label {
+            visible: engineLink.transcriptionOffered
+            text: "speech"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeBody
+        }
+
+        RSegmented {
+            id: speechChoice
+
+            visible: engineLink.transcriptionOffered
+            options: ["auto", "on", "off"]
+            current: engineLink.receiverTranscribe
+            tint: detail.tint
+            onPicked: (choice) => engineLink.setReceiverTranscribe(choice)
+
+            HoverHandler { id: speechHover }
+
+            Tip {
+                visible: speechHover.hovered
+                text: "Speech to text on this receiver while the top bar's switch is on. Auto "
+                      + "transcribes every mode that makes speech except wfm, which is mostly "
+                      + "music; on takes this receiver in whatever its mode, so a talk station "
+                      + "can be chosen; off leaves it out. Raw, TETRA and cw make no speech "
+                      + "and are never transcribed."
+            }
+        }
+
+        Label {
+            readonly property string note:
+                engineLink.transcribeNote(engineLink.receiverTranscribe,
+                                          engineLink.receiverDemod,
+                                          engineLink.transcriptionOn,
+                                          engineLink.receiverTranscribing)
+
+            visible: engineLink.transcriptionOffered && note.length > 0
+            text: note
+            color: engineLink.receiverTranscribing ? detail.tint : Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
         Item { Layout.fillWidth: true }
 
         RButton {

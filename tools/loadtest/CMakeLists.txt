@@ -10,5 +10,9 @@ add_executable(revenant-loadtest main.cpp)
 
 target_link_libraries(revenant-loadtest PRIVATE revenant_rpc_server revenant_rpc_client)
 
+# --whisper-clip: Whisper on the engine's GPU beside the radio, the contention
+# measurement the owner asked for before transcription was built on.
+target_link_libraries(revenant-loadtest PRIVATE revenant_transcribe)
+
 revenant_apply_warnings(revenant-loadtest)
 revenant_embed_version(revenant-loadtest DESCRIPTION "Revenant contention measurement")

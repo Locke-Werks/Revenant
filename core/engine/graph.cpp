@@ -820,6 +820,13 @@ struct Graph::Impl {
         dsp::SampleIndex retire_through = 0;
         std::uint64_t timeline_value = 0;
 
+        // One past the last source sample this frame's channel blocks stand
+        // for, on SpectrumFrame::start's index, and zero for a frame that
+        // processed no blocks. Copied onto every AudioChunk this frame
+        // delivers as AudioChunk::source_end; Graph::on_block has the
+        // arithmetic.
+        dsp::SampleIndex source_end = 0;
+
         // The spectrum stage's own scratch and destination, per frame for the
         // same reason a receiver's are: frames overlap on the device, so a
         // shared buffer would have the next dispatch writing over the copy
@@ -1890,6 +1897,7 @@ struct Graph::Impl {
             chunk.channels = entry.output.channels;
             chunk.squelch_open = open;
             chunk.tuning_epoch = entry.tuning_epoch;
+            chunk.source_end = frame.source_end;
 
             if (entry.sink != nullptr && *entry.sink) {
                 Status delivered;
@@ -4261,6 +4269,24 @@ Status Graph::on_block(const source::SourceBlock& block) {
     frame.retire_through =
         block_count > 0 && next_first * decimation > support ? next_first * decimation - support
                                                              : 0;
+
+    // Where this frame's audio sits on the source clock, which is the clock
+    // the waterfall and the detector are drawn on. The same composition as
+    // frame.spectrum_start above: channel block m is taken at input m*D and
+    // the prototype delays it by exactly its group delay, so the blocks
+    // [first_block, next_first) stand for source samples up to
+    // next_first*D - delay. A spectrum frame recorded in this dispatch ends
+    // on exactly this index, because its window ends on the same block.
+    //
+    // Set on every frame, including one that processed nothing, so a reused
+    // slot never carries a previous frame's figure. The guard is the same
+    // clamp-not-wrap rule source_index_of_display states; first_block*D is
+    // at least the prototype's support, which is about twice its delay, so
+    // it does not bite.
+    frame.source_end =
+        block_count > 0 && next_first * decimation > impl.prototype_group_delay
+            ? next_first * decimation - impl.prototype_group_delay
+            : 0;
     frame.timeline_value = ticket + 1;
 
     VkTimelineSemaphoreSubmitInfo timeline_info{};

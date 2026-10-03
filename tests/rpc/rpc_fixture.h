@@ -188,6 +188,10 @@ struct HarnessOptions {
     // ServerOptions::vocoders, passed through. The case owns the set and keeps
     // it alive past the harness.
     const decode::VocoderPluginSet* vocoders = nullptr;
+
+    // ServerOptions::transcribe_prepare, passed through. A case passes a fake
+    // recogniser; empty is a server that does not transcribe.
+    transcribe::Prepare transcribe_prepare;
 };
 
 // A ring request the engine satisfies in full, so nothing is clamped.

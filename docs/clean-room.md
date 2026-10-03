@@ -152,6 +152,42 @@ written from textbook mathematics with the chapter cited in the file header, and
 those headers stay exactly as they are. Their claims are about the file that
 carries them, they were true when they were written, and they are still true.
 
+## Speech to text, and the first model file
+
+Speech to text, since 2026-10-03, is linked code and a model, and neither is
+specification work. There is no document a speech recogniser could be written
+from in the sense this file means, so whisper.cpp 1.8.3 and ggml are linked
+from vcpkg, MIT, under the permissive
+clause of "What is allowed" below, and no code of theirs is copied into
+`core/`, `tools/` or `ui/`. `core/transcribe/whisper_runner.cpp` is the only
+file that includes `whisper.h`. ggml comes from Revenant's overlay port,
+`vcpkg-overlays/ggml`, which builds upstream's source at `b6d1f0f` with the
+registry's five patches unchanged and changes only build options; its
+portfile says which and why. The rejection rules in
+`core/transcribe/transcriber.cpp` cite where each came from: openai/whisper's
+`transcribe.py`, MIT, for the no-speech rule and its two thresholds, and
+Table III of Baranski et al., arXiv:2501.11378, for the hallucination list.
+
+**Whisper's weights are the project's first model-file dependency, accepted by
+the owner on 2026-10-03.** `ggml-large-v3-turbo.bin`, 1,624,555,275 bytes,
+MIT, from Hugging Face's `ggerganov/whisper.cpp` at commit
+`5359861c739e955e79d9a303bcbc70fb988958b1`, SHA-256
+`1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69`.
+`core/transcribe/model_store.h` pins all three. The engine downloads it the
+first time speech to text is turned on, into
+`%LOCALAPPDATA%\Revenant\models`, verifies the size and the hash, and deletes
+a download that does not match both. It is never in the installer, so a release
+conveys no weights: the file comes to the person who asked for it from
+Hugging Face, under the licence it is published with there. The notices files
+therefore name whisper.cpp and ggml, which are linked, and not the model.
+
+What the decision does not change is that a weights file has no document to
+cite and no clause to check against when it misbehaves, which is the argument
+`docs/modes.md` makes against FreeDV 2020 and RADE. A transcript is the
+recogniser's reading of the audio, judged by its own scores and a published
+list of its known failures, and never a decode. That row now waits only on the
+licence of RADE's weights.
+
 ## What is allowed
 
 - Published specifications and standards documents.
@@ -634,6 +670,17 @@ resolves to `vulkan-1.lib`, an import library for the loader that arrives with
 the graphics driver. Whether that loader is a System Library under GPL-3.0
 section 1 does not need deciding, because the loader is Apache-2.0 and so is
 compatible either way.
+
+**Added on 2026-10-03, for speech to text:** `whisper-cpp` 1.8.3, MIT, and
+`ggml` at `ggml-org/ggml` `b6d1f0f` from Revenant's overlay port, MIT, both
+static in the engine. Each asks of a binary release the copyright notice and
+the permission notice. `scripts/generate_notices.py` reproduces every
+installed port except the test framework and vcpkg's helpers, so both reach
+`THIRD-PARTY-NOTICES-engine.txt` without a change to it. ggml's Vulkan
+backend builds against the same LunarG SDK and imports the same
+`vulkan-1.dll` as the engine, so no Vulkan loader arrives from vcpkg. The
+model file is not a port and not in the binary; "Speech to text, and the
+first model file" above has its position.
 
 **Qt, which the engine does not link and the UI does.** `ui/` is a separate
 CMake project against the dynamic triplet, requiring Qt6 6.8 or newer, and it

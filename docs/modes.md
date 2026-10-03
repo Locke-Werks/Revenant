@@ -127,6 +127,27 @@ to the first loaded one that serves the mode or its codec
 owns; with none loaded the receiver is silent. Nothing in this tree implements
 AMBE or AMBE+2, so the table's "No" stands for software of this project's own.
 
+### Speech to text, where it touches each voice mode
+
+Since 2026-10-03 the engine can transcribe a receiver's speech with Whisper
+(`docs/rpc.md`, "Speech to text"). It reads the same audio a listener hears, so
+it reaches exactly the voice this document says Revenant can render and no
+further. A digital voice receiver is cut into utterances by its calls.
+
+| Mode | Transcribed |
+| --- | --- |
+| P25 Phase 1 | Yes, from the IMBE voice, a call at a time, with the call's NAC, talkgroup and source on the transcript. An encrypted call is silence with the gate shut and never reaches the recogniser |
+| D-STAR, DMR | Only with a vocoder plugin loaded, since without one the voice is silence. A DMR call marked private never reaches the plugin and so is not transcribed. No call fields are attached today |
+| TETRA | No. A tetra receiver makes no audio; TETRA voice is not decoded |
+| M17 | No. M17 is decoded for its framing; its Codec 2 voice is not rendered |
+| Analogue speech: am, sam, nfm, usb, lsb, dsb | Yes, by squelch where one is set and by a level detector where it is open |
+| wfm | Only on a receiver chosen in, since broadcast FM is mostly music |
+| cw, raw | Never |
+
+The recogniser is told the speech is English and does not detect the
+language. A transcript is the recogniser's reading of the audio, not a decode:
+nothing in the signal checks it.
+
 ## Included
 
 ### Land mobile, and the open alternatives to it
@@ -583,7 +604,23 @@ answer either, or where the only other route is reading somebody's decoder.
 | Inmarsat-C air interface via the System Definition Manual | The SDM is confidential and is not a usable source. This is not an exclusion of Inmarsat-C, which is included above by measurement; it is an exclusion of that route to it |
 | KG-STV | One author's software, no published format description |
 | ROS and Opera | No specification located. Both are closed-source distributions from the author of VARA. This rests on an absence rather than a document that was read, and the search was not completed |
-| FreeDV 2020 and RADE | The code is two-clause BSD and the licence on the trained model weights was never established. A weights file has no document to cite and no clause to check against when it misbehaves, and a neural vocoder cannot be clean-roomed from an architecture paper. Two surveys returned opposite verdicts on RADE and both conceded the weights question. Revisit if the weights carry a GPL-3-compatible grant and the project decides a model file is an acceptable dependency |
+| FreeDV 2020 and RADE | The code is two-clause BSD and the licence on the trained model weights was never established. A weights file has no document to cite and no clause to check against when it misbehaves, and a neural vocoder cannot be clean-roomed from an architecture paper. Two surveys returned opposite verdicts on RADE and both conceded the weights question. Revisit if the weights carry a GPL-3-compatible grant. Whether a model file can be a dependency at all was settled on 2026-10-03, below the table |
+
+**A model file is an acceptable dependency, by the owner's decision of
+2026-10-03.** Whisper's weights, `ggml-large-v3-turbo.bin`, MIT, are the
+project's first, accepted for speech to text (`docs/rpc.md`, "Speech to
+text"; `docs/clean-room.md` has the position). They are downloaded on first
+use rather than shipped, and pinned by URL commit, size and SHA-256 in
+`core/transcribe/model_store.h`. That leaves FreeDV 2020 and RADE with one
+question instead of two: the licence on their weights. The rest of the row's
+reasoning stands, and applies to Whisper as much as to RADE: a weights file has
+no document to cite, and the transcriber has nothing to check Whisper's output
+against but Whisper's own scores and a published list of its failures
+(`core/transcribe/transcriber.cpp`).
+
+WHAT THE FREEDV 2020 AND RADE ROW USED TO SAY, at its end: "Revisit if the
+weights carry a GPL-3-compatible grant and the project decides a model file is
+an acceptable dependency". The second condition was met on 2026-10-03.
 
 ### Excluded on scope or reach
 

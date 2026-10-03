@@ -12,6 +12,14 @@
         },
         "libusb",
         "rtlsdr",
-        "capnproto"
+        "capnproto",
+        "whisper-cpp",
+        {
+            "name": "ggml",
+            "default-features": false,
+            "features": [
+                "vulkan"
+            ]
+        }
     ]
 }

@@ -75,6 +75,25 @@ Rectangle {
                 font.pixelSize: Theme.sizeSmall
             }
 
+            // The engine is transcribing this receiver right now, as its
+            // status says. Three letters in the receiver's colour and nothing
+            // at all otherwise, so a rack of quiet receivers reads as quiet.
+            Label {
+                visible: strip.entry.transcribing === true
+                text: "STT"
+                color: strip.tint
+                font.pixelSize: Theme.sizeSmall
+                font.bold: true
+
+                HoverHandler { id: sttHover }
+
+                Tip {
+                    visible: sttHover.hovered
+                    text: "The engine is transcribing this receiver; what it hears goes on the "
+                          + "waterfall beside it and into the decode log."
+                }
+            }
+
             Item { Layout.fillWidth: true }
 
             // Heard at the client or not. Mute takes this receiver out of

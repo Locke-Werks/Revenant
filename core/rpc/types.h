@@ -502,6 +502,11 @@ struct VrxPlacement {
     std::string clamp_reason;
 };
 
+// Speech to text on one receiver, mirroring the schema's TranscribeChoice
+// ordinal for ordinal: auto follows the engine's rule (every mode that makes
+// speech but wfm), on takes it in whatever the mode, off leaves it out.
+enum class TranscribeChoice : std::uint8_t { Auto, On, Off };
+
 struct VrxStatus {
     std::uint64_t id = 0;
     VrxParams params;
@@ -548,6 +553,11 @@ struct VrxStatus {
     std::uint64_t creator_session = 0;
     bool kept = false;
     bool owned_by_caller = false;
+
+    // Speech to text on this receiver: what setVrxTranscribe asked, and
+    // whether the engine is transcribing it now. See TranscriptionStatus.
+    TranscribeChoice transcribe = TranscribeChoice::Auto;
+    bool transcribing = false;
 };
 
 // What addVrx is asked to do with a receiver when the session that created
@@ -1442,6 +1452,60 @@ struct DecodedStats {
 
     // The rate the decoder was built for, zero until the first chunk.
     std::uint32_t sample_rate = 0;
+};
+
+// The engine's speech to text, as transcriptionStatus answers. Mirrors the
+// schema's TranscriptionStatus; its comments there are the contract.
+enum class TranscriptionModelState : std::uint8_t {
+    Absent,
+    Downloading,
+    Verifying,
+    Loading,
+    Ready,
+    Failed
+};
+
+struct TranscriptionStatus {
+    bool enabled = false;
+    TranscriptionModelState model_state = TranscriptionModelState::Absent;
+    std::string model_name;
+    std::uint64_t bytes_done = 0;
+    std::uint64_t bytes_total = 0;
+    std::string detail;
+    std::string backend;
+    std::uint32_t receivers = 0;
+    std::uint32_t queued = 0;
+    std::uint64_t transcribed = 0;
+    std::uint64_t dropped = 0;
+    std::uint64_t rejected = 0;
+    double last_latency_ms = 0.0;
+};
+
+// What one receiver was heard to say. Mirrors the schema's Transcript.
+//
+// TWO CLOCKS, ON PURPOSE. source_start and source_end are the engine's source
+// sample index, the clock SpectrumFrame::start and every Detection count in,
+// which is what puts the text on the waterfall rows the speech was on.
+// start_sample and end_sample are the receiver's own stream, the clock
+// DecodedMessage counts in, which is what a decode log lines it up against.
+struct Transcript {
+    std::uint64_t vrx = 0;
+    std::uint64_t sequence = 0;
+    std::uint64_t source_start = 0;
+    std::uint64_t source_end = 0;
+    std::uint64_t start_sample = 0;
+    std::uint64_t end_sample = 0;
+    std::uint32_t sample_rate = 0;
+    std::int64_t center_hz = 0;
+    std::int64_t low_hz = 0;
+    std::int64_t high_hz = 0;
+    std::string mode;
+    std::string text;
+    float confidence = 0.0F;
+    float no_speech_prob = 0.0F;
+    std::vector<DecodedField> fields;
+    double latency_ms = 0.0;
+    std::uint64_t dropped_before = 0;
 };
 
 }  // namespace revenant::rpc

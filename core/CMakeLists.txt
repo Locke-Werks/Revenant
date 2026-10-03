@@ -239,5 +239,8 @@ revenant_apply_warnings(revenant_core)
 # checked.
 revenant_apply_reference_fp(revenant_core)
 
+# Speech to text, a library of its own; transcribe/CMakeLists.txt says why.
+add_subdirectory(transcribe)
+
 # The wire. Two libraries, and the comment in rpc/CMakeLists.txt says why.
 add_subdirectory(rpc)

@@ -95,6 +95,7 @@ Status Harness::open(const HarnessOptions& options) {
     const rpc::Token token = test_token();
     server_options.token.assign(token.begin(), token.end());
     server_options.vocoders = options.vocoders;
+    server_options.transcribe_prepare = options.transcribe_prepare;
 
     auto served = rpc::Server::create(*engine_, server_options);
     if (!served) {

@@ -15,16 +15,26 @@
 // all four have to be turned off. Disabling one and assuming the rest follow is
 // how this comes back.
 //
-// Linked into every test executable the root CMake project builds, which is
-// all six: revenant_reference_tests, revenant_decode_tests,
-// revenant_detect_tests, revenant_engine_tests, revenant_rpc_tests and
-// revenant_tool_tests. Each one lists this file by path; there is no library
-// to link and nothing that adds it automatically.
+// Linked into every *_tests executable the root CMake project builds, nine on
+// 2026-10-03: revenant_reference_tests, revenant_characterise_tests,
+// revenant_decode_tests, revenant_detect_tests, revenant_labelled_tests,
+// revenant_engine_tests, revenant_rpc_tests, revenant_tool_tests and
+// revenant_transcribe_tests. Each one lists this file by path; there is no
+// library to link and nothing that adds it automatically.
 //
-// revenant_ui_tests, the seventh, does not have it and is not going to get it
+// revenant_ui_tests, the tenth, does not have it and is not going to get it
 // from here. ui/ is a separate CMake project with its own CMakeLists.txt, and
-// of the seven it is the one where this matters least: that target opens no
+// of the ten it is the one where this matters least: that target opens no
 // Vulkan context and holds no abort() path of its own.
+//
+// WHAT THE FIRST OF THOSE PARAGRAPHS USED TO SAY: "Linked into every test
+// executable the root CMake project builds, which is all six", with the
+// second calling revenant_ui_tests "the seventh". It went stale on
+// 2026-09-21, when revenant_characterise_tests arrived, and again with
+// revenant_labelled_tests on 2026-09-23; both listed this file, so the check
+// described below stayed green while the count here was wrong.
+// revenant_transcribe_tests made nine on 2026-10-03. The script is the
+// authority on the list; this paragraph is a dated copy of it.
 //
 // WHAT THIS PARAGRAPH USED TO SAY: first "Linked into every test executable",
 // which revenant_ui_tests made false the day ui/ was added; then, after that
@@ -35,8 +45,8 @@
 // one that does not list this file. CI's guards job runs it and so does
 // ctest, as modal_dialogs. revenant_ui_tests is named in the script's exempt
 // list with the reason above, so the one known gap is a decision written
-// down in the place that checks rather than a claim nobody had checked. An
-// eighth target added without the file arrives red, including one whose name
+// down in the place that checks rather than a claim nobody had checked. A
+// new target added without the file arrives red, including one whose name
 // sits on the line below add_executable(, which the inline awk this replaced
 // dropped without saying so.
 //

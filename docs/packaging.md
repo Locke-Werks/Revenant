@@ -93,6 +93,17 @@ now 139 files. Staging both halves that day wrote 139 and `lwforge inspect`
 listed all four licence members in the container." True on 2026-09-22, and
 stale from the commit that kept the file dialog's modules.
 
+**Speech to text, 2026-10-03, grew the engine and nothing else.**
+`revenant-engine.exe` went from 8.3 MB to 66.3 MB, nearly all of it the
+compiled Vulkan shaders ggml embeds in its backend. whisper.cpp and ggml are
+static, so no new DLL ships and the payload's file count does not move; the
+one new import is `WINHTTP.dll`, which is Windows'. The speech model is not in
+the payload: the engine downloads it, 1.6 GB, into
+`%LOCALAPPDATA%\Revenant\models` the first time somebody turns speech to text
+on, and the installer neither fetches it nor removes it. `docs/clean-room.md`,
+"Speech to text, and the first model file", has the pin and the licence
+position.
+
 ### The licence material
 
 | Member | From | For |
@@ -125,12 +136,19 @@ and freed on another. It is not a reason for two payloads or two directories.
 
 Measured with `dumpbin /dependents` on `revenant-engine.exe`: `WS2_32.dll`,
 `bcrypt.dll`, `SHELL32.dll`, `ADVAPI32.dll`, `ole32.dll`, `vulkan-1.dll`,
-`KERNEL32.dll`. No `MSVCP140`, no `VCRUNTIME140`. The engine imports no C
+`KERNEL32.dll`, and since speech to text on 2026-10-03 `WINHTTP.dll`, which
+fetches the speech model, all of them Windows' own or the driver's. No
+`MSVCP140`, no `VCRUNTIME140`. The engine imports no C
 runtime DLL at all, so it cannot resolve the wrong one out of a directory that
 also holds the client's. Everything installs into `{ProgramFiles}\Revenant`
 side by side, which is also what the client's own DLL resolution wants: Windows
 searches the directory of the executable being launched, so the Qt libraries
 have to sit beside `revenant-ui.exe`.
+
+WHAT THIS PARAGRAPH USED TO SAY, as the whole list: "`ole32.dll`,
+`vulkan-1.dll`, `KERNEL32.dll`. No `MSVCP140`, no `VCRUNTIME140`." The model
+download's WinHTTP made it eight imports on 2026-10-03, and no DLL ships for
+it.
 
 `vulkan-1.dll` is the loader and arrives with the graphics driver. It is not in
 the payload and must not be.
@@ -264,6 +282,11 @@ carries the reasoning for each of these inline; the summary:
   folder as far as it trusts the executable beside it:
   `core/decode/vocoder_plugin.h` says why nothing can do better. The radio
   panel's vocoders section lists what the engine loaded and refused.
+- **No speech model.** Whisper's weights, 1.6 GB, are fetched by the engine
+  on first use into `%LOCALAPPDATA%\Revenant\models` of whoever turned speech
+  to text on, under their own token, and verified there. The installer does
+  not carry them and does not check for the space, and with no hooks an
+  uninstall does not reach them: they stay until somebody deletes the folder.
 - **Nothing per-user.** The RPC token the client hands `Authenticator.login`
   lives at `%LOCALAPPDATA%\Revenant\rpc-token` and is created by the engine on
   first run under the invoking user's own token. An elevated installer writing

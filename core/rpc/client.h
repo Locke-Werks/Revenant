@@ -562,6 +562,30 @@ public:
     [[nodiscard]] virtual Expected<DecodedStats> decoded_stats(std::uint64_t vrx,
                                                                std::string_view decoder) = 0;
 
+    // Speech to text, engine-wide. set_transcription turns the engine's one
+    // switch on or off for every session and answers with the status after
+    // the change; the first time it goes on the engine starts downloading its
+    // model, which transcription_status reports while it happens. An engine
+    // older than these refuses them as unimplemented, which a caller reports
+    // as "this engine does not transcribe" rather than as off.
+    [[nodiscard]] virtual Expected<TranscriptionStatus> set_transcription(bool on) = 0;
+    [[nodiscard]] virtual Expected<TranscriptionStatus> transcription_status() = 0;
+
+    // One receiver's place in it. See the schema's setVrxTranscribe.
+    [[nodiscard]] virtual Status set_vrx_transcribe(std::uint64_t vrx,
+                                                    TranscribeChoice choice) = 0;
+
+    // Every transcript the engine produces, for every receiver, until
+    // unsubscribe_transcripts. One subscription per client; subscribing again
+    // replaces it. The callbacks run on the event loop thread under the rule
+    // subscribe_decoded states, and on_ended fires at most once and never for
+    // an unsubscribe.
+    using TranscriptCallback = std::function<void(const Transcript&)>;
+    using TranscriptEndedCallback = std::function<void(const std::string& reason)>;
+    [[nodiscard]] virtual Status subscribe_transcripts(TranscriptCallback on_transcript,
+                                                       TranscriptEndedCallback on_ended) = 0;
+    virtual void unsubscribe_transcripts() = 0;
+
     // Frames this client was sent.
     [[nodiscard]] virtual std::uint64_t frames_received() const = 0;
 

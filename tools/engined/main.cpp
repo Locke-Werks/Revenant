@@ -127,6 +127,9 @@
 #include "core/rpc/server.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
+#include "core/transcribe/model_store.h"
+#include "core/transcribe/transcriber.h"
+#include "core/transcribe/whisper_runner.h"
 
 namespace {
 
@@ -141,6 +144,7 @@ namespace engine = revenant::engine;
 namespace rpc = revenant::rpc;
 namespace decode = revenant::decode;
 namespace source = revenant::source;
+namespace transcribe = revenant::transcribe;
 
 using dsp::Hertz;
 using dsp::SampleRate;
@@ -258,6 +262,10 @@ struct Options {
     // note at the top of the file for why an empty uri alone does not mean
     // this.
     bool no_source = false;
+
+    // Speech to text on from the start, for a headless engine. A client turns
+    // it on and off with Session.setTranscription either way.
+    bool transcribe = false;
 
     std::string bind = "127.0.0.1";
 
@@ -468,6 +476,9 @@ void print_usage()
         "                      rather than a line redrawn in place, because this\n"
         "                      program's stdout is usually a log.\n"
         "  --quiet             No periodic status line.\n"
+        "  --transcribe        Turn speech to text on at startup, for every receiver\n"
+        "                      that makes speech. The model is downloaded the first\n"
+        "                      time, into %LOCALAPPDATA%\\Revenant\\models.\n"
         "  --list              List sources and exit.\n"
         "  -h, --help          This.\n"
         "\n"
@@ -526,6 +537,10 @@ void print_usage()
         }
         if (arg == "--no-source") {
             options.no_source = true;
+            continue;
+        }
+        if (arg == "--transcribe") {
+            options.transcribe = true;
             continue;
         }
         if (arg == "--no-spectrum") {
@@ -1185,6 +1200,18 @@ void print_engine_block(const engine::Engine& eng)
     server_options.detector_cpu_budget =
         options.detector_cpu.value_or(server_options.detector_cpu_budget);
     server_options.decode_lanes = options.decode_lanes;
+
+    // Speech to text, on the engine's own GPU: the hint is the device the
+    // engine chose, so whisper.cpp's Vulkan backend does not land on another
+    // one this machine also exposes. Nothing is downloaded or loaded until a
+    // client turns the switch on, or --transcribe does.
+    {
+        transcribe::WhisperOptions whisper;
+        whisper.gpu_hint = eng.info().device.name;
+        server_options.transcribe_prepare = transcribe::whisper_prepare(std::move(whisper));
+        server_options.transcribe_model_name = std::string(transcribe::kDefaultModel.name);
+        server_options.transcribe_on_start = options.transcribe;
+    }
 
     auto server = rpc::Server::create(eng, server_options);
     if (!server) {

@@ -17,6 +17,17 @@
 //               [--grab-main FILE] [--frame-stats FILE] [--maximise]
 //               [--on-top] [--memories FILE] [--panel NAME]
 //               [--preview-import FILE] [--open-recording PATH[:CENTER] ...]
+//               [--fake-transcripts]
+//
+// --fake-transcripts IS FOR TESTING AND NOTHING ELSE. It feeds a made-up
+// transcript every few seconds through the path a real one takes, onto the
+// rows the span waterfall has just drawn and beside a receiver in the rack,
+// so the captions, the hover card and the decode log's speech lines can be
+// looked at and timed against an engine that does not transcribe, which on
+// 2026-10-03 was every engine. Every fake says it is a test caption. The
+// environment variable REVENANT_UI_FAKE_TRANSCRIPTS=1 does the same, so a run
+// started by scripts/frame-budget.ps1, which passes its own arguments, can
+// carry captions. EngineLink::startFakeTranscripts has the rest.
 //
 // --smoke-seconds is for CI, which has no screen and no one to close the
 // window: it runs on the offscreen platform unless QT_QPA_PLATFORM names
@@ -478,6 +489,7 @@ int main(int argc, char* argv[])
     QString open_panel;
     QString preview_import;
     QStringList startup_recordings;
+    bool fake_transcripts = qEnvironmentVariableIntValue("REVENANT_UI_FAKE_TRANSCRIPTS") != 0;
 
     const QStringList args = QGuiApplication::arguments();
     QStringList positional;
@@ -549,6 +561,10 @@ int main(int argc, char* argv[])
         }
         if (args[i] == QStringLiteral("--on-top")) {
             on_top = true;
+            continue;
+        }
+        if (args[i] == QStringLiteral("--fake-transcripts")) {
+            fake_transcripts = true;
             continue;
         }
         if (args[i] == QStringLiteral("--smoke-seconds")) {
@@ -689,6 +705,16 @@ int main(int argc, char* argv[])
     if (smoke) {
         link.setRememberDetector(false);
         link.setRememberLastSource(false);
+
+        // Nor the speech to text switch: an engine that downloads a 1.6 GB
+        // model the first time it goes on is not one to turn on from CI.
+        link.setRememberTranscription(false);
+    }
+    if (fake_transcripts) {
+        std::fputs("revenant-ui: --fake-transcripts: feeding test captions, which were never "
+                   "on the air\n",
+                   stderr);
+        link.startFakeTranscripts();
     }
 
     // Before start(), so the first thing the window says is the truth about

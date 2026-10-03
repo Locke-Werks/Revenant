@@ -10,7 +10,7 @@ machine and what CI runs against.
 | Visual Studio 2022 | 17.14, toolset v143 | Community is fine. The "Desktop development with C++" workload. |
 | CMake | 4.3.4 | Presets version 6, so anything older than 3.28 will not read `CMakePresets.json`. |
 | Ninja | any current release | See the trap below. The one on `PATH` is probably the wrong one. |
-| LunarG Vulkan SDK | 1.4.350 | `VULKAN_SDK` must be set. `glslangValidator` and `spirv-val` come from here. |
+| LunarG Vulkan SDK | 1.4.350 | `VULKAN_SDK` must be set. `glslangValidator` and `spirv-val` come from here, and since 2026-10-03 the `glslc` that compiles ggml's shaders. |
 | vcpkg | at `C:\vcpkg` | `VCPKG_ROOT` must be set. Manifest mode, so dependencies come from `vcpkg.json`. |
 | Qt | 6.8.3, kit `msvc2022_64` | The `ui/` build only. The engine, the tools and the tests do not need it and must never find it. |
 
@@ -24,6 +24,77 @@ Nothing needs to be installed by hand from vcpkg. The toolchain file in the
 preset reads `vcpkg.json` and the baseline pinned in
 `vcpkg-configuration.json`, and builds what is missing on first configure. That
 first configure is slow. Later ones are not.
+
+### whisper.cpp, ggml and the overlay
+
+Speech to text, since 2026-10-03, adds `whisper-cpp` and `ggml` to
+`vcpkg.json`, and ggml comes from Revenant's overlay port,
+`vcpkg-overlays/ggml`, which `vcpkg-configuration.json` lists after
+`vcpkg-overlays/rtlsdr`. The portfile carries the reasoning for each of the
+three ways it differs from the registry's port:
+
+- **The source is ggml `b6d1f0f`**, the commit whisper.cpp 1.8.3 was synced
+  to, rather than the baseline's ggml of 2025-11-17. That pair aborts in the
+  first transcription on `GGML_ASSERT(mask->ne[1] >= GGML_PAD(...))` in
+  `ggml_flash_attn_ext`, because the two disagree about padding the attention
+  mask. Retire the pin when the baseline moves to a pair that agrees; the
+  registry carried whisper-cpp 1.8.6 with ggml 0.11.1 on 2026-10-03.
+- **The CPU baseline is pinned**: `GGML_NATIVE` off, AVX, AVX2, FMA, F16C and
+  BMI2 on, AVX-512 off. ggml's default tunes to the machine running the
+  compiler, and a release built on the 7950X would then die with an illegal
+  instruction on every CPU without AVX-512. The configure log's "Adding CPU
+  backend variant ggml-cpu" line is where to check what took effect.
+- **Vulkan comes from the LunarG SDK, not vcpkg's `vulkan-loader`**, which
+  would force a vcpkg-built `vulkan-1.dll` into this static triplet and put its
+  headers ahead of the SDK's for the whole tree. So `VULKAN_SDK` has to be set
+  for the port build too, and the portfile fails saying so when it is not; it
+  passes the SDK's `glslc` to ggml, so shaderc is not built either. OpenMP is
+  off, because under MSVC it is `vcomp140.dll`, a DLL the static CRT does not
+  carry, and CUDA, Metal, OpenCL and BLAS stay off.
+
+The first configure after this builds ggml's Vulkan backend, which generates
+its shader variants and compiles each with `glslc`, and that is most of why it
+is slow. An edit to a file under `vcpkg-overlays/ggml` re-runs the
+configure and with it vcpkg's install, because
+`core/transcribe/CMakeLists.txt` makes the overlay's files configure
+dependencies; vcpkg's toolchain watches only the two manifests.
+
+**Each configuration links its own build of the two libraries, by hand.**
+Neither package's CMake config states a per-configuration location, so the
+first of `lib` and `debug/lib` a search reaches is linked into every
+configuration, and the `vs` preset linked the Debug ggml into Release with
+LNK2038. `core/transcribe/CMakeLists.txt` sets the debug and release paths of
+`whisper`, `ggml`, `ggml-base`, `ggml-cpu` and `ggml-vulkan` explicitly and
+fails the configure if either is missing.
+
+whisper.cpp and ggml link into `revenant_transcribe`, a library of its own,
+and reach only what links it: `revenant_rpc_server`, and through it
+`revenant-engine` and `revenant_rpc_tests`, plus `revenant-loadtest` and
+`revenant_transcribe_tests`. Every other test binary and tool links
+`revenant_core` as before.
+
+**The model is not part of the build.** `revenant_transcribe_tests`' Whisper
+cases need it in `%LOCALAPPDATA%\Revenant\models` of the account running them
+and skip, saying so, when it is not there; `REVENANT_REQUIRE_WHISPER=1` turns
+that skip into a failure, on `REVENANT_REQUIRE_GPU`'s argument below. Running
+the hidden case by name fetches it:
+
+```powershell
+build\vs\tests\transcribe\Debug\revenant_transcribe_tests.exe "download the default Whisper model"
+```
+
+Turning speech to text on in a running engine does the same. The other
+`[.download]` case, "resume a partial download of the default Whisper model",
+cuts the first 400 MB of that file into a scratch directory and fetches the
+rest again, so it is a test of the resume and not a way to get the model.
+
+**A Debug build can crash inside Vulkan device creation when ggml opens its
+device**, about one run in five on the development machine on 2026-10-03:
+an access violation in `vkCreateDevice`, through an implicit layer a game
+trainer registers (CheatHappens) and into the validation layer the Debug test
+fixture enables. Twenty runs with `DISABLE_CH_LAYER=1`, that layer's own off
+switch, crashed none. Release contexts enable no validation and the Release
+runs did not crash. `tests/transcribe/test_whisper.cpp` has the record.
 
 ## Presets
 

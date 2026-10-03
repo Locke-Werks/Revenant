@@ -367,6 +367,42 @@ ColumnLayout {
                 font.pixelSize: Theme.sizeSmall
             }
         }
+        // THE CAPTION UNDER THE POINTER, in full. A caption on the waterfall
+        // carries three lines at most (render/caption_layout.h); this card
+        // carries the receiver, its mode and frequency, the call's talkgroup
+        // where the protocol said one, the whole text, and how sure and how
+        // late the recogniser was. Only while the pointer is on a plate, and in
+        // the waterfall's top right corner, where the detection card sits on
+        // the spectrum.
+        Rectangle {
+            id: captionCard
+
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.rightMargin: 6
+            anchors.topMargin: 6
+            visible: waterfall.hoveredCaption !== 0 && captionText.text.length > 0
+            width: Math.min(captionText.implicitWidth, 460) + 16
+            height: captionText.implicitHeight + 10
+            radius: Theme.radius
+            color: Theme.panel
+            border.width: 1
+            border.color: Theme.border
+            z: 2
+
+            Text {
+                id: captionText
+                x: 8
+                y: 5
+                width: Math.min(implicitWidth, 460)
+                text: waterfall.hoveredCaptionText
+                wrapMode: Text.WordWrap
+                color: Theme.ink
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+
         link: engineLink
         mapPins: ScaleSettings
         selectedDetection: span.selection.selectedDetection

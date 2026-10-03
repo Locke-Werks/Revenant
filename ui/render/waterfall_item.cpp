@@ -8,20 +8,70 @@
 
 #include <QColor>
 #include <QCursor>
+#include <QFont>
+#include <QFontMetricsF>
 #include <QHoverEvent>
+#include <QMatrix4x4>
 #include <QMouseEvent>
 #include <QQuickWindow>
 #include <QRectF>
 #include <QSGImageNode>
 #include <QSGNode>
+#include <QSGOpacityNode>
 #include <QSGRectangleNode>
+#include <QSGTextNode>
 #include <QSGTexture>
+#include <QTextLine>
 #include <QWheelEvent>
 
 #include "models/frame_stats.h"
+#include "models/receiver_palette.h"
+#include "models/transcription.h"
 
 namespace revenant::ui {
 namespace {
+
+// THE CAPTIONS ARE SET IN THE THEME'S MONOSPACE, Theme.monoFont at
+// Theme.sizeSmall, the face the detection plates are painted in
+// (overlay_label_font in render/spectrum_item.cpp): render/caption_layout.h
+// wraps by columns, which is only the same as wrapping by width in a
+// monospace. Named here because a scene graph item cannot read the QML
+// singleton; change the three together.
+[[nodiscard]] QFont caption_font()
+{
+    QFont font(QStringLiteral("Cascadia Mono"));
+    font.setStyleHint(QFont::Monospace);
+    font.setPixelSize(11);
+    return font;
+}
+
+// Inside the plate, and the receiver's colour down its left edge, which with
+// the leader is what ties a caption to its strip in the rack.
+constexpr double kCaptionPadPx = 4.0;
+constexpr double kCaptionBarPx = 3.0;
+
+// The plate is Theme.plate, #e6060810: the near-black the span's other
+// plates sit on, at the 90% that keeps a label legible over the brightest
+// part of the colour map and still shows there is a picture under it. The
+// text is Theme.ink, and Theme.inkDim for a transcript the recogniser
+// doubted, as its line in the decode log is drawn.
+constexpr int kCaptionPlateAlpha = 230;
+const QColor kCaptionPlate(6, 8, 16);
+const QColor kCaptionInk(0xc6, 0xd0, 0xdd);
+const QColor kCaptionInkDim(0x6f, 0x7b, 0x8c);
+
+// The leader and the bar: the receiver's rack colour, models/
+// receiver_palette.h, or the ink for a receiver that has left the rack.
+[[nodiscard]] QColor caption_tie(int slot, double opacity, int alpha)
+{
+    QColor colour = kCaptionInk;
+    if (slot >= 0) {
+        const Rgb8 rgb = receiver_colour(static_cast<std::size_t>(slot));
+        colour = QColor(rgb.r, rgb.g, rgb.b);
+    }
+    colour.setAlpha(static_cast<int>(std::lround(alpha * std::clamp(opacity, 0.0, 1.0))));
+    return colour;
+}
 
 // Rows never written, which is the bottom of the colour map and the window's
 // own background: render/colour_map.h starts the map there so an empty band
@@ -66,6 +116,19 @@ public:
     QSGNode* tiles = nullptr;
     OverlayNode* overlay = nullptr;
     std::vector<QSGTexture*> textures;
+
+    // Over the detection overlay: the captions' leaders, plates and bars as
+    // one batch of quads, then each caption's glyphs under an opacity for its
+    // fade and a transform for where it is. Kept per caption by serial, so a
+    // frame moves and fades a node and never rebuilds its text.
+    OverlayNode* caption_quads = nullptr;
+    QSGNode* caption_texts = nullptr;
+    struct CaptionText {
+        std::uint64_t serial = 0;
+        QSGOpacityNode* opacity = nullptr;
+        QSGTransformNode* place = nullptr;
+    };
+    std::vector<CaptionText> caption_nodes;
 };
 
 // One contiguous run of ring rows, and where it lands on the display. A tile
@@ -90,6 +153,8 @@ WaterfallItem::WaterfallItem(QQuickItem* parent) : QQuickItem(parent)
     hovered_label_->setVisible(false);
     selected_label_ = new OverlayLabelItem(this);
     selected_label_->setVisible(false);
+
+    caption_line_height_ = QFontMetricsF(caption_font()).height();
 }
 
 void WaterfallItem::setLink(EngineLink* link)
@@ -109,6 +174,13 @@ void WaterfallItem::setLink(EngineLink* link)
 
         // The one signal SpectrumItem connects, for the reason given there.
         connect(link_, &EngineLink::rackChanged, this, &WaterfallItem::takeReceiver);
+
+        connect(link_, &EngineLink::transcriptsArrived, this, &WaterfallItem::takeTranscripts);
+
+        // What the feed already holds was said before this item was looking,
+        // on rows it does not have.
+        caption_feed_seen_ =
+            link_->captionFeed().empty() ? 0 : link_->captionFeed().back().serial;
     }
     // A different link is a different engine, so the pixels go with the
     // sample ranges. Leaving the pixels would show the previous engine's
@@ -327,9 +399,12 @@ void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
     reduced_bins_ = bins;
 
     // The rows are gone, so the axis they were on and the boxes drawn over
-    // them go too. The next frame starts both again.
+    // them go too. The next frame starts both again. The captions go with
+    // them for the boxes' reason: pinned to rows that no longer exist, every
+    // one would read as having reached the bottom.
     axis_ = {};
     box_history_.clear();
+    clearCaptions();
 
     const std::size_t bins_per_column =
         bins == 0 ? 1 : std::max<std::size_t>(1, bins / static_cast<std::size_t>(wide));
@@ -349,6 +424,137 @@ void WaterfallItem::clearHistory()
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
     axis_ = {};
     box_history_.clear();
+    clearCaptions();
+}
+
+void WaterfallItem::clearCaptions()
+{
+    captions_.clear();
+    placed_captions_.clear();
+    caption_layouts_.clear();
+    setHoveredCaption(0);
+}
+
+QString WaterfallItem::hoveredCaptionText() const
+{
+    const Caption* caption = captions_.find(hovered_caption_);
+    return caption == nullptr ? QString() : QString::fromStdString(caption->card);
+}
+
+void WaterfallItem::setHoveredCaption(std::uint64_t serial)
+{
+    if (hovered_caption_ == serial) {
+        return;
+    }
+    hovered_caption_ = serial;
+    emit hoveredCaptionChanged();
+}
+
+void WaterfallItem::takeTranscripts()
+{
+    if (link_ == nullptr) {
+        return;
+    }
+    const QFont font = caption_font();
+    const QFontMetricsF metrics(font);
+    bool added = false;
+    for (const EngineLink::CaptionFeedEntry& entry : link_->captionFeed()) {
+        if (entry.serial <= caption_feed_seen_) {
+            continue;
+        }
+        caption_feed_seen_ = entry.serial;
+
+        Caption caption;
+        caption.serial = entry.serial;
+        caption.source_end = entry.transcript.source_end;
+        caption.low_hz = entry.transcript.low_hz;
+        caption.high_hz = entry.transcript.high_hz;
+        caption.slot = entry.slot;
+        caption.doubtful = entry.transcript.confidence < kDoubtfulConfidence;
+        caption.lines = wrap_caption(entry.transcript.text);
+        caption.card = entry.card;
+        if (caption.lines.empty()) {
+            continue;
+        }
+
+        // Laid out once, here, and handed to a text node by updatePaintNode;
+        // see caption_layouts_ in the header. The plate is measured from the
+        // same layouts, so its width is the font's and not the column count's.
+        std::vector<std::unique_ptr<QTextLayout>> laid;
+        double widest = 0.0;
+        for (const std::string& line : caption.lines) {
+            auto layout = std::make_unique<QTextLayout>(QString::fromStdString(line), font);
+            layout->setCacheEnabled(true);
+            layout->beginLayout();
+            QTextLine text_line = layout->createLine();
+            if (text_line.isValid()) {
+                text_line.setPosition(QPointF(0.0, 0.0));
+            }
+            layout->endLayout();
+            widest = std::max(widest, metrics.horizontalAdvance(QString::fromStdString(line)));
+            laid.push_back(std::move(layout));
+        }
+        caption.box_width = std::ceil(widest) + 2.0 * kCaptionPadPx + kCaptionBarPx;
+        caption.box_height = std::ceil(caption_line_height_ * static_cast<double>(laid.size())) +
+                             2.0 * kCaptionPadPx;
+
+        caption_layouts_.emplace_back(caption.serial, std::move(laid));
+        captions_.add(std::move(caption));
+        added = true;
+    }
+    if (!added) {
+        return;
+    }
+    rebuildOverlay();
+    update();
+}
+
+void WaterfallItem::layoutCaptions()
+{
+    if (captions_.empty()) {
+        if (!placed_captions_.empty() || !caption_layouts_.empty()) {
+            placed_captions_.clear();
+            caption_layouts_.clear();
+            setHoveredCaption(0);
+        }
+        return;
+    }
+    const int tall = history_.height();
+    if (link_ == nullptr || tall <= 0 || row_spans_.size() != static_cast<std::size_t>(tall)) {
+        placed_captions_.clear();
+        return;
+    }
+
+    // Display rows, newest first, exactly as rowsForSamples reads them.
+    const int read = readRow();
+    const auto span_at = [this, read, tall](int display_row) {
+        const RowSpan& span = row_spans_[static_cast<std::size_t>((read + display_row) % tall)];
+        return CaptionRowSpan{span.start, span.count};
+    };
+    CaptionGeometry geometry;
+    geometry.width_px = width();
+    geometry.height_px = height();
+    geometry.tall = tall;
+    geometry.span_low_hz = link_->spanLowHz();
+    geometry.span_high_hz = link_->spanHighHz();
+    geometry.pad_px = kCaptionPadPx;
+    geometry.line_height_px = caption_line_height_;
+    placed_captions_ = captions_.layout(span_at, geometry);
+
+    // The layout forgets what has faded out; the text laid out for it goes
+    // with it.
+    std::erase_if(caption_layouts_, [this](const auto& laid) {
+        return captions_.find(laid.first) == nullptr;
+    });
+
+    // A caption scrolls under a pointer that has not moved, so the hover is
+    // asked again here rather than only when the pointer moves.
+    if (hovering_) {
+        setHoveredCaption(
+            caption_at(placed_captions_, hover_position_.x(), hover_position_.y()));
+    } else if (hovered_caption_ != 0 && captions_.find(hovered_caption_) == nullptr) {
+        setHoveredCaption(0);
+    }
 }
 
 void WaterfallItem::followAxis()
@@ -635,6 +841,7 @@ void WaterfallItem::rebuildOverlay()
     }
     }
 
+    layoutCaptions();
     placeLabels();
 }
 
@@ -761,14 +968,27 @@ void WaterfallItem::setHovered(std::uint64_t id)
     update();
 }
 
+void WaterfallItem::hoverAt(QPointF position)
+{
+    // A plate is drawn over the boxes, so the pointer on a plate is on the
+    // caption and not on whatever box is under it.
+    const std::uint64_t caption = caption_at(placed_captions_, position.x(), position.y());
+    setHoveredCaption(caption);
+    setHovered(caption != 0 ? 0 : detection_at(boxes_, position.x()));
+}
+
 void WaterfallItem::hoverMoveEvent(QHoverEvent* event)
 {
-    setHovered(detection_at(boxes_, event->position().x()));
+    hovering_ = true;
+    hover_position_ = event->position();
+    hoverAt(hover_position_);
     event->accept();
 }
 
 void WaterfallItem::hoverLeaveEvent(QHoverEvent* event)
 {
+    hovering_ = false;
+    setHoveredCaption(0);
     setHovered(0);
     event->accept();
 }
@@ -777,6 +997,14 @@ void WaterfallItem::mousePressEvent(QMouseEvent* event)
 {
     if (event->button() != Qt::LeftButton) {
         event->ignore();
+        return;
+    }
+
+    // A press on a caption's plate is a press on text, and retuning the
+    // focused receiver to wherever the plate happens to sit would be a
+    // surprise. The plate is for reading; the hover card has the rest.
+    if (caption_at(placed_captions_, event->position().x(), event->position().y()) != 0) {
+        event->accept();
         return;
     }
 
@@ -809,6 +1037,12 @@ void WaterfallItem::mouseDoubleClickEvent(QMouseEvent* event)
 {
     if (event->button() != Qt::LeftButton) {
         event->ignore();
+        return;
+    }
+
+    // On a plate, for the reason a single press there does nothing.
+    if (caption_at(placed_captions_, event->position().x(), event->position().y()) != 0) {
+        event->accept();
         return;
     }
 
@@ -870,9 +1104,13 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
         node->background->setColor(kBackground);
         node->tiles = new QSGNode;
         node->overlay = new OverlayNode;
+        node->caption_quads = new OverlayNode;
+        node->caption_texts = new QSGNode;
         node->appendChildNode(node->background);
         node->appendChildNode(node->tiles);
         node->appendChildNode(node->overlay);
+        node->appendChildNode(node->caption_quads);
+        node->appendChildNode(node->caption_texts);
     }
     node->background->setRect(0.0, 0.0, w, h);
 
@@ -979,6 +1217,85 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
     }
 
     node->overlay->setQuads(quads_);
+
+    // THE CAPTIONS. Leaders first, so a plate covers the end of its own, then
+    // the plates, then each plate's bar in the receiver's colour, every alpha
+    // scaled by the caption's fade; then the glyphs, which only move.
+    std::vector<OverlayQuad> caption_quads;
+    caption_quads.reserve(placed_captions_.size() * 4);
+    for (const PlacedCaption& one : placed_captions_) {
+        if (!one.has_leader()) {
+            continue;
+        }
+        const QColor tie = caption_tie(one.slot, one.opacity, 200);
+        caption_quads.push_back(OverlayQuad{
+            QRectF(one.leader_from_x, one.leader_y - 0.5, one.leader_to_x - one.leader_from_x, 1.0),
+            tie});
+        if (one.has_elbow()) {
+            const double top = std::min(one.leader_y, one.elbow_to_y);
+            const double bottom = std::max(one.leader_y, one.elbow_to_y);
+            caption_quads.push_back(
+                OverlayQuad{QRectF(one.elbow_x - 0.5, top, 1.0, bottom - top), tie});
+        }
+    }
+    for (const PlacedCaption& one : placed_captions_) {
+        QColor plate = kCaptionPlate;
+        plate.setAlpha(static_cast<int>(std::lround(kCaptionPlateAlpha * one.opacity)));
+        caption_quads.push_back(OverlayQuad{QRectF(one.x, one.y, one.width, one.height), plate});
+        caption_quads.push_back(OverlayQuad{QRectF(one.x, one.y, kCaptionBarPx, one.height),
+                                            caption_tie(one.slot, one.opacity, 255)});
+    }
+    node->caption_quads->setQuads(caption_quads);
+
+    std::erase_if(node->caption_nodes, [&](const WaterfallNode::CaptionText& held) {
+        const bool live = std::any_of(placed_captions_.begin(), placed_captions_.end(),
+                                      [&held](const PlacedCaption& one) {
+                                          return one.serial == held.serial;
+                                      });
+        if (!live) {
+            node->caption_texts->removeChildNode(held.opacity);
+            delete held.opacity;
+        }
+        return !live;
+    });
+    for (const PlacedCaption& one : placed_captions_) {
+        auto held = std::find_if(node->caption_nodes.begin(), node->caption_nodes.end(),
+                                 [&one](const WaterfallNode::CaptionText& text) {
+                                     return text.serial == one.serial;
+                                 });
+        if (held == node->caption_nodes.end()) {
+            const auto laid = std::find_if(caption_layouts_.begin(), caption_layouts_.end(),
+                                           [&one](const auto& entry) {
+                                               return entry.first == one.serial;
+                                           });
+            if (laid == caption_layouts_.end()) {
+                continue;
+            }
+            QSGTextNode* text = window()->createTextNode();
+            text->setColor(one.doubtful ? kCaptionInkDim : kCaptionInk);
+            for (std::size_t line = 0; line < laid->second.size(); ++line) {
+                text->addTextLayout(QPointF(kCaptionPadPx + kCaptionBarPx,
+                                            kCaptionPadPx + caption_line_height_ *
+                                                                static_cast<double>(line)),
+                                    laid->second[line].get());
+            }
+            auto* place = new QSGTransformNode;
+            place->appendChildNode(text);
+            auto* opacity = new QSGOpacityNode;
+            opacity->appendChildNode(place);
+            node->caption_texts->appendChildNode(opacity);
+            node->caption_nodes.push_back(WaterfallNode::CaptionText{one.serial, opacity, place});
+            held = std::prev(node->caption_nodes.end());
+        }
+        QMatrix4x4 at;
+        at.translate(static_cast<float>(one.x), static_cast<float>(one.y));
+        if (held->place->matrix() != at) {
+            held->place->setMatrix(at);
+        }
+        if (held->opacity->opacity() != one.opacity) {
+            held->opacity->setOpacity(one.opacity);
+        }
+    }
 
     // Every node now points at a live texture, so the ones they were holding
     // can go. See the block above.

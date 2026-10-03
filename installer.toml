@@ -152,8 +152,9 @@ fail            = "Revenant is running. Close the window and the install can con
 # NO VULKAN PREFLIGHT, WHICH IS A DECISION AND NOT AN OVERSIGHT.
 #
 # The engine imports vulkan-1.dll: dumpbin /dependents on revenant-engine.exe
-# lists WS2_32, bcrypt, SHELL32, ADVAPI32, ole32, vulkan-1 and KERNEL32, and
-# nothing else. A file_exists preflight on the loader would therefore predict a
+# lists WS2_32, bcrypt, SHELL32, ADVAPI32, ole32, vulkan-1, WINHTTP and
+# KERNEL32, and nothing else; WINHTTP since 2026-10-03, for the speech model's
+# first-use download, and it is part of Windows. A file_exists preflight on the loader would therefore predict a
 # real startup failure. It would also block the client, which is a remote user
 # interface that reaches an engine over a socket and has every reason to be
 # installed on a machine that will never open a GPU.

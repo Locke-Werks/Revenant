@@ -1181,6 +1181,14 @@ struct VrxStatus {
     creatorSession @11 :UInt64;
     kept @12 :Bool;
     ownedByCaller @13 :Bool;
+
+    # Speech to text on this receiver: what was asked of it through
+    # setVrxTranscribe, auto unless somebody chose, and whether the engine is
+    # transcribing it right now, which needs the global switch on, a mode
+    # that makes speech and a choice that does not leave it out. Added on
+    # 2026-10-03; an older engine sends auto and false.
+    transcribe @14 :TranscribeChoice;
+    transcribing @15 :Bool;
 }
 
 struct SpectrumFrame {
@@ -3488,6 +3496,43 @@ interface Session {
     # refused as unimplemented and should say the engine does not report
     # vocoders, never that there are none.
     vocoderPlugins @28 () -> (plugins :VocoderPlugins);
+
+    # SPEECH TO TEXT, added on 2026-10-03. Owner decision: one global switch,
+    # and while it is on the engine transcribes every receiver that makes
+    # speech. A digital voice receiver is cut into utterances by its calls, an
+    # analogue one by its squelch, and one with its squelch open by the level
+    # of what it hears. WFM is left out unless a receiver is chosen in by
+    # setVrxTranscribe, because broadcast FM is mostly music and Whisper
+    # writes lyrics nobody sang. Modes with no speech, raw, tetra and cw, are
+    # never transcribed.
+    #
+    # The recogniser is whisper.cpp on the engine's GPU through Vulkan, and
+    # its model is downloaded the first time the switch goes on, which
+    # TranscriptionStatus reports while it happens. core/transcribe has the
+    # pieces and docs/rpc.md the design.
+    #
+    # ENGINE-WIDE, like setDetectionThreshold: one switch for every session,
+    # because there is one recogniser and every session sees the same
+    # receivers. The answer is the status after the change. Turning it off
+    # stops new utterances being cut and drops the ones waiting, the one being
+    # recognised included, counted in TranscriptionStatus.dropped; a model
+    # already loaded stays loaded, so turning it back on is immediate.
+    setTranscription @29 (on :Bool) -> (status :TranscriptionStatus);
+    transcriptionStatus @30 () -> (status :TranscriptionStatus);
+
+    # One receiver's place in it: auto follows the rule above, on transcribes
+    # it whatever its mode (so a wfm talk station can be chosen in), off leaves
+    # it out. A mode with no speech stays out whatever is asked. Refused for a
+    # receiver that does not exist. Forgotten when the receiver goes.
+    setVrxTranscribe @31 (vrx :UInt64, choice :TranscribeChoice) -> ();
+
+    # Every transcript the engine produces from now on, for every receiver,
+    # until the subscription is dropped. One per session is the expected use;
+    # a session may hold more. A transcript is the only copy of what was said,
+    # so the subscription queues and evicts the oldest when full, as
+    # subscribeDecoded does.
+    subscribeTranscripts @32 (receiver :TranscriptReceiver)
+        -> (subscription :TranscriptSubscription);
 }
 
 # What one loaded plugin can decode, as it declared itself through
@@ -3550,4 +3595,128 @@ struct VocoderPlugins {
     status @3 :Text;
 
     files @4 :List(VocoderPluginFile);
+}
+
+# ---------------------------------------------------------------------------
+# Speech to text
+# ---------------------------------------------------------------------------
+
+enum TranscribeChoice {
+    auto @0;
+    on @1;
+    off @2;
+}
+
+enum TranscriptionModelState {
+    # Not on disk. The switch has never been on, or the download was refused.
+    absent @0;
+    downloading @1;
+    verifying @2;
+    loading @3;
+    ready @4;
+
+    # Downloading, verifying or loading failed. detail says how, and turning
+    # the switch off and on again retries.
+    failed @5;
+}
+
+struct TranscriptionStatus {
+    enabled @0 :Bool;
+
+    modelState @1 :TranscriptionModelState;
+    modelName @2 :Text;
+
+    # The download, while modelState is downloading; both zero otherwise.
+    bytesDone @3 :UInt64;
+    bytesTotal @4 :UInt64;
+
+    # A sentence for an operator: why it failed, or what it is waiting on.
+    # Empty when there is nothing to say.
+    detail @5 :Text;
+
+    # The device the recogniser runs on, as ggml names it, "Vulkan0: NVIDIA
+    # GeForce RTX 4090", or empty before the model is loaded.
+    backend @6 :Text;
+
+    # Receivers being transcribed right now.
+    receivers @7 :UInt32;
+
+    # Utterances cut and waiting for the recogniser. A number that climbs is
+    # a recogniser that is not keeping up with the band.
+    queued @8 :UInt32;
+
+    # Since the engine started: utterances turned into text, utterances
+    # dropped because the queue was full, and utterances the recogniser heard
+    # and judged not to be speech.
+    transcribed @9 :UInt64;
+    dropped @10 :UInt64;
+    rejected @11 :UInt64;
+
+    # From the end of the utterance on the air to its text being ready, for
+    # the most recent one, in milliseconds.
+    lastLatencyMs @12 :Float64;
+}
+
+struct Transcript {
+    vrx @0 :UInt64;
+
+    # Transcripts the engine produced before this one, across every receiver.
+    sequence @1 :UInt64;
+
+    # WHEN, in the engine's source sample index: the clock SpectrumFrame.start
+    # and Detection count in, so a client can put the text on the waterfall
+    # rows the speech was on. [sourceStart, sourceEnd) is the utterance, which
+    # for a call is the call and for analogue is the squelch opening to its
+    # closing.
+    sourceStart @2 :UInt64;
+    sourceEnd @3 :UInt64;
+
+    # The same stretch in the receiver's own stream at sampleRate, the frame
+    # AudioChunk.sampleIndex counts in.
+    startSample @4 :UInt64;
+    endSample @5 :UInt64;
+    sampleRate @6 :UInt32;
+
+    # WHERE: the receiver's passband in absolute hertz when it heard this,
+    # which is not necessarily where it is now.
+    centerHz @7 :Int64;
+    lowHz @8 :Int64;
+    highHz @9 :Int64;
+
+    # The receiver's mode, by Demod's lower case name.
+    mode @10 :Text;
+
+    # What was said. Never empty: an utterance with no text is not sent.
+    text @11 :Text;
+
+    # How sure the recogniser was, from zero to one: the mean probability of
+    # the tokens it chose, and its own estimate that there was no speech at
+    # all. A client may dim a line it doubts; the engine has already dropped
+    # the ones it judged to be noise.
+    confidence @12 :Float32;
+    noSpeechProb @13 :Float32;
+
+    # What the receiver's protocol said about the call, for a digital voice
+    # receiver: talkgroup, source and the like, under the keys its decoder
+    # publishes (core/rpc/decoders.h). Empty for analogue.
+    fields @14 :List(DecodedField);
+
+    # From the end of the utterance on the air to this text being ready.
+    latencyMs @15 :Float64;
+
+    # Transcripts THIS subscription lost from its queue before this one.
+    droppedBefore @16 :UInt64;
+}
+
+interface TranscriptReceiver {
+    transcript @0 (transcript :Transcript) -> ();
+
+    # No further transcript will arrive, and why. At most once, never for a
+    # cancel this client asked for.
+    ended @1 (reason :Text) -> ();
+}
+
+# Dropping this ends the subscription.
+interface TranscriptSubscription {
+    cancel @0 () -> ();
 }

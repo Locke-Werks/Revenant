@@ -33,6 +33,14 @@
 //           in each kind of sink, time it waited on the GPU, time the
 //           recording thread waited for a frame slot, and what a Paced
 //           source lost.
+//   vrx     re-anchors and audio frames dropped, summed over every receiver,
+//           which move when the device falls behind the channelizer and no
+//           source counter does.
+//   whisper with --whisper-clip, a thread in this process transcribing the
+//           clip back to back on the GPU the engine uses, as the engine's
+//           transcription queue would with a backlog: calls, audio seconds
+//           per wall second, and latency. Its model loads before the warm-up
+//           so the load is not in the window.
 //
 // Run a file with flow=paced&pace=1 to make it behave as a radio, which loses
 // what it cannot deliver, rather than as a file, which waits.
@@ -45,6 +53,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <format>
 #include <map>
 #include <memory>
@@ -74,6 +83,8 @@
 #include "core/rpc/client.h"
 #include "core/rpc/server.h"
 #include "core/rpc/token.h"
+#include "core/transcribe/model_store.h"
+#include "core/transcribe/whisper_runner.h"
 
 using namespace revenant;
 using Clock = std::chrono::steady_clock;
@@ -122,6 +133,14 @@ struct Options {
     // recording: an engine started on the dongle, a file opened from the
     // window.
     std::string switch_to;
+
+    // Whisper beside the radio. A 16 kHz mono 16-bit WAV, transcribed over
+    // and over on its own thread for the whole run. Empty for none.
+    std::string whisper_clip;
+    std::string whisper_model;
+    int whisper_threads = 4;
+    double whisper_gap_ms = 0.0;
+    bool whisper_cpu = false;
 };
 
 void print_usage()
@@ -156,7 +175,14 @@ void print_usage()
         "                        the wire, as a window opens a recording, then warm up again\n"
         "  --cpus N              confine this process to the top N logical processors, so\n"
         "                        --burn loads those and leaves the rest of the machine alone\n"
-        "  --gpu N               device index\n");
+        "  --gpu N               device index\n"
+        "  --whisper-clip WAV    transcribe this 16 kHz mono 16-bit WAV back to back on a\n"
+        "                        thread of its own, on the engine's GPU, for the whole run\n"
+        "  --whisper-model PATH  the model (the default model's place in the model store)\n"
+        "  --whisper-threads N   Whisper's CPU threads (4)\n"
+        "  --whisper-gap-ms X    idle between transcriptions, standing in for a queue that\n"
+        "                        is not backlogged (0)\n"
+        "  --whisper-cpu         run Whisper on the CPU instead of the GPU\n");
 }
 
 [[nodiscard]] Expected<std::int64_t> integer_of(std::string_view text)
@@ -283,6 +309,24 @@ void print_usage()
             auto got = as_integer();
             if (!got) { return std::unexpected(got.error()); }
             options.gpu = static_cast<int>(*got);
+        } else if (token == "--whisper-clip") {
+            auto text = value();
+            if (!text) { return std::unexpected(text.error()); }
+            options.whisper_clip = std::string(*text);
+        } else if (token == "--whisper-model") {
+            auto text = value();
+            if (!text) { return std::unexpected(text.error()); }
+            options.whisper_model = std::string(*text);
+        } else if (token == "--whisper-threads") {
+            auto got = as_integer();
+            if (!got) { return std::unexpected(got.error()); }
+            options.whisper_threads = static_cast<int>(*got);
+        } else if (token == "--whisper-gap-ms") {
+            auto got = as_real();
+            if (!got) { return std::unexpected(got.error()); }
+            options.whisper_gap_ms = *got;
+        } else if (token == "--whisper-cpu") {
+            options.whisper_cpu = true;
         } else if (token.starts_with("--")) {
             return fail(std::format("unknown option {}", token));
         } else if (options.uri.empty()) {
@@ -517,6 +561,62 @@ struct VoiceScore {
 
 [[nodiscard]] double ms(std::uint64_t ns) { return static_cast<double>(ns) / 1e6; }
 
+// A RIFF WAVE file of 16-bit PCM, mono, at Whisper's 16 kHz, as floats. The
+// only shape --whisper-clip takes, so the measurement has no resampler in it.
+// PowerShell's System.Speech writes one:
+//   $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+//   $f = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000, 'Sixteen', 'Mono')
+//   $s.SetOutputToWaveFile('clip.wav', $f); $s.Speak('...'); $s.Dispose()
+[[nodiscard]] Expected<std::vector<float>> read_wav_16k(const std::string& path)
+{
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    if (file == nullptr) {
+        return fail(std::format("could not open {}", path));
+    }
+    std::vector<std::uint8_t> bytes;
+    std::uint8_t buffer[65536];
+    std::size_t got = 0;
+    while ((got = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        bytes.insert(bytes.end(), buffer, buffer + got);
+    }
+    std::fclose(file);
+    const auto u16 = [&](std::size_t at) {
+        return static_cast<std::uint32_t>(bytes[at] | (bytes[at + 1] << 8));
+    };
+    const auto u32 = [&](std::size_t at) { return u16(at) | (u16(at + 2) << 16); };
+    if (bytes.size() < 12 || std::memcmp(bytes.data(), "RIFF", 4) != 0 ||
+        std::memcmp(bytes.data() + 8, "WAVE", 4) != 0) {
+        return fail(std::format("{} is not a WAV file", path));
+    }
+    bool format_ok = false;
+    for (std::size_t at = 12; at + 8 <= bytes.size();) {
+        const std::uint32_t size = u32(at + 4);
+        const std::size_t body = at + 8;
+        if (std::memcmp(bytes.data() + at, "fmt ", 4) == 0 && body + 16 <= bytes.size()) {
+            format_ok = u16(body) == 1 && u16(body + 2) == 1 && u32(body + 4) == 16'000 &&
+                        u16(body + 14) == 16;
+        } else if (std::memcmp(bytes.data() + at, "data", 4) == 0) {
+            if (!format_ok) {
+                return fail(std::format("{} is not 16-bit PCM, mono, at 16000 S/s", path));
+            }
+            const std::size_t end = std::min<std::size_t>(bytes.size(), body + size);
+            std::vector<float> out;
+            for (std::size_t i = body; i + 1 < end; i += 2) {
+                out.push_back(static_cast<float>(static_cast<std::int16_t>(u16(i))) / 32768.0f);
+            }
+            return out;
+        }
+        at = body + size + (size & 1U);
+    }
+    return fail(std::format("{} has no audio in it", path));
+}
+
+// One transcription, when it started and how long it took.
+struct WhisperCall {
+    Clock::time_point began;
+    double seconds = 0.0;
+};
+
 [[nodiscard]] Status run(const Options& options)
 {
 #if defined(_WIN32)
@@ -736,6 +836,76 @@ struct VoiceScore {
         }
     });
 
+    // Whisper beside it. Loaded here, before the warm-up, so a load of a few
+    // seconds lands in the warm-up and not the window; hinted at the engine's
+    // own device, which is how core/transcribe/whisper_runner.h is meant to
+    // be used and what keeps it off an integrated part.
+    std::unique_ptr<transcribe::Whisper> whisper;
+    std::vector<float> clip;
+    std::atomic<bool> transcribing{false};
+    std::mutex whisper_lock;
+    std::vector<WhisperCall> whisper_calls;
+    std::string whisper_failure;
+    std::thread whisper_thread;
+    if (!options.whisper_clip.empty() && !options.reference) {
+        auto read = read_wav_16k(options.whisper_clip);
+        if (!read) {
+            return std::unexpected(read.error());
+        }
+        clip = std::move(*read);
+        transcribe::WhisperOptions whisper_options;
+        whisper_options.model_path = options.whisper_model.empty()
+                                         ? transcribe::model_path(transcribe::kDefaultModel)
+                                         : std::filesystem::path(options.whisper_model);
+        whisper_options.use_gpu = !options.whisper_cpu;
+        whisper_options.gpu_hint = info.device.name;
+        whisper_options.threads = options.whisper_threads;
+        const auto began = Clock::now();
+        auto loaded = transcribe::Whisper::load(whisper_options);
+        if (!loaded) {
+            return std::unexpected(with_context(loaded.error(), "loading Whisper"));
+        }
+        whisper = std::move(*loaded);
+        std::println("{} whisper {} loaded in {:.2f} s, clip {:.2f} s, {} threads, gap {:.0f} ms", options.label,
+                     whisper->backend_description(),
+                     std::chrono::duration<double>(Clock::now() - began).count(),
+                     static_cast<double>(clip.size()) / transcribe::kWhisperSampleRate, options.whisper_threads,
+                     options.whisper_gap_ms);
+        transcribing.store(true);
+        whisper_thread = std::thread([&] {
+#if defined(_WIN32)
+            SetThreadDescription(GetCurrentThread(), L"loadtest whisper");
+#endif
+            while (transcribing.load()) {
+                const auto started = Clock::now();
+                auto segments = whisper->transcribe(clip);
+                const double took = std::chrono::duration<double>(Clock::now() - started).count();
+                const std::scoped_lock held(whisper_lock);
+                if (!segments) {
+                    whisper_failure = segments.error().message;
+                    return;
+                }
+                whisper_calls.push_back(WhisperCall{started, took});
+                if (options.whisper_gap_ms > 0.0) {
+                    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(options.whisper_gap_ms));
+                }
+            }
+        });
+    }
+
+    // Re-anchors and dropped audio frames over every receiver the engine has,
+    // probes excluded because vrx_ids leaves them out.
+    const auto receiver_losses = [&] {
+        std::pair<std::uint64_t, std::uint64_t> sum{0, 0};
+        for (const engine::VrxId id : eng.vrx_ids()) {
+            if (auto status = eng.vrx_status(id)) {
+                sum.first += status->reanchors;
+                sum.second += status->audio_dropped;
+            }
+        }
+        return sum;
+    };
+
     const std::uint32_t main_id =
 #if defined(_WIN32)
         static_cast<std::uint32_t>(GetCurrentThreadId());
@@ -763,6 +933,12 @@ struct VoiceScore {
     }
 
     const auto finish = [&]() -> Status {
+        transcribing.store(false);
+        if (whisper_thread.joinable()) {
+            whisper_thread.join();
+        }
+        // Before anything static goes: whisper_runner.h says why.
+        whisper.reset();
         burning.store(false);
         for (std::thread& burner : burners) {
             burner.join();
@@ -848,6 +1024,7 @@ struct VoiceScore {
     const rpc::ServerLoad serve0 = server->load();
     const engine::ProbeStats probes0 = eng.probe_stats();
     const source::SourceStats source0 = eng.source_stats();
+    const auto receivers0 = receiver_losses();
 
     std::this_thread::sleep_for(std::chrono::duration<double>(options.seconds));
 
@@ -858,6 +1035,7 @@ struct VoiceScore {
     const rpc::ServerLoad serve1 = server->load();
     const engine::ProbeStats probes1 = eng.probe_stats();
     const source::SourceStats source1 = eng.source_stats();
+    const auto receivers1 = receiver_losses();
     PollResult poll;
     std::vector<double> polls;
     std::size_t tracks_seen = 0;
@@ -919,6 +1097,39 @@ struct VoiceScore {
     std::println("{} source lost {} samples in {} overruns", tag,
                  source1.samples_lost - source0.samples_lost,
                  source1.overrun_events - source0.overrun_events);
+    std::println("{} receivers: {} re-anchors, {} audio frames dropped", tag,
+                 receivers1.first - receivers0.first, receivers1.second - receivers0.second);
+    if (whisper) {
+        // Calls that started inside the window; the audio they covered per
+        // wall second of window is the rate Whisper sustained beside the radio.
+        std::vector<double> took;
+        std::string failure;
+        {
+            const std::scoped_lock held(whisper_lock);
+            for (const WhisperCall& call : whisper_calls) {
+                if (call.began >= t0 && call.began < t1) {
+                    took.push_back(call.seconds);
+                }
+            }
+            failure = whisper_failure;
+        }
+        const double clip_seconds = static_cast<double>(clip.size()) / transcribe::kWhisperSampleRate;
+        if (took.empty()) {
+            std::println("{} whisper: no transcription started in the window{}", tag,
+                         failure.empty() ? std::string{} : ": " + failure);
+        } else {
+            std::ranges::sort(took);
+            double busy = 0.0;
+            for (const double one : took) {
+                busy += one;
+            }
+            std::println("{} whisper: {} calls, {:.1f} s of audio per wall second, latency p50 {:.3f} s "
+                         "max {:.3f} s, busy {:.0f}% of the window{}",
+                         tag, took.size(), static_cast<double>(took.size()) * clip_seconds / wall,
+                         took[took.size() / 2], took.back(), 100.0 * busy / wall,
+                         failure.empty() ? std::string{} : " then failed: " + failure);
+        }
+    }
     std::println("{} completion thread: handler {:.1f} ms/s (max {:.2f} ms), gpu wait {:.1f} "
                  "ms/s, audio sinks {:.1f} ms/s, spectrum sink {:.1f} ms/s, passband {:.1f} ms/s",
                  tag, per_second(load1.handler_ns - load0.handler_ns), ms(load1.handler_max_ns),

@@ -76,6 +76,7 @@ target_link_libraries(revenant_rpc_server
     PUBLIC
         revenant_rpc_client
         revenant_core
+        revenant_transcribe
 )
 
 # listen.cpp calls Winsock directly to bind the port with SO_EXCLUSIVEADDRUSE,

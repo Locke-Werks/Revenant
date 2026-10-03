@@ -89,7 +89,10 @@ QtObject {
     // bundled and the installer does not change. The detection plates on the
     // span are painted in C++ and cannot read this singleton, so
     // overlay_label_font in render/spectrum_item.cpp names monoFont at
-    // sizeSmall itself; change the two together.
+    // sizeSmall itself, and caption_font in render/waterfall_item.cpp does the
+    // same for the speech captions on the waterfall; change the three
+    // together. WHAT THAT USED TO SAY: "change the two together", before the
+    // captions arrived on 2026-10-03.
     readonly property string uiFont: "Segoe UI Variable Text"
     readonly property string monoFont: "Cascadia Mono"
 

@@ -907,6 +907,53 @@ struct AudioChunk {
     // receiver that did not move, which is the cheap direction to be wrong
     // in when the expensive one is text from two stations in one struct.
     std::uint64_t tuning_epoch = 0;
+
+    // WHERE THESE FRAMES SIT ON THE SOURCE CLOCK. One past the last source
+    // sample of the engine block whose processing produced them, on the
+    // index SpectrumFrame::start and detect::Track's first_seen and
+    // last_detected are on. `start` above cannot answer that: it counts this
+    // receiver's own output at `rate`, from whenever the receiver was added,
+    // and nothing relates the two after a re-anchor or a skipped block.
+    //
+    // Added for speech-to-text, whose transcript is drawn on the waterfall
+    // on the rows the speech was on the air. A consumer places frame i of
+    // a chunk holding `frames` frames at roughly
+    //
+    //     source_end - (frames - i) * source_rate / rate
+    //
+    // with source_rate EngineInfo::source_rate. It is an end and not a
+    // start because the end is what the dispatch knows exactly: the
+    // receiver produced every frame its inputs allowed up to that block,
+    // and how far back the first of them reaches depends on what it had
+    // left over from the block before.
+    //
+    // WHAT IT DOES NOT TAKE OFF is the receiver's own filters. The
+    // channelizer prototype's group delay is already removed, as it is for
+    // the spectrum, but the fine stage's filter and the audio decimation
+    // filter each delay the signal by their own group delay, so the mapped
+    // position of a sound is LATE by that much. Measured on 2026-10-03 by
+    // tests/engine/test_engine_source_clock.cpp on a USB receiver at 48 kHz
+    // off a 1.152 MS/s source: a keyed tone mapped back 0.87 ms after it was
+    // keyed, against 0.89 ms from the receiver's plan, so the order is a
+    // millisecond. The same run holds source_end - (start + frames) *
+    // source_rate / rate to within 16 source samples, 14 us, across 225
+    // chunks, so from chunk to chunk the placement wanders by far less than
+    // the filter lag it leaves in.
+    // A row on a waterfall at 10 to 30 rows a second is 33 to 100 ms tall,
+    // so a consumer drawing text needs no correction; one aligning to the
+    // millisecond subtracts the receiver's plan figures,
+    // dsp::VrxPlan::fine_group_delay_channel_samples and
+    // audio_group_delay_demod_samples. With the noise blanker on, the fine
+    // stage reads a copy that trails the channel by the blanker's lead,
+    // which adds to the same lag.
+    //
+    // Set by core/engine/graph.cpp on every chunk it delivers, and copied
+    // with the rest of the chunk by a decode lane. ZERO MEANS NOT KNOWN: a
+    // chunk built by hand in a test or a tool, or by anything other than the
+    // graph, says nothing about the source clock, and no real chunk can
+    // carry zero because the first block of a stream ends past the
+    // prototype's support.
+    dsp::SampleIndex source_end = 0;
 };
 
 using AudioSink = std::function<Status(const AudioChunk&)>;
@@ -1186,10 +1233,16 @@ struct SpectrumFrame {
 
     // The source samples this frame's window covers, as a half-open range
     // [start, start + count). Absolute from the start of the stream, so it
-    // lines up with an AudioChunk's start and with anything else indexed the
-    // way docs/conventions.md says time is indexed. The window is N coarse
-    // channel samples, so it spans N * grid.decimation source samples, and
-    // the filter's group delay has already been taken off.
+    // lines up with an AudioChunk's source_end and with anything else on the
+    // source's index the way docs/conventions.md says time is indexed. The
+    // window is N coarse channel samples, so it spans N * grid.decimation
+    // source samples, and the filter's group delay has already been taken
+    // off.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "lines up with an AudioChunk's start".
+    // It does not. AudioChunk::start counts the receiver's own output at its
+    // own rate, so the two were never on one index; AudioChunk::source_end
+    // was added on 2026-10-03 to be the one that is.
     dsp::SampleIndex start = 0;
     dsp::SampleIndex count = 0;
 

@@ -33,6 +33,7 @@ QVariant DecodedLogModel::data(const QModelIndex& index, int role) const
         case TextRole: return QString::fromStdString(line.text);
         case ChipRole: return QString::fromStdString(line.chip);
         case ExpandedRole: return line.expanded;
+        case SlotRole: return line.slot;
         case FieldsRole: {
             // Built on demand and only for an open line, which is the one
             // place the view reads it.
@@ -56,7 +57,7 @@ QHash<int, QByteArray> DecodedLogModel::roleNames() const
     return {
         {SerialRole, "serial"},   {TimeRole, "time"},     {DecoderRole, "decoder"},
         {TextRole, "text"},       {ChipRole, "chip"},     {FieldsRole, "fields"},
-        {ExpandedRole, "expanded"},
+        {ExpandedRole, "expanded"}, {SlotRole, "slot"},
     };
 }
 

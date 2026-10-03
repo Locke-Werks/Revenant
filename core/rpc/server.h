@@ -19,12 +19,14 @@
 //
 // THREADING, WHICH IS THE ONLY HARD PART IN HERE
 //
-// Six kinds of thread matter and none of them is the same thread: the four
-// below, and since 2026-09-23 the sigid lane and the decode lanes, which the
-// two paragraphs after the listing worker describe.
+// Seven kinds of thread matter and none of them is the same thread: the four
+// below, since 2026-09-23 the sigid lane and the decode lanes, and since
+// 2026-10-03 the speech recogniser's, which the three paragraphs after the
+// listing worker describe.
 //
 // WHAT THE SENTENCE ABOVE USED TO SAY: "Four threads matter and none of them
-// is the same thread."
+// is the same thread." And then "Six kinds of thread matter and none of them
+// is the same thread", until the recogniser's thread arrived.
 //
 //   The caller's. Constructs the Server, and later stops it.
 //
@@ -56,6 +58,10 @@
 //   P25 voice stream and every RDS decode on chunks their audio sinks copy
 //   to them. Neither kind touches a capability; both reach the loop the way
 //   the completion thread does.
+//
+//   The speech recogniser's, one thread at the lowest priority class,
+//   core/transcribe/transcriber.h, which runs Whisper on utterances the
+//   decode lanes cut and hands the text to the loop the same way.
 //
 //   core/thread_role.h has the priorities and docs/rpc.md, under Threading,
 //   the measurement that put signal identification and the decoders on
@@ -153,6 +159,7 @@
 #include "core/engine/engine.h"
 #include "core/error.h"
 #include "core/rpc/token.h"
+#include "core/transcribe/transcriber.h"
 
 namespace revenant::decode {
 class VocoderPluginSet;
@@ -219,6 +226,21 @@ struct ServerOptions {
     // is unmapped when the set goes. Null is a host that did not scan, which
     // the call reports as unscanned rather than as an empty folder.
     const decode::VocoderPluginSet* vocoders = nullptr;
+
+    // Speech to text: how the recogniser is made ready, which the server runs
+    // on the transcriber's own thread the first time setTranscription turns
+    // it on. revenant-engine passes transcribe::whisper_prepare, which
+    // downloads the model on first use and loads whisper.cpp on the GPU
+    // through Vulkan; a test passes a fake. Empty is a server that does not
+    // transcribe, and setTranscription says so in words.
+    transcribe::Prepare transcribe_prepare;
+
+    // What TranscriptionStatus names the model, for an operator.
+    std::string transcribe_model_name;
+
+    // The switch on from the start, for a headless engine that should
+    // transcribe without a client asking.
+    bool transcribe_on_start = false;
 };
 
 // Where this server's own work runs and how long it takes, cumulative from

@@ -2373,3 +2373,36 @@ commit: "Turn auto P25 into auto DV, a receiver for every DV protocol"
 instead: The rack's "auto DV" switch opens a held receiver on every verified P25,
     DMR, D-STAR, TETRA or M17 detection, in the mode a click would set.
     ui/models/dv_spawn.h.
+
+phrase: Six kinds of thread on the server side, and none of them is the same thread
+retired: 2026-10-03
+commit: "Transcribe speech on every receiver that makes it"
+instead: Seven kinds: the transcriber's worker in core/transcribe/transcriber.h is
+    the seventh. docs/rpc.md, "Threading" and "Speech to text".
+
+phrase: the project decides a model file is an acceptable dependency
+retired: 2026-10-03
+commit: "Transcribe speech on every receiver that makes it"
+instead: The owner accepted a model file as a dependency on 2026-10-03, Whisper's
+    weights for speech to text; FreeDV 2020 and RADE wait only on their weights'
+    licence. docs/modes.md and docs/clean-room.md.
+
+phrase: The section is absent where nothing reads the mode
+retired: 2026-10-03
+commit: "Transcribe speech on every receiver that makes it"
+instead: The decode switch and menu are absent where nothing reads the mode; the
+    log shows under any receiver while it holds lines, transcripts included.
+    ui/qml/DecodePane.qml.
+
+phrase: ole32.dll, vulkan-1.dll, KERNEL32.dll. No MSVCP140
+retired: 2026-10-03
+commit: "Transcribe speech on every receiver that makes it"
+instead: revenant-engine.exe also imports WINHTTP.dll, for the speech model's
+    download. docs/packaging.md, "One directory, not two".
+
+phrase: the root CMake project builds, which is all six
+phrase: one deleted add_test away rather than six
+retired: 2026-09-21
+commit: "Add the spectral primitives the characteriser measures against"
+instead: The root project builds nine *_tests targets on 2026-10-03, ui/ a tenth;
+    python scripts/check_modal_dialogs.py lists them.

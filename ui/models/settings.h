@@ -150,6 +150,16 @@ inline constexpr QLatin1StringView kEnginePort{"engine/port"};
 // and an engine somebody else started, whose source is never touched.
 inline constexpr QLatin1StringView kLastSource{"engine/lastSource"};
 
+// The speech to text switch, as the operator last set it. Remembered and sent
+// again on every connection, the owner's decision of 2026-10-03, which is the
+// detection threshold's arrangement (kDetectionThresholdDb above) rather than
+// the RDS switch's: the switch is engine-wide like the threshold, and a
+// restarted engine comes up with it off. Written only when the operator moves
+// it, and never read or written by a smoke run, so a window that has never
+// been told anything sends nothing and leaves another session's switch alone.
+// See models/transcribe_link.cpp.
+inline constexpr QLatin1StringView kTranscription{"speech/transcribe"};
+
 // The last ten recordings opened from the picker, newest first, as one JSON
 // array for the reason kBookmarks is one. Each entry is the path and the
 // centre, rate and format boxes as they were typed, so a recording that

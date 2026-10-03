@@ -1553,7 +1553,9 @@ and `DecodedMessage`, which are the "decoded symbols" clause of the same
 promise now that something decodes. Nothing new crosses the bus for either:
 the composite is audio PCM the engine already returns, a digital voice
 receiver's baseband comes back through the same readback at its decoder's
-rate, and the decode happens on the host.
+rate, and the decode happens on the host. A `Transcript` is text made from
+that same returned audio, by a recogniser that does run on the device; "Speech
+to text" below has what that costs.
 Overruns and lost samples travel because they are correctness events, and a
 remote client is exactly the caller that cannot read the log.
 `VrxStatus::audioDropped` travels beside them and is narrower than it reads:
@@ -1591,13 +1593,17 @@ for a match.
 
 ## Threading
 
-Six kinds of thread on the server side, and none of them is the same thread:
-the caller's, the event loop, the engine's completion thread, the listing
-worker, and since 2026-09-23 the sigid lane and the decode lanes. "Who runs
-what, measured" below has the last two and why they exist.
+Seven kinds of thread on the server side, and none of them is the same
+thread: the caller's, the event loop, the engine's completion thread, the
+listing worker, since 2026-09-23 the sigid lane and the decode lanes, and since
+2026-10-03 the transcriber's worker. "Who runs what, measured" below has the
+sigid lane and the decode lanes and why they exist; "Speech to text" below has
+the transcriber.
 
 WHAT THIS SECTION'S FIRST SENTENCE USED TO SAY: "Four threads on the server
-side, and none of them is the same thread."
+side, and none of them is the same thread." And then, from 2026-09-23: "Six
+kinds of thread on the server side, and none of them is the same thread". The
+transcriber's worker is the seventh.
 
 The caller's thread constructs the `Server` and later stops it. The Cap'n Proto
 event loop, which the `Server` owns, is the only thread that may touch a
@@ -1823,6 +1829,240 @@ no track was labelled, where before the probes took half a core and labelled
 70 to 75. With the machine idle the half-core budget bounds the heaviest
 scene at 111 probes and 90 labels in 30 s against 127 and 98 with no budget.
 The detector itself kept up everywhere.
+
+## Speech to text
+
+Added on 2026-10-03. The engine turns what its receivers hear into text and
+serves it as transcripts, each pinned to the source samples and the passband
+it was heard on. The schema's "SPEECH TO TEXT" block in
+`core/rpc/revenant.capnp` is the contract, `core/transcribe/` holds the
+pieces, and `core/transcribe/utterance.h` names them in the order audio
+passes through them.
+
+### What the owner decided
+
+On 2026-10-03, and encoded rather than re-decided anywhere below:
+
+- **One global switch.** While it is on the engine transcribes every receiver
+  that makes speech. It is independent of the rack's "auto DV" switch, which
+  only opens receivers.
+- **How an utterance is cut depends on the receiver.** Digital voice by call:
+  P25, and D-STAR and DMR when a vocoder plugin is loaded, since without one
+  their voice is silence and nothing is cut. Analogue by squelch, for a
+  receiver whose squelch is set. Analogue with the squelch left open by a
+  level detector: 20 ms frames, open at 10 dB over a noise floor that follows
+  a quieter frame down with a 0.1 s time constant and a louder one up at no
+  more than 3 dB/s, a 0.6 s hangover and 0.2 s of pre-roll. The constants and
+  the measurement behind the 10 dB are in `core/transcribe/segmenter.h`.
+- **WFM is left out** unless a receiver is chosen in, because broadcast FM is
+  mostly music and Whisper writes lyrics nobody sang. raw, tetra and cw are
+  never transcribed: complex baseband, a receiver with no audio, and Morse,
+  which Whisper writes words for. `segment_for` in `core/rpc/server.cpp` is
+  the rule.
+- **Per receiver: auto, on or off.** Auto follows the rule above, on takes a
+  receiver in whatever its mode, which is how a wfm talk station is chosen,
+  and off leaves it out. A mode with no speech stays out whatever is asked.
+- **The recogniser is whisper.cpp 1.8.3 on ggml's Vulkan backend**, in the
+  engine process, on the engine's own GPU. No CUDA, ever: the engine is a
+  Vulkan program, and CUDA's runtime is DLLs the static build cannot carry.
+  The device is chosen by the engine's device name, passed by
+  `tools/engined/main.cpp` as `WhisperOptions::gpu_hint`, because ggml
+  enumerates every GPU it finds and this machine also exposes the Radeon
+  integrated part, which is not supported. A hint that matches nothing is
+  refused rather than guessed (`core/transcribe/whisper_runner.h`).
+- **The model is downloaded on first use**, the first time the switch goes
+  on, into `%LOCALAPPDATA%\Revenant\models`, verified by SHA-256 and never
+  shipped in the installer. It is the project's first model-file dependency;
+  `docs/clean-room.md` has the position and `core/transcribe/model_store.h`
+  the pin.
+
+### The wire
+
+Four methods on `Session`, and two fields on `VrxStatus`:
+
+- `setTranscription(on)` and `transcriptionStatus()`. **Engine-wide**, like
+  `setDetectionThreshold`: one switch for every session, because there is one
+  recogniser and every session sees the same receivers. The answer is the
+  status after the change. `TranscriptionStatus` carries the model's state
+  (absent, downloading, verifying, loading, ready, failed), the download's
+  bytes, a sentence for an operator, the device the recogniser runs on, the
+  receivers being transcribed, the queue depth, and since the engine started
+  the utterances transcribed, dropped and rejected, and the last latency.
+- `setVrxTranscribe(vrx, choice)`. Refused for a receiver that does not
+  exist, and forgotten when the receiver goes. `VrxStatus.transcribe` reports
+  the choice and `VrxStatus.transcribing` whether the engine is transcribing
+  that receiver right now, which is the switch, the mode and the choice
+  together. An older engine sends auto and false.
+- `subscribeTranscripts(receiver)`. Every transcript from every receiver until
+  the subscription is dropped. A transcript is the only copy of what was said,
+  so it queues and evicts the oldest at 256, with `droppedBefore` counting what
+  this subscription lost, as `subscribeDecoded` does.
+
+A `Transcript` carries the utterance twice: `[sourceStart, sourceEnd)` in the
+engine's source sample index, the clock `SpectrumFrame.start` and `Detection`
+count in, so a client can put the text on the waterfall rows the speech was
+on, and `[startSample, endSample)` at `sampleRate` in the receiver's own
+stream. It carries the passband in absolute hertz as it was when the speech
+was heard, the mode, the text (never empty), the recogniser's confidence and
+no-speech probability, the call's fields for a P25 receiver (NAC, talkgroup
+and source, kept from the last voiced chunk so the utterance that closes after
+the terminator still has them; D-STAR and DMR carry none today), and the
+latency from the end of the utterance to the text being ready.
+
+**The source clock is new, for this.** `engine::AudioChunk::source_end` is one
+past the last source sample of the engine block that produced a chunk, set by
+`core/engine/graph.cpp` on every chunk, so the segmenter can map a stretch of
+a receiver's audio back to the samples the spectrum was drawn from. It leaves
+in the receiver's own filter delay. `tests/engine/test_engine_source_clock.cpp`
+measured a keyed tone on a USB receiver at 48 kHz off a 1.152 MS/s source
+mapping back 0.87 ms after its true onset, against 0.889 ms predicted from the
+receiver's plan, which is far inside one waterfall row.
+`core/engine/engine.h` has the arithmetic and what to subtract for millisecond
+alignment.
+
+An engine started without a recogniser answers `setTranscription` with a
+status that says so in words. A client against an engine older than the block
+gets all four calls refused as unimplemented and should say the engine does not
+transcribe, never that it failed.
+
+### Where it hangs, and on which threads
+
+**Off the audio route, not a sink of its own.** A transcript tap,
+`TranscriptTap` in `core/rpc/server.cpp`, sits on the receiver's `AudioRoute`
+beside the listeners, so a digital voice receiver is decoded once whether
+somebody is listening, it is being transcribed, or both: one P25 decoder or
+one plugin vocoder handle per receiver, not two. A route lives while it has a
+subscriber or a tap.
+
+**Segmenting runs on the decode lanes.** A voice route already runs on a
+decode lane, and it feeds the tap there straight after it queues the
+listener's chunk. An analogue route's own work stays on the engine's
+completion thread, so it posts the chunk to a decode lane and the segmenting
+runs there. Either way the completion thread only copies. The segmenter
+(`core/transcribe/segmenter.h`) resamples to Whisper's 16000 S/s, cuts on the
+gate or the level, bridges gaps up to its hangover with silence so timing
+holds, closes an utterance at a new tuning epoch so one never spans two
+tunings, and cuts anything reaching 28 s so Whisper never sees more than its
+30 s window.
+
+**Recognising runs on the transcriber's own thread.** One worker, one
+recogniser and one queue for every receiver, `core/transcribe/transcriber.h`,
+because `whisper_full` is not reentrant on one context and a second worker
+would need a second 1.6 GB copy of the model on the GPU. It runs at
+`ThreadClass::SigId`, below normal and the lowest class `core/thread_role.h`
+has: text made from audio somebody has already heard comes after decoding,
+audio, the display and identification. The queue holds 32 utterances and a
+full one evicts the oldest, because late text is worth less than current text.
+Every utterance lands in exactly one counter: transcribed, dropped (submitted
+before the recogniser was ready, evicted, emptied by the switch going off, or
+abandoned by a recogniser that failed three times in a row), rejected as not
+speech, or an error. The same thread runs the download, the verification and
+the load, so none of them holds up the loop. Turning the switch off empties
+the queue and discards the text of an utterance already being recognised when
+it comes back, both counted as dropped, and keeps the model loaded; off and on
+again retries a model that failed.
+
+**Delivery goes through the loop.** The worker hands each transcript to a
+pending queue of 256 and wakes the loop, which alone may touch a capability;
+the loop copies it into each subscription's queue and sends one at a time per
+subscription.
+
+**Every 500 ms the loop reconciles** the receivers being transcribed against
+the engine's (`kTranscriptReconcileNs`, `reconcile_transcripts`), and again
+whenever the switch or a choice changes: new receivers taken in, removed ones
+let go with their last utterance flushed, a retune's new passband picked up,
+and a squelch set or cleared re-cutting a receiver by squelch or by level.
+Taps go on only once the recogniser is ready, so a download in progress costs
+the radio nothing. RDS companion receivers are never taken in.
+
+### What the recogniser is told
+
+Per call, in `core/transcribe/whisper_runner.cpp`: greedy decoding at
+temperature 0 with no fallback, because the fallback ladder turns the worst
+audio into six decodes and the most invented text; `no_context` on every call,
+because consecutive transmissions are unrelated and a hallucinated line would
+otherwise prompt the next; blank and non-speech tokens suppressed; flash
+attention on; English, with language detection off. There is no control for
+the language today.
+
+Before a call each utterance is brought to -20 dBFS RMS after its mean is
+removed, with the gain capped at +30 dB and the peak at 0.9, because Whisper's
+log-mel front end applies a fixed offset after a relative clamp and is not
+level invariant. After it, `core/transcribe/transcriber.cpp` rejects what is
+not speech by four rules in order: whisper's own no-speech rule from
+openai/whisper's `transcribe.py`, no-speech probability over 0.6 and mean
+log-probability under -1.0 together; a run of one to eight words repeated four
+or more times cut to one copy; empty text, punctuation or sound marks alone;
+and the stock phrases of Table III in Baranski et al., arXiv:2501.11378,
+rejected when the recogniser was not confident in them, since some of them
+("okay", "thank you") are things people say on the air.
+
+### What it costs, measured
+
+On 2026-10-03, on the Ryzen 9 7950X and RTX 4090, with ggml-large-v3-turbo.
+
+**Whisper alone**, Release, warm, median of five: a 5 s clip in 0.080 s, 62x
+realtime, and a 15 s clip in 0.146 s, 103x. The model loads in 1.6 s. The
+download, 1.62 GB, took 8 s on this line. `tests/transcribe/test_whisper.cpp`'s
+hidden `[.speed]` case is the measurement.
+
+**Beside the radio.** `revenant-loadtest --whisper-clip WAV` runs a thread in
+the load test's process transcribing a 16 kHz mono clip back to back on the
+engine's GPU for the whole run, which is the transcription queue with a
+backlog that never empties; `--whisper-gap-ms` idles between calls to stand in
+for one that is not backlogged. The model loads before the warm-up. On the
+heavy scene from "Who runs what, measured" above, 2.16 MS/s paced, the P25
+receiver and four nfm receivers on audio, sixteen probes, detection on, two
+60 s windows after 8 s of warm-up, with the machine otherwise idle and Whisper
+looping flat out: realtime 1.000 and 1.001; no samples lost, and no overruns,
+re-anchors or dropped audio; 319 P25 LDUs, as without it; voice underruns 0
+and 1, the one 1 ms long. What moved was timing on the GPU. Voice arrival
+jitter p99 was 4.9 and 10.5 ms, maximum 19 and 52, against 3.2 and 3.4,
+maximum 18 and 16, without Whisper; the GPU wait was 51 and 55 ms/s against
+31 and 30. Live, on the RTL-SDR at 462 MHz with four nfm receivers, nothing
+was lost and the GPU wait went from 20 to 26 ms/s.
+
+**Where it does cost: a GPU-bound engine.** 20 MS/s, 64 channels, 32 nfm
+receivers, unthrottled, so headroom is how many times faster than realtime the
+engine ran:
+
+| Whisper | headroom |
+| --- | --- |
+| none | 4.35 to 4.44x |
+| looping flat out | 1.91 to 2.03x |
+| 500 ms between calls, about 31% busy | 3.51 to 3.60x |
+| 2000 ms between calls, about 10% busy | 4.20x |
+
+Whisper running continuously halves the GPU headroom. Real use is bursty, one
+call per transmission, which is the spaced rows. ggml hard-codes a Vulkan
+queue priority of 1.0, the same as the engine's own queue in
+`core/gpu/context.cpp`, so giving the recogniser a lower GPU priority would
+need a patch in `vcpkg-overlays/ggml`; nothing does that today.
+
+**Two more costs that are not time.** The utterance goes back to the device:
+the log-mel transform runs on the host and its output crosses the bus into
+ggml's buffers. The engine's promise that samples cross once is about the
+source's samples, and this is audio the engine already returned going up a
+second time, in ggml's buffers rather than the engine's. And
+`revenant-engine.exe` grew from 8.3 MB to 66.3 MB, nearly all of it ggml's
+embedded shaders; `docs/packaging.md` has what else did and did not change in
+the payload.
+
+### What is tested
+
+`tests/rpc/test_rpc_transcribe.cpp` runs the server end to end with a fake
+recogniser: a clear P25 call is one transcript, on the call's source rows and
+frequency, with its talkgroup; an encrypted call never reaches the recogniser;
+with the switch off or the receiver chosen out nothing is transcribed; and an
+engine without a recogniser says so in words. `tests/transcribe/` covers the
+model store without a network, the segmenter, the resampler, the queue and its
+rules, and Whisper itself on speech made at test time by Windows SAPI, since
+the tree holds no audio. The Whisper cases skip, saying so, when the model is
+not on the machine, and `REVENANT_REQUIRE_WHISPER=1` makes that a failure.
+`docs/ci.md` says what CI runs of it.
+
+`revenant-engine --transcribe` turns the switch on at startup, for a headless
+engine that should transcribe without a client asking.
 
 ## Backpressure
 

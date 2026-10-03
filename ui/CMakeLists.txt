@@ -234,8 +234,11 @@ qt_add_executable(revenant_ui
     models/recording_plan.h
     models/recording_status.h
     models/source_link.cpp
+    models/transcribe_link.cpp
+    models/transcription.h
     models/window_raise.h
     render/box_history.h
+    render/caption_layout.h
     render/colour_map.h
     render/frame_probe.cpp
     render/frame_probe.h
@@ -658,6 +661,7 @@ if(REVENANT_UI_TESTS)
             tests/test_band_plan.cpp
             tests/test_bookmarks.cpp
             tests/test_box_history.cpp
+            tests/test_caption_layout.cpp
             tests/test_calibration.cpp
             tests/test_colour_map.cpp
             tests/test_composite_probe.cpp
@@ -702,6 +706,7 @@ if(REVENANT_UI_TESTS)
             tests/test_spectrum_scale.cpp
             tests/test_squelch_control.cpp
             tests/test_status_summary.cpp
+            tests/test_transcription.cpp
             tests/test_window_raise.cpp
         )
 

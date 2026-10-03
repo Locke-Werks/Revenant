@@ -339,6 +339,8 @@
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
 #include "core/thread_role.h"
+#include "core/transcribe/segmenter.h"
+#include "core/transcribe/transcriber.h"
 
 namespace revenant::rpc {
 namespace {
@@ -630,6 +632,49 @@ struct AudioChunkBuffer {
 // receiver's own audio, a decode lane for a P25 receiver's voice. So
 // everything under `lock` is written by both threads and everything above it
 // is the loop thread's alone.
+class ServerImpl;
+
+// One receiver being transcribed: its segmenter, and where the receiver was.
+//
+// SPEECH TO TEXT HANGS OFF THE AUDIO ROUTE, not a sink of its own, so a
+// digital voice receiver is decoded once whether somebody is listening, being
+// transcribed, or both: a P25 decoder and a plugin vocoder handle per receiver,
+// not two. A voice route feeds this on its decode lane straight after it
+// queues the listener's chunk; an analogue route, whose own work stays on the
+// engine's completion thread, posts the chunk to a decode lane and the
+// segmenting runs there. Either way the completion thread only copies.
+//
+// Co-owned by the lane work that feeds it, so `owner` is cleared under `lock`
+// when it is taken off or the server stops and a late chunk finds null.
+struct TranscriptTap {
+    TranscriptTap(engine::VrxId which, transcribe::SegmentBy how, std::string_view demod)
+        : vrx(which), by(how), mode(demod), segmenter(transcribe::segmenter_config_for(how)) {}
+
+    const engine::VrxId vrx;
+    const transcribe::SegmentBy by;
+    const std::string mode;
+
+    std::mutex lock;
+    ServerImpl* owner = nullptr;
+    transcribe::Segmenter segmenter;
+    std::vector<transcribe::Utterance> closed;
+
+    // Where the receiver is, absolute hertz, and the source rate that places a
+    // chunk on the source clock. Written by the loop thread on every
+    // reconcile, so a retune is picked up within one; an utterance carries
+    // what was here when it closed. The segmenter never lets an utterance
+    // span two tunings, so the error is bounded by one reconcile period after
+    // a retune.
+    std::int64_t center_hz = 0;
+    std::int64_t low_hz = 0;
+    std::int64_t high_hz = 0;
+    double source_rate = 0.0;
+
+    // What a P25 call said about itself, kept from the last voiced chunk so
+    // the utterance closing after the terminator still carries it.
+    std::vector<transcribe::CallField> fields;
+};
+
 struct AudioNode : std::enable_shared_from_this<AudioNode> {
     AudioNode(schema::AudioReceiver::Client client, engine::VrxId which,
               std::uint32_t millis)
@@ -733,7 +778,42 @@ struct AudioRoute {
     // capability.
     std::string fault;
     bool fault_reported = false;
+
+    // Speech to text on this receiver, null when it is not being transcribed.
+    // A route lives while it has a subscriber OR a tap. For an analogue
+    // route the chunk goes to tap_lane with tap_work; a voice route feeds the
+    // tap directly on the lane it already runs on. All three under `lock`.
+    std::shared_ptr<TranscriptTap> tap;
+    std::shared_ptr<DecodeLane> tap_lane;
+    std::shared_ptr<const LaneWork> tap_work;
 };
+
+// One subscriber to every transcript. Loop thread only: transcripts reach the
+// loop through transcript_pending_ and are queued here by drain_transcripts.
+struct TranscriptNode : std::enable_shared_from_this<TranscriptNode> {
+    explicit TranscriptNode(schema::TranscriptReceiver::Client client)
+        : receiver(kj::mv(client)) {}
+
+    schema::TranscriptReceiver::Client receiver;
+    bool in_flight = false;
+    bool cancelled = false;
+    bool ended_sent = false;
+    std::deque<transcribe::Transcript> queue;
+    std::uint64_t dropped_before = 0;
+};
+
+// A transcript subscription's queue, in transcripts. A transcript is a few
+// hundred bytes and arrives seconds apart per receiver, so this is minutes of
+// a busy band held for a client that stalled.
+constexpr std::size_t kTranscriptQueueDepth = 256;
+
+// The most transcripts held between the recogniser's thread and the loop.
+constexpr std::size_t kTranscriptPendingDepth = 256;
+
+// How often the loop reconciles the receivers being transcribed against the
+// engine's: new receivers taken in, removed ones let go, a retune's new
+// frequency picked up, the model becoming ready acted on.
+constexpr std::uint64_t kTranscriptReconcileNs = 500'000'000;
 
 // ---------------------------------------------------------------------------
 // RDS
@@ -1217,6 +1297,21 @@ public:
     // the requirement into the type, where a caller with a std::string
     // substring cannot satisfy it by accident.
     void end_audio_for_vrx(engine::VrxId vrx, kj::StringPtr reason);
+
+    // Speech to text. Loop thread, except feed_* which run on a decode lane
+    // under the tap's lock. core/rpc/revenant.capnp, "Speech to text", is the
+    // contract.
+    [[nodiscard]] bool transcription_available() const { return transcriber_ != nullptr; }
+    void set_transcription(bool on);
+    void write_transcription_status(schema::TranscriptionStatus::Builder out) const;
+    [[nodiscard]] Status set_vrx_transcribe(engine::VrxId vrx, TranscribeChoice choice);
+    [[nodiscard]] TranscribeChoice transcribe_choice(engine::VrxId vrx) const;
+    [[nodiscard]] bool transcribing(engine::VrxId vrx) const {
+        return transcript_taps_.contains(vrx.value);
+    }
+    void add_transcript_node(std::shared_ptr<TranscriptNode> node);
+    void end_transcript_node(const std::shared_ptr<TranscriptNode>& node);
+    void feed_analog_tap(TranscriptTap& tap, const engine::AudioChunk& chunk);
 
     // Event loop thread. One ended() on one subscription, at most once for
     // the life of that subscription, best effort and never retried. Split
@@ -1774,6 +1869,40 @@ private:
     std::map<std::pair<std::uint32_t, std::string>, std::shared_ptr<DecodeRoute>>
         decode_routes_;
 
+    // Speech to text. The transcriber is made in start() when the options
+    // carry a way to prepare a recogniser, and destroyed in stop() after
+    // every tap has been taken off; null is a server that does not
+    // transcribe. The switch, the per-receiver choices, the taps and the
+    // subscribers are loop-thread state. transcript_pending_ is the hand-off
+    // from the recogniser's thread to the loop, under transcript_lock_.
+    std::unique_ptr<transcribe::Transcriber> transcriber_;
+    bool transcription_on_ = false;
+    std::map<std::uint32_t, TranscribeChoice> transcribe_choices_;
+    std::map<std::uint32_t, std::shared_ptr<TranscriptTap>> transcript_taps_;
+    std::vector<std::shared_ptr<TranscriptNode>> transcript_nodes_;
+    std::uint64_t transcript_reconciled_ns_ = 0;
+    std::mutex transcript_lock_;
+    std::deque<transcribe::Transcript> transcript_pending_;
+    std::uint64_t transcript_pending_dropped_ = 0;
+
+    // Loop thread. See the definitions.
+    [[nodiscard]] Expected<std::shared_ptr<AudioRoute>> ensure_audio_route(
+        engine::VrxId vrx, const engine::VrxStatus& status);
+    void retire_audio_route(engine::VrxId vrx);
+    [[nodiscard]] Status attach_tap(engine::VrxId vrx, const engine::VrxStatus& status,
+                                    transcribe::SegmentBy by);
+    void detach_tap(engine::VrxId vrx, bool flush);
+    void place_tap(TranscriptTap& tap, const engine::VrxStatus& status) const;
+    void reconcile_transcripts();
+    void drain_transcripts();
+    void pump_transcript(const std::shared_ptr<TranscriptNode>& node);
+    void on_transcript(transcribe::Transcript transcript);
+
+    // Any thread that holds the tap's lock.
+    void feed_voice_tap(AudioRoute& route, const engine::AudioChunk& chunk,
+                        std::uint32_t voice_rate);
+    void hand_over(TranscriptTap& tap);
+
     kj::TaskSet* sends_ = nullptr;
 };
 
@@ -1942,6 +2071,35 @@ private:
 
     ServerImpl& owner_;
     std::shared_ptr<DecodedNode> node_;
+};
+
+class TranscriptSubscriptionImpl final : public schema::TranscriptSubscription::Server {
+public:
+    TranscriptSubscriptionImpl(ServerImpl& owner, std::shared_ptr<TranscriptNode> node)
+        : owner_(owner), node_(std::move(node)) {}
+
+    TranscriptSubscriptionImpl(const TranscriptSubscriptionImpl&) = delete;
+    TranscriptSubscriptionImpl& operator=(const TranscriptSubscriptionImpl&) = delete;
+
+    // Not an override, for the reason SubscriptionImpl's destructor gives.
+    ~TranscriptSubscriptionImpl() { end(); }
+
+    kj::Promise<void> cancel(CancelContext) override {
+        end();
+        return kj::READY_NOW;
+    }
+
+private:
+    void end() {
+        if (node_ == nullptr) {
+            return;
+        }
+        owner_.end_transcript_node(node_);
+        node_.reset();
+    }
+
+    ServerImpl& owner_;
+    std::shared_ptr<TranscriptNode> node_;
 };
 
 class SubscriptionImpl final : public schema::SpectrumSubscription::Server {
@@ -2162,6 +2320,13 @@ public:
         out.setCreatorSession(owner.session);
         out.setKept(owner.keep);
         out.setOwnedByCaller(owner.session != 0 && owner.session == id_);
+
+        switch (owner_.transcribe_choice(*id)) {
+            case TranscribeChoice::Auto: out.setTranscribe(schema::TranscribeChoice::AUTO); break;
+            case TranscribeChoice::On: out.setTranscribe(schema::TranscribeChoice::ON); break;
+            case TranscribeChoice::Off: out.setTranscribe(schema::TranscribeChoice::OFF); break;
+        }
+        out.setTranscribing(owner_.transcribing(*id));
         return kj::READY_NOW;
     }
 
@@ -2666,6 +2831,60 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> setTranscription(SetTranscriptionContext context) override {
+        if (!owner_.transcription_available()) {
+            return to_exception(Error{
+                "this engine was started without speech to text, so there is no recogniser to "
+                "switch on. revenant-engine provides one; a host that embeds the engine "
+                "passes ServerOptions::transcribe_prepare"});
+        }
+        owner_.set_transcription(context.getParams().getOn());
+        owner_.write_transcription_status(context.getResults().initStatus());
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> transcriptionStatus(TranscriptionStatusContext context) override {
+        owner_.write_transcription_status(context.getResults().initStatus());
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> setVrxTranscribe(SetVrxTranscribeContext context) override {
+        auto params = context.getParams();
+        auto id = to_vrx_id(params.getVrx());
+        if (!id) {
+            return to_exception(id.error());
+        }
+        TranscribeChoice choice = TranscribeChoice::Auto;
+        switch (params.getChoice()) {
+            case schema::TranscribeChoice::AUTO: choice = TranscribeChoice::Auto; break;
+            case schema::TranscribeChoice::ON: choice = TranscribeChoice::On; break;
+            case schema::TranscribeChoice::OFF: choice = TranscribeChoice::Off; break;
+            default:
+                return to_exception(Error{std::format(
+                    "setVrxTranscribe was sent choice {}, which this engine cannot name. "
+                    "auto, on and off are what it knows",
+                    static_cast<unsigned>(params.getChoice()))});
+        }
+        if (auto set = owner_.set_vrx_transcribe(*id, choice); !set) {
+            return to_exception(set.error());
+        }
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> subscribeTranscripts(SubscribeTranscriptsContext context) override {
+        auto request = context.getParams();
+        if (!request.hasReceiver()) {
+            return to_exception(Error{"subscribeTranscripts needs a receiver capability, and "
+                                      "this request carried a null pointer in its place"});
+        }
+        auto node = std::make_shared<TranscriptNode>(request.getReceiver());
+        owner_.add_transcript_node(node);
+        schema::TranscriptSubscription::Client handle =
+            kj::heap<TranscriptSubscriptionImpl>(owner_, std::move(node));
+        context.getResults().setSubscription(kj::mv(handle));
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> vocoderPlugins(VocoderPluginsContext context) override {
         write_vocoder_plugins(context.getResults().initPlugins(), owner_.vocoders());
         return kj::READY_NOW;
@@ -2864,6 +3083,25 @@ private:
 
 Status ServerImpl::start(const ServerOptions& options) {
     vocoders_ = options.vocoders;
+
+    // Speech to text, when the host gave a way to prepare a recogniser. Made
+    // here and not on first use so the status call can answer about it from
+    // the start; nothing is downloaded or loaded until the switch goes on.
+    if (options.transcribe_prepare) {
+        transcribe::TranscriberOptions topts;
+        topts.model_name = options.transcribe_model_name;
+        auto made = transcribe::Transcriber::create(
+            std::move(topts), options.transcribe_prepare,
+            [this](transcribe::Transcript transcript) { on_transcript(std::move(transcript)); });
+        if (!made) {
+            return std::unexpected(with_context(made.error(), "the speech-to-text transcriber"));
+        }
+        transcriber_ = std::move(*made);
+        if (options.transcribe_on_start) {
+            transcription_on_ = true;
+            transcriber_->set_enabled(true);
+        }
+    }
 
     // Before the loop, so nothing the loop does can find a route with no lane
     // to post to.
@@ -3874,6 +4112,7 @@ void ServerImpl::after_vrx_removed(engine::VrxId vrx, kj::StringPtr reason) {
     end_decoded_for_vrx(vrx, reason);
 
     vrx_owners_.erase(vrx.value);
+    transcribe_choices_.erase(vrx.value);
 }
 
 // WHAT A SESSION ENDING TAKES WITH IT, which is its own receivers and nothing
@@ -4374,6 +4613,19 @@ kj::Promise<void> ServerImpl::pump() {
     drain_passbands();
     drain_audio();
     drain_decoded();
+    drain_transcripts();
+
+    // Reconciled on the pump's own heartbeat, which is the spectrum's frame
+    // rate while a source is open, and at most twice a second: often enough
+    // that a receiver added or retuned is taken in before it says much, and
+    // rarely enough that asking the engine about every receiver costs nothing.
+    if (transcriber_ != nullptr) {
+        const std::uint64_t now = engine::load_clock_ns();
+        if (now - transcript_reconciled_ns_ >= kTranscriptReconcileNs) {
+            transcript_reconciled_ns_ = now;
+            reconcile_transcripts();
+        }
+    }
 
     return armed.promise.then([this]() { return pump(); });
 }
@@ -4697,6 +4949,14 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
     if (!route.carries_voice()) {
         queue_audio(route, chunk.heard, chunk.start, static_cast<std::uint32_t>(chunk.rate),
                     static_cast<std::uint16_t>(chunk.channels), chunk.squelch_open);
+
+        // Speech to text, copied to a lane and segmented there: this is the
+        // completion thread. A full lane drops the chunk on a clocked source,
+        // which the segmenter reads as a gap, as every decoder here does.
+        if (route.tap_lane != nullptr && route.tap_work != nullptr) {
+            static_cast<void>(
+                route.tap_lane->post(route.tap_work, chunk, runs_unthrottled(engine_)));
+        }
         return {};
     }
 
@@ -4746,6 +5006,7 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
         }
         queue_audio(route, route.voice_out.samples, route.voice_out.start,
                     route.plugin_stream->out_rate(), 1, route.voice_out.voiced);
+        feed_voice_tap(route, chunk, route.plugin_stream->out_rate());
         return {};
     }
 
@@ -4765,6 +5026,7 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
     }
     queue_audio(route, route.voice_out.samples, route.voice_out.start, kP25VoiceRateHz, 1,
                 route.voice_out.voiced);
+    feed_voice_tap(route, chunk, kP25VoiceRateHz);
     return {};
 }
 
@@ -5039,7 +5301,20 @@ void ServerImpl::pump_audio(const std::shared_ptr<AudioNode>& node) {
 }
 
 Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node, const engine::VrxStatus& status) {
-    const std::uint32_t key = node->vrx.value;
+    auto route = ensure_audio_route(node->vrx, status);
+    if (!route) {
+        return std::unexpected(route.error());
+    }
+    const std::scoped_lock held((*route)->lock);
+    (*route)->nodes.push_back(std::move(node));
+    return {};
+}
+
+// The route for a receiver, made and its sink attached when there is none.
+// Shared by a subscriber and by speech to text, either of which keeps it.
+Expected<std::shared_ptr<AudioRoute>> ServerImpl::ensure_audio_route(
+    engine::VrxId vrx, const engine::VrxStatus& status) {
+    const std::uint32_t key = vrx.value;
 
     auto existing = audio_routes_.find(key);
     if (existing == audio_routes_.end()) {
@@ -5090,7 +5365,7 @@ Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node, const engine::VrxS
                 return route->owner->on_audio_chunk(*route, chunk);
             };
         }
-        auto attached = engine_.attach_audio_sink(node->vrx, std::move(sink));
+        auto attached = engine_.attach_audio_sink(vrx, std::move(sink));
         if (!attached) {
             return std::unexpected(attached.error());
         }
@@ -5098,10 +5373,28 @@ Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node, const engine::VrxS
         route->sink = *attached;
         existing = audio_routes_.emplace(key, std::move(route)).first;
     }
+    return existing->second;
+}
 
-    const std::scoped_lock held(existing->second->lock);
-    existing->second->nodes.push_back(std::move(node));
-    return {};
+// Takes a route off once nothing holds it. Loop thread.
+void ServerImpl::retire_audio_route(engine::VrxId vrx) {
+    auto found = audio_routes_.find(vrx.value);
+    if (found == audio_routes_.end()) {
+        return;
+    }
+    {
+        const std::scoped_lock held(found->second->lock);
+        if (!found->second->nodes.empty() || found->second->tap != nullptr) {
+            return;
+        }
+    }
+    auto route = found->second;
+    audio_routes_.erase(found);
+
+    // Unconditionally and without sink_lock_, for the reason end_audio gives.
+    static_cast<void>(engine_.detach_audio_sink(vrx, route->sink));
+    const std::scoped_lock owned(route->lock);
+    route->owner = nullptr;
 }
 
 void ServerImpl::end_audio(const std::shared_ptr<AudioNode>& node) {
@@ -5122,7 +5415,9 @@ void ServerImpl::end_audio(const std::shared_ptr<AudioNode>& node) {
             // cancel and then drop the capability.
             return;
         }
-        last = found->second->nodes.empty();
+
+        // A route being transcribed stays, with nobody listening to it.
+        last = found->second->nodes.empty() && found->second->tap == nullptr;
     }
     if (!last) {
         return;
@@ -5196,6 +5491,10 @@ void ServerImpl::end_audio_for_vrx(engine::VrxId vrx, kj::StringPtr reason) {
         }
         end_audio(node);
     }
+
+    // And speech to text on it, whose last utterance is closed and sent on:
+    // the receiver going is the end of what it was hearing.
+    detach_tap(vrx, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -5874,6 +6173,426 @@ void ServerImpl::close_listings() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Speech to text
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// How a receiver's utterances are cut, or nothing when it is not transcribed.
+// The owner's rule of 2026-10-03: every mode that makes speech, wfm only when
+// chosen in, and the modes with no speech never.
+[[nodiscard]] std::optional<transcribe::SegmentBy> segment_for(const engine::VrxParams& params,
+                                                                TranscribeChoice choice) {
+    if (choice == TranscribeChoice::Off) {
+        return std::nullopt;
+    }
+
+    // An analogue receiver whose squelch is set closes between transmissions,
+    // which is the cleanest cut there is. One left at the default never
+    // closes, and its utterances are found by level. -200 is VrxParams'
+    // default, "open"; anything the operator set is well above -199.
+    const transcribe::SegmentBy analogue = params.squelch_dbfs > -199.0
+                                               ? transcribe::SegmentBy::Squelch
+                                               : transcribe::SegmentBy::Level;
+    switch (params.demod) {
+        case engine::Demod::P25p1:
+        case engine::Demod::Dstar:
+        case engine::Demod::Dmr: return transcribe::SegmentBy::Call;
+        case engine::Demod::Am:
+        case engine::Demod::Sam:
+        case engine::Demod::Nfm:
+        case engine::Demod::Usb:
+        case engine::Demod::Lsb:
+        case engine::Demod::Dsb: return analogue;
+        case engine::Demod::Wfm:
+            if (choice == TranscribeChoice::On) {
+                return analogue;
+            }
+            return std::nullopt;
+        case engine::Demod::Raw:
+        case engine::Demod::Tetra:
+        case engine::Demod::Cw: return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] schema::TranscriptionModelState to_schema(transcribe::ModelState state) {
+    switch (state) {
+        case transcribe::ModelState::Absent: return schema::TranscriptionModelState::ABSENT;
+        case transcribe::ModelState::Downloading:
+            return schema::TranscriptionModelState::DOWNLOADING;
+        case transcribe::ModelState::Verifying:
+            return schema::TranscriptionModelState::VERIFYING;
+        case transcribe::ModelState::Loading: return schema::TranscriptionModelState::LOADING;
+        case transcribe::ModelState::Ready: return schema::TranscriptionModelState::READY;
+        case transcribe::ModelState::Failed: return schema::TranscriptionModelState::FAILED;
+    }
+    return schema::TranscriptionModelState::FAILED;
+}
+
+void write_transcript(schema::Transcript::Builder out, const transcribe::Transcript& in,
+                      std::uint64_t dropped_before) {
+    const transcribe::Utterance& heard = in.heard;
+    out.setVrx(heard.vrx);
+    out.setSequence(in.sequence);
+    out.setSourceStart(heard.source_start);
+    out.setSourceEnd(heard.source_end);
+    out.setStartSample(heard.start_sample);
+    out.setEndSample(heard.end_sample);
+    out.setSampleRate(heard.sample_rate);
+    out.setCenterHz(heard.center_hz);
+    out.setLowHz(heard.low_hz);
+    out.setHighHz(heard.high_hz);
+    out.setMode(heard.mode);
+    out.setText(in.text);
+    out.setConfidence(in.confidence);
+    out.setNoSpeechProb(in.no_speech_prob);
+    out.setLatencyMs(in.latency_ms);
+    out.setDroppedBefore(dropped_before);
+    auto fields = out.initFields(static_cast<unsigned>(heard.fields.size()));
+    for (unsigned i = 0; i < fields.size(); ++i) {
+        fields[i].setKey(heard.fields[i].key);
+        fields[i].getValue().setInteger(heard.fields[i].value);
+    }
+}
+
+}  // namespace
+
+void ServerImpl::set_transcription(bool on) {
+    if (transcriber_ == nullptr) {
+        return;
+    }
+    transcription_on_ = on;
+    transcriber_->set_enabled(on);
+    reconcile_transcripts();
+}
+
+void ServerImpl::write_transcription_status(schema::TranscriptionStatus::Builder out) const {
+    out.setEnabled(transcription_on_);
+    if (transcriber_ == nullptr) {
+        out.setModelState(schema::TranscriptionModelState::ABSENT);
+        out.setDetail("this engine was started without speech to text");
+        return;
+    }
+    const transcribe::TranscriberStatus status = transcriber_->status();
+    out.setModelState(to_schema(status.state));
+    out.setModelName(status.model_name);
+    out.setBytesDone(status.bytes_done);
+    out.setBytesTotal(status.bytes_total);
+    out.setDetail(status.detail);
+    out.setBackend(status.backend);
+    out.setReceivers(static_cast<std::uint32_t>(transcript_taps_.size()));
+    out.setQueued(status.queued);
+    out.setTranscribed(status.transcribed);
+    out.setDropped(status.dropped);
+    out.setRejected(status.rejected);
+    out.setLastLatencyMs(status.last_latency_ms);
+}
+
+Status ServerImpl::set_vrx_transcribe(engine::VrxId vrx, TranscribeChoice choice) {
+    auto status = engine_.vrx_status(vrx);
+    if (!status) {
+        return std::unexpected(status.error());
+    }
+    if (choice == TranscribeChoice::Auto) {
+        transcribe_choices_.erase(vrx.value);
+    } else {
+        transcribe_choices_[vrx.value] = choice;
+    }
+    reconcile_transcripts();
+    return {};
+}
+
+TranscribeChoice ServerImpl::transcribe_choice(engine::VrxId vrx) const {
+    const auto found = transcribe_choices_.find(vrx.value);
+    return found == transcribe_choices_.end() ? TranscribeChoice::Auto : found->second;
+}
+
+void ServerImpl::add_transcript_node(std::shared_ptr<TranscriptNode> node) {
+    transcript_nodes_.push_back(std::move(node));
+}
+
+void ServerImpl::end_transcript_node(const std::shared_ptr<TranscriptNode>& node) {
+    node->cancelled = true;
+    std::erase(transcript_nodes_, node);
+}
+
+Status ServerImpl::attach_tap(engine::VrxId vrx, const engine::VrxStatus& status,
+                              transcribe::SegmentBy by) {
+    auto route = ensure_audio_route(vrx, status);
+    if (!route) {
+        return std::unexpected(route.error());
+    }
+    auto tap = std::make_shared<TranscriptTap>(vrx, by, engine::demod_name(status.params.demod));
+    tap->owner = this;
+    place_tap(*tap, status);
+    {
+        const std::scoped_lock held((*route)->lock);
+        (*route)->tap = tap;
+        if (!(*route)->carries_voice()) {
+            (*route)->tap_lane = pick_lane();
+            (*route)->tap_work = std::make_shared<const LaneWork>(
+                [tap, load = load_](const engine::AudioChunk& chunk) {
+                    const engine::LoadTimer timed(load->decode_ns);
+                    const std::scoped_lock owned(tap->lock);
+                    if (tap->owner != nullptr) {
+                        tap->owner->feed_analog_tap(*tap, chunk);
+                    }
+                });
+        }
+    }
+    transcript_taps_[vrx.value] = std::move(tap);
+    return {};
+}
+
+void ServerImpl::detach_tap(engine::VrxId vrx, bool flush) {
+    auto found = transcript_taps_.find(vrx.value);
+    if (found == transcript_taps_.end()) {
+        return;
+    }
+    const std::shared_ptr<TranscriptTap> tap = found->second;
+    transcript_taps_.erase(found);
+
+    std::shared_ptr<DecodeLane> lane;
+    if (auto route = audio_routes_.find(vrx.value); route != audio_routes_.end()) {
+        const std::scoped_lock held(route->second->lock);
+        if (route->second->tap == tap) {
+            route->second->tap = nullptr;
+            route->second->tap_work = nullptr;
+            lane = std::exchange(route->second->tap_lane, nullptr);
+            if (lane == nullptr) {
+                lane = route->second->lane;
+            }
+        }
+    }
+
+    // What was already posted is segmented before the flush, so the last
+    // utterance is the whole of what the receiver delivered, on the argument
+    // end_decode_route makes for its decoders.
+    drain_lane(lane);
+    {
+        const std::scoped_lock owned(tap->lock);
+        if (flush && tap->owner != nullptr) {
+            tap->segmenter.flush(tap->closed);
+            hand_over(*tap);
+        }
+        tap->owner = nullptr;
+    }
+    retire_audio_route(vrx);
+}
+
+void ServerImpl::place_tap(TranscriptTap& tap, const engine::VrxStatus& status) const {
+    const engine::EngineInfo& info = engine_.info();
+    const std::int64_t center = static_cast<std::int64_t>(info.source_center) +
+                                static_cast<std::int64_t>(status.params.center);
+    const std::scoped_lock held(tap.lock);
+    tap.center_hz = center;
+    tap.low_hz = center + static_cast<std::int64_t>(status.placement.granted_low);
+    tap.high_hz = center + static_cast<std::int64_t>(status.placement.granted_high);
+    tap.source_rate = static_cast<double>(info.source_rate);
+}
+
+void ServerImpl::reconcile_transcripts() {
+    if (transcriber_ == nullptr) {
+        return;
+    }
+
+    // Taps go on only once the recogniser can take what they cut, so a
+    // download in progress costs the radio nothing.
+    std::set<std::uint32_t> wanted;
+    if (transcription_on_ && transcriber_->ready()) {
+        for (const engine::VrxId id : engine_.vrx_ids()) {
+            if (is_rds_companion(id)) {
+                continue;
+            }
+            auto status = engine_.vrx_status(id);
+            if (!status) {
+                continue;
+            }
+            const auto by = segment_for(status->params, transcribe_choice(id));
+            if (!by) {
+                continue;
+            }
+            auto found = transcript_taps_.find(id.value);
+            if (found != transcript_taps_.end() && found->second->by != *by) {
+                // A squelch set or cleared changes how utterances are cut.
+                detach_tap(id, true);
+                found = transcript_taps_.end();
+            }
+            if (found == transcript_taps_.end()) {
+                if (auto attached = attach_tap(id, *status, *by); !attached) {
+                    continue;
+                }
+            } else {
+                place_tap(*found->second, *status);
+            }
+            wanted.insert(id.value);
+        }
+    }
+
+    std::vector<std::uint32_t> unwanted;
+    for (const auto& entry : transcript_taps_) {
+        if (!wanted.contains(entry.first)) {
+            unwanted.push_back(entry.first);
+        }
+    }
+    for (const std::uint32_t id : unwanted) {
+        detach_tap(engine::VrxId{id}, true);
+    }
+}
+
+void ServerImpl::feed_voice_tap(AudioRoute& route, const engine::AudioChunk& chunk,
+                                std::uint32_t voice_rate) {
+    // A decode lane, with route.lock held.
+    if (route.tap == nullptr) {
+        return;
+    }
+    TranscriptTap& tap = *route.tap;
+    const std::scoped_lock held(tap.lock);
+    if (tap.owner == nullptr) {
+        return;
+    }
+
+    // The call's talkgroup and source, kept from the last chunk that carried
+    // voice: the terminator that ends an utterance arrives after the call
+    // state has moved on.
+    if (route.voice_out.voiced && route.voice != nullptr) {
+        const decode::P25CallState& call = route.voice->call();
+        tap.fields.clear();
+        tap.fields.push_back({"nac", call.network_access_code});
+        if (call.talkgroup_id) {
+            tap.fields.push_back({"talkgroup", *call.talkgroup_id});
+        }
+        if (call.source_id) {
+            tap.fields.push_back({"source", *call.source_id});
+        }
+    }
+
+    transcribe::SegmenterChunk in;
+    in.samples = route.voice_out.samples;
+    in.channels = 1;
+    in.rate = voice_rate;
+    in.start = route.voice_out.start;
+    in.gate = route.voice_out.voiced;
+    in.source_end = chunk.source_end;
+    in.source_rate = tap.source_rate;
+    in.tuning_epoch = chunk.tuning_epoch;
+    tap.segmenter.push(in, tap.closed);
+    hand_over(tap);
+}
+
+void ServerImpl::feed_analog_tap(TranscriptTap& tap, const engine::AudioChunk& chunk) {
+    // A decode lane, with tap.lock held. `samples` and not `heard`: a lane's
+    // copy carries the receiver's output only (DecodeLane::post), and the
+    // transcriber levels each utterance itself.
+    transcribe::SegmenterChunk in;
+    in.samples = chunk.samples;
+    in.channels = chunk.channels;
+    in.rate = static_cast<std::uint32_t>(chunk.rate);
+    in.start = chunk.start;
+    in.gate = chunk.squelch_open;
+    in.source_end = chunk.source_end;
+    in.source_rate = tap.source_rate;
+    in.tuning_epoch = chunk.tuning_epoch;
+    tap.segmenter.push(in, tap.closed);
+    hand_over(tap);
+}
+
+void ServerImpl::hand_over(TranscriptTap& tap) {
+    // tap.lock held. The transcriber outlives every tap with an owner: stop()
+    // clears the owners before it destroys the transcriber.
+    if (tap.closed.empty()) {
+        return;
+    }
+    const std::uint64_t now = engine::load_clock_ns();
+    for (transcribe::Utterance& utterance : tap.closed) {
+        utterance.vrx = tap.vrx.value;
+        utterance.mode = tap.mode;
+        utterance.center_hz = tap.center_hz;
+        utterance.low_hz = tap.low_hz;
+        utterance.high_hz = tap.high_hz;
+        if (tap.by == transcribe::SegmentBy::Call) {
+            utterance.fields = tap.fields;
+        }
+        utterance.closed_ns = now;
+        transcriber_->submit(std::move(utterance));
+    }
+    tap.closed.clear();
+}
+
+void ServerImpl::on_transcript(transcribe::Transcript transcript) {
+    // The recogniser's thread. Handed to the loop, which alone may touch a
+    // capability, and the oldest goes first if the loop has fallen this far
+    // behind, on the audio queue's argument.
+    {
+        const std::scoped_lock held(transcript_lock_);
+        while (transcript_pending_.size() >= kTranscriptPendingDepth) {
+            transcript_pending_.pop_front();
+            ++transcript_pending_dropped_;
+        }
+        transcript_pending_.push_back(std::move(transcript));
+    }
+    wake_loop();
+}
+
+void ServerImpl::drain_transcripts() {
+    std::deque<transcribe::Transcript> arrived;
+    std::uint64_t lost = 0;
+    {
+        const std::scoped_lock held(transcript_lock_);
+        arrived.swap(transcript_pending_);
+        lost = std::exchange(transcript_pending_dropped_, 0);
+    }
+    if (arrived.empty() && lost == 0) {
+        return;
+    }
+
+    std::erase_if(transcript_nodes_, [](const auto& node) { return node->cancelled; });
+    for (const auto& node : transcript_nodes_) {
+        node->dropped_before += lost;
+        for (const transcribe::Transcript& transcript : arrived) {
+            while (node->queue.size() >= kTranscriptQueueDepth) {
+                node->queue.pop_front();
+                ++node->dropped_before;
+            }
+            node->queue.push_back(transcript);
+        }
+        pump_transcript(node);
+    }
+}
+
+void ServerImpl::pump_transcript(const std::shared_ptr<TranscriptNode>& node) {
+    // One in flight per subscription, pump_decoded's rule.
+    if (node->cancelled || node->in_flight || sends_ == nullptr || node->queue.empty()) {
+        return;
+    }
+    transcribe::Transcript transcript = std::move(node->queue.front());
+    node->queue.pop_front();
+    const std::uint64_t dropped_before = std::exchange(node->dropped_before, 0);
+
+    auto request = node->receiver.transcriptRequest();
+    write_transcript(request.initTranscript(), transcript, dropped_before);
+    node->in_flight = true;
+
+    auto weak = node->weak_from_this();
+    sends_->add(request.send().ignoreResult().then(
+        [this, weak]() {
+            if (auto live = weak.lock()) {
+                live->in_flight = false;
+                pump_transcript(live);
+            }
+        },
+        [weak](kj::Exception&&) {
+            // A receiver that threw or went is not coming back, on deliver's
+            // argument for the spectrum.
+            if (auto live = weak.lock()) {
+                live->in_flight = false;
+                live->cancelled = true;
+            }
+        }));
+}
+
 void ServerImpl::stop() {
     // A mutex rather than an exchanged flag, because the second caller has to
     // wait for the first to finish rather than race the destructor that
@@ -5948,8 +6667,19 @@ void ServerImpl::stop() {
         const std::scoped_lock owned(entry.second->lock);
         entry.second->owner = nullptr;
         entry.second->nodes.clear();
+        entry.second->tap = nullptr;
+        entry.second->tap_work = nullptr;
+        entry.second->tap_lane = nullptr;
     }
     audio_routes_.clear();
+
+    // Every tap inert, under its own lock, so a chunk already being segmented
+    // on a lane finishes before this returns and a later one finds null.
+    for (const auto& entry : transcript_taps_) {
+        const std::scoped_lock owned(entry.second->lock);
+        entry.second->owner = nullptr;
+    }
+    transcript_taps_.clear();
 
     // And every RDS decoder, on the same terms. Taking each route's lock is
     // what makes a sink call already inside the decoder finish before this
@@ -5981,6 +6711,14 @@ void ServerImpl::stop() {
     for (const auto& lane : lanes_) {
         lane->stop();
     }
+
+    // The recogniser after every tap is inert and every lane stopped, so
+    // nothing can submit to it while it goes. Its destructor cancels a
+    // download or a load in progress and waits for an utterance being
+    // recognised, a second or so at worst. What it sends on the way out goes
+    // to transcript_pending_, which nothing reads now.
+    transcriber_.reset();
+    transcript_nodes_.clear();
 
     {
         std::scoped_lock held(frame_lock_);

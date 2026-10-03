@@ -100,6 +100,16 @@
 // here is a rectangle closed in both axes, and the rows it spans are
 // resolved from a ring of sample ranges kept beside the pixels.
 //
+// SPEECH IS DRAWN HERE TOO, since 2026-10-03: what a receiver was heard to
+// say, as a caption beside its passband on the rows where the utterance
+// ended, riding down with them, held at the bottom edge and faded over the
+// time it took to cross. render/caption_layout.h has the placement and the
+// owner's decisions; this file measures the text, draws the plates, the
+// leaders and the glyphs in the scene graph, and says which caption is under
+// the pointer. The text is laid out on the GUI thread when a caption arrives
+// and only moved and faded after that, so a frame costs a transform and an
+// opacity per caption and no text layout at all.
+//
 // AND A BOX HERE IS HISTORY, since 2026-09-23. What is drawn is every box the
 // waterfall has drawn and still holds rows for, not the detector's current
 // list: a box stays on its rows when the detector lets the track go and
@@ -111,15 +121,20 @@
 #pragma once
 
 #include <QImage>
+#include <QPointF>
 #include <QQuickItem>
 #include <QSize>
+#include <QTextLayout>
 #include <QtQmlIntegration>
 
 #include <cstdint>
+#include <memory>
+#include <utility>
 #include <vector>
 
 #include "models/engine_link.h"
 #include "render/box_history.h"
+#include "render/caption_layout.h"
 #include "render/history_resize.h"
 #include "render/history_shift.h"
 #include "render/spectrum_item.h"
@@ -166,6 +181,13 @@ class WaterfallItem : public QQuickItem {
     Q_PROPERTY(qulonglong hoveredDetection READ hoveredDetection
                    NOTIFY hoveredDetectionChanged)
 
+    // The caption under the pointer, or zero, and its whole text for the
+    // hover card in qml/SpanView.qml: the plate carries three lines at most.
+    // A caption under the pointer outranks a detection box under it, since
+    // the plate is drawn over the box.
+    Q_PROPERTY(qulonglong hoveredCaption READ hoveredCaption NOTIFY hoveredCaptionChanged)
+    Q_PROPERTY(QString hoveredCaptionText READ hoveredCaptionText NOTIFY hoveredCaptionChanged)
+
 public:
     explicit WaterfallItem(QQuickItem* parent = nullptr);
 
@@ -191,6 +213,9 @@ public:
 
     [[nodiscard]] qulonglong hoveredDetection() const { return hovered_detection_; }
 
+    [[nodiscard]] qulonglong hoveredCaption() const { return hovered_caption_; }
+    [[nodiscard]] QString hoveredCaptionText() const;
+
 signals:
     void linkChanged();
     void endsChanged();
@@ -198,6 +223,7 @@ signals:
     void mapPinsChanged();
     void selectedDetectionChanged();
     void hoveredDetectionChanged();
+    void hoveredCaptionChanged();
 
     // Same signal and the same caveats as SpectrumItem::tuneRequested, which
     // carries the note about the measured centre not being the logical one
@@ -279,6 +305,22 @@ private:
     void placeLabels();
     void setHovered(std::uint64_t id);
 
+    // Takes the transcripts the link has delivered since the last call,
+    // wraps, measures and lays out each one's text once, and adds it.
+    void takeTranscripts();
+
+    // Places every caption against the rows held now; render/
+    // caption_layout.h. Called from rebuildOverlay, so a row, a retune and a
+    // resize each move them. Costs nothing with no captions.
+    void layoutCaptions();
+
+    // Forgets every caption and its laid-out text, with the rows they were on.
+    void clearCaptions();
+
+    // The caption under a point, and the hover that follows it.
+    void setHoveredCaption(std::uint64_t serial);
+    void hoverAt(QPointF position);
+
     // The newest row, which is the top of the display. The cursor decrements,
     // so it points one past the newest.
     [[nodiscard]] int readRow() const;
@@ -358,6 +400,24 @@ private:
     // the history the rectangles are pointing at.
     OverlayLabelItem* hovered_label_ = nullptr;
     OverlayLabelItem* selected_label_ = nullptr;
+
+    // The captions, where the last layout put them, and each one's lines
+    // laid out on the GUI thread when it arrived, which updatePaintNode hands
+    // to a text node and never lays out again. QQuickText splits the work the
+    // same way, and for the same reason: the render thread then needs no
+    // font engine of its own.
+    CaptionHistory captions_;
+    std::vector<PlacedCaption> placed_captions_;
+    std::vector<std::pair<std::uint64_t, std::vector<std::unique_ptr<QTextLayout>>>>
+        caption_layouts_;
+    std::uint64_t caption_feed_seen_ = 0;
+    std::uint64_t hovered_caption_ = 0;
+    double caption_line_height_ = 14.0;
+
+    // Where the pointer was last seen over the item, so a caption scrolling
+    // under a pointer that has not moved is found under it.
+    bool hovering_ = false;
+    QPointF hover_position_;
 };
 
 }  // namespace revenant::ui

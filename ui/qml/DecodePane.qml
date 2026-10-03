@@ -2,8 +2,10 @@
 //
 // OFFERED ONLY WHERE SOMETHING READS THE RECEIVER. The menu is the engine's
 // own list cut to the decoders that read this receiver's mode, with auto
-// first where it would attach anything, so the section is absent on am, dsb
+// first where it would attach anything, so the menu is absent on am, dsb
 // and wfm rather than a menu of refusals. WFM keeps its RDS section above.
+// The log itself shows under any receiver while it holds lines, since
+// transcripts arrived on 2026-10-03 and land on those modes too.
 // models/decoded_log.h has the rule and ui/tests/test_decoded_log.cpp its
 // cases.
 //
@@ -28,6 +30,13 @@ ColumnLayout {
     readonly property bool offered: engineLink.receiverId > 0
                                     && engineLink.decodeChoices.length > 0
 
+    // SPEECH TO TEXT WRITES HERE TOO, since 2026-10-03: every transcript is a
+    // line, decoder "speech", from whichever receiver it came from. A
+    // receiver no decoder reads, am or wfm, can still be transcribed, so the
+    // log is shown under any receiver while it holds lines, and the decode
+    // switch and menu only where something reads the mode.
+    readonly property bool shown: offered || (engineLink.receiverId > 0 && log.count > 0)
+
     // The log takes the height it is given rather than its own, which is the
     // docked strip's column beside the receiver. See ReceiverPanel.qml.
     property bool fills: false
@@ -50,7 +59,7 @@ ColumnLayout {
     Layout.fillWidth: true
     Layout.fillHeight: growing
     spacing: 4
-    visible: offered
+    visible: shown
 
     GridLayout {
         Layout.fillWidth: true
@@ -64,6 +73,7 @@ ColumnLayout {
             spacing: 8
 
             RButton {
+                visible: pane.offered
                 flat: true
                 checkable: true
                 checked: engineLink.decodeWanted
@@ -77,6 +87,7 @@ ColumnLayout {
             RComboBox {
                 id: choice
 
+                visible: pane.offered
                 Layout.preferredWidth: 110
                 model: engineLink.decodeChoices
                 currentIndex: engineLink.decodeChoices.indexOf(engineLink.decodeChoice)
@@ -251,6 +262,10 @@ ColumnLayout {
                 required property bool expanded
                 required property var fields
 
+                // The receiver the line came from, -1 for the focused one's
+                // colour as a decoder line has always been drawn.
+                required property int slot
+
                 width: ListView.view.width
                 height: line.height + (entry.expanded ? detail.height + 4 : 0)
 
@@ -289,7 +304,8 @@ ColumnLayout {
                     Text {
                         Layout.preferredWidth: decoderWidth.advanceWidth
                         text: entry.decoder
-                        color: Theme.receiverColour(engineLink.focusedSlot)
+                        color: Theme.receiverColour(entry.slot >= 0 ? entry.slot
+                                                                    : engineLink.focusedSlot)
                         font.family: Theme.monoFont
                         font.pixelSize: Theme.sizeSmall
                         elide: Text.ElideRight

@@ -247,6 +247,13 @@ inline constexpr std::array kKeyActions{
 
     // The colour map's ends, [ for the low one and ] for the high one, as on
     // the filter display.
+    // Speech to text, the engine's one switch for every receiver that makes
+    // speech (models/transcription.h). Ctrl+Shift+T beside AFT's Ctrl+T, for
+    // the t both words start with.
+    KeyAction{"transcription.toggle", "turn speech to text on or off", "speech",
+              "transcribe transcription whisper captions stt words voice recogniser",
+              {"Ctrl+Shift+T", ""}, KeyContext::Window, kNeedsEngine, "transcription.toggle", ""},
+
     KeyAction{"scale.floor", "pin or unpin the spectrum floor", "display", "colour map scale lock bottom",
               {"Ctrl+[", ""}, KeyContext::Window, kNeedsSpectrum, "scale.pin", "floor"},
     KeyAction{"scale.ceiling", "pin or unpin the spectrum ceiling", "display", "colour map scale lock top",

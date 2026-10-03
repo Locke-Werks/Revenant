@@ -593,6 +593,15 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.creator_session = in.getCreatorSession();
     out.kept = in.getKept();
     out.owned_by_caller = in.getOwnedByCaller();
+
+    // Auto and false from an engine built before transcription existed, which
+    // is what an engine that cannot transcribe would say anyway.
+    switch (in.getTranscribe()) {
+        case schema::TranscribeChoice::ON: out.transcribe = TranscribeChoice::On; break;
+        case schema::TranscribeChoice::OFF: out.transcribe = TranscribeChoice::Off; break;
+        default: out.transcribe = TranscribeChoice::Auto; break;
+    }
+    out.transcribing = in.getTranscribing();
     return out;
 }
 
@@ -1003,20 +1012,9 @@ void read_audio_chunk(AudioChunk& out, schema::AudioChunk::Reader in) {
 // kind, is dropped rather than read as whichever alternative sits at that
 // ordinal. The message is still delivered and its other fields are not
 // disturbed, so an older client keeps working against a newer decoder.
-void read_decoded_message(DecodedMessage& out, schema::DecodedMessage::Reader in) {
-    out.vrx = in.getVrx();
-    out.decoder = read_text(in.getDecoder());
-    out.kind = read_text(in.getKind());
-    out.start_sample = in.getStartSample();
-    out.end_sample = in.getEndSample();
-    out.sample_rate = in.getSampleRate();
-    out.text = read_text(in.getText());
-    out.sequence = in.getSequence();
-    out.dropped_before = in.getDroppedBefore();
-
-    out.fields.clear();
-    auto fields = in.getFields();
-    out.fields.reserve(fields.size());
+void read_decoded_fields(std::vector<DecodedField>& out,
+                         capnp::List<schema::DecodedField>::Reader fields) {
+    out.reserve(out.size() + fields.size());
     for (const auto field : fields) {
         DecodedField entry;
         entry.key = read_text(field.getKey());
@@ -1042,8 +1040,82 @@ void read_decoded_message(DecodedMessage& out, schema::DecodedMessage::Reader in
             default:
                 continue;
         }
-        out.fields.push_back(std::move(entry));
+        out.push_back(std::move(entry));
     }
+}
+
+void read_decoded_message(DecodedMessage& out, schema::DecodedMessage::Reader in) {
+    out.vrx = in.getVrx();
+    out.decoder = read_text(in.getDecoder());
+    out.kind = read_text(in.getKind());
+    out.start_sample = in.getStartSample();
+    out.end_sample = in.getEndSample();
+    out.sample_rate = in.getSampleRate();
+    out.text = read_text(in.getText());
+    out.sequence = in.getSequence();
+    out.dropped_before = in.getDroppedBefore();
+
+    out.fields.clear();
+    read_decoded_fields(out.fields, in.getFields());
+}
+
+[[nodiscard]] TranscriptionStatus read_transcription_status(
+    schema::TranscriptionStatus::Reader in) {
+    TranscriptionStatus out;
+    out.enabled = in.getEnabled();
+    // A state this build cannot name reads as failed, with the engine's own
+    // sentence in detail, rather than as ready.
+    switch (in.getModelState()) {
+        case schema::TranscriptionModelState::ABSENT:
+            out.model_state = TranscriptionModelState::Absent;
+            break;
+        case schema::TranscriptionModelState::DOWNLOADING:
+            out.model_state = TranscriptionModelState::Downloading;
+            break;
+        case schema::TranscriptionModelState::VERIFYING:
+            out.model_state = TranscriptionModelState::Verifying;
+            break;
+        case schema::TranscriptionModelState::LOADING:
+            out.model_state = TranscriptionModelState::Loading;
+            break;
+        case schema::TranscriptionModelState::READY:
+            out.model_state = TranscriptionModelState::Ready;
+            break;
+        default: out.model_state = TranscriptionModelState::Failed; break;
+    }
+    out.model_name = read_text(in.getModelName());
+    out.bytes_done = in.getBytesDone();
+    out.bytes_total = in.getBytesTotal();
+    out.detail = read_text(in.getDetail());
+    out.backend = read_text(in.getBackend());
+    out.receivers = in.getReceivers();
+    out.queued = in.getQueued();
+    out.transcribed = in.getTranscribed();
+    out.dropped = in.getDropped();
+    out.rejected = in.getRejected();
+    out.last_latency_ms = in.getLastLatencyMs();
+    return out;
+}
+
+void read_transcript(Transcript& out, schema::Transcript::Reader in) {
+    out.vrx = in.getVrx();
+    out.sequence = in.getSequence();
+    out.source_start = in.getSourceStart();
+    out.source_end = in.getSourceEnd();
+    out.start_sample = in.getStartSample();
+    out.end_sample = in.getEndSample();
+    out.sample_rate = in.getSampleRate();
+    out.center_hz = in.getCenterHz();
+    out.low_hz = in.getLowHz();
+    out.high_hz = in.getHighHz();
+    out.mode = read_text(in.getMode());
+    out.text = read_text(in.getText());
+    out.confidence = in.getConfidence();
+    out.no_speech_prob = in.getNoSpeechProb();
+    out.latency_ms = in.getLatencyMs();
+    out.dropped_before = in.getDroppedBefore();
+    out.fields.clear();
+    read_decoded_fields(out.fields, in.getFields());
 }
 
 [[nodiscard]] DecodedStats read_decoded_stats(schema::DecodedStats::Reader in) {
@@ -1093,6 +1165,9 @@ struct LoopState {
 
     // And decoded messages, one per decoder per receiver.
     std::map<DecodedKey, kj::Own<schema::DecodedSubscription::Client>> decodeds;
+
+    // The one transcript subscription, or null.
+    kj::Own<schema::TranscriptSubscription::Client> transcripts;
 };
 
 class ClientImpl;
@@ -1156,6 +1231,22 @@ public:
 private:
     ClientImpl& owner_;
     DecodedKey key_;
+};
+
+// The same, for transcripts. It carries the generation it was made for, so a
+// transcript from a subscription this client has since replaced cannot reach
+// the new callback.
+class TranscriptReceiverImpl final : public schema::TranscriptReceiver::Server {
+public:
+    TranscriptReceiverImpl(ClientImpl& owner, std::uint64_t generation)
+        : owner_(owner), generation_(generation) {}
+
+    kj::Promise<void> transcript(TranscriptContext context) override;
+    kj::Promise<void> ended(EndedContext context) override;
+
+private:
+    ClientImpl& owner_;
+    std::uint64_t generation_ = 0;
 };
 
 class ClientImpl final : public Client {
@@ -1228,6 +1319,14 @@ public:
     [[nodiscard]] Expected<DecodedStats> decoded_stats(std::uint64_t vrx,
                                                        std::string_view decoder) override;
 
+    [[nodiscard]] Expected<TranscriptionStatus> set_transcription(bool on) override;
+    [[nodiscard]] Expected<TranscriptionStatus> transcription_status() override;
+    [[nodiscard]] Status set_vrx_transcribe(std::uint64_t vrx,
+                                            TranscribeChoice choice) override;
+    [[nodiscard]] Status subscribe_transcripts(TranscriptCallback on_transcript,
+                                               TranscriptEndedCallback on_ended) override;
+    void unsubscribe_transcripts() override;
+
     [[nodiscard]] std::uint64_t frames_received() const override;
     [[nodiscard]] std::uint64_t frames_dropped() const override;
 
@@ -1244,6 +1343,10 @@ public:
     // Loop thread only, called by DecodedReceiverImpl.
     void deliver_decoded(const DecodedKey& key, schema::DecodedMessage::Reader in);
     void deliver_decoded_ended(const DecodedKey& key, capnp::Text::Reader reason);
+
+    // Loop thread only, called by TranscriptReceiverImpl.
+    void deliver_transcript(std::uint64_t generation, schema::Transcript::Reader in);
+    void deliver_transcript_ended(std::uint64_t generation, capnp::Text::Reader reason);
 
 private:
     void run(const std::string& address, std::uint16_t port, std::promise<Status>& ready);
@@ -1361,6 +1464,13 @@ private:
     // floats whose buffer is worth keeping.
     std::map<DecodedKey, DecodedCallback> decoded_callbacks_;
     std::map<DecodedKey, DecodedEndedCallback> decoded_ended_;
+
+    // The transcript subscription's pair, and its generation: moved by every
+    // subscribe and unsubscribe and carried by the receiver capability, so a
+    // late transcript from a replaced subscription is dropped. Loop thread.
+    TranscriptCallback transcript_callback_;
+    TranscriptEndedCallback transcript_ended_;
+    std::uint64_t transcript_generation_ = 0;
 
     // client.h says calls queue. This is what makes them.
     std::mutex calls_;
@@ -2186,6 +2296,132 @@ kj::Promise<void> DecodedReceiverImpl::message(MessageContext context) {
 kj::Promise<void> DecodedReceiverImpl::ended(EndedContext context) {
     owner_.deliver_decoded_ended(key_, context.getParams().getReason());
     return kj::READY_NOW;
+}
+
+kj::Promise<void> TranscriptReceiverImpl::transcript(TranscriptContext context) {
+    owner_.deliver_transcript(generation_, context.getParams().getTranscript());
+    return kj::READY_NOW;
+}
+
+kj::Promise<void> TranscriptReceiverImpl::ended(EndedContext context) {
+    owner_.deliver_transcript_ended(generation_, context.getParams().getReason());
+    return kj::READY_NOW;
+}
+
+Expected<TranscriptionStatus> ClientImpl::set_transcription(bool on) {
+    return on_loop("setTranscription", [on](LoopState& state) {
+        auto request = state.session.setTranscriptionRequest();
+        request.setOn(on);
+        return request.send().then(
+            [](auto&& response) { return read_transcription_status(response.getStatus()); });
+    });
+}
+
+Expected<TranscriptionStatus> ClientImpl::transcription_status() {
+    return on_loop("transcriptionStatus", [](LoopState& state) {
+        return state.session.transcriptionStatusRequest().send().then(
+            [](auto&& response) { return read_transcription_status(response.getStatus()); });
+    });
+}
+
+Status ClientImpl::set_vrx_transcribe(std::uint64_t vrx, TranscribeChoice choice) {
+    auto done = on_loop("setVrxTranscribe", [vrx, choice](LoopState& state) {
+        auto request = state.session.setVrxTranscribeRequest();
+        request.setVrx(vrx);
+        switch (choice) {
+            case TranscribeChoice::Auto: request.setChoice(schema::TranscribeChoice::AUTO); break;
+            case TranscribeChoice::On: request.setChoice(schema::TranscribeChoice::ON); break;
+            case TranscribeChoice::Off: request.setChoice(schema::TranscribeChoice::OFF); break;
+        }
+        return request.send().then([](auto&&) { return true; });
+    });
+    if (!done) {
+        return std::unexpected(done.error());
+    }
+    return {};
+}
+
+Status ClientImpl::subscribe_transcripts(TranscriptCallback on_transcript,
+                                         TranscriptEndedCallback on_ended) {
+    if (!on_transcript) {
+        return fail("subscribe_transcripts: the transcript callback is empty. "
+                    "unsubscribe_transcripts is how a subscription ends");
+    }
+    auto done = on_loop("subscribeTranscripts", [this, &on_transcript,
+                                                 &on_ended](LoopState& state) {
+        // The old one is cancelled first, on subscribe_decoded's argument, and
+        // the generation moves so anything it still had on the wire is dropped.
+        kj::Promise<void> ended = kj::READY_NOW;
+        if (state.transcripts.get() != nullptr) {
+            ended = state.transcripts->cancelRequest().send().ignoreResult().catch_(
+                [](kj::Exception&&) {});
+            state.transcripts = nullptr;
+        }
+        const std::uint64_t generation = ++transcript_generation_;
+        transcript_callback_ = std::move(on_transcript);
+        transcript_ended_ = std::move(on_ended);
+        return ended.then([this, &state, generation]() {
+            auto request = state.session.subscribeTranscriptsRequest();
+            request.setReceiver(schema::TranscriptReceiver::Client(
+                kj::heap<TranscriptReceiverImpl>(*this, generation)));
+            return request.send()
+                .then([&state](auto&& response) {
+                    state.transcripts = kj::heap<schema::TranscriptSubscription::Client>(
+                        response.getSubscription());
+                    return true;
+                })
+                .catch_([this, generation](kj::Exception&& failure) -> kj::Promise<bool> {
+                    if (generation == transcript_generation_) {
+                        transcript_callback_ = nullptr;
+                        transcript_ended_ = nullptr;
+                    }
+                    return kj::Promise<bool>(kj::mv(failure));
+                });
+        });
+    });
+    if (!done) {
+        return std::unexpected(done.error());
+    }
+    return {};
+}
+
+void ClientImpl::unsubscribe_transcripts() {
+    // No error channel, for the reason unsubscribe_spectrum gives.
+    static_cast<void>(on_loop("unsubscribe_transcripts", [this](LoopState& state) {
+        ++transcript_generation_;
+        transcript_callback_ = nullptr;
+        transcript_ended_ = nullptr;
+        if (state.transcripts.get() == nullptr) {
+            return kj::Promise<void>(kj::READY_NOW);
+        }
+        auto cancelled = state.transcripts->cancelRequest().send().ignoreResult();
+        state.transcripts = nullptr;
+        return cancelled.catch_([](kj::Exception&&) {});
+    }));
+}
+
+void ClientImpl::deliver_transcript(std::uint64_t generation, schema::Transcript::Reader in) {
+    if (generation != transcript_generation_ || !transcript_callback_) {
+        return;
+    }
+    Transcript transcript;
+    read_transcript(transcript, in);
+    transcript_callback_(transcript);
+}
+
+void ClientImpl::deliver_transcript_ended(std::uint64_t generation, capnp::Text::Reader reason) {
+    if (generation != transcript_generation_) {
+        return;
+    }
+    TranscriptEndedCallback callable = std::move(transcript_ended_);
+    transcript_callback_ = nullptr;
+    transcript_ended_ = nullptr;
+    if (state_ != nullptr) {
+        state_->transcripts = nullptr;
+    }
+    if (callable) {
+        callable(read_text(reason));
+    }
 }
 
 Expected<std::vector<DecoderInfo>> ClientImpl::decoders() {

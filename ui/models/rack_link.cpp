@@ -152,14 +152,17 @@ QVariantList EngineLink::rackEntries() const
         double centre = 0.0;
         double level = -200.0;
         QString mode;
+        bool transcribing = false;
         if (focused) {
             centre = receiverCenterHz();
             level = receiver_status_.level_dbfs;
             mode = receiverDemod();
+            transcribing = receiver_status_.transcribing;
         } else if (const HeldView* view = held_view(entry.key); view != nullptr) {
             centre = static_cast<double>(view->absolute_hz);
             level = view->level_dbfs;
             mode = demod_name(view->params.demod);
+            transcribing = view->transcribing;
         }
 
         double low = centre;
@@ -190,6 +193,7 @@ QVariantList EngineLink::rackEntries() const
             {QStringLiteral("heard"), rack_.heard(entry.key)},
             {QStringLiteral("gain"), entry.gain},
             {QStringLiteral("gainText"), QString::fromStdString(rack_gain_text(entry.gain))},
+            {QStringLiteral("transcribing"), transcribing},
         });
     }
     return out;
@@ -272,6 +276,8 @@ void EngineLink::park_pane()
     view.granted_high = static_cast<int>(receiver_status_.placement.granted_high);
     view.edge_limit = receiver_edge_limit_;
     view.level_dbfs = receiver_status_.level_dbfs;
+    view.transcribe = receiver_status_.transcribe;
+    view.transcribing = receiver_status_.transcribing;
     held_views_.emplace_back(pane_key_, view);
 
     if (RackEntry* entry = rack_.find(pane_key_); entry != nullptr) {
@@ -321,6 +327,8 @@ void EngineLink::focus_entry(std::uint64_t key)
     receiver_status_.placement.granted_low = incoming.granted_low;
     receiver_status_.placement.granted_high = incoming.granted_high;
     receiver_status_.level_dbfs = incoming.level_dbfs;
+    receiver_status_.transcribe = incoming.transcribe;
+    receiver_status_.transcribing = incoming.transcribing;
     receiver_edge_limit_ = incoming.edge_limit;
 
     const RackEntry* entry = rack_.find(key);
@@ -761,6 +769,8 @@ void EngineLink::adopt_held_reports()
         if (report.has_status) {
             if (HeldView* view = held_view(report.key); view != nullptr) {
                 view->level_dbfs = report.status.level_dbfs;
+                view->transcribe = report.status.transcribe;
+                view->transcribing = report.status.transcribing;
                 view->granted_low = static_cast<int>(report.status.placement.granted_low);
                 view->granted_high = static_cast<int>(report.status.placement.granted_high);
 

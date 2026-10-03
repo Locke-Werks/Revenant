@@ -181,6 +181,24 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
         gain.store(1.0F, std::memory_order_relaxed);
     }
 
+    // The speech to text switch, sent on every connection once the operator
+    // has set it; see kTranscription in models/settings.h. A run that has
+    // never been told sends nothing, the threshold's rule.
+    if (store.contains(settings::kTranscription)) {
+        transcription_wanted_ = store.value(settings::kTranscription, false).toBool();
+        transcription_set_ = true;
+        const std::lock_guard<std::mutex> lock(transcription_mutex_);
+        requested_transcription_ = transcription_wanted_;
+        transcription_switch_pending_ = true;
+    }
+    transcription_view_ = transcription_view(TranscriptionFacts{});
+
+    // Every rack change is a chance that a receiver's engine id moved under
+    // a choice, which is what the per-receiver reconcile is about. Compared
+    // before anything is posted; see post_transcribe_wants.
+    connect(this, &EngineLink::rackChanged, this, &EngineLink::post_transcribe_wants);
+    connect(&fake_transcripts_, &QTimer::timeout, this, &EngineLink::feed_fake_transcript);
+
     // What a double click's second press measures its first against.
     click_clock_.start();
 }
@@ -265,6 +283,7 @@ void EngineLink::supervise()
             apply_audio_request();
             apply_decode_request();
             poll_vocoder_plugins();
+            apply_transcription(false);
             poll_receiver_status();
             poll_held_status();
             poll_detections();
@@ -286,7 +305,7 @@ void EngineLink::supervise()
             std::unique_lock<std::mutex> lock(supervisor_mutex_);
             supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
                 return stopping_ || ((receiver_work_pending_ || audio_work_pending_ ||
-                                      decode_work_pending_ ||
+                                      decode_work_pending_ || transcribe_work_pending_ ||
                                       tune_work_pending_ || rds_work_pending_ ||
                                       source_work_pending_) &&
                                      client_ != nullptr);
@@ -336,6 +355,9 @@ void EngineLink::supervise()
 
             // Every decoder subscription went with it, on the same terms.
             forget_decoded();
+
+            // And the transcript subscription and every choice sent.
+            forget_transcription();
 
             // The decoder went with the engine, and the station on screen
             // was one engine's reading of one receiver. Nothing has to be
@@ -388,6 +410,10 @@ void EngineLink::supervise()
             apply_audio_request();
             apply_decode_request();
             poll_vocoder_plugins();
+
+            // The probe pass reads the recogniser's status as well, which is
+            // the once a second the download's progress moves at.
+            apply_transcription(true);
             poll_receiver_status();
             poll_held_status();
 
@@ -428,7 +454,7 @@ void EngineLink::supervise()
         // thread.
         supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
             return stopping_ || ((receiver_work_pending_ || audio_work_pending_ ||
-                                  decode_work_pending_ ||
+                                  decode_work_pending_ || transcribe_work_pending_ ||
                                   tune_work_pending_ || rds_work_pending_ ||
                                   source_work_pending_) &&
                                  client_ != nullptr);
@@ -442,6 +468,7 @@ void EngineLink::supervise()
         // drop_receiver stops the audio first, so the tail here needs no
         // separate call. See receiver_link.cpp.
         drop_receiver();
+        client_->unsubscribe_transcripts();
         client_->unsubscribe_spectrum();
         client_.reset();
     }

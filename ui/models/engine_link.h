@@ -133,6 +133,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -173,6 +174,7 @@
 #include "models/front_end_note.h"
 #include "models/gain_control.h"
 #include "models/source_pacing.h"
+#include "models/transcription.h"
 
 namespace revenant::ui {
 
@@ -1632,6 +1634,47 @@ class EngineLink : public QObject {
     // was decoded is still what was decoded; the operator clears it.
     Q_PROPERTY(revenant::ui::DecodedLogModel* decodedLog READ decodedLog CONSTANT)
 
+    // ------------------------------------------------------------------
+    // Speech to text. Implemented in ui/models/transcribe_link.cpp; the
+    // rules are models/transcription.h's and the captions on the span
+    // waterfall are render/caption_layout.h's.
+    // ------------------------------------------------------------------
+    //
+    // ONE SWITCH FOR THE WHOLE ENGINE, the owner's decision of 2026-10-03,
+    // independent of autoDv, which only opens receivers. The recogniser and
+    // its model live in the engine, so what this window holds is the switch,
+    // the status beside it, each receiver's choice, and the transcripts.
+    //
+    // RECONCILED ON THE SUPERVISOR, NOT COMMANDED, on the audio's argument:
+    // the switch and the choices are handed over whole, and the supervisor
+    // compares them against what this connection has sent, so a reconnect
+    // and a receiver rebuilt under a new id are the same code path as a
+    // click.
+
+    // The switch as drawn: the engine's once it has said, the operator's
+    // until then. The engine's is shared by every session, so another
+    // window turning it on is drawn as on here.
+    Q_PROPERTY(bool transcriptionOn READ transcriptionOn NOTIFY transcriptionChanged)
+
+    // False for an engine older than the calls, which refuses them as
+    // unimplemented; the switch is greyed and says so. No dialog, no fault
+    // in the pill: an engine that does not transcribe is not broken.
+    Q_PROPERTY(bool transcriptionOffered READ transcriptionOffered NOTIFY transcriptionChanged)
+
+    // The word or two beside the switch, "model 43%", "loading model",
+    // "ready", "3 queued", "model failed", and the sentence behind it, and
+    // how loudly to draw it: quiet, busy, bad or off.
+    Q_PROPERTY(QString transcriptionLabel READ transcriptionLabel NOTIFY transcriptionChanged)
+    Q_PROPERTY(QString transcriptionDetail READ transcriptionDetail NOTIFY transcriptionChanged)
+    Q_PROPERTY(QString transcriptionTone READ transcriptionTone NOTIFY transcriptionChanged)
+
+    // The focused receiver's choice as the engine reports it on the
+    // receiver's status, "auto", "on" or "off", and whether the engine is
+    // transcribing it now. The segmented control binds the first and moves
+    // when the answer comes back, as RSegmented.qml's rule has it.
+    Q_PROPERTY(QString receiverTranscribe READ receiverTranscribe NOTIFY receiverStatusChanged)
+    Q_PROPERTY(bool receiverTranscribing READ receiverTranscribing NOTIFY receiverStatusChanged)
+
 public:
     explicit EngineLink(QObject* parent = nullptr);
     ~EngineLink() override;
@@ -2733,6 +2776,64 @@ public:
     // place it does, and nothing after that repeats it.
     void setStartupReceiver(double absolute_hz, const QString& mode, const QString& decoder);
 
+    // ------------------------------------------------------------------
+    // The speech to text surface. Implemented in ui/models/transcribe_link.cpp.
+    // ------------------------------------------------------------------
+
+    [[nodiscard]] bool transcriptionOn() const { return transcription_view_.on; }
+    [[nodiscard]] bool transcriptionOffered() const { return transcription_view_.offered; }
+    [[nodiscard]] QString transcriptionLabel() const
+    {
+        return QString::fromStdString(transcription_view_.label);
+    }
+    [[nodiscard]] QString transcriptionDetail() const
+    {
+        return QString::fromStdString(transcription_view_.detail);
+    }
+    [[nodiscard]] QString transcriptionTone() const;
+    [[nodiscard]] QString receiverTranscribe() const;
+    [[nodiscard]] bool receiverTranscribing() const { return receiver_status_.transcribing; }
+
+    // Flips the switch from what is drawn, remembers it unless this is a
+    // smoke run, and hands it to the supervisor.
+    Q_INVOKABLE void toggleTranscription();
+
+    // The focused receiver's choice, by name. A name that is not one of the
+    // three is ignored rather than read as auto.
+    Q_INVOKABLE void setReceiverTranscribe(const QString& choice);
+
+    // The word or two beside the focused receiver's choice; see
+    // receiver_transcribe_note in models/transcription.h. A function rather
+    // than a property because it reads four properties with four signals.
+    [[nodiscard]] Q_INVOKABLE QString transcribeNote(const QString& choice, const QString& mode,
+                                                     bool on, bool transcribing) const;
+
+    // main() turns it off for a smoke run, which neither reads, writes nor
+    // sends the remembered switch, on the rule setRememberDetector follows.
+    void setRememberTranscription(bool remember);
+
+    // TEST-ONLY. Feeds a made-up transcript every few seconds through the same
+    // Qt-thread path a real one takes, placed on the rows the waterfall has
+    // just drawn and beside a receiver in the rack, so the captions can be
+    // looked at and timed against an engine that does not transcribe. main()
+    // calls it for --fake-transcripts or REVENANT_UI_FAKE_TRANSCRIPTS, and
+    // nothing else does. The text says it is a test.
+    void startFakeTranscripts();
+
+    // Every transcript this connection has delivered, newest last, kept to
+    // render/caption_layout.h's limit, for the span waterfall's captions.
+    // Each carries a serial of this window's own, which the waterfall
+    // remembers so it takes each one once, the rack colour slot of the
+    // receiver when it arrived (-1 when it was not in the rack), and the
+    // hover card's text.
+    struct CaptionFeedEntry {
+        std::uint64_t serial = 0;
+        rpc::Transcript transcript;
+        int slot = -1;
+        std::string card;
+    };
+    [[nodiscard]] const std::deque<CaptionFeedEntry>& captionFeed() const { return caption_feed_; }
+
 signals:
     // The link came up or went away. An item holding history keyed to one
     // engine's geometry clears it here, on the edge into connected: the next
@@ -2893,6 +2994,12 @@ signals:
     // own rows for that.
     void decodeChanged();
     void vocodersChanged();
+
+    // The switch, its status, or whether the engine offers it moved.
+    void transcriptionChanged();
+
+    // New entries are on captionFeed(). The decode log has its own rows.
+    void transcriptsArrived();
 
     // The open source's description or the delivered count moved.
     void openedSourceChanged();
@@ -3664,6 +3771,11 @@ private:
         int granted_high = 0;
         int edge_limit = 0;
         double level_dbfs = -200.0;
+
+        // What the engine last said about speech to text on it, for the
+        // strip's indicator; see VrxStatus.
+        rpc::TranscribeChoice transcribe = rpc::TranscribeChoice::Auto;
+        bool transcribing = false;
     };
 
     ReceiverRack rack_;
@@ -4542,6 +4654,88 @@ private:
     // the supervisor when it has reconciled. In the wait predicate for the
     // reason audio_work_pending_ is.
     bool decode_work_pending_ = false;  // guarded by supervisor_mutex_
+
+    // ------------------------------------------------------------------
+    // Speech to text. Implemented in ui/models/transcribe_link.cpp.
+    // ------------------------------------------------------------------
+
+    // Supervisor thread. Subscribes to transcripts once per connection,
+    // applies the switch when it has moved or a connection is new, sends the
+    // per-receiver choices that differ from what this connection sent, and
+    // on the probe pass, once a second, reads the status. Every call this
+    // half makes goes through here.
+    void apply_transcription(bool probe);
+
+    // Supervisor thread. The engine went, and every subscription and choice
+    // with it; nothing to cancel.
+    void forget_transcription();
+
+    // Supervisor thread. Hands the Qt thread what changed, when it did.
+    void note_transcription();
+
+    // Qt thread.
+    void adopt_transcription();
+    void drain_transcripts();
+    void post_transcribe_wants();
+    void feed_fake_transcript();
+
+    // Invoked on the Cap'n Proto event loop thread. The first copies the
+    // transcript into the hand-off and posts one wake; the second records the
+    // engine's words for the supervisor.
+    void on_transcript(const rpc::Transcript& transcript);
+    void on_transcripts_ended(const std::string& reason);
+
+    // Qt thread only. The operator's switch, whether it has ever been set
+    // (which is what decides whether a connection is sent it), whether this
+    // run remembers it, and each rack entry's choice by rack key.
+    bool transcription_wanted_ = false;
+    bool transcription_set_ = false;
+    bool remember_transcription_ = true;
+    std::vector<std::pair<std::uint64_t, rpc::TranscribeChoice>> transcribe_choices_;
+    TranscriptionView transcription_view_;
+    std::deque<CaptionFeedEntry> caption_feed_;
+    std::uint64_t caption_serial_ = 0;
+    std::vector<VrxTranscribeWant> posted_transcribe_wants_;
+    QTimer fake_transcripts_;
+    std::uint64_t fake_transcript_count_ = 0;
+
+    // The Qt thread's hand-off to the supervisor, the supervisor's back, and
+    // the Cap'n Proto loop's transcripts, under one lock for the reason
+    // decoded_mutex_ gives.
+    std::mutex transcription_mutex_;
+    bool requested_transcription_ = false;                      // guarded
+    bool transcription_switch_pending_ = false;                 // guarded
+    std::vector<VrxTranscribeWant> requested_transcribe_wants_; // guarded
+    bool has_transcription_handover_ = false;                   // guarded
+    TranscriptionFacts handover_transcription_;                 // guarded
+    std::vector<rpc::Transcript> pending_transcripts_;          // guarded
+    std::vector<std::int64_t> pending_transcripts_arrived_ms_;  // guarded
+    std::uint64_t pending_transcripts_unkept_ = 0;              // guarded
+    bool transcripts_ended_ = false;                            // guarded
+    std::string transcripts_ended_reason_;                      // guarded
+    std::atomic<bool> transcript_wake_pending_{false};
+
+    // Supervisor thread only. What this connection has done: subscribed or
+    // not, whether the engine refused the calls as unimplemented, the last
+    // status read, the switch as last sent, and each receiver's choice as
+    // last sent. All cleared by forget_transcription.
+    bool transcripts_subscribed_ = false;
+
+    // The switch has been sent on some connection of this session, so every
+    // later connection is sent it too; and the last send failed for a reason
+    // other than a refusal, so it is retried once a second rather than on
+    // every pass.
+    bool transcription_switch_sent_ = false;
+    bool transcription_switch_failed_ = false;
+    TranscriptionFacts work_transcription_;
+    TranscriptionFacts posted_transcription_;
+    bool transcription_posted_ = false;
+    VrxTranscribeSent vrx_transcribe_sent_;
+
+    // Set by the switch, a choice and an ended arrival, cleared by the
+    // supervisor when it has reconciled. In the wait predicate for the
+    // reason audio_work_pending_ is.
+    bool transcribe_work_pending_ = false;  // guarded by supervisor_mutex_
 };
 
 }  // namespace revenant::ui

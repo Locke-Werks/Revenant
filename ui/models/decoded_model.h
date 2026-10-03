@@ -54,6 +54,7 @@ public:
         ChipRole,
         FieldsRole,
         ExpandedRole,
+        SlotRole,
     };
 
     explicit DecodedLogModel(QObject* parent = nullptr);

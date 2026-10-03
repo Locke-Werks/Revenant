@@ -155,8 +155,12 @@ empty `CTestTestfile.cmake` gives exit 0 bare and exit 8 with the flag.
 So a `tests/CMakeLists.txt` or a `ui/CMakeLists.txt` that stopped registering targets
 would turn a gate into a compile check, and the only sign would be a run that got faster.
 Both `ctest` invocations in `ci.yml` carry the flag. It matters most in `ui`, which has
-exactly one test target, so the empty set there is one deleted `add_test` away rather
-than six.
+exactly one test target, so the empty set there is one deleted `add_test` away, where
+the engine tree has nine `*_tests` targets on 2026-10-03.
+
+WHAT THE LAST SENTENCE USED TO SAY: "one deleted `add_test` away rather than six". True
+on 2026-09-20; `revenant_characterise_tests` and `revenant_labelled_tests` made eight by
+2026-09-23 and `revenant_transcribe_tests` nine on 2026-10-03.
 
 What the flag catches is zero tests, not too few. `catch_discover_tests` registers one
 ctest entry per Catch2 case, so the count moves with every commit and a floor on it would
@@ -236,6 +240,32 @@ when GitHub issue #2 closes.
 
 A green run therefore says nothing about that case. Read its output in the ctest log
 rather than its status.
+
+### Speech to text, and the model the runner does not have
+
+Since 2026-10-03 `build-and-test` builds and runs `revenant_transcribe_tests`, label
+`transcribe`, beside the rest. Most of it needs nothing outside the tree: the model
+store's size and hash logic and its download's failure paths against loopback, the
+segmenter, the resampler, and the transcription queue with its rejection rules against a
+fake recogniser. `tests/rpc/test_rpc_transcribe.cpp` runs the server end to end on that
+fake, and `tests/engine/test_engine_source_clock.cpp` measures where a receiver's audio
+lands on the source clock; both are in the GPU suites they belong to.
+
+The Whisper cases in `tests/transcribe/test_whisper.cpp` need the 1.6 GB model and skip,
+saying so, when it is absent. The runner is this machine, which has the model, but the
+model lives in `%LOCALAPPDATA%\Revenant\models` of the account that fetched it, and the
+runner's service runs as `NT AUTHORITY\NETWORK SERVICE`, whose `%LOCALAPPDATA%` is
+`C:\Windows\ServiceProfiles\NetworkService\AppData\Local`. On 2026-10-03 there was no
+model there, and `ci.yml` does not set `REVENANT_REQUIRE_WHISPER`, so in CI those cases
+skip and Whisper itself is not exercised. Fetching the model into the service's profile
+and setting the variable on `build-and-test` closes that; until then a green run says the
+pipeline around the recogniser works and nothing about the recogniser. The two
+`[.download]` cases and the `[.speed]` measurement are hidden and never run in CI.
+
+The `ui` job picks up `ui/tests/test_transcription.cpp` and
+`ui/tests/test_caption_layout.cpp` in `revenant_ui_tests`: the per-receiver choice, the
+switch's label and chip, the log line and hover card, and the caption placement, hold,
+fade and stacking.
 
 ## The `ui` job, and why it is a job rather than a step
 
@@ -318,9 +348,10 @@ Job object that ends it with the window, and reading its stderr. It talks to Win
 which is why it is its own file; the decision whether to start one is
 `models/engine_start.h`, and `tests/test_engine_start.cpp` covers that.
 
-**`models/engine_link.cpp`, `models/receiver_link.cpp`, `models/audio_link.cpp`.** The
-RPC-facing state: connection lifecycle, reconnect, the detection and RDS surfaces, and
-what happens when the engine goes away mid-stream. These hold Qt types and want an event
+**`models/engine_link.cpp`, `models/receiver_link.cpp`, `models/audio_link.cpp`,
+`models/transcribe_link.cpp`.** The RPC-facing state: connection lifecycle, reconnect,
+the detection, RDS and speech to text surfaces, and what happens when the engine goes
+away mid-stream. These hold Qt types and want an event
 loop and a server on the other end, so covering them is a harness, not a test file.
 
 **`render/spectrum_item.cpp`, `render/waterfall_item.cpp`, `render/passband_item.cpp`.**
