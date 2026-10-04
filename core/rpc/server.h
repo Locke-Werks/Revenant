@@ -151,6 +151,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -163,6 +164,10 @@
 
 namespace revenant::decode {
 class VocoderPluginSet;
+}
+
+namespace revenant::plugin {
+class EnginePluginSet;
 }
 
 namespace revenant::rpc {
@@ -226,6 +231,19 @@ struct ServerOptions {
     // is unmapped when the set goes. Null is a host that did not scan, which
     // the call reports as unscanned rather than as an empty folder.
     const decode::VocoderPluginSet* vocoders = nullptr;
+
+    // The engine plugins the engine process scanned at startup, under the
+    // same lifetime rule as vocoders. The server runs each one that loaded,
+    // feeds it events and carries out its commands on the event loop, which
+    // is the only thread that changes the engine; core/plugin/engine_plugin.h
+    // has the arrangement. Null runs none, and Session.enginePlugins reports
+    // it as unscanned.
+    const plugin::EnginePluginSet* engine_plugins = nullptr;
+
+    // Where a plugin's log lines go, already prefixed with its name. Called
+    // from the plugin's own thread or one it started, so it must be thread
+    // safe. Empty discards them.
+    std::function<void(std::string_view)> plugin_log;
 
     // Speech to text: how the recogniser is made ready, which the server runs
     // on the transcriber's own thread the first time setTranscription turns

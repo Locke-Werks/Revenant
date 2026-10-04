@@ -63,6 +63,12 @@ find_package(rtlsdr CONFIG REQUIRED)
 # loader that turns a third-party DLL into one of those implementations, and
 # decode/vocoder_abi.h is the C contract such a DLL implements.
 #
+# plugin/ is the engine plugin ABI: plugin/engine_plugin_abi.h is the C
+# contract, engine_plugin.cpp loads plugins and runs each on a thread of its
+# own, and dll_scan.cpp is the folder handling it shares with the vocoder
+# loader. The RPC server is what feeds them events and carries out their
+# commands; core/plugin/engine_plugin.h says why that is the server's job.
+#
 # Both were behind an EXISTS guard while they landed on separate branches in
 # the same session. Both have landed, and the guard is gone rather than left
 # in place: it was configure-time only, so a file that went missing or got
@@ -127,6 +133,8 @@ add_library(revenant_core STATIC
     detect/label.cpp
     detect/tier_two.cpp
     identify/identify.cpp
+    plugin/dll_scan.cpp
+    plugin/engine_plugin.cpp
     dsp/complex_ops.cpp
     dsp/convert.cpp
     dsp/denormal_mode.cpp

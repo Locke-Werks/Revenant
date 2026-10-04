@@ -29,6 +29,7 @@
 #include "core/decode/rds_bits.h"
 #include "core/decode/rds_groups.h"
 #include "core/decode/vocoder_plugin.h"
+#include "core/plugin/engine_plugin.h"
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
 #include "core/detect/label.h"
@@ -296,6 +297,11 @@ void write_decoder_info(schema::DecoderInfo::Builder out, std::string_view name,
 // The scan the engine process took at startup, or `scanned` false for null.
 void write_vocoder_plugins(schema::VocoderPlugins::Builder out,
                            const decode::VocoderPluginSet* set);
+
+// The engine plugin scan, or `scanned` false for null. `running` is indexed
+// like set->modules(), which is the loaded reports in order.
+void write_engine_plugins(schema::EnginePlugins::Builder out,
+                          const plugin::EnginePluginSet* set, std::span<const bool> running);
 
 // There is deliberately no read_spectrum_geometry here.
 //

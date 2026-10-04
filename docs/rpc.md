@@ -1110,6 +1110,9 @@ mono, silent between calls, `sampleIndex` counted at the chunk's own rate.
   the client shows it as the radio panel's vocoders section. An engine older
   than the call refuses it as unimplemented, and the client says the engine
   does not report plugins rather than that there are none.
+- `Session.enginePlugins`, since 2026-10-03, is the same report for engine
+  plugins, the `plugins` folder, with whether each one is running.
+  `docs/plugins.md` has what an engine plugin is and what it may do.
 
 `P25Voice` hands a call over an LDU at a time, 1440 samples every 180 ms of
 air, detected at the end of whichever engine block holds the LDU's last

@@ -24,10 +24,12 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -188,6 +190,11 @@ struct HarnessOptions {
     // ServerOptions::vocoders, passed through. The case owns the set and keeps
     // it alive past the harness.
     const decode::VocoderPluginSet* vocoders = nullptr;
+
+    // ServerOptions::engine_plugins and plugin_log, passed through, under the
+    // same ownership rule.
+    const plugin::EnginePluginSet* engine_plugins = nullptr;
+    std::function<void(std::string_view)> plugin_log;
 
     // ServerOptions::transcribe_prepare, passed through. A case passes a fake
     // recogniser; empty is a server that does not transcribe.

@@ -534,6 +534,10 @@ public:
     // "not reported" rather than as no plugins.
     [[nodiscard]] virtual Expected<VocoderPlugins> vocoder_plugins() = 0;
 
+    // The engine plugins the engine found when it started, under the same
+    // rule for an older engine.
+    [[nodiscard]] virtual Expected<EnginePlugins> engine_plugins() = 0;
+
     // Attaches a decoder to a receiver and streams what it recovers, one
     // DecodedMessage per event, until the subscription or the receiver ends.
     //

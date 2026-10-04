@@ -3533,6 +3533,18 @@ interface Session {
     # subscribeDecoded does.
     subscribeTranscripts @32 (receiver :TranscriptReceiver)
         -> (subscription :TranscriptSubscription);
+
+    # The engine plugins this engine process found at startup: the "plugins"
+    # folder beside revenant-engine, every .dll in it, what each loaded as or
+    # why it was refused, and whether it is running. core/plugin/
+    # engine_plugin.h has the loader and core/plugin/engine_plugin_abi.h the
+    # contract a plugin implements; docs/plugins.md is the overview.
+    #
+    # Answered from the scan taken when the engine started. Added on
+    # 2026-10-03. A client talking to an older engine gets the method refused
+    # as unimplemented and should say the engine does not report plugins,
+    # never that there are none.
+    enginePlugins @33 () -> (plugins :EnginePlugins);
 }
 
 # What one loaded plugin can decode, as it declared itself through
@@ -3580,6 +3592,46 @@ struct VocoderPluginFile {
     detail @3 :Text;
 
     offers @4 :List(VocoderOfferInfo);
+}
+
+# One .dll the engine plugin scan looked at, loaded or not.
+struct EnginePluginFile {
+    # The file's name, without the folder.
+    file @0 :Text;
+    loaded @1 :Bool;
+
+    # Whether create returned a handle and the plugin has not been stopped.
+    # A plugin can load and then decline to start.
+    running @2 :Bool;
+
+    # Why it did not load, by core/plugin/engine_plugin.h's
+    # engine_plugin_refusal_name: "load-failed", "missing-entry-point",
+    # "abi-version-mismatch", "describe-failed" or
+    # "not-supported-on-this-platform". "none" when it loaded.
+    refusal @3 :Text;
+
+    # The loader's sentence for this file, set whether it loaded or not.
+    detail @4 :Text;
+
+    # What the plugin called itself, empty when it never got that far.
+    name @5 :Text;
+    version @6 :Text;
+}
+
+struct EnginePlugins {
+    # False when this engine process never scanned.
+    scanned @0 :Bool;
+
+    # True when the scan was switched off with --no-plugins.
+    disabled @1 :Bool;
+
+    directory @2 :Text;
+    directoryPresent @3 :Bool;
+
+    # The loader's one line for an operator. Never empty when scanned.
+    status @4 :Text;
+
+    files @5 :List(EnginePluginFile);
 }
 
 struct VocoderPlugins {

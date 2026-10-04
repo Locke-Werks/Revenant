@@ -33,15 +33,14 @@
 #include "core/decode/vocoder_plugin.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cstddef>
 #include <format>
 #include <iterator>
 #include <limits>
-#include <system_error>
 #include <utility>
 
 #include "core/decode/vocoder_abi.h"
+#include "core/plugin/dll_scan.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -311,14 +310,6 @@ struct EntryPoint {
     return static_cast<long long>(GetLastError());
 }
 
-[[nodiscard]] std::string os_error_text(long long code)
-{
-    // std::system_category is used rather than FormatMessage by hand because
-    // the standard library already owns the Win32 mapping and the result is
-    // the same sentence the rest of the tree prints for a Win32 failure.
-    return std::system_category().message(static_cast<int>(code));
-}
-
 [[nodiscard]] VocoderPluginReport load_one(const std::filesystem::path& path,
                                            std::shared_ptr<VocoderPluginModule>& out_module)
 {
@@ -343,7 +334,7 @@ struct EntryPoint {
             "plugin that is not beside it; put its DLLs in the same directory",
             path.filename().string(),
             report.os_error,
-            os_error_text(report.os_error));
+            plugin::os_error_text(report.os_error));
         return report;
     }
 
@@ -675,33 +666,7 @@ std::optional<Expected<std::unique_ptr<Vocoder>>> VocoderPluginSet::open_for_mod
 
 std::filesystem::path default_vocoder_plugin_directory()
 {
-#ifdef _WIN32
-    // Grown rather than assumed, because MAX_PATH stopped being the limit and
-    // a truncated executable path would resolve to a directory that exists
-    // somewhere else.
-    std::wstring buffer(MAX_PATH, L'\0');
-    for (;;) {
-        const DWORD written = GetModuleFileNameW(nullptr,
-                                                 buffer.data(),
-                                                 static_cast<DWORD>(buffer.size()));
-        if (written == 0) {
-            return {};
-        }
-        if (written < buffer.size()) {
-            buffer.resize(written);
-            break;
-        }
-        if (buffer.size() >= 32768) {
-            return {};
-        }
-        buffer.resize(buffer.size() * 2);
-    }
-
-    const std::filesystem::path executable(buffer);
-    return executable.parent_path() / std::filesystem::path(kVocoderPluginDirectoryName);
-#else
-    return {};
-#endif
+    return plugin::directory_beside_executable(kVocoderPluginDirectoryName);
 }
 
 VocoderPluginSet scan_vocoder_plugins(const VocoderPluginScanOptions& options)
@@ -739,25 +704,7 @@ VocoderPluginSet scan_vocoder_plugins(const VocoderPluginScanOptions& options)
     }
     set.directory_ = root;
 
-    std::vector<std::filesystem::path> candidates;
-    for (const std::filesystem::directory_entry& entry :
-         std::filesystem::directory_iterator(root, ec)) {
-        if (!entry.is_regular_file(ec)) {
-            continue;
-        }
-        std::string text = entry.path().extension().string();
-        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-        });
-        if (text == ".dll") {
-            candidates.push_back(entry.path());
-        }
-    }
-
-    // Sorted because directory order is whatever the filesystem feels like,
-    // and both the report and the order open() matches in have to be the same
-    // on two machines for a bug report about either to mean anything.
-    std::sort(candidates.begin(), candidates.end());
+    const std::vector<std::filesystem::path> candidates = plugin::dll_candidates(root);
 
     for (const std::filesystem::path& candidate : candidates) {
         std::shared_ptr<VocoderPluginModule> module;

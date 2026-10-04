@@ -282,6 +282,11 @@ carries the reasoning for each of these inline; the summary:
   folder as far as it trusts the executable beside it:
   `core/decode/vocoder_plugin.h` says why nothing can do better. The radio
   panel's vocoders section lists what the engine loaded and refused.
+- **No engine plugins.** The same arrangement for the `plugins` folder beside
+  `revenant-engine.exe`, since 2026-10-03: the payload carries neither a
+  plugin nor the folder, an installed engine looks in
+  `{ProgramFiles}\Revenant\plugins`, and nothing that goes there is signed.
+  `docs/plugins.md`.
 - **No speech model.** Whisper's weights, 1.6 GB, are fetched by the engine
   on first use into `%LOCALAPPDATA%\Revenant\models` of whoever turned speech
   to text on, under their own token, and verified there. The installer does

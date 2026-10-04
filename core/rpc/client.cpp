@@ -1311,6 +1311,7 @@ public:
 
     [[nodiscard]] Expected<std::vector<DecoderInfo>> decoders() override;
     [[nodiscard]] Expected<VocoderPlugins> vocoder_plugins() override;
+    [[nodiscard]] Expected<EnginePlugins> engine_plugins() override;
     [[nodiscard]] Expected<std::string> subscribe_decoded(std::uint64_t vrx,
                                                           std::string_view decoder,
                                                           DecodedCallback on_message,
@@ -2473,6 +2474,32 @@ Expected<VocoderPlugins> ClientImpl::vocoder_plugins() {
                     }
                     file.offers.push_back(std::move(info));
                 }
+                out.files.push_back(std::move(file));
+            }
+            return out;
+        });
+    });
+}
+
+Expected<EnginePlugins> ClientImpl::engine_plugins() {
+    return on_loop("enginePlugins", [](LoopState& state) {
+        return state.session.enginePluginsRequest().send().then([](auto&& response) {
+            const auto in = response.getPlugins();
+            EnginePlugins out;
+            out.scanned = in.getScanned();
+            out.disabled = in.getDisabled();
+            out.directory = read_text(in.getDirectory());
+            out.directory_present = in.getDirectoryPresent();
+            out.status = read_text(in.getStatus());
+            for (const auto row : in.getFiles()) {
+                EnginePluginFile file;
+                file.file = read_text(row.getFile());
+                file.loaded = row.getLoaded();
+                file.running = row.getRunning();
+                file.refusal = read_text(row.getRefusal());
+                file.detail = read_text(row.getDetail());
+                file.name = read_text(row.getName());
+                file.version = read_text(row.getVersion());
                 out.files.push_back(std::move(file));
             }
             return out;

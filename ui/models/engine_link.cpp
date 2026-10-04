@@ -283,6 +283,7 @@ void EngineLink::supervise()
             apply_audio_request();
             apply_decode_request();
             poll_vocoder_plugins();
+            poll_engine_plugins();
             apply_transcription(false);
             poll_receiver_status();
             poll_held_status();
@@ -410,6 +411,7 @@ void EngineLink::supervise()
             apply_audio_request();
             apply_decode_request();
             poll_vocoder_plugins();
+            poll_engine_plugins();
 
             // The probe pass reads the recogniser's status as well, which is
             // the once a second the download's progress moves at.

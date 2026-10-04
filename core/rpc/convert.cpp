@@ -941,6 +941,37 @@ namespace {
 
 }  // namespace
 
+void write_engine_plugins(schema::EnginePlugins::Builder out,
+                          const plugin::EnginePluginSet* set, std::span<const bool> running) {
+    if (set == nullptr) {
+        out.setScanned(false);
+        return;
+    }
+    out.setScanned(true);
+    out.setDisabled(set->disabled());
+    out.setDirectory(path_text(set->directory()));
+    out.setDirectoryPresent(set->directory_present());
+    out.setStatus(set->status_line());
+
+    const auto reports = set->reports();
+    auto files = out.initFiles(static_cast<unsigned>(reports.size()));
+    std::size_t module = 0;
+    for (unsigned i = 0; i < files.size(); ++i) {
+        const plugin::EnginePluginReport& report = reports[i];
+        auto file = files[i];
+        file.setFile(path_text(report.path.filename()));
+        file.setLoaded(report.loaded);
+        if (report.loaded) {
+            file.setRunning(module < running.size() && running[module]);
+            ++module;
+        }
+        file.setRefusal(std::string(plugin::engine_plugin_refusal_name(report.refusal)));
+        file.setDetail(report.detail);
+        file.setName(report.name);
+        file.setVersion(report.version);
+    }
+}
+
 void write_vocoder_plugins(schema::VocoderPlugins::Builder out,
                            const decode::VocoderPluginSet* set) {
     if (set == nullptr) {

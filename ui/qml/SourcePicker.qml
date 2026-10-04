@@ -471,6 +471,109 @@ ColumnLayout {
         }
     }
 
+    // The engine plugins the engine loaded from the plugins folder beside it
+    // when it started, each with whether it is running, and every file there
+    // it refused, with the reason. Laid out like the vocoders above, for the
+    // same reason. core/plugin/engine_plugin.h is the loader.
+    ColumnLayout {
+        id: enginePlugins
+
+        property bool expanded: false
+
+        Layout.fillWidth: true
+        spacing: 4
+        visible: engineLink.connected && engineLink.pluginStatus.length > 0
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            RButton {
+                flat: true
+                ink: Theme.inkDim
+                text: (enginePlugins.expanded ? "▾ " : "▸ ") + "engine plugins"
+                onClicked: enginePlugins.expanded = !enginePlugins.expanded
+            }
+
+            Label {
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
+                text: engineLink.pluginCount > 0
+                      ? engineLink.pluginCount + " running  ·  " + engineLink.pluginStatus
+                      : engineLink.pluginStatus
+                color: engineLink.pluginCount > 0 ? Theme.ink : Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+                elide: Text.ElideRight
+            }
+        }
+
+        // The whole line, wrapped, once opened: it names the folder.
+        Label {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            visible: enginePlugins.expanded
+            text: engineLink.pluginStatus
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+            wrapMode: Text.WrapAnywhere
+        }
+
+        Repeater {
+            model: enginePlugins.expanded ? engineLink.pluginFiles : []
+
+            ColumnLayout {
+                id: pluginFile
+
+                required property var modelData
+
+                Layout.fillWidth: true
+                spacing: 2
+
+                // A plugin that loaded and then declined to start reads as
+                // loaded but stopped, which is not the same as refused.
+                Label {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    text: pluginFile.modelData.file + "  ·  "
+                          + (!pluginFile.modelData.loaded ? pluginFile.modelData.refusal
+                             : pluginFile.modelData.running ? "running"
+                                                            : "loaded, not running")
+                    color: pluginFile.modelData.running ? Theme.ink : Theme.inkWarn
+                    font.pixelSize: Theme.sizeSmall
+                    font.bold: true
+                    elide: Text.ElideRight
+                }
+
+                // What the plugin called itself, when it got that far.
+                Label {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    visible: pluginFile.modelData.name.length > 0
+                    leftPadding: 12
+                    text: pluginFile.modelData.version.length > 0
+                          ? pluginFile.modelData.name + " " + pluginFile.modelData.version
+                          : pluginFile.modelData.name
+                    color: Theme.ink
+                    font.family: Theme.monoFont
+                    font.pixelSize: Theme.sizeSmall
+                    elide: Text.ElideRight
+                }
+
+                // The loader's sentence, which says what to do about a refusal.
+                Label {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    visible: !pluginFile.modelData.running
+                    leftPadding: 12
+                    text: pluginFile.modelData.detail
+                    color: Theme.inkDim
+                    font.pixelSize: Theme.sizeSmall
+                    wrapMode: Text.WordWrap
+                }
+            }
+        }
+    }
+
     // What the last open or close said when it refused. Its own row rather
     // than beside the button, because a registry refusal names the backends
     // it does know and that sentence is longer than a status strip.

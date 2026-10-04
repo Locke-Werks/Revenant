@@ -123,6 +123,7 @@
 #include "core/dsp/types.h"
 #include "core/decode/vocoder_plugin.h"
 #include "core/engine/engine.h"
+#include "core/plugin/engine_plugin.h"
 #include "core/error.h"
 #include "core/rpc/server.h"
 #include "core/source/capabilities.h"
@@ -143,6 +144,7 @@ namespace dsp = revenant::dsp;
 namespace engine = revenant::engine;
 namespace rpc = revenant::rpc;
 namespace decode = revenant::decode;
+namespace plugin = revenant::plugin;
 namespace source = revenant::source;
 namespace transcribe = revenant::transcribe;
 
@@ -291,6 +293,11 @@ struct Options {
     // operator's profile.
     std::string calibration_file;
 
+    // Where engine plugins are loaded from, empty for "plugins" beside the
+    // executable, and the switch that loads none. docs/plugins.md.
+    std::string plugin_dir;
+    bool no_plugins = false;
+
     // Zero is "work it out from the source rate", which is what the engine
     // does with EngineConfig::channels at zero. See default_channel_count in
     // core/engine/engine.cpp: 64 is a good grid at 20 MS/s and an unusable
@@ -396,6 +403,9 @@ void print_usage()
         "                      and I/Q correction are kept, by serial. Default is\n"
         "                      calibration.txt beside the token file. See\n"
         "                      docs/calibration.md.\n"
+        "  --plugin-dir <path> Load engine plugins from this folder. Default is\n"
+        "                      plugins beside the executable. See docs/plugins.md.\n"
+        "  --no-plugins        Load no engine plugins.\n"
         "  --new-token         Mint a fresh token over the existing file.\n"
         "                      ROTATING DOES NOT DISCONNECT ANYBODY. A session already\n"
         "                      granted is a capability and capabilities do not\n"
@@ -594,6 +604,23 @@ void print_usage()
                 return fail("--calibration-file needs a path");
             }
             options.calibration_file = *text;
+            continue;
+        }
+
+        if (arg == "--plugin-dir") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            if (text->empty()) {
+                return fail("--plugin-dir needs a path");
+            }
+            options.plugin_dir = *text;
+            continue;
+        }
+
+        if (arg == "--no-plugins") {
+            options.no_plugins = true;
             continue;
         }
 
@@ -1192,8 +1219,26 @@ void print_engine_block(const engine::Engine& eng)
     // refused is in the set and printed below.
     const decode::VocoderPluginSet vocoders = decode::scan_vocoder_plugins({});
 
+    // The engine plugins, on the same terms and for the same reason declared
+    // here: the server runs them, and their code must stay mapped until the
+    // server has stopped every one.
+    plugin::EnginePluginScanOptions plugin_scan;
+    if (!options.plugin_dir.empty()) {
+        plugin_scan.directory = std::filesystem::path(options.plugin_dir);
+    }
+    plugin_scan.disabled = options.no_plugins;
+    const plugin::EnginePluginSet engine_plugins = plugin::scan_engine_plugins(plugin_scan);
+
     rpc::ServerOptions server_options;
     server_options.vocoders = &vocoders;
+    server_options.engine_plugins = &engine_plugins;
+
+    // A plugin logs from its own thread, so one line at a time.
+    static std::mutex plugin_log_lock;
+    server_options.plugin_log = [](std::string_view line) {
+        const std::scoped_lock held(plugin_log_lock);
+        std::println("{}", line);
+    };
     server_options.bind_address = options.bind;
     server_options.port = options.port;
     server_options.token.assign(token->second.begin(), token->second.end());
@@ -1235,6 +1280,10 @@ void print_engine_block(const engine::Engine& eng)
     std::println("vocoders        {}", vocoders.status_line());
     // The loader's sentence per file, which names the file itself.
     for (const decode::VocoderPluginReport& report : vocoders.reports()) {
+        std::println("                {}", report.detail);
+    }
+    std::println("plugins         {}", engine_plugins.status_line());
+    for (const plugin::EnginePluginReport& report : engine_plugins.reports()) {
         std::println("                {}", report.detail);
     }
 

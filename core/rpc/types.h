@@ -1440,6 +1440,27 @@ struct VocoderPlugins {
     std::vector<VocoderPluginFile> files;
 };
 
+// The engine plugins the engine found at startup. The schema's EnginePlugins
+// says what each field means; core/plugin/engine_plugin.h is the loader.
+struct EnginePluginFile {
+    std::string file;
+    bool loaded = false;
+    bool running = false;
+    std::string refusal;
+    std::string detail;
+    std::string name;
+    std::string version;
+};
+
+struct EnginePlugins {
+    bool scanned = false;
+    bool disabled = false;
+    std::string directory;
+    bool directory_present = false;
+    std::string status;
+    std::vector<EnginePluginFile> files;
+};
+
 // One decoded-message subscription's running totals.
 struct DecodedStats {
     std::uint64_t messages_sent = 0;

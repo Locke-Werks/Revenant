@@ -245,6 +245,99 @@ int EngineLink::vocoderCount() const
     return count;
 }
 
+// ---------------------------------------------------------------------------
+// Engine plugins
+// ---------------------------------------------------------------------------
+
+void EngineLink::poll_engine_plugins()
+{
+    // Once per connection, for the reason poll_vocoder_plugins gives: the
+    // engine scans its plugins folder at startup and not again.
+    if (client_ == nullptr || plugins_asked_) {
+        return;
+    }
+    plugins_asked_ = true;
+
+    auto listed = client_->engine_plugins();
+    {
+        const std::lock_guard<std::mutex> lock(decoded_mutex_);
+        if (listed) {
+            handover_plugins_ = std::move(*listed);
+            handover_plugin_fault_.clear();
+        } else {
+            handover_plugins_ = {};
+            handover_plugin_fault_ = QString::fromStdString(listed.error().message);
+        }
+        has_plugin_handover_ = true;
+    }
+    QMetaObject::invokeMethod(this, [this] { adopt_plugins(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::adopt_plugins()
+{
+    {
+        const std::lock_guard<std::mutex> lock(decoded_mutex_);
+        if (!has_plugin_handover_) {
+            return;
+        }
+        has_plugin_handover_ = false;
+        plugins_ = std::move(handover_plugins_);
+        handover_plugins_ = {};
+        plugin_fault_ = handover_plugin_fault_;
+    }
+    plugins_known_ = true;
+    emit pluginsChanged();
+}
+
+QString EngineLink::pluginStatus() const
+{
+    if (!connected_ || !plugins_known_) {
+        return {};
+    }
+    // Refused by an engine older than the call: "not reported", never "none".
+    if (!plugin_fault_.isEmpty()) {
+        return QStringLiteral("this engine does not report engine plugins: %1").arg(plugin_fault_);
+    }
+    if (!plugins_.scanned) {
+        return QStringLiteral("this engine did not scan for engine plugins");
+    }
+    return QString::fromStdString(plugins_.status);
+}
+
+QVariantList EngineLink::pluginFiles() const
+{
+    QVariantList out;
+    if (!connected_ || !plugins_known_) {
+        return out;
+    }
+    for (const rpc::EnginePluginFile& file : plugins_.files) {
+        out.append(QVariantMap{
+            {QStringLiteral("file"), QString::fromStdString(file.file)},
+            {QStringLiteral("name"), QString::fromStdString(file.name)},
+            {QStringLiteral("version"), QString::fromStdString(file.version)},
+            {QStringLiteral("loaded"), file.loaded},
+            {QStringLiteral("running"), file.running},
+            {QStringLiteral("refusal"), QString::fromStdString(file.refusal)},
+            {QStringLiteral("detail"), QString::fromStdString(file.detail)},
+        });
+    }
+    return out;
+}
+
+int EngineLink::pluginCount() const
+{
+    if (!connected_ || !plugins_known_) {
+        return 0;
+    }
+    int count = 0;
+    for (const rpc::EnginePluginFile& file : plugins_.files) {
+        if (file.running) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 void EngineLink::adopt_decode()
 {
     {
@@ -437,6 +530,7 @@ void EngineLink::forget_decoded()
     decoder_infos_asked_ = false;
     decoder_infos_fault_.clear();
     vocoders_asked_ = false;
+    plugins_asked_ = false;
     {
         const std::lock_guard<std::mutex> lock(decoded_mutex_);
         pending_decoded_ended_.clear();

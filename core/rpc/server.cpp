@@ -301,6 +301,7 @@
 #include <cstdint>
 #include <deque>
 #include <format>
+#include <functional>
 #include <future>
 #include <limits>
 #include <map>
@@ -313,7 +314,9 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <capnp/message.h>
@@ -330,6 +333,8 @@
 #include "core/engine/cpu_budget.h"
 #include "core/engine/load_clock.h"
 #include "core/engine/spsc_ring.h"
+#include "core/plugin/engine_plugin.h"
+#include "core/plugin/engine_plugin_abi.h"
 #include "core/rpc/convert.h"
 #include "core/rpc/decode_lane.h"
 #include "core/rpc/decoders.h"
@@ -1058,6 +1063,15 @@ struct DecodedNode : std::enable_shared_from_this<DecodedNode> {
     bool cancelled = false;
     bool ended_sent = false;
 
+    // An engine plugin's subscription, which has no capability: receiver is
+    // null, messages go straight to the plugin's runner from the decode lane
+    // instead of through the queue below, and the end goes to on_ended in
+    // place of DecodedReceiver::ended. Set before the node joins a route and
+    // never written again. Both only append to a runner's queue, so neither
+    // can hold up the lane that calls forward.
+    std::function<void(const DecodedMessage&)> forward;
+    std::function<void(std::string_view)> on_ended;
+
     // Both threads, under `lock`.
     std::mutex lock;
     std::deque<DecodedMessage> queue;
@@ -1163,7 +1177,9 @@ struct SinkGate {
     ServerImpl* owner = nullptr;
 };
 
-class ServerImpl final : public Server, private kj::TaskSet::ErrorHandler {
+class ServerImpl final : public Server,
+                         private kj::TaskSet::ErrorHandler,
+                         private plugin::CommandSink {
 public:
     explicit ServerImpl(engine::Engine& engine)
         : engine_(engine), gate_(std::make_shared<SinkGate>()) {
@@ -1536,6 +1552,26 @@ public:
     // than borrowed so a burst rings it once.
     void wake_loop();
 
+    // What follows a receiver's params changing, whoever changed them: the
+    // decoders on it are cleared and fenced, its RDS companion follows it,
+    // and the plugins hear about it. Split out of setVrxParams so a plugin's
+    // set_vrx_center takes exactly the same path. Loop thread.
+    [[nodiscard]] Status after_vrx_retuned(engine::VrxId vrx, const engine::VrxParams& params);
+
+    // Retunes the front end and takes down everything the engine removed,
+    // for setSourceCenter and for a plugin alike. `reasons` gets one sentence
+    // per removal, in the engine's order. Loop thread.
+    [[nodiscard]] Expected<engine::SourceRetune> retune_source(
+        std::int64_t wanted, std::vector<std::string>& reasons);
+
+    // ServerOptions::engine_plugins, null when the host did not scan.
+    [[nodiscard]] const plugin::EnginePluginSet* engine_plugins() const {
+        return engine_plugins_;
+    }
+
+    // Whether the plugin at `index` in engine_plugins()->modules() is running.
+    [[nodiscard]] bool plugin_running(std::size_t index) const;
+
 private:
     void serve(ServerOptions options);
     void announce(Status status);
@@ -1568,6 +1604,29 @@ private:
     // receiver and the decoder's sequence and queues it on every node.
     void enqueue_decoded(DecodeRoute& route);
 
+    // Engine plugins. start_plugins and stop_plugins run on the thread that
+    // calls start() and stop(); everything else on the loop thread except the
+    // two CommandSink calls, which come from a plugin's thread.
+    void start_plugins(const ServerOptions& options);
+    void stop_plugins();
+    std::int32_t post_command(plugin::Command command) override;
+    void plugin_log(std::size_t plugin, std::uint32_t level, std::string message) override;
+    void drain_plugin_commands();
+    void run_plugin_command(plugin::Command& command);
+    [[nodiscard]] Expected<std::uint32_t> plugin_add_vrx(std::size_t plugin,
+                                                         const plugin::AddVrxCommand& command);
+    [[nodiscard]] Status plugin_subscribe(std::size_t plugin,
+                                          const plugin::SubscribeDecodedCommand& command);
+    [[nodiscard]] Status plugin_unsubscribe(std::size_t plugin,
+                                            const plugin::UnsubscribeDecodedCommand& command);
+    [[nodiscard]] Status plugin_owns(std::size_t plugin, std::uint32_t vrx) const;
+
+    // Hands one event to every plugin, with VRX owner set from each plugin's
+    // point of view when `about` names a receiver. Loop thread.
+    void emit_plugin_event(const plugin::Event& event,
+                           std::optional<engine::VrxId> about = std::nullopt);
+    [[nodiscard]] plugin::Event vrx_event(std::uint32_t type, engine::VrxId vrx) const;
+
     void taskFailed(kj::Exception&&) override {
         // Every send already carries its own error handler, which ends the
         // subscription. Anything reaching here is not attributable to one
@@ -1577,6 +1636,32 @@ private:
 
     engine::Engine& engine_;
     const decode::VocoderPluginSet* vocoders_ = nullptr;
+
+    // One per module in engine_plugins_, in the same order, so a Command's
+    // plugin index is a position in both. Reserved before the first runner
+    // starts and never resized, because a forward closure holds a pointer to
+    // a runner. `session` is the plugin's number in vrx_owners_, which is what
+    // makes a receiver it opened its own. `decoded` is loop thread only.
+    struct PluginSlot {
+        std::unique_ptr<plugin::EnginePluginRunner> runner;
+        std::uint64_t session = 0;
+        std::map<std::pair<std::uint32_t, std::string>, std::shared_ptr<DecodedNode>> decoded;
+    };
+    const plugin::EnginePluginSet* engine_plugins_ = nullptr;
+    std::vector<PluginSlot> plugins_;
+    std::function<void(std::string_view)> plugin_log_;
+
+    // Commands from every plugin, in arrival order, for the loop to run.
+    // Bounded so a plugin issuing commands in a tight loop is told so rather
+    // than growing this without end.
+    static constexpr std::size_t kPluginCommandDepth = 4096;
+    std::mutex plugin_command_lock_;
+    std::deque<plugin::Command> plugin_commands_;
+    bool plugin_commands_closed_ = false;
+
+    // Front-end retunes since the source opened, which is what a plugin's
+    // SOURCE_RETUNED carries as epoch. Loop thread.
+    std::uint64_t source_retunes_ = 0;
     std::shared_ptr<SinkGate> gate_;
 
     std::thread loop_;
@@ -2134,6 +2219,91 @@ private:
     std::shared_ptr<Subscription> node_;
 };
 
+// Which decoder a subscription to `id` gets, and whether it can run there:
+// the receiver's mode, the decoder's input and a raw tap's rate, each refused
+// in words naming both sides. For subscribeDecoded and for a plugin's
+// subscribe_decoded, which must refuse exactly the same things.
+[[nodiscard]] Expected<const DecoderSpec*> resolve_decoder(engine::Engine& owner,
+                                                           engine::VrxId id,
+                                                           const engine::VrxStatus& status,
+                                                           std::string_view asked) {
+    const engine::Demod mode = status.params.demod;
+
+    // Empty means the decoder named after the receiver's mode. Resolved
+    // here rather than on the client, which does not know which modes
+    // have a decoder, and answered back in decoderResolved so the client
+    // can say which one ran.
+    const DecoderSpec* spec =
+        find_decoder(asked.empty() ? std::string_view(engine::demod_name(mode)) : asked);
+    if (spec == nullptr) {
+        if (asked.empty()) {
+            // A usb or nfm receiver has no decoder named after its mode
+            // and may well have several that read it, and naming those
+            // is the answer the operator was looking for.
+            const std::string readers = decoders_reading(engine::demod_name(mode));
+            if (!readers.empty()) {
+                return fail(std::format(
+                    "receiver {} is {} and no decoder is named after that mode, so there is "
+                    "nothing to attach by default: a {} receiver can carry more than one "
+                    "protocol. Name one; the decoders that read {} audio are {}",
+                    id.value, engine::demod_name(mode), engine::demod_name(mode),
+                    engine::demod_name(mode), readers));
+            }
+            return fail(std::format(
+                "receiver {} is {} and no decoder is named after that mode, so there is "
+                "nothing to attach by default. Name one; this engine has {}",
+                id.value, engine::demod_name(mode), decoder_names()));
+        }
+        return fail(std::format(
+            "this engine has no decoder named '{}'. It has {}", asked, decoder_names()));
+    }
+
+    // The modes an audio decoder reads, asked before the input check
+    // below because it is the more specific answer: RTTY on a wfm
+    // receiver and RTTY on a raw tap are both refused here, naming the
+    // sideband the decoder needs, rather than one of them being told only
+    // that a complex tap has no audio.
+    if (!decoder_accepts(*spec, engine::demod_name(mode))) {
+        return fail(std::format(
+            "the {} decoder reads {} and receiver {} is {}. Add a receiver in {} on the "
+            "signal",
+            spec->name, decoder_needs_text(*spec), id.value, engine::demod_name(mode),
+            decoder_modes_text(*spec)));
+    }
+
+    // The input the decoder reads against what the receiver gives. Checked
+    // here, in words naming both, because the alternative is a decoder
+    // fed the wrong shape and a stream that ends one chunk later with a
+    // sentence about channel counts.
+    const bool complex_tap = engine::is_complex_tap(mode);
+    if (spec->input == DecoderInput::ComplexBaseband && !complex_tap) {
+        return fail(std::format(
+            "the {} decoder reads complex baseband and receiver {} is {}, which produces "
+            "audio. Add a receiver in a complex tap mode, raw or {}, on the signal",
+            spec->name, id.value, engine::demod_name(mode), spec->name));
+    }
+    if (spec->input == DecoderInput::RealAudio && complex_tap) {
+        return fail(std::format(
+            "the {} decoder reads audio and receiver {} is {}, a complex tap that produces "
+            "none",
+            spec->name, id.value, engine::demod_name(mode)));
+    }
+
+    // A raw tap runs at the grid's channel rate, which is known now, so
+    // one too fast for a complex decoder is refused here, in the words
+    // its adapter would use one chunk later. decoders_detail::
+    // kRawTapRateCap has the measurement behind the limit.
+    if (mode == engine::Demod::Raw && spec->input == DecoderInput::ComplexBaseband) {
+        if (auto allowed = decoders_detail::raw_tap_allowed(
+                spec->name, engine::demod_name(mode), owner.info().channel_rate);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+    }
+
+    return spec;
+}
+
 class SessionImpl final : public schema::Session::Server {
 public:
     explicit SessionImpl(ServerImpl& owner) : owner_(owner), id_(owner.open_session()) {}
@@ -2285,20 +2455,9 @@ public:
         // everything queued for it, so it is the number the decoder waits
         // to see. Reading it before the retune would fence against the
         // tuning being left.
-        auto status = owner_.engine().vrx_status(*id);
-        if (!status) {
-            return to_exception(status.error());
+        if (auto after = owner_.after_vrx_retuned(*id, *params); !after) {
+            return to_exception(after.error());
         }
-        owner_.retune_rds_companion(*id, *params);
-        owner_.reset_rds_for_vrx(*id, status->tuning_epoch);
-
-        // Every event decoder on the receiver too, on the same fence and for
-        // the same reason: a P25 header half from one transmitter and half
-        // from another decodes to a talkgroup neither of them sent.
-        owner_.reset_decoded_for_vrx(*id, status->tuning_epoch);
-
-        // And a P25 receiver's voice, which is a decoder in an audio route.
-        owner_.reset_audio_for_vrx(*id, status->tuning_epoch);
         return kj::READY_NOW;
     }
 
@@ -2612,47 +2771,21 @@ public:
         // The engine's call refuses in the SOURCE's own words on a source
         // that cannot retune, and each of the three backends says something
         // different about what to do instead. Nothing is composed here.
-        auto landed = owner_.engine().set_source_center(wanted);
+        std::vector<std::string> reasons;
+        auto landed = owner_.retune_source(wanted, reasons);
         if (!landed) {
             return to_exception(landed.error());
         }
 
-        // Every receiver the engine removed gets the cleanup removeVrx gives
-        // one, because it has been removed just as surely. Before 2026-09-23
-        // this answer was discarded and none of that happened: an audio
-        // subscriber went quiet with no ended(), which is what a shut
-        // squelch sounds like, and the RDS route, the decoder routes and the
-        // ownership record stayed behind. The reason names both frequencies,
-        // since the operator knows the receiver by where it was and the
-        // retune by where it went.
         auto removed = context.getResults().initRemoved(
             static_cast<unsigned int>(landed->removed.size()));
         for (unsigned int i = 0; i < removed.size(); ++i) {
-            // The engine's own sentence, because the span is no longer the
-            // only cause: a receiver still inside it is removed when its new
-            // place in a channel needs a filter the graph will not swap in
-            // place, and saying "outside the span" then would be false.
             const engine::RetuneRemoval& gone = landed->removed[i];
-            const std::string reason =
-                !gone.reason.empty()
-                    ? gone.reason
-                    : std::format("the front end was retuned to {} Hz and the engine removed the "
-                                  "receiver at {} Hz",
-                                  landed->center, gone.frequency);
-            owner_.after_vrx_removed(gone.id, kj::StringPtr(reason.c_str()));
-
             removed[i].setVrx(gone.id.value);
             removed[i].setFrequencyHz(gone.frequency);
             removed[i].setCause(to_schema(gone.cause));
-            removed[i].setReason(kj::StringPtr(reason.c_str()));
+            removed[i].setReason(kj::StringPtr(reasons[i].c_str()));
         }
-
-        // After the tune and only if it took, exactly as setVrxParams
-        // clears the decoders after its own. The engine has already moved
-        // every receiver's tuning epoch; this is the half above the engine,
-        // which is the detector's tracks and the decoders' accumulated
-        // stations.
-        owner_.forget_across_retune();
 
         context.getResults().setGrantedHz(landed->center);
         return kj::READY_NOW;
@@ -2890,6 +3023,19 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> enginePlugins(EnginePluginsContext context) override {
+        const plugin::EnginePluginSet* const set = owner_.engine_plugins();
+        // A bool array rather than std::vector<bool>, which has no data().
+        const std::size_t count = set == nullptr ? 0 : set->modules().size();
+        auto running = std::make_unique<bool[]>(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            running[i] = owner_.plugin_running(i);
+        }
+        write_engine_plugins(context.getResults().initPlugins(), set,
+                             std::span<const bool>(running.get(), count));
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> subscribeDecoded(SubscribeDecodedContext context) override {
         auto request = context.getParams();
         if (!request.hasReceiver()) {
@@ -2912,79 +3058,11 @@ public:
 
         const capnp::Text::Reader asked_text = request.getDecoder();
         const std::string_view asked(asked_text.begin(), asked_text.size());
-        const engine::Demod mode = status->params.demod;
-
-        // Empty means the decoder named after the receiver's mode. Resolved
-        // here rather than on the client, which does not know which modes
-        // have a decoder, and answered back in decoderResolved so the client
-        // can say which one ran.
-        const DecoderSpec* spec =
-            find_decoder(asked.empty() ? std::string_view(engine::demod_name(mode)) : asked);
-        if (spec == nullptr) {
-            if (asked.empty()) {
-                // A usb or nfm receiver has no decoder named after its mode
-                // and may well have several that read it, and naming those
-                // is the answer the operator was looking for.
-                const std::string readers = decoders_reading(engine::demod_name(mode));
-                if (!readers.empty()) {
-                    return to_exception(Error{std::format(
-                        "receiver {} is {} and no decoder is named after that mode, so there is "
-                        "nothing to attach by default: a {} receiver can carry more than one "
-                        "protocol. Name one; the decoders that read {} audio are {}",
-                        id->value, engine::demod_name(mode), engine::demod_name(mode),
-                        engine::demod_name(mode), readers)});
-                }
-                return to_exception(Error{std::format(
-                    "receiver {} is {} and no decoder is named after that mode, so there is "
-                    "nothing to attach by default. Name one; this engine has {}",
-                    id->value, engine::demod_name(mode), decoder_names())});
-            }
-            return to_exception(Error{std::format(
-                "this engine has no decoder named '{}'. It has {}", asked, decoder_names())});
+        auto resolved_spec = resolve_decoder(owner_.engine(), *id, *status, asked);
+        if (!resolved_spec) {
+            return to_exception(resolved_spec.error());
         }
-
-        // The modes an audio decoder reads, asked before the input check
-        // below because it is the more specific answer: RTTY on a wfm
-        // receiver and RTTY on a raw tap are both refused here, naming the
-        // sideband the decoder needs, rather than one of them being told only
-        // that a complex tap has no audio.
-        if (!decoder_accepts(*spec, engine::demod_name(mode))) {
-            return to_exception(Error{std::format(
-                "the {} decoder reads {} and receiver {} is {}. Add a receiver in {} on the "
-                "signal",
-                spec->name, decoder_needs_text(*spec), id->value, engine::demod_name(mode),
-                decoder_modes_text(*spec))});
-        }
-
-        // The input the decoder reads against what the receiver gives. Checked
-        // here, in words naming both, because the alternative is a decoder
-        // fed the wrong shape and a stream that ends one chunk later with a
-        // sentence about channel counts.
-        const bool complex_tap = engine::is_complex_tap(mode);
-        if (spec->input == DecoderInput::ComplexBaseband && !complex_tap) {
-            return to_exception(Error{std::format(
-                "the {} decoder reads complex baseband and receiver {} is {}, which produces "
-                "audio. Add a receiver in a complex tap mode, raw or {}, on the signal",
-                spec->name, id->value, engine::demod_name(mode), spec->name)});
-        }
-        if (spec->input == DecoderInput::RealAudio && complex_tap) {
-            return to_exception(Error{std::format(
-                "the {} decoder reads audio and receiver {} is {}, a complex tap that produces "
-                "none",
-                spec->name, id->value, engine::demod_name(mode))});
-        }
-
-        // A raw tap runs at the grid's channel rate, which is known now, so
-        // one too fast for a complex decoder is refused here, in the words
-        // its adapter would use one chunk later. decoders_detail::
-        // kRawTapRateCap has the measurement behind the limit.
-        if (mode == engine::Demod::Raw && spec->input == DecoderInput::ComplexBaseband) {
-            if (auto allowed = decoders_detail::raw_tap_allowed(
-                    spec->name, engine::demod_name(mode), owner_.engine().info().channel_rate);
-                !allowed) {
-                return to_exception(allowed.error());
-            }
-        }
+        const DecoderSpec* const spec = *resolved_spec;
 
         auto node = std::make_shared<DecodedNode>(request.getReceiver(), *id, spec->name);
 
@@ -3108,6 +3186,10 @@ Status ServerImpl::start(const ServerOptions& options) {
     if (auto lanes = start_lanes(options); !lanes) {
         return lanes;
     }
+
+    // Before the loop too. A plugin may issue commands from create, which
+    // wait in plugin_commands_ for the loop's first pump.
+    start_plugins(options);
 
     auto ready = ready_.get_future();
     try {
@@ -4089,6 +4171,7 @@ void ServerImpl::end_rds_for_vrx(engine::VrxId vrx) {
 
 void ServerImpl::record_vrx(engine::VrxId vrx, std::uint64_t session, bool keep) {
     vrx_owners_[vrx.value] = VrxOwner{.session = session, .keep = keep};
+    emit_plugin_event(vrx_event(RV_ENGINE_EVENT_VRX_ADDED, vrx), vrx);
 }
 
 VrxOwner ServerImpl::owner_of(engine::VrxId vrx) const {
@@ -4097,6 +4180,15 @@ VrxOwner ServerImpl::owner_of(engine::VrxId vrx) const {
 }
 
 void ServerImpl::after_vrx_removed(engine::VrxId vrx, kj::StringPtr reason) {
+    // First, while the ownership record still says whose it was.
+    {
+        plugin::Event event;
+        event.type = RV_ENGINE_EVENT_VRX_REMOVED;
+        event.vrx = vrx.value;
+        event.text = std::string(reason.cStr(), reason.size());
+        emit_plugin_event(event, vrx);
+    }
+
     end_audio_for_vrx(vrx, reason);
 
     // And the decoder, which needs no message: rdsStation is a poll, so the
@@ -4614,6 +4706,7 @@ kj::Promise<void> ServerImpl::pump() {
     drain_audio();
     drain_decoded();
     drain_transcripts();
+    drain_plugin_commands();
 
     // Reconciled on the pump's own heartbeat, which is the spectrum's frame
     // rate while a source is open, and at most twice a second: often enough
@@ -5564,6 +5657,10 @@ void ServerImpl::enqueue_decoded(DecodeRoute& route) {
         message.vrx = route.vrx.value;
         message.sequence = route.sequence++;
         for (const auto& node : route.nodes) {
+            if (node->forward) {
+                node->forward(message);
+                continue;
+            }
             const std::scoped_lock held(node->lock);
             // From the front, on audio's argument: the oldest message is the
             // one a subscriber that fell behind is least likely to still
@@ -5662,8 +5759,16 @@ void ServerImpl::end_decoded(const std::shared_ptr<DecodedNode>& node) {
 
 void ServerImpl::send_decoded_ended(const std::shared_ptr<DecodedNode>& node,
                                     kj::StringPtr reason) {
+    if (node->ended_sent) {
+        return;
+    }
+    if (node->on_ended) {
+        node->ended_sent = true;
+        node->on_ended(std::string_view(reason.cStr(), reason.size()));
+        return;
+    }
     // Best effort, on send_audio_ended's terms.
-    if (node->ended_sent || sends_ == nullptr) {
+    if (sends_ == nullptr) {
         return;
     }
     node->ended_sent = true;
@@ -6031,12 +6136,24 @@ Status ServerImpl::open_source(std::string_view uri) {
     // makes the same call and reports the engine's own sentence to whoever
     // asks for a spectrum.
     static_cast<void>(ensure_sink());
+
+    source_retunes_ = 0;
+    plugin::Event event;
+    event.type = RV_ENGINE_EVENT_SOURCE_OPENED;
+    event.center_hz = static_cast<std::int64_t>(engine_.info().source_center);
+    emit_plugin_event(event);
     return {};
 }
 
 Status ServerImpl::close_source() {
     release_source_state("the engine's source was closed, so this stream has ended");
-    return engine_.close_source();
+    if (auto closed = engine_.close_source(); !closed) {
+        return closed;
+    }
+    plugin::Event event;
+    event.type = RV_ENGINE_EVENT_SOURCE_CLOSED;
+    emit_plugin_event(event);
+    return {};
 }
 
 // BOTH OF THOSE BLOCK THE EVENT LOOP, AND THAT IS A CHOICE RATHER THAN AN
@@ -6593,6 +6710,494 @@ void ServerImpl::pump_transcript(const std::shared_ptr<TranscriptNode>& node) {
         }));
 }
 
+// ---------------------------------------------------------------------------
+// Receiver and front-end changes, shared by clients and plugins
+// ---------------------------------------------------------------------------
+
+Status ServerImpl::after_vrx_retuned(engine::VrxId vrx, const engine::VrxParams& params) {
+    // After the retune and only if it took. A receiver that moved is pointed
+    // at a different transmitter, and PS, RadioText, the AF list and the PI
+    // are that station's rather than this one's: keeping them would assemble
+    // one station's text over another's, character by character, with the
+    // A/B flag saying nothing changed.
+    //
+    // Every retune and not only one that moved the centre. The engine takes a
+    // whole VrxParams and this server cannot tell "the same frequency, a wider
+    // filter" from "a hundred kilohertz away" without keeping its own copy of
+    // what was there, and a copy that went stale would keep the wrong
+    // station's text at the one moment it matters. A client that retunes
+    // without meaning to pays a reacquisition.
+    //
+    // The engine only QUEUED the retune, so this clears the decoder AND
+    // fences the sample path against the frames the old tuning already
+    // produced. reset_rds_for_vrx has why the clearing alone was not enough.
+    //
+    // The status is read HERE and AFTER the retune, which is the whole of the
+    // fence: VrxStatus::tuning_epoch is the epoch this receiver's chunks will
+    // carry once the graph has applied everything queued for it, so it is the
+    // number the decoder waits to see. Reading it before the retune would
+    // fence against the tuning being left.
+    auto status = engine_.vrx_status(vrx);
+    if (!status) {
+        return std::unexpected(status.error());
+    }
+    retune_rds_companion(vrx, params);
+    reset_rds_for_vrx(vrx, status->tuning_epoch);
+
+    // Every event decoder on the receiver too, on the same fence and for the
+    // same reason: a P25 header half from one transmitter and half from
+    // another decodes to a talkgroup neither of them sent.
+    reset_decoded_for_vrx(vrx, status->tuning_epoch);
+
+    // And a P25 receiver's voice, which is a decoder in an audio route.
+    reset_audio_for_vrx(vrx, status->tuning_epoch);
+
+    emit_plugin_event(vrx_event(RV_ENGINE_EVENT_VRX_CHANGED, vrx), vrx);
+    return {};
+}
+
+Expected<engine::SourceRetune> ServerImpl::retune_source(std::int64_t wanted,
+                                                         std::vector<std::string>& reasons) {
+    auto landed = engine_.set_source_center(wanted);
+    if (!landed) {
+        return std::unexpected(landed.error());
+    }
+
+    // Every receiver the engine removed gets the cleanup removeVrx gives one,
+    // because it has been removed just as surely. Before 2026-09-23 this
+    // answer was discarded and none of that happened: an audio subscriber
+    // went quiet with no ended(), which is what a shut squelch sounds like,
+    // and the RDS route, the decoder routes and the ownership record stayed
+    // behind. The reason names both frequencies, since the operator knows the
+    // receiver by where it was and the retune by where it went.
+    //
+    // The engine's own sentence where it gave one, because the span is no
+    // longer the only cause: a receiver still inside it is removed when its
+    // new place in a channel needs a filter the graph will not swap in place,
+    // and saying "outside the span" then would be false.
+    reasons.clear();
+    reasons.reserve(landed->removed.size());
+    for (const engine::RetuneRemoval& gone : landed->removed) {
+        std::string reason =
+            !gone.reason.empty()
+                ? gone.reason
+                : std::format("the front end was retuned to {} Hz and the engine removed the "
+                              "receiver at {} Hz",
+                              landed->center, gone.frequency);
+        after_vrx_removed(gone.id, kj::StringPtr(reason.c_str()));
+        reasons.push_back(std::move(reason));
+    }
+
+    // After the tune and only if it took. The engine has already moved every
+    // receiver's tuning epoch; this is the half above the engine, which is the
+    // detector's tracks and the decoders' accumulated stations.
+    forget_across_retune();
+
+    ++source_retunes_;
+    plugin::Event event;
+    event.type = RV_ENGINE_EVENT_SOURCE_RETUNED;
+    event.center_hz = static_cast<std::int64_t>(landed->center);
+    event.epoch = source_retunes_;
+    for (const engine::RetuneRemoval& gone : landed->removed) {
+        std::uint32_t cause = RV_ENGINE_REMOVED_OTHER;
+        switch (gone.cause) {
+            case engine::RetuneCause::OutsideSpan: cause = RV_ENGINE_REMOVED_OUTSIDE_SPAN; break;
+            case engine::RetuneCause::Unplaceable: cause = RV_ENGINE_REMOVED_UNPLACEABLE; break;
+            case engine::RetuneCause::ShapeChanged: cause = RV_ENGINE_REMOVED_SHAPE; break;
+        }
+        event.removed.push_back(plugin::EventRemoved{
+            .vrx = gone.id.value,
+            .cause = cause,
+            .frequency_hz = static_cast<std::int64_t>(gone.frequency)});
+    }
+    emit_plugin_event(event);
+
+    return *std::move(landed);
+}
+
+// ---------------------------------------------------------------------------
+// Engine plugins
+// ---------------------------------------------------------------------------
+
+namespace {
+
+[[nodiscard]] plugin::Event decoded_event(const DecodedMessage& message) {
+    plugin::Event event;
+    event.type = RV_ENGINE_EVENT_DECODED;
+    event.vrx = static_cast<std::uint32_t>(message.vrx);
+    event.decoder = message.decoder;
+    event.kind = message.kind;
+    event.start_sample = message.start_sample;
+    event.end_sample = message.end_sample;
+    event.sample_rate = static_cast<std::uint32_t>(message.sample_rate);
+    event.sequence = message.sequence;
+    event.dropped_before = message.dropped_before;
+    event.text = message.text;
+    event.fields.reserve(message.fields.size());
+    for (const DecodedField& field : message.fields) {
+        plugin::EventField out;
+        out.key = field.key;
+        if (const std::int64_t* value = field.integer(); value != nullptr) {
+            out.type = RV_ENGINE_FIELD_INT;
+            out.int_value = *value;
+        } else if (const double* real = field.real(); real != nullptr) {
+            out.type = RV_ENGINE_FIELD_DOUBLE;
+            out.double_value = *real;
+        } else if (const bool* flag = field.flag(); flag != nullptr) {
+            out.type = RV_ENGINE_FIELD_BOOL;
+            out.bool_value = *flag;
+        } else if (const std::string* text = field.text(); text != nullptr) {
+            out.type = RV_ENGINE_FIELD_TEXT;
+            out.text = *text;
+        } else if (const std::vector<std::uint8_t>* bytes = field.bytes(); bytes != nullptr) {
+            out.type = RV_ENGINE_FIELD_BYTES;
+            out.bytes = *bytes;
+        }
+        event.fields.push_back(std::move(out));
+    }
+    return event;
+}
+
+[[nodiscard]] std::string_view log_level_name(std::uint32_t level) {
+    switch (level) {
+        case RV_ENGINE_LOG_DEBUG: return "debug";
+        case RV_ENGINE_LOG_INFO: return "info";
+        case RV_ENGINE_LOG_WARN: return "warn";
+        case RV_ENGINE_LOG_ERROR: return "error";
+        default: return "log";
+    }
+}
+
+}  // namespace
+
+void ServerImpl::start_plugins(const ServerOptions& options) {
+    engine_plugins_ = options.engine_plugins;
+    plugin_log_ = options.plugin_log;
+    if (engine_plugins_ == nullptr) {
+        return;
+    }
+
+    // Every slot exists, with its session, before the first runner starts,
+    // because a plugin may issue a command from create and the loop that runs
+    // it reads the slot.
+    const auto modules = engine_plugins_->modules();
+    plugins_.reserve(modules.size());
+    for (std::size_t i = 0; i < modules.size(); ++i) {
+        PluginSlot slot;
+        slot.session = open_session();
+        plugins_.push_back(std::move(slot));
+    }
+    // Converted here, where the private base is accessible, and not inside
+    // make_unique, where it is not.
+    plugin::CommandSink& sink = *this;
+    for (std::size_t i = 0; i < modules.size(); ++i) {
+        plugins_[i].runner = std::make_unique<plugin::EnginePluginRunner>(modules[i], i, sink);
+    }
+
+    // What already exists, so a plugin does not have to tell a quiet engine
+    // from one it joined late. The ABI header promises this replay. Queued
+    // behind create, on the plugin's own thread, before the loop starts and
+    // anything can change.
+    if (engine_.has_source()) {
+        plugin::Event opened;
+        opened.type = RV_ENGINE_EVENT_SOURCE_OPENED;
+        opened.center_hz = static_cast<std::int64_t>(engine_.info().source_center);
+        emit_plugin_event(opened);
+        for (const engine::VrxId id : engine_.vrx_ids()) {
+            emit_plugin_event(vrx_event(RV_ENGINE_EVENT_VRX_ADDED, id), id);
+        }
+    }
+}
+
+void ServerImpl::stop_plugins() {
+    {
+        const std::scoped_lock held(plugin_command_lock_);
+        plugin_commands_closed_ = true;
+        plugin_commands_.clear();
+    }
+    // Stopped and not destroyed: a decode lane may still be inside a forward
+    // closure that names a runner, and posting to a stopped one is a no-op.
+    // They go with the server.
+    for (PluginSlot& slot : plugins_) {
+        if (slot.runner != nullptr) {
+            slot.runner->stop();
+        }
+    }
+}
+
+bool ServerImpl::plugin_running(std::size_t index) const {
+    return index < plugins_.size() && plugins_[index].runner != nullptr &&
+           plugins_[index].runner->running();
+}
+
+std::int32_t ServerImpl::post_command(plugin::Command command) {
+    {
+        const std::scoped_lock held(plugin_command_lock_);
+        if (plugin_commands_closed_) {
+            return RV_ENGINE_PLUGIN_ERR_STOPPED;
+        }
+        if (plugin_commands_.size() >= kPluginCommandDepth) {
+            return RV_ENGINE_PLUGIN_ERR_QUEUE_FULL;
+        }
+        plugin_commands_.push_back(std::move(command));
+    }
+    wake_loop();
+    return RV_ENGINE_PLUGIN_OK;
+}
+
+void ServerImpl::plugin_log(std::size_t plugin, std::uint32_t level, std::string message) {
+    if (!plugin_log_ || engine_plugins_ == nullptr) {
+        return;
+    }
+    // By file name and not by the runner's name: a plugin can log from
+    // create, before its runner has been stored anywhere this thread may read.
+    const auto modules = engine_plugins_->modules();
+    const std::string who =
+        plugin < modules.size() ? plugin::module_file_name(*modules[plugin]) : "a plugin";
+    plugin_log_(std::format("plugin {} {}: {}", who, log_level_name(level), message));
+}
+
+void ServerImpl::drain_plugin_commands() {
+    std::deque<plugin::Command> batch;
+    {
+        const std::scoped_lock held(plugin_command_lock_);
+        batch.swap(plugin_commands_);
+    }
+    for (plugin::Command& command : batch) {
+        run_plugin_command(command);
+    }
+}
+
+Status ServerImpl::plugin_owns(std::size_t plugin, std::uint32_t vrx) const {
+    const VrxOwner owner = owner_of(engine::VrxId{vrx});
+    if (owner.session != plugins_[plugin].session) {
+        return fail(std::format("receiver {} was not opened by this plugin, and a plugin may "
+                                "only remove or retune the receivers it opened",
+                                vrx));
+    }
+    return {};
+}
+
+Expected<std::uint32_t> ServerImpl::plugin_add_vrx(std::size_t plugin,
+                                                   const plugin::AddVrxCommand& command) {
+    auto demod = engine::demod_from_name(command.demod);
+    if (!demod) {
+        return std::unexpected(demod.error());
+    }
+    engine::VrxParams params;
+    params.demod = *demod;
+    params.center = static_cast<dsp::Hertz>(
+        command.center_hz - static_cast<std::int64_t>(engine_.info().source_center));
+    // Zero passes through as zero, which the engine reads as the mode's own
+    // default passband, exactly as it does from addVrx.
+    params.bandwidth = static_cast<dsp::Hertz>(command.bandwidth_hz);
+    auto id = engine_.add_vrx(params);
+    if (!id) {
+        return std::unexpected(id.error());
+    }
+    record_vrx(*id, plugins_[plugin].session, false);
+    return id->value;
+}
+
+Status ServerImpl::plugin_subscribe(std::size_t plugin,
+                                    const plugin::SubscribeDecodedCommand& command) {
+    const engine::VrxId id{command.vrx};
+    auto status = engine_.vrx_status(id);
+    if (!status) {
+        return std::unexpected(status.error());
+    }
+    auto spec = resolve_decoder(engine_, id, *status, command.decoder);
+    if (!spec) {
+        return std::unexpected(spec.error());
+    }
+
+    PluginSlot& slot = plugins_[plugin];
+    auto key = std::make_pair(command.vrx, std::string((*spec)->name));
+    if (auto found = slot.decoded.find(key);
+        found != slot.decoded.end() && !found->second->cancelled) {
+        return {};
+    }
+
+    auto node = std::make_shared<DecodedNode>(schema::DecodedReceiver::Client(nullptr), id,
+                                              (*spec)->name);
+    plugin::EnginePluginRunner* const runner = slot.runner.get();
+    node->forward = [runner](const DecodedMessage& message) {
+        runner->post(decoded_event(message));
+    };
+    node->on_ended = [runner, vrx = command.vrx,
+                      decoder = std::string((*spec)->name)](std::string_view why) {
+        plugin::Event event;
+        event.type = RV_ENGINE_EVENT_DECODED_ENDED;
+        event.vrx = vrx;
+        event.decoder = decoder;
+        event.text = std::string(why);
+        runner->post(std::move(event));
+    };
+    if (auto added = add_decoded(node, *status, **spec); !added) {
+        return added;
+    }
+    slot.decoded[std::move(key)] = std::move(node);
+    return {};
+}
+
+Status ServerImpl::plugin_unsubscribe(std::size_t plugin,
+                                      const plugin::UnsubscribeDecodedCommand& command) {
+    PluginSlot& slot = plugins_[plugin];
+
+    // The name the subscription was filed under, which for "" is whatever
+    // the receiver's mode resolved to when it was made. A receiver that has
+    // gone ended its subscriptions already, so the exact name is all that is
+    // left to look for.
+    std::string name = command.decoder;
+    if (name.empty()) {
+        if (auto status = engine_.vrx_status(engine::VrxId{command.vrx}); status) {
+            if (auto spec = resolve_decoder(engine_, engine::VrxId{command.vrx}, *status, name);
+                spec) {
+                name = std::string((*spec)->name);
+            }
+        }
+    }
+
+    const auto found = slot.decoded.find(std::make_pair(command.vrx, name));
+    if (found == slot.decoded.end()) {
+        return fail(std::format("this plugin has no subscription to the {} decoder on receiver {}",
+                                name.empty() ? std::string("default") : name, command.vrx));
+    }
+    auto node = std::move(found->second);
+    slot.decoded.erase(found);
+    if (!node->cancelled) {
+        // Asked for, so no DECODED_ENDED follows: the result says it.
+        node->ended_sent = true;
+        end_decoded(node);
+    }
+    return {};
+}
+
+void ServerImpl::run_plugin_command(plugin::Command& command) {
+    if (command.plugin >= plugins_.size() || plugins_[command.plugin].runner == nullptr) {
+        return;
+    }
+    const std::size_t who = command.plugin;
+
+    plugin::Event result;
+    result.type = RV_ENGINE_EVENT_COMMAND_RESULT;
+    result.request_tag = command.tag;
+    bool not_owner = false;
+
+    Status outcome = std::visit(
+        [&](auto& body) -> Status {
+            using Body = std::decay_t<decltype(body)>;
+            if constexpr (std::is_same_v<Body, plugin::AddVrxCommand>) {
+                auto id = plugin_add_vrx(who, body);
+                if (!id) {
+                    return std::unexpected(id.error());
+                }
+                result.vrx = *id;
+                return {};
+            } else if constexpr (std::is_same_v<Body, plugin::RemoveVrxCommand>) {
+                result.vrx = body.vrx;
+                if (auto owned = plugin_owns(who, body.vrx); !owned) {
+                    not_owner = true;
+                    return owned;
+                }
+                const engine::VrxId id{body.vrx};
+                if (auto removed = engine_.remove_vrx(id); !removed) {
+                    return removed;
+                }
+                after_vrx_removed(id, "the plugin that opened this receiver removed it");
+                return {};
+            } else if constexpr (std::is_same_v<Body, plugin::SetVrxCenterCommand>) {
+                result.vrx = body.vrx;
+                if (auto owned = plugin_owns(who, body.vrx); !owned) {
+                    not_owner = true;
+                    return owned;
+                }
+                const engine::VrxId id{body.vrx};
+                auto status = engine_.vrx_status(id);
+                if (!status) {
+                    return std::unexpected(status.error());
+                }
+                engine::VrxParams params = status->params;
+                params.center = static_cast<dsp::Hertz>(
+                    body.center_hz - static_cast<std::int64_t>(engine_.info().source_center));
+                if (auto applied = engine_.set_vrx_params(id, params); !applied) {
+                    return applied;
+                }
+                return after_vrx_retuned(id, params);
+            } else if constexpr (std::is_same_v<Body, plugin::SetSourceCenterCommand>) {
+                std::vector<std::string> reasons;
+                auto landed = retune_source(body.center_hz, reasons);
+                if (!landed) {
+                    return std::unexpected(landed.error());
+                }
+                result.center_hz = static_cast<std::int64_t>(landed->center);
+                return {};
+            } else if constexpr (std::is_same_v<Body, plugin::SubscribeDecodedCommand>) {
+                result.vrx = body.vrx;
+                result.decoder = body.decoder;
+                return plugin_subscribe(who, body);
+            } else {
+                result.vrx = body.vrx;
+                result.decoder = body.decoder;
+                return plugin_unsubscribe(who, body);
+            }
+        },
+        command.body);
+
+    if (outcome) {
+        result.result_code = RV_ENGINE_PLUGIN_OK;
+    } else {
+        result.result_code =
+            not_owner ? RV_ENGINE_PLUGIN_ERR_NOT_OWNER : RV_ENGINE_PLUGIN_ERR_REFUSED;
+        result.text = outcome.error().message;
+    }
+    plugins_[who].runner->post(std::move(result));
+}
+
+plugin::Event ServerImpl::vrx_event(std::uint32_t type, engine::VrxId vrx) const {
+    plugin::Event event;
+    event.type = type;
+    event.vrx = vrx.value;
+    if (auto status = engine_.vrx_status(vrx); status) {
+        event.vrx_center_hz = static_cast<std::int64_t>(engine_.info().source_center) +
+                              static_cast<std::int64_t>(status->params.center);
+        event.bandwidth_hz = static_cast<std::uint32_t>(status->params.bandwidth);
+        event.demod = engine::demod_name(status->params.demod);
+    }
+    return event;
+}
+
+void ServerImpl::emit_plugin_event(const plugin::Event& event,
+                                   std::optional<engine::VrxId> about) {
+    if (plugins_.empty()) {
+        return;
+    }
+    std::uint64_t owner_session = 0;
+    if (about) {
+        owner_session = owner_of(*about).session;
+    }
+    for (const PluginSlot& slot : plugins_) {
+        if (slot.runner == nullptr) {
+            continue;
+        }
+        plugin::Event copy = event;
+        if (about) {
+            if (owner_session == 0) {
+                copy.owner = RV_ENGINE_OWNER_HOST;
+            } else if (owner_session == slot.session) {
+                copy.owner = RV_ENGINE_OWNER_THIS_PLUGIN;
+            } else if (std::ranges::any_of(plugins_, [&](const PluginSlot& other) {
+                           return other.session == owner_session;
+                       })) {
+                copy.owner = RV_ENGINE_OWNER_OTHER_PLUGIN;
+            } else {
+                copy.owner = RV_ENGINE_OWNER_CLIENT;
+            }
+        }
+        slot.runner->post(std::move(copy));
+    }
+}
+
 void ServerImpl::stop() {
     // A mutex rather than an exchanged flag, because the second caller has to
     // wait for the first to finish rather than race the destructor that
@@ -6602,6 +7207,11 @@ void ServerImpl::stop() {
         return;
     }
     stopped_ = true;
+
+    // Before anything else is taken down, so no plugin is mid-call into a
+    // server that is half gone, and no command it sends on its way out
+    // reaches the loop.
+    stop_plugins();
 
     // First, and before the loop is told to end. A listing's result comes
     // back through a fulfiller that arms this loop, so the thread that can
@@ -6632,6 +7242,18 @@ void ServerImpl::stop() {
     }
     if (loop_.joinable()) {
         loop_.join();
+    }
+
+    // The receivers the plugins opened, which nobody else will remove: a
+    // plugin has no session whose ending would. The loop is joined, so its
+    // maps are this thread's now, and the bookkeeping after_vrx_removed would
+    // do is about to be dropped with the rest of the server.
+    for (const PluginSlot& slot : plugins_) {
+        for (const auto& [id, owner] : vrx_owners_) {
+            if (owner.session == slot.session) {
+                static_cast<void>(engine_.remove_vrx(engine::VrxId{id}));
+            }
+        }
     }
 
     // The sigid lane before the gate. On an unthrottled source a spectrum

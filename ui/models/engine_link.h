@@ -1606,6 +1606,15 @@ class EngineLink : public QObject {
     Q_PROPERTY(QString vocoderStatus READ vocoderStatus NOTIFY vocodersChanged)
     Q_PROPERTY(QVariantList vocoderFiles READ vocoderFiles NOTIFY vocodersChanged)
     Q_PROPERTY(int vocoderCount READ vocoderCount NOTIFY vocodersChanged)
+    // The engine plugins the engine loaded from its plugins folder at startup,
+    // read once per connection; core/plugin/engine_plugin.h is the loader.
+    // pluginStatus is one line, the loader's own or why there is none to show,
+    // and empty while disconnected. pluginFiles is one map per .dll the engine
+    // looked at: file, name, version, loaded, running, refusal and detail.
+    // pluginCount is the plugins running.
+    Q_PROPERTY(QString pluginStatus READ pluginStatus NOTIFY pluginsChanged)
+    Q_PROPERTY(QVariantList pluginFiles READ pluginFiles NOTIFY pluginsChanged)
+    Q_PROPERTY(int pluginCount READ pluginCount NOTIFY pluginsChanged)
 
     Q_PROPERTY(bool decodeWanted READ decodeWanted WRITE setDecodeWanted NOTIFY decodeChanged)
 
@@ -2752,6 +2761,9 @@ public:
     [[nodiscard]] QString vocoderStatus() const;
     [[nodiscard]] QVariantList vocoderFiles() const;
     [[nodiscard]] int vocoderCount() const;
+    [[nodiscard]] QString pluginStatus() const;
+    [[nodiscard]] QVariantList pluginFiles() const;
+    [[nodiscard]] int pluginCount() const;
 
     [[nodiscard]] bool decodeWanted() const { return decode_wanted_.load(); }
     void setDecodeWanted(bool wanted);
@@ -2994,6 +3006,7 @@ signals:
     // own rows for that.
     void decodeChanged();
     void vocodersChanged();
+    void pluginsChanged();
 
     // The switch, its status, or whether the engine offers it moved.
     void transcriptionChanged();
@@ -4538,6 +4551,13 @@ private:
     // Qt thread: takes that answer and notifies vocodersChanged.
     void adopt_vocoders();
 
+    // Supervisor thread: asks the engine for its engine plugins once per
+    // connection and hands the answer to adopt_plugins. decoded_link.cpp.
+    void poll_engine_plugins();
+
+    // Qt thread: takes that answer and notifies pluginsChanged.
+    void adopt_plugins();
+
     // Supervisor thread. Cancels every decoder subscription this client
     // holds, before its receiver is removed, so the engine's ended() keeps
     // meaning a removal somebody else made. drop_receiver calls it beside
@@ -4621,6 +4641,15 @@ private:
     rpc::VocoderPlugins vocoders_;                      // Qt thread
     QString vocoder_fault_;                             // Qt thread
     bool vocoders_known_ = false;                       // Qt thread
+
+    // The engine plugin report, on the same terms as the vocoder report.
+    bool plugins_asked_ = false;                        // supervisor thread
+    rpc::EnginePlugins handover_plugins_;               // guarded by decoded_mutex_
+    QString handover_plugin_fault_;                     // guarded by decoded_mutex_
+    bool has_plugin_handover_ = false;                  // guarded by decoded_mutex_
+    rpc::EnginePlugins plugins_;                        // Qt thread
+    QString plugin_fault_;                              // Qt thread
+    bool plugins_known_ = false;                        // Qt thread
     QString decoder_infos_fault_;
     rpc::Demod live_receiver_demod_ = rpc::Demod::Nfm;
     qulonglong live_decoded_vrx_ = 0;

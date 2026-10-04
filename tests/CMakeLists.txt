@@ -96,6 +96,7 @@ add_subdirectory(characterise)
 add_subdirectory(decode)
 add_subdirectory(detect)
 add_subdirectory(engine)
+add_subdirectory(plugin)
 add_subdirectory(transcribe)
 
 # The RPC service. Guarded inside its own file on revenant_rpc_server, which
