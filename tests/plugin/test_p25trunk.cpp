@@ -296,10 +296,13 @@ TEST_CASE("p25trunk releases on a terminator after the hold", "[plugin][p25trunk
     t.tsbk(1.3, 0x02, {Tracker::integer("group", 100),
                        Tracker::integer("channel_frequency_hz", kVoiceHz)});
     CHECK(t.take().empty());
-    t.idle(1.7);
+    t.idle(2.0);
+    CHECK(t.take().empty());
+    t.idle(3.15);  // 2.05 s after the terminator, before the hang time
     const auto requests = t.take();
     REQUIRE(requests.size() == 1);
     CHECK(requests[0].what == "remove");
+    CHECK(t.rec.log.back().find("terminator") != std::string::npos);
 }
 
 TEST_CASE("p25trunk a new grant after a terminator keeps the receiver", "[plugin][p25trunk]") {

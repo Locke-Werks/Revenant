@@ -141,7 +141,10 @@ constexpr std::int64_t kOpGroupVoiceGrantUpdate = 0x02;
 constexpr std::int64_t kOpGroupVoiceGrantUpdateExplicit = 0x03;
 
 // ENGINEERING CHOICES, not citations.
-constexpr double kTduHoldSeconds = 0.5;
+// Measured on air 2026-10-06: at 0.5 a talkgroup's next transmission was
+// often granted just after its receiver went, so each push to talk cost a
+// remove and an add. 2.0 holds across a normal back and forth.
+constexpr double kTduHoldSeconds = 2.0;
 constexpr double kRefusalBackoffSeconds = 5.0;
 
 struct Settings {
@@ -217,6 +220,7 @@ struct rv_engine_plugin {
     // looking.
     std::set<std::uint32_t> p25_receivers;
     std::set<std::uint32_t> candidates;
+    std::set<std::uint32_t> heard;  // candidates that have decoded anything
     std::optional<std::uint32_t> control;
 
     // The receiver opened for control_frequency_hz, or the tag of the add
@@ -232,6 +236,7 @@ struct rv_engine_plugin {
     std::map<std::int64_t, Call> calls;               // frequency -> call
     std::map<std::uint32_t, std::int64_t> voice_vrx;  // our receiver -> frequency
     std::map<std::int64_t, double> refused;           // frequency -> when
+    std::set<std::int64_t> refusal_logged;
     std::set<std::int64_t> encrypted_groups;          // last grant said encrypted
     bool full_logged = false;
 };
@@ -418,8 +423,6 @@ void on_grant(rv_engine_plugin& self, std::int64_t group, std::int64_t frequency
     }
     self.pending_adds[tag] = frequency_hz;
     self.calls[frequency_hz] = Call{group, frequency_hz, 0, tag, self.now, false, 0.0};
-    log(self, RV_ENGINE_LOG_INFO,
-        "follow TG " + std::to_string(group) + " on " + mhz(frequency_hz));
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +531,13 @@ void on_voice(rv_engine_plugin& self, const rv_engine_event& ev, const Fields& f
 void on_decoded(rv_engine_plugin& self, const rv_engine_event& ev)
 {
     const Fields fields(ev);
+    // One line per candidate, so an operator whose control channel is never
+    // found can tell a receiver hearing no P25 from one hearing voice.
+    if (!self.control && self.candidates.contains(ev.vrx) && self.heard.insert(ev.vrx).second) {
+        log(self, RV_ENGINE_LOG_INFO,
+            "receiver " + std::to_string(ev.vrx) + " decodes P25, first " + ev.kind + ", NAC " +
+                std::to_string(fields.integer("nac").value_or(-1)));
+    }
     if (std::string_view(ev.kind) == "tsbk") {
         on_tsbk(self, ev, fields);
     } else {
@@ -667,7 +677,11 @@ void on_command_result(rv_engine_plugin& self, const rv_engine_event& ev)
     }
 
     if (ev.result_code != RV_ENGINE_PLUGIN_OK) {
-        log(self, RV_ENGINE_LOG_WARN, "cannot open " + mhz(hz) + ": " + ev.text);
+        // Once per frequency per span; the grant repeats for as long as the
+        // call lasts and would otherwise log every kRefusalBackoffSeconds.
+        const bool first = self.refusal_logged.insert(hz).second;
+        log(self, first ? RV_ENGINE_LOG_WARN : RV_ENGINE_LOG_DEBUG,
+            "cannot open " + mhz(hz) + ": " + ev.text);
         self.refused[hz] = self.now;
         if (it != self.calls.end()) {
             self.calls.erase(it);
@@ -683,6 +697,8 @@ void on_command_result(rv_engine_plugin& self, const rv_engine_event& ev)
     }
     it->second.vrx = ev.vrx;
     it->second.pending_tag = 0;
+    log(self, RV_ENGINE_LOG_INFO, "follow TG " + std::to_string(it->second.group) + " on " +
+                                      mhz(hz) + ", receiver " + std::to_string(ev.vrx));
     self.voice_vrx[ev.vrx] = hz;
     subscribe(self, ev.vrx);
 }
@@ -718,6 +734,7 @@ void dispatch(rv_engine_plugin& self, const rv_engine_event& ev)
         // A different span: frequencies refused before may fit now, the
         // configured control channel among them.
         self.refused.clear();
+        self.refusal_logged.clear();
         open_own_control(self);
         break;
     case RV_ENGINE_EVENT_SOURCE_CLOSED:

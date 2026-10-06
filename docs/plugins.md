@@ -92,7 +92,7 @@ dev build runs with them loaded. None links `revenant_core`.
 receiver on a control channel; the plugin subscribes to every p25p1 receiver it
 did not open, takes the first that delivers a good TSBK as the control channel,
 and opens a p25p1 receiver on each group voice grant for as long as the call
-lasts. A call ends on a voice terminator after half a second, after
+lasts. A call ends two seconds after a voice terminator, after
 `hang_seconds` with no grant, update or voice frame, when its channel goes to
 a talkgroup it would not follow, or when its receiver is removed. Removing the
 control channel's receiver removes every voice receiver it opened, and the
