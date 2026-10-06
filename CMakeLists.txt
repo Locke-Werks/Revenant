@@ -90,6 +90,9 @@ if(REVENANT_BUILD_TOOLS)
     endforeach()
 endif()
 
+# After the tools, so a plugin can place itself beside revenant-engine.
+add_subdirectory(plugins)
+
 # A one-off, not a component. See tools/devicespike/main.cpp for what it does
 # and, more importantly, for what it deliberately does not do.
 if(REVENANT_BUILD_DEVICE_SPIKE)

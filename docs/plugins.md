@@ -81,6 +81,97 @@ with their raw octets.
 
 Receivers a plugin opened are removed when the engine stops it.
 
+## Plugins in this tree
+
+`plugins/` builds each one into `plugins` beside `revenant-engine.exe`, so a
+dev build runs with them loaded. None links `revenant_core`.
+
+### p25trunk
+
+`plugins/p25trunk/p25trunk.cpp`, a P25 Phase 1 trunk tracker. Open a p25p1
+receiver on a control channel; the plugin subscribes to every p25p1 receiver it
+did not open, takes the first that delivers a good TSBK as the control channel,
+and opens a p25p1 receiver on each group voice grant for as long as the call
+lasts. A call ends on a voice terminator after half a second, after
+`hang_seconds` with no grant, update or voice frame, or when its receiver is
+removed. Removing the control channel's receiver removes every voice receiver
+it opened.
+
+It does not retune the front end, so only voice channels inside the span are
+followed; the rest are refused by the engine and logged. It does not follow
+Phase 2 grants or adjacent sites, and it does not decrypt. Voice audio needs
+an IMBE vocoder in `vocoders`, the same as a receiver opened by hand.
+
+Optional settings in `p25trunk.ini` beside the DLL, one `key=value` per line:
+
+| Key | Default | |
+| --- | --- | --- |
+| `talkgroups` | all | comma-separated talkgroups to follow |
+| `follow_encrypted` | `0` | `1` opens receivers on encrypted calls, which stay silent |
+| `max_calls` | `6` | voice receivers open at once |
+| `hang_seconds` | `2.5` | silence before a call is released |
+
+`tests/plugin/test_p25trunk.cpp` drives the DLL through a host table of its
+own with hand-built events. It has not yet run against a live control channel.
+
+## Writing your own
+
+Start from `plugins/p25trunk/p25trunk.cpp`. Comments marked `TEMPLATE` are
+about the ABI and hold for any plugin; the rest is trunking. The shape:
+
+1. Copy `core/plugin/engine_plugin_abi.h` into your project. It includes
+   `<stdint.h>` and nothing else. Define `RV_ENGINE_PLUGIN_BUILDING_PLUGIN`
+   before including it.
+2. Define `struct rv_engine_plugin` with whatever state you need. The host
+   only holds a pointer to it.
+3. Implement the five exports. `abi_version` returns
+   `RV_ENGINE_PLUGIN_ABI_VERSION`. `describe` checks `struct_size`, sets the
+   interest mask, name and version. `create` checks the host table's
+   `struct_size`, allocates, and returns NULL to decline. `on_event` checks
+   `struct_size` and dispatches on `type`. `destroy` frees.
+4. Wrap the body of every export in `try { } catch (...) { }`. An exception
+   reaching the host ends the process.
+5. Copy anything you keep out of an event before `on_event` returns.
+   Strings, fields and the removed list all belong to the host.
+6. Pick a tag per request and match `COMMAND_RESULT` on it. A host function
+   that returns anything but `RV_ENGINE_PLUGIN_OK` queued nothing, and no
+   result will come, so forget the request there.
+7. Ignore event types you do not recognise.
+
+Points that catch people:
+
+- **There is no timer.** You are called when an event arrives. If you need
+  time, take it from a decoder you are subscribed to:
+  `end_sample / sample_rate` advances with the signal, and each receiver's
+  count starts at its own zero. p25trunk clocks everything off the control
+  channel.
+- **Your own receivers come back to you.** `VRX_ADDED` fires for them with
+  owner `RV_ENGINE_OWNER_THIS_PLUGIN`. Learn their ids from the `add_vrx`
+  result instead, and skip them when reacting to other receivers.
+- **A release can overtake an add.** If you give up on something while its
+  `add_vrx` is still in flight, the result still arrives with a live receiver
+  in it. Remove it then.
+- **Front-end retunes remove receivers.** Expect `VRX_REMOVED` for your own
+  receivers at any time and clean up from it.
+- **Dropped events.** `events_dropped_before` says how many you lost. Design
+  state that heals from the next events rather than trusting you saw
+  everything.
+- **Settings.** The plugin has no config channel. p25trunk finds its own path
+  with `GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, ...)` and
+  reads an `.ini` of the same name.
+- **Runtimes.** Build `/MT` or `/MD`, either works, because nothing is freed
+  across the line. Never pass the host something it would have to free.
+
+To build one in this tree, add it to `plugins/CMakeLists.txt` with
+`revenant_engine_plugin(<name> <sources>)`. Outside the tree, any compiler that
+produces a Windows x64 DLL with C exports will do; drop the DLL in `plugins`
+beside the engine and look for its line in the engine's startup output or the
+radio panel's "engine plugins" list.
+
+To test without a radio, load the DLL and hand it a host table of your own, as
+`tests/plugin/test_p25trunk.cpp` does: record what it asks for, feed it events
+with the field keys `core/rpc/decoders.h` documents, and check the requests.
+
 ## Not decided
 
 Revenant is GPL-3.0-or-later. Whether the ABI header gets a separate grant so
