@@ -78,6 +78,11 @@
 //                             receiver stays silent for them either way
 //   max_calls=6               voice receivers open at once
 //   hang_seconds=2.5          see WHEN A CALL ENDS
+//   control_frequency_hz=     a control channel for the plugin to open
+//                             itself whenever a source is open and it is not,
+//                             for an engine run with no client; it is a
+//                             p25p1 receiver like any other and is found the
+//                             same way
 //
 // WHAT IT DOES NOT DO
 //
@@ -144,6 +149,7 @@ struct Settings {
     bool follow_encrypted = false;
     std::size_t max_calls = 6;
     double hang_seconds = 2.5;
+    std::optional<std::int64_t> control_frequency_hz;
 };
 
 // One followed call, keyed by its voice frequency. A voice channel carries one
@@ -212,6 +218,11 @@ struct rv_engine_plugin {
     std::set<std::uint32_t> p25_receivers;
     std::set<std::uint32_t> candidates;
     std::optional<std::uint32_t> control;
+
+    // The receiver opened for control_frequency_hz, or the tag of the add
+    // that is opening it.
+    std::optional<std::uint32_t> own_control;
+    std::optional<std::uint32_t> own_control_tag;
 
     // The control channel's clock, seconds. Only ever moves forward: see
     // advance_clock.
@@ -533,6 +544,18 @@ void look_for_control(rv_engine_plugin& self)
     }
 }
 
+void open_own_control(rv_engine_plugin& self)
+{
+    const auto hz = self.settings.control_frequency_hz;
+    if (!hz || self.own_control || self.own_control_tag) {
+        return;
+    }
+    const std::uint32_t tag = take_tag(self);
+    if (queued(self, self.host->add_vrx(self.host->ctx, *hz, 0, kP25, tag), "control add")) {
+        self.own_control_tag = tag;
+    }
+}
+
 // The control channel is gone: release every call, and look for a control
 // channel again among the p25p1 receivers still open. The caller has already
 // dropped the lost receiver from p25_receivers if it is no longer one.
@@ -588,6 +611,10 @@ void on_vrx_removed(rv_engine_plugin& self, const rv_engine_event& ev)
 {
     self.p25_receivers.erase(ev.vrx);
     self.candidates.erase(ev.vrx);
+    if (self.own_control && *self.own_control == ev.vrx) {
+        // Reopened at the next source event, when the span may fit it.
+        self.own_control.reset();
+    }
     if (self.control && *self.control == ev.vrx) {
         lose_control(self, ev.text);
         return;
@@ -604,6 +631,22 @@ void on_vrx_removed(rv_engine_plugin& self, const rv_engine_event& ev)
 
 void on_command_result(rv_engine_plugin& self, const rv_engine_event& ev)
 {
+    if (self.own_control_tag && *self.own_control_tag == ev.request_tag) {
+        self.own_control_tag.reset();
+        if (ev.result_code != RV_ENGINE_PLUGIN_OK) {
+            log(self, RV_ENGINE_LOG_WARN,
+                "cannot open the control channel at " +
+                    mhz(*self.settings.control_frequency_hz) + ": " + ev.text);
+            return;
+        }
+        self.own_control = ev.vrx;
+        self.p25_receivers.insert(ev.vrx);
+        if (!self.control) {
+            look_for_control(self);
+        }
+        return;
+    }
+
     auto pending = self.pending_adds.find(ev.request_tag);
     if (pending == self.pending_adds.end()) {
         // Subscriptions and removals. A failed one is worth a line and
@@ -670,11 +713,17 @@ void dispatch(rv_engine_plugin& self, const rv_engine_event& ev)
             lose_control(self, ev.text);
         }
         break;
+    case RV_ENGINE_EVENT_SOURCE_OPENED: open_own_control(self); break;
     case RV_ENGINE_EVENT_SOURCE_RETUNED:
-        // A different span: frequencies refused before may fit now.
+        // A different span: frequencies refused before may fit now, the
+        // configured control channel among them.
         self.refused.clear();
+        open_own_control(self);
         break;
-    case RV_ENGINE_EVENT_SOURCE_CLOSED: lose_control(self, "the source closed"); break;
+    case RV_ENGINE_EVENT_SOURCE_CLOSED:
+        self.own_control.reset();
+        lose_control(self, "the source closed");
+        break;
     default: break;  // TEMPLATE: ignore types you do not know; later versions may add some
     }
 }
@@ -770,6 +819,12 @@ void load_settings(rv_engine_plugin& self, const std::string& path)
             s.follow_encrypted = value == "1";
         } else if (key == "max_calls") {
             ok = parse_number(value, s.max_calls) && s.max_calls > 0;
+        } else if (key == "control_frequency_hz") {
+            std::int64_t hz = 0;
+            ok = value.empty() || (parse_number(value, hz) && hz > 0);
+            if (ok && !value.empty()) {
+                s.control_frequency_hz = hz;
+            }
         } else if (key == "hang_seconds") {
             ok = parse_number(value, s.hang_seconds) && s.hang_seconds > 0.0;
         } else {

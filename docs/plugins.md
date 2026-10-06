@@ -114,6 +114,7 @@ Optional settings in `p25trunk.ini` beside the DLL, one `key=value` per line:
 | `follow_encrypted` | `0` | `1` opens receivers on encrypted calls, which stay silent |
 | `max_calls` | `6` | voice receivers open at once |
 | `hang_seconds` | `2.5` | silence before a call is released |
+| `control_frequency_hz` | none | a control channel the plugin opens itself whenever a source is open, for an engine with no client |
 
 `tests/plugin/test_p25trunk.cpp` drives the DLL through a host table of its
 own with hand-built events. It has not yet run against a live control channel.
