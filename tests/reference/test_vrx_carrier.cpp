@@ -109,7 +109,10 @@ class Synth {
 public:
     Synth(const Signal& signal, double rate, double noise_rms = 0.0, std::uint64_t seed = 1)
         : signal_(signal), rate_(rate), noise_rms_(noise_rms), phase_(signal.phase),
-          engine_(seed), gauss_(0.0, noise_rms / std::numbers::sqrt2) {}
+          engine_(seed),
+          // The debug STL rejects a zero sigma at construction, though a
+          // noiseless synth never draws from it.
+          gauss_(0.0, noise_rms > 0.0 ? noise_rms / std::numbers::sqrt2 : 1.0) {}
 
     void next(std::span<dsp::Complex32> out) {
         for (dsp::Complex32& value : out) {
