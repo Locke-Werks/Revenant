@@ -20,8 +20,13 @@
 // channel, from the UI or any RPC client, and the plugin subscribes to the
 // p25p1 decoder of every p25p1 receiver it did not open itself. The first one
 // to deliver a Trunking Signaling Block with a good CRC becomes the control
-// channel, and the others are unsubscribed. Removing that receiver ends the
-// tracking and removes every voice receiver the plugin opened.
+// channel, and the others are unsubscribed. Removing that receiver, or
+// changing its mode, removes every voice receiver the plugin opened, and the
+// plugin goes back to listening to every p25p1 receiver still open.
+//
+// A p25p1 receiver that never sends a TSBK, one on a conventional channel
+// say, stays subscribed while the plugin is looking, which keeps its decoder
+// running. That costs one decoder's time on a decode lane and nothing else.
 //
 // A grant only resolves to a frequency once the control channel has sent the
 // identifier update for the grant's channel identifier (TIA-102.AABC-B clause
@@ -42,6 +47,15 @@
 //     voice frame.
 //   - Its receiver is removed by something else, a front-end retune that no
 //     longer covers it for instance.
+//   - Its channel goes to a talkgroup this plugin would not follow, by a
+//     grant on the control channel or by the talkgroup the voice itself
+//     carries.
+//
+// The second depends on the control channel to keep time, see TIME. If the
+// control channel stops decoding, a fade or the operator moving its receiver
+// somewhere else, no time passes and open calls stay open until it decodes
+// again or its receiver is removed. A plugin thread with a timer would close
+// that gap at the cost of locking every piece of state; this plugin does not.
 //
 // TIME
 //
@@ -49,9 +63,10 @@
 // no other time. A control channel sends a TSDU every few tens of
 // milliseconds, so this plugin uses the control channel's own sample count as
 // its clock: end_sample / sample_rate of each control channel message, in
-// seconds. Voice receivers have their own sample counts that start at their
-// own zero, so voice events are stamped with the control channel's latest
-// time rather than their own.
+// seconds, taken only as forward steps so a decoder that restarts its count
+// cannot run the clock backwards. Voice receivers have their own sample
+// counts that start at their own zero, so voice events are stamped with the
+// control channel's latest time rather than their own.
 //
 // CONFIGURATION
 //
@@ -137,7 +152,8 @@ struct Settings {
 struct Call {
     std::int64_t group = 0;
     std::int64_t frequency_hz = 0;
-    std::uint32_t vrx = 0;   // 0 while add_vrx is outstanding
+    std::uint32_t vrx = 0;          // 0 while add_vrx is outstanding
+    std::uint32_t pending_tag = 0;  // that add's tag, so a stale result is not taken for it
     double last_heard = 0.0;
     bool terminated = false;  // a TDU was heard
     double terminated_at = 0.0;
@@ -190,9 +206,17 @@ struct rv_engine_plugin {
     std::uint32_t next_tag = 1;
     std::map<std::uint32_t, std::int64_t> pending_adds;  // tag -> frequency
 
-    std::set<std::uint32_t> candidates;  // receivers subscribed to, looking for TSBKs
+    // Every p25p1 receiver somebody else opened, so a lost control channel
+    // can be looked for again among them, and the ones subscribed to while
+    // looking.
+    std::set<std::uint32_t> p25_receivers;
+    std::set<std::uint32_t> candidates;
     std::optional<std::uint32_t> control;
-    double now = 0.0;  // the control channel's clock, seconds
+
+    // The control channel's clock, seconds. Only ever moves forward: see
+    // advance_clock.
+    double now = 0.0;
+    std::optional<double> last_stamp;
 
     std::map<std::int64_t, Call> calls;               // frequency -> call
     std::map<std::uint32_t, std::int64_t> voice_vrx;  // our receiver -> frequency
@@ -302,6 +326,23 @@ void expire(rv_engine_plugin& self)
     }
 }
 
+// A decoder's sample count is its own and starts at its own zero, so a new
+// control channel, or the same one after its decoder restarts, can stamp a
+// time behind the last. Only forward steps are taken, which keeps every time
+// stored against `now` meaningful whatever the stamps do.
+void advance_clock(rv_engine_plugin& self, const rv_engine_event& ev)
+{
+    if (ev.sample_rate == 0) {
+        return;
+    }
+    const double stamp =
+        static_cast<double>(ev.end_sample) / static_cast<double>(ev.sample_rate);
+    if (self.last_stamp && stamp > *self.last_stamp) {
+        self.now += stamp - *self.last_stamp;
+    }
+    self.last_stamp = stamp;
+}
+
 bool wanted(const rv_engine_plugin& self, std::int64_t group, bool encrypted)
 {
     if (encrypted && !self.settings.follow_encrypted) {
@@ -316,6 +357,13 @@ void on_grant(rv_engine_plugin& self, std::int64_t group, std::int64_t frequency
               bool explicit_grant, bool encrypted)
 {
     if (!wanted(self, group, encrypted)) {
+        // A channel this plugin holds, handed to a talkgroup it would not
+        // follow. Without this the receiver plays the new call, and that
+        // call's voice keeps it open.
+        if (auto it = self.calls.find(frequency_hz);
+            it != self.calls.end() && it->second.group != group) {
+            release(self, it, "channel reassigned");
+        }
         return;
     }
 
@@ -358,7 +406,7 @@ void on_grant(rv_engine_plugin& self, std::int64_t group, std::int64_t frequency
         return;
     }
     self.pending_adds[tag] = frequency_hz;
-    self.calls[frequency_hz] = Call{group, frequency_hz, 0, self.now, false, 0.0};
+    self.calls[frequency_hz] = Call{group, frequency_hz, 0, tag, self.now, false, 0.0};
     log(self, RV_ENGINE_LOG_INFO,
         "follow TG " + std::to_string(group) + " on " + mhz(frequency_hz));
 }
@@ -390,9 +438,7 @@ void on_tsbk(rv_engine_plugin& self, const rv_engine_event& ev, const Fields& f)
         return;
     }
 
-    if (ev.sample_rate != 0) {
-        self.now = static_cast<double>(ev.end_sample) / static_cast<double>(ev.sample_rate);
-    }
+    advance_clock(self, ev);
 
     const std::int64_t opcode = f.integer("opcode").value_or(-1);
     const bool encrypted = f.flag("encrypted_call");
@@ -446,7 +492,19 @@ void on_voice(rv_engine_plugin& self, const rv_engine_event& ev, const Fields& f
             call.terminated_at = self.now;
         }
     } else if (kind == "hdu" || kind == "ldu1" || kind == "ldu2") {
-        if (f.flag("encrypted") && !self.settings.follow_encrypted) {
+        // The voice says who is talking, and it can disagree with the grant
+        // this plugin last saw for the channel.
+        if (const auto group = f.integer("talkgroup"); group && *group != call.group) {
+            if (!wanted(self, *group, false)) {
+                release(self, it, "voice is another talkgroup");
+                return;
+            }
+            call.group = *group;
+        }
+        // Encrypted voice is the header's or LDU2's flag, from the ALGID.
+        // LDU1's flag of the same name is the Link Control's, which can be
+        // encrypted over clear voice, so it is not read here.
+        if (kind != "ldu1" && f.flag("encrypted") && !self.settings.follow_encrypted) {
             self.encrypted_groups.insert(call.group);
             release(self, it, "encrypted");
             return;
@@ -466,11 +524,28 @@ void on_decoded(rv_engine_plugin& self, const rv_engine_event& ev)
     }
 }
 
+void look_for_control(rv_engine_plugin& self)
+{
+    for (std::uint32_t vrx : self.p25_receivers) {
+        if (self.candidates.insert(vrx).second) {
+            subscribe(self, vrx);
+        }
+    }
+}
+
+// The control channel is gone: release every call, and look for a control
+// channel again among the p25p1 receivers still open. The caller has already
+// dropped the lost receiver from p25_receivers if it is no longer one.
 void lose_control(rv_engine_plugin& self, const char* why)
 {
+    if (!self.control) {
+        return;
+    }
     log(self, RV_ENGINE_LOG_INFO, std::string("control channel lost: ") + why);
     self.control.reset();
+    self.last_stamp.reset();
     release_all(self, "control channel lost");
+    look_for_control(self);
 }
 
 void on_vrx_added(rv_engine_plugin& self, const rv_engine_event& ev)
@@ -481,11 +556,10 @@ void on_vrx_added(rv_engine_plugin& self, const rv_engine_event& ev)
     if (ev.owner == RV_ENGINE_OWNER_THIS_PLUGIN || std::string_view(ev.demod) != kP25) {
         return;
     }
-    if (self.control || self.candidates.contains(ev.vrx)) {
-        return;
+    self.p25_receivers.insert(ev.vrx);
+    if (!self.control) {
+        look_for_control(self);
     }
-    self.candidates.insert(ev.vrx);
-    subscribe(self, ev.vrx);
 }
 
 void on_vrx_changed(rv_engine_plugin& self, const rv_engine_event& ev)
@@ -493,25 +567,26 @@ void on_vrx_changed(rv_engine_plugin& self, const rv_engine_event& ev)
     if (ev.owner == RV_ENGINE_OWNER_THIS_PLUGIN) {
         return;
     }
-    const bool p25 = std::string_view(ev.demod) == kP25;
-    if (self.control && *self.control == ev.vrx) {
-        // The operator moved the control channel's receiver off the
-        // control channel or changed its mode. Either way it is not ours to
-        // follow any more.
-        if (!p25) {
-            lose_control(self, "its receiver left p25p1");
-        }
+    if (std::string_view(ev.demod) == kP25) {
+        // A move keeps the subscription. A control channel receiver moved
+        // somewhere with no control channel stops sending TSBKs, and see
+        // WHEN A CALL ENDS for what that does.
+        on_vrx_added(self, ev);
         return;
     }
-    if (p25) {
-        on_vrx_added(self, ev);
-    } else if (self.candidates.erase(ev.vrx) != 0) {
+    self.p25_receivers.erase(ev.vrx);
+    if (self.candidates.erase(ev.vrx) != 0) {
         unsubscribe(self, ev.vrx);
+    }
+    if (self.control && *self.control == ev.vrx) {
+        unsubscribe(self, ev.vrx);
+        lose_control(self, "its receiver left p25p1");
     }
 }
 
 void on_vrx_removed(rv_engine_plugin& self, const rv_engine_event& ev)
 {
+    self.p25_receivers.erase(ev.vrx);
     self.candidates.erase(ev.vrx);
     if (self.control && *self.control == ev.vrx) {
         lose_control(self, ev.text);
@@ -541,6 +616,12 @@ void on_command_result(rv_engine_plugin& self, const rv_engine_event& ev)
     const std::int64_t hz = pending->second;
     self.pending_adds.erase(pending);
     auto it = self.calls.find(hz);
+    // A call released while its add was in flight may have been replaced by
+    // another on the same frequency with an add of its own, and this result
+    // is not that one's.
+    if (it != self.calls.end() && it->second.pending_tag != ev.request_tag) {
+        it = self.calls.end();
+    }
 
     if (ev.result_code != RV_ENGINE_PLUGIN_OK) {
         log(self, RV_ENGINE_LOG_WARN, "cannot open " + mhz(hz) + ": " + ev.text);
@@ -551,13 +632,14 @@ void on_command_result(rv_engine_plugin& self, const rv_engine_event& ev)
         return;
     }
 
-    if (it == self.calls.end() || it->second.vrx != 0) {
+    if (it == self.calls.end()) {
         // Released while the add was in flight.
         static_cast<void>(queued(
             self, self.host->remove_vrx(self.host->ctx, ev.vrx, take_tag(self)), "remove"));
         return;
     }
     it->second.vrx = ev.vrx;
+    it->second.pending_tag = 0;
     self.voice_vrx[ev.vrx] = hz;
     subscribe(self, ev.vrx);
 }
@@ -579,6 +661,10 @@ void dispatch(rv_engine_plugin& self, const rv_engine_event& ev)
     case RV_ENGINE_EVENT_DECODED: on_decoded(self, ev); break;
     case RV_ENGINE_EVENT_COMMAND_RESULT: on_command_result(self, ev); break;
     case RV_ENGINE_EVENT_DECODED_ENDED:
+        // The subscription is gone and is not renewed: the decoder stopped
+        // for a reason, and a receiver that becomes p25p1 again arrives as
+        // VRX_CHANGED.
+        self.p25_receivers.erase(ev.vrx);
         self.candidates.erase(ev.vrx);
         if (self.control && *self.control == ev.vrx) {
             lose_control(self, ev.text);

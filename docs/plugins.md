@@ -93,9 +93,13 @@ receiver on a control channel; the plugin subscribes to every p25p1 receiver it
 did not open, takes the first that delivers a good TSBK as the control channel,
 and opens a p25p1 receiver on each group voice grant for as long as the call
 lasts. A call ends on a voice terminator after half a second, after
-`hang_seconds` with no grant, update or voice frame, or when its receiver is
-removed. Removing the control channel's receiver removes every voice receiver
-it opened.
+`hang_seconds` with no grant, update or voice frame, when its channel goes to
+a talkgroup it would not follow, or when its receiver is removed. Removing the
+control channel's receiver removes every voice receiver it opened, and the
+plugin looks for a control channel again among the p25p1 receivers still open.
+
+Time comes from the control channel's sample count, so while the control
+channel is not decoding no time passes and open calls stay open.
 
 It does not retune the front end, so only voice channels inside the span are
 followed; the rest are refused by the engine and logged. It does not follow
@@ -144,7 +148,15 @@ Points that catch people:
   time, take it from a decoder you are subscribed to:
   `end_sample / sample_rate` advances with the signal, and each receiver's
   count starts at its own zero. p25trunk clocks everything off the control
-  channel.
+  channel and takes only forward steps, so switching to another receiver's
+  count cannot run its clock backwards.
+- **Match results on the tag, not the subject.** A result names the request
+  it answers. Two requests about the same frequency or receiver can be in
+  flight at once, and the older result must not be taken for the newer.
+- **Same key, different meaning.** A decoded field's meaning can depend on the
+  kind. p25p1's `encrypted` is the voice's on an HDU or LDU2 and the Link
+  Control's on an LDU1. Read the decoder's comment in `core/rpc/decoders.h`
+  for each kind you use.
 - **Your own receivers come back to you.** `VRX_ADDED` fires for them with
   owner `RV_ENGINE_OWNER_THIS_PLUGIN`. Learn their ids from the `add_vrx`
   result instead, and skip them when reacting to other receivers.

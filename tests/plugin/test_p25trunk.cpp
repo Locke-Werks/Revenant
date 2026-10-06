@@ -130,9 +130,10 @@ public:
     }
 
     // A control channel TSBK at `seconds` on the control channel's clock.
-    void tsbk(double seconds, std::int64_t opcode, std::vector<rv_engine_field> extra = {}) {
+    void tsbk(double seconds, std::int64_t opcode, std::vector<rv_engine_field> extra = {},
+              std::uint32_t vrx = kControl) {
         rv_engine_event ev = blank(RV_ENGINE_EVENT_DECODED);
-        ev.vrx = kControl;
+        ev.vrx = vrx;
         ev.decoder = "p25p1";
         ev.kind = "tsbk";
         ev.sample_rate = kRate;
@@ -160,12 +161,13 @@ public:
         send(ev);
     }
 
-    void voice(std::uint32_t vrx, const char* kind, bool encrypted = false) {
+    void voice(std::uint32_t vrx, const char* kind, bool encrypted = false,
+               std::int64_t talkgroup = 100) {
         rv_engine_event ev = blank(RV_ENGINE_EVENT_DECODED);
         ev.vrx = vrx;
         ev.decoder = "p25p1";
         ev.kind = kind;
-        send(ev, {flag("encrypted", encrypted)});
+        send(ev, {flag("encrypted", encrypted), integer("talkgroup", talkgroup)});
     }
 
     void removed(std::uint32_t vrx) {
@@ -332,7 +334,7 @@ TEST_CASE("p25trunk releases a call joined mid-way when its voice is encrypted",
     REQUIRE(requests.size() == 2);
     t.result(requests[1].tag, 20);
     static_cast<void>(t.take());
-    t.voice(20, "ldu2", true);
+    t.voice(20, "ldu2", true, 300);
     requests = t.take();
     REQUIRE(requests.size() == 1);
     CHECK(requests[0].what == "remove");
@@ -376,4 +378,87 @@ TEST_CASE("p25trunk removes a receiver whose add finished after the release",
     REQUIRE(requests.size() == 1);
     CHECK(requests[0].what == "remove");
     CHECK(requests[0].vrx == 20);
+}
+
+TEST_CASE("p25trunk does not read LDU1's encrypted Link Control as encrypted voice",
+          "[plugin][p25trunk]") {
+    Tracker t;
+    t.start_call(20);
+    t.voice(20, "ldu1", true);
+    CHECK(t.take().empty());
+}
+
+TEST_CASE("p25trunk releases a channel granted to a talkgroup it would not follow",
+          "[plugin][p25trunk]") {
+    Tracker t;
+    t.start_call(20);
+    t.grant(1.4, 300, true);
+    const auto requests = t.take();
+    REQUIRE(requests.size() == 1);
+    CHECK(requests[0].what == "remove");
+    CHECK(requests[0].vrx == 20);
+}
+
+TEST_CASE("p25trunk ignores a stale add result for a frequency it reopened",
+          "[plugin][p25trunk]") {
+    Tracker t;
+    t.client_receiver(kControl);
+    t.idle(1.0);
+    t.grant(1.1, 100);
+    auto requests = t.take();
+    REQUIRE(requests.size() == 2);
+    const std::uint32_t first = requests[1].tag;
+    t.idle(4.0);       // the first call hangs before its add returns
+    t.grant(4.1, 100); // and the talkgroup is granted the same channel again
+    requests = t.take();
+    REQUIRE(requests.size() == 1);
+    REQUIRE(requests[0].what == "add");
+    const std::uint32_t second = requests[0].tag;
+
+    t.result(first, 20);
+    requests = t.take();
+    REQUIRE(requests.size() == 1);
+    CHECK(requests[0].what == "remove");
+    CHECK(requests[0].vrx == 20);
+
+    t.result(second, 21);
+    requests = t.take();
+    REQUIRE(requests.size() == 1);
+    CHECK(requests[0].what == "subscribe");
+    CHECK(requests[0].vrx == 21);
+}
+
+TEST_CASE("p25trunk looks for a control channel again when it loses one",
+          "[plugin][p25trunk]") {
+    constexpr std::uint32_t kOther = 8;
+    Tracker t;
+    t.client_receiver(kControl);
+    t.client_receiver(kOther);
+    t.idle(10.0);  // receiver 7 is the control channel; 8 is let go
+    auto requests = t.take();
+    REQUIRE(requests.size() == 3);
+    CHECK(requests[2].what == "unsubscribe");
+    CHECK(requests[2].vrx == kOther);
+
+    t.removed(kControl);
+    requests = t.take();
+    REQUIRE(requests.size() == 1);
+    CHECK(requests[0].what == "subscribe");
+    CHECK(requests[0].vrx == kOther);
+
+    // Receiver 8's sample count is behind 7's. The clock still runs, so a
+    // call on the new control channel opens and later hangs.
+    t.tsbk(0.5, 0x3A, {}, kOther);
+    t.tsbk(0.6, 0x00,
+           {Tracker::integer("group", 100), Tracker::integer("channel_frequency_hz", kVoiceHz)},
+           kOther);
+    requests = t.take();
+    REQUIRE(requests.size() == 1);
+    REQUIRE(requests[0].what == "add");
+    t.result(requests[0].tag, 20);
+    static_cast<void>(t.take());
+    t.tsbk(3.5, 0x3A, {}, kOther);
+    requests = t.take();
+    REQUIRE(requests.size() == 1);
+    CHECK(requests[0].what == "remove");
 }
