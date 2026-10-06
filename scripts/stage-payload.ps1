@@ -300,6 +300,19 @@ if ($Only -in @("both", "engine")) {
     }
     Copy-Item -LiteralPath $engineExe -Destination (Join-Path $outDir "revenant-engine.exe") -Force
 
+    # The engine plugins plugins/CMakeLists.txt builds, in the folder the
+    # engine scans beside itself. No settings file ships: p25trunk with none
+    # follows whichever p25p1 receiver a client opens on a control channel.
+    $pluginOut = Join-Path $outDir "plugins"
+    New-Item -ItemType Directory -Force -Path $pluginOut | Out-Null
+    foreach ($name in @("p25trunk.dll")) {
+        $plugin = Join-Path $engineDir "tools/engined/plugins/$name"
+        if (-not (Test-Path -LiteralPath $plugin)) {
+            throw "$name is not at $plugin. It builds with the engine."
+        }
+        Copy-Item -LiteralPath $plugin -Destination (Join-Path $pluginOut $name) -Force
+    }
+
     # The project's own licence, beside the binaries rather than linked. A
     # recipient who has the installer and no network still has the terms.
     $license = Join-Path $root "LICENSE"

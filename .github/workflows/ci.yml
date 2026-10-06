@@ -921,7 +921,7 @@ jobs:
           }
           $found.GetEnumerator() | ForEach-Object { "$($_.Key) = $($_.Value)" }
 
-      # Our two executables and nothing else. The other 53 binaries in the
+      # Our two executables and our engine plugins, and nothing else. The other 53 binaries in the
       # payload, Qt, FFmpeg and the Visual C++ runtime, arrive signed by The
       # Qt Company and by Microsoft, and signtool without /as replaces a
       # signature rather than adding one, so signing the folder would have
@@ -940,6 +940,7 @@ jobs:
           files: |-
             ${{ github.workspace }}/dist/stage/revenant-engine.exe
             ${{ github.workspace }}/dist/stage/revenant-ui.exe
+            ${{ github.workspace }}/dist/stage/plugins/p25trunk.dll
           file-digest: SHA256
           # Certificates last three days. Without a timestamp the signature
           # stops validating inside the week. Not optional.
@@ -949,24 +950,25 @@ jobs:
       # The action exiting zero is not the same as the files being signed. A
       # wrong path or a file it never reached looks identical from the
       # outside, and the failure surfaces on somebody else's machine. So every
-      # binary has to be valid, our two have to be signed by us, and nothing
+      # binary has to be valid, ours have to be signed by us, and nothing
       # else may be: the last is what catches the step being widened back to
       # the whole folder.
       - name: Every payload binary is signed, and only ours by us
         shell: pwsh
         run: |
-          $ours = 'revenant-engine.exe', 'revenant-ui.exe'
+          $ours = 'revenant-engine.exe', 'revenant-ui.exe', 'plugins/p25trunk.dll'
           $bad = @($ours | Where-Object { -not (Test-Path "dist/stage/$_") } |
-                   ForEach-Object { "${_}: not at the top of the payload" })
+                   ForEach-Object { "${_}: not where the payload puts it" })
           Get-ChildItem dist/stage -Recurse -Include *.exe, *.dll | ForEach-Object {
             $sig = Get-AuthenticodeSignature $_.FullName
             $signer = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '' }
             $byUs = $signer -match 'Specter Point'
+            $rel = [IO.Path]::GetRelativePath((Resolve-Path dist/stage).Path, $_.FullName) -replace '\\', '/'
             if ($sig.Status -ne 'Valid') {
               $bad += "$($_.Name): $($sig.Status)"
-            } elseif ($ours -contains $_.Name -and -not $byUs) {
+            } elseif ($ours -contains $rel -and -not $byUs) {
               $bad += "$($_.Name): signed by $signer, not by us"
-            } elseif ($ours -notcontains $_.Name -and $byUs) {
+            } elseif ($ours -notcontains $rel -and $byUs) {
               $bad += "$($_.Name): re-signed by us over its publisher"
             }
           }
