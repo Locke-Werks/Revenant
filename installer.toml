@@ -17,7 +17,7 @@
 
 [product]
 name        = "Revenant"
-version     = "0.2.0"
+version     = "0.2.1"
 publisher   = "Locke Werks"
 description = "A GPU-resident software defined radio"
 copyright   = "Copyright (c) 2026 Locke Werks"
