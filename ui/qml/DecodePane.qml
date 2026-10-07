@@ -220,8 +220,35 @@ ColumnLayout {
             onCountChanged: {
                 if (count === 0) {
                     follow = true;
-                } else if (follow) {
-                    Qt.callLater(toTail);
+                }
+            }
+
+            // Followed on the model's inserts, not on count. At the cap a
+            // batch takes as many lines off the top as it adds at the bottom,
+            // the view applies both together, and count ends where it began
+            // and never signals: following on count stopped the log at its
+            // two thousandth line. Geometry the view moves while it applies
+            // the batch is not the operator scrolling, so placing holds the
+            // follow decision from before the change until it is acted on.
+            Connections {
+                target: pane.log
+
+                function onRowsAboutToBeRemoved() {
+                    logView.placing = true;
+                }
+                function onRowsAboutToBeInserted() {
+                    logView.placing = true;
+                }
+                function onRowsInserted() {
+                    Qt.callLater(logView.settle);
+                }
+            }
+
+            function settle() {
+                if (follow) {
+                    toTail();
+                } else {
+                    placing = false;
                 }
             }
             onContentYChanged: {
