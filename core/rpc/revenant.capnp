@@ -1189,6 +1189,18 @@ struct VrxStatus {
     # 2026-10-03; an older engine sends auto and false.
     transcribe @14 :TranscribeChoice;
     transcribing @15 :Bool;
+
+    # The owner again, classified for the session asking, which is what a
+    # client draws and could not work out from creatorSession: it holds no
+    # session id of its own and has no way to know which numbers are plugins.
+    # engine is a receiver no session created, the hosting process's; plugin
+    # is one an engine plugin opened, and ownerName is then the plugin's name
+    # as it described itself, empty for every other kind. Filled by vrxStatus
+    # and inside every VrxEvent, both relative to the session that asked or
+    # subscribed. Added on 2026-10-06; an older engine sends engine and an
+    # empty name, which is why engine is the zero.
+    ownerKind @16 :VrxOwnerKind;
+    ownerName @17 :Text;
 }
 
 struct SpectrumFrame {
@@ -3545,6 +3557,34 @@ interface Session {
     # as unimplemented and should say the engine does not report plugins,
     # never that there are none.
     enginePlugins @33 () -> (plugins :EnginePlugins);
+
+    # RECEIVERS SOMEBODY ELSE OPENED, added on 2026-10-06. vrxIds is a poll
+    # and a client polling it sees a receiver appear without knowing who made
+    # it or that it is worth listening to; an engine plugin such as the P25
+    # trunk tracker opens and closes voice receivers by the call, faster than
+    # any sensible poll, so a client that polls misses most of them outright.
+    # This pushes every receiver's coming, change and going instead.
+    #
+    # On subscribe the engine first sends added for every receiver that
+    # exists at that moment, then every change after it, in order, per
+    # subscriber. The replay comes first so a client builds its list from
+    # this stream alone and never has to merge it with a vrxIds answer that
+    # raced it. RDS companions are never sent, for the reason vrxIds leaves
+    # them out.
+    #
+    # ONE CALL IN FLIGHT, AND A SUBSCRIBER THAT FALLS BEHIND IS ENDED RATHER
+    # THAN THINNED. Unlike a transcript, an event lost from the middle of
+    # this stream is not just a gap: a dropped removed leaves the client
+    # showing a receiver that is gone, for as long as it runs. So a
+    # subscriber more than 1024 events behind is sent ended() with the reason
+    # and dropped, and the client subscribes again, which replays the truth.
+    #
+    # changed and removed are sent only for a receiver this subscription was
+    # sent added for, so a client never has to guess at an id it does not
+    # know. The subscription lives as long as its capability, as
+    # subscribeTranscripts does.
+    subscribeVrxEvents @34 (receiver :VrxEventReceiver)
+        -> (subscription :VrxEventSubscription);
 }
 
 # What one loaded plugin can decode, as it declared itself through
@@ -3770,5 +3810,70 @@ interface TranscriptReceiver {
 
 # Dropping this ends the subscription.
 interface TranscriptSubscription {
+    cancel @0 () -> ();
+}
+
+# ---------------------------------------------------------------------------
+# Receiver events
+# ---------------------------------------------------------------------------
+
+# Who a receiver belongs to, from the point of view of one session. The
+# server knows the creator as a number; what a client needs is whether that
+# number is itself, another client, a plugin or nobody, because each is drawn
+# and offered differently: a client may remove its own, should ask before
+# removing another session's, and should leave a plugin's to the plugin.
+enum VrxOwnerKind {
+    # No session created it: the process hosting the engine added it, and it
+    # stays until somebody removes it. Also what an engine that predates the
+    # field sends.
+    engine @0;
+    thisSession @1;
+    otherSession @2;
+    plugin @3;
+}
+
+enum VrxEventKind {
+    added @0;
+    changed @1;
+    removed @2;
+}
+
+struct VrxEvent {
+    kind @0 :VrxEventKind;
+    vrx @1 :UInt64;
+
+    # Relative to the subscribing session, by VrxOwnerKind. For removed this
+    # is who it belonged to when it went.
+    owner @2 :VrxOwnerKind;
+
+    # The plugin's name when owner is plugin, as the plugin described itself
+    # ("test-tracker", "p25-trunk"). Empty for every other owner.
+    ownerName @3 :Text;
+
+    # The receiver as vrxStatus would answer it at the moment of the event,
+    # owner fields included, for added and changed. Unset for removed: the
+    # receiver is gone and a status read now would be the engine's refusal.
+    # Taken when the event happens and not when it is delivered, so a client
+    # behind its queue sees each state in turn rather than the last one
+    # several times.
+    status @4 :VrxStatus;
+
+    # Why, for removed, in the same words AudioReceiver::ended carries for
+    # that receiver: removed by a session, its session ended, the front end
+    # retuned away from it, the source closed. Empty for added and changed.
+    reason @5 :Text;
+}
+
+interface VrxEventReceiver {
+    event @0 (event :VrxEvent) -> ();
+
+    # No further event will arrive, and why. At most once, never for a cancel
+    # this client asked for. Sent when the subscriber fell too far behind,
+    # and the answer to it is to subscribe again.
+    ended @1 (reason :Text) -> ();
+}
+
+# Dropping this ends the subscription.
+interface VrxEventSubscription {
     cancel @0 () -> ();
 }

@@ -195,6 +195,23 @@ static_assert(static_cast<std::uint16_t>(schema::FlowControl::PACED) ==
 static_assert(static_cast<std::uint16_t>(schema::FlowControl::DEMAND) ==
               static_cast<std::uint16_t>(FlowControl::Demand));
 
+// And for receiver ownership and receiver events, used by read_vrx_status and
+// read_vrx_event.
+static_assert(static_cast<std::uint16_t>(schema::VrxOwnerKind::ENGINE) ==
+              static_cast<std::uint16_t>(VrxOwnerKind::Engine));
+static_assert(static_cast<std::uint16_t>(schema::VrxOwnerKind::THIS_SESSION) ==
+              static_cast<std::uint16_t>(VrxOwnerKind::ThisSession));
+static_assert(static_cast<std::uint16_t>(schema::VrxOwnerKind::OTHER_SESSION) ==
+              static_cast<std::uint16_t>(VrxOwnerKind::OtherSession));
+static_assert(static_cast<std::uint16_t>(schema::VrxOwnerKind::PLUGIN) ==
+              static_cast<std::uint16_t>(VrxOwnerKind::Plugin));
+static_assert(static_cast<std::uint16_t>(schema::VrxEventKind::ADDED) ==
+              static_cast<std::uint16_t>(VrxEventKind::Added));
+static_assert(static_cast<std::uint16_t>(schema::VrxEventKind::CHANGED) ==
+              static_cast<std::uint16_t>(VrxEventKind::Changed));
+static_assert(static_cast<std::uint16_t>(schema::VrxEventKind::REMOVED) ==
+              static_cast<std::uint16_t>(VrxEventKind::Removed));
+
 // Sets a field for the length of a scope and puts it back on the way out,
 // including out of an exception. Both uses are loop-thread-only fields whose
 // stale value would be read by code running after the scope: a dangling
@@ -566,6 +583,18 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     return out;
 }
 
+// An ordinal this client cannot name reads as Engine, the zero, which is the
+// one owner a client offers no action on: a newer engine's new kind of owner
+// is shown as somebody else's rather than as this session's.
+[[nodiscard]] VrxOwnerKind read_vrx_owner_kind(schema::VrxOwnerKind in) {
+    switch (in) {
+        case schema::VrxOwnerKind::THIS_SESSION: return VrxOwnerKind::ThisSession;
+        case schema::VrxOwnerKind::OTHER_SESSION: return VrxOwnerKind::OtherSession;
+        case schema::VrxOwnerKind::PLUGIN: return VrxOwnerKind::Plugin;
+        default: return VrxOwnerKind::Engine;
+    }
+}
+
 [[nodiscard]] Expected<VrxStatus> read_vrx_status(schema::VrxStatus::Reader in) {
     auto params = read_vrx_params(in.getParams());
     if (!params) {
@@ -602,6 +631,38 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
         default: out.transcribe = TranscribeChoice::Auto; break;
     }
     out.transcribing = in.getTranscribing();
+
+    out.owner_kind = read_vrx_owner_kind(in.getOwnerKind());
+    out.owner_name = read_text(in.getOwnerName());
+    return out;
+}
+
+// A receiver event, or nothing for a kind this client cannot name, which a
+// newer engine could send: guessing would turn it into an added or a removed
+// that never happened.
+//
+// A status that does not read, which can only be an engine sending a
+// demodulator this client cannot name, leaves status empty rather than
+// refusing the event: a removed or an added with no status still tells the
+// client a receiver exists or went, and losing that is the ghost the schema's
+// subscribeVrxEvents is written to prevent.
+[[nodiscard]] std::optional<VrxEvent> read_vrx_event(schema::VrxEvent::Reader in) {
+    VrxEvent out;
+    switch (in.getKind()) {
+        case schema::VrxEventKind::ADDED: out.kind = VrxEventKind::Added; break;
+        case schema::VrxEventKind::CHANGED: out.kind = VrxEventKind::Changed; break;
+        case schema::VrxEventKind::REMOVED: out.kind = VrxEventKind::Removed; break;
+        default: return std::nullopt;
+    }
+    out.vrx = in.getVrx();
+    out.owner = read_vrx_owner_kind(in.getOwner());
+    out.owner_name = read_text(in.getOwnerName());
+    if (in.hasStatus()) {
+        if (auto status = read_vrx_status(in.getStatus())) {
+            out.status = *std::move(status);
+        }
+    }
+    out.reason = read_text(in.getReason());
     return out;
 }
 
@@ -1168,6 +1229,9 @@ struct LoopState {
 
     // The one transcript subscription, or null.
     kj::Own<schema::TranscriptSubscription::Client> transcripts;
+
+    // The one receiver event subscription, or null.
+    kj::Own<schema::VrxEventSubscription::Client> vrx_events;
 };
 
 class ClientImpl;
@@ -1242,6 +1306,22 @@ public:
         : owner_(owner), generation_(generation) {}
 
     kj::Promise<void> transcript(TranscriptContext context) override;
+    kj::Promise<void> ended(EndedContext context) override;
+
+private:
+    ClientImpl& owner_;
+    std::uint64_t generation_ = 0;
+};
+
+// The same, for receiver events, and carrying a generation for the same
+// reason: the replay a replaced subscription was still sending must not reach
+// the new callback, or a client would rebuild its list twice over.
+class VrxEventReceiverImpl final : public schema::VrxEventReceiver::Server {
+public:
+    VrxEventReceiverImpl(ClientImpl& owner, std::uint64_t generation)
+        : owner_(owner), generation_(generation) {}
+
+    kj::Promise<void> event(EventContext context) override;
     kj::Promise<void> ended(EndedContext context) override;
 
 private:
@@ -1328,6 +1408,10 @@ public:
                                                TranscriptEndedCallback on_ended) override;
     void unsubscribe_transcripts() override;
 
+    [[nodiscard]] Status subscribe_vrx_events(VrxEventCallback on_event,
+                                              VrxEventEndedCallback on_ended) override;
+    void unsubscribe_vrx_events() override;
+
     [[nodiscard]] std::uint64_t frames_received() const override;
     [[nodiscard]] std::uint64_t frames_dropped() const override;
 
@@ -1348,6 +1432,10 @@ public:
     // Loop thread only, called by TranscriptReceiverImpl.
     void deliver_transcript(std::uint64_t generation, schema::Transcript::Reader in);
     void deliver_transcript_ended(std::uint64_t generation, capnp::Text::Reader reason);
+
+    // Loop thread only, called by VrxEventReceiverImpl.
+    void deliver_vrx_event(std::uint64_t generation, schema::VrxEvent::Reader in);
+    void deliver_vrx_event_ended(std::uint64_t generation, capnp::Text::Reader reason);
 
 private:
     void run(const std::string& address, std::uint16_t port, std::promise<Status>& ready);
@@ -1472,6 +1560,12 @@ private:
     TranscriptCallback transcript_callback_;
     TranscriptEndedCallback transcript_ended_;
     std::uint64_t transcript_generation_ = 0;
+
+    // The receiver event subscription's pair and generation, on the
+    // transcript subscription's terms. Loop thread.
+    VrxEventCallback vrx_event_callback_;
+    VrxEventEndedCallback vrx_event_ended_;
+    std::uint64_t vrx_event_generation_ = 0;
 
     // client.h says calls queue. This is what makes them.
     std::mutex calls_;
@@ -2419,6 +2513,111 @@ void ClientImpl::deliver_transcript_ended(std::uint64_t generation, capnp::Text:
     transcript_ended_ = nullptr;
     if (state_ != nullptr) {
         state_->transcripts = nullptr;
+    }
+    if (callable) {
+        callable(read_text(reason));
+    }
+}
+
+kj::Promise<void> VrxEventReceiverImpl::event(EventContext context) {
+    owner_.deliver_vrx_event(generation_, context.getParams().getEvent());
+    return kj::READY_NOW;
+}
+
+kj::Promise<void> VrxEventReceiverImpl::ended(EndedContext context) {
+    owner_.deliver_vrx_event_ended(generation_, context.getParams().getReason());
+    return kj::READY_NOW;
+}
+
+Status ClientImpl::subscribe_vrx_events(VrxEventCallback on_event,
+                                        VrxEventEndedCallback on_ended) {
+    if (!on_event) {
+        return fail("subscribe_vrx_events: the event callback is empty. "
+                    "unsubscribe_vrx_events is how a subscription ends");
+    }
+    auto done = on_loop("subscribeVrxEvents", [this, &on_event, &on_ended](LoopState& state) {
+        // subscribe_transcripts' order: the old one cancelled, the generation
+        // moved, and the callbacks in place BEFORE the request goes out. The
+        // engine starts its replay inside the call, so the first added events
+        // can arrive ahead of the answer, and a callback installed in the
+        // answer's continuation would miss them.
+        kj::Promise<void> ended = kj::READY_NOW;
+        if (state.vrx_events.get() != nullptr) {
+            ended = state.vrx_events->cancelRequest().send().ignoreResult().catch_(
+                [](kj::Exception&&) {});
+            state.vrx_events = nullptr;
+        }
+        const std::uint64_t generation = ++vrx_event_generation_;
+        vrx_event_callback_ = std::move(on_event);
+        vrx_event_ended_ = std::move(on_ended);
+        return ended.then([this, &state, generation]() {
+            auto request = state.session.subscribeVrxEventsRequest();
+            request.setReceiver(schema::VrxEventReceiver::Client(
+                kj::heap<VrxEventReceiverImpl>(*this, generation)));
+            return request.send()
+                .then([this, &state, generation](auto&& response) {
+                    // Kept only while it is still the current subscription.
+                    // An ended() that overtook this answer has already moved
+                    // the generation, and holding the capability then would
+                    // keep alive a subscription the engine has finished with.
+                    if (generation == vrx_event_generation_) {
+                        state.vrx_events = kj::heap<schema::VrxEventSubscription::Client>(
+                            response.getSubscription());
+                    }
+                    return true;
+                })
+                .catch_([this, generation](kj::Exception&& failure) -> kj::Promise<bool> {
+                    if (generation == vrx_event_generation_) {
+                        vrx_event_callback_ = nullptr;
+                        vrx_event_ended_ = nullptr;
+                    }
+                    return kj::Promise<bool>(kj::mv(failure));
+                });
+        });
+    });
+    if (!done) {
+        return std::unexpected(done.error());
+    }
+    return {};
+}
+
+void ClientImpl::unsubscribe_vrx_events() {
+    // No error channel, for the reason unsubscribe_spectrum gives.
+    static_cast<void>(on_loop("unsubscribe_vrx_events", [this](LoopState& state) {
+        ++vrx_event_generation_;
+        vrx_event_callback_ = nullptr;
+        vrx_event_ended_ = nullptr;
+        if (state.vrx_events.get() == nullptr) {
+            return kj::Promise<void>(kj::READY_NOW);
+        }
+        auto cancelled = state.vrx_events->cancelRequest().send().ignoreResult();
+        state.vrx_events = nullptr;
+        return cancelled.catch_([](kj::Exception&&) {});
+    }));
+}
+
+void ClientImpl::deliver_vrx_event(std::uint64_t generation, schema::VrxEvent::Reader in) {
+    if (generation != vrx_event_generation_ || !vrx_event_callback_) {
+        return;
+    }
+    if (auto event = read_vrx_event(in)) {
+        vrx_event_callback_(*event);
+    }
+}
+
+void ClientImpl::deliver_vrx_event_ended(std::uint64_t generation, capnp::Text::Reader reason) {
+    if (generation != vrx_event_generation_) {
+        return;
+    }
+    // The generation moves as well as the callbacks clearing, so a
+    // subscribe answer still on its way does not keep the capability; see
+    // subscribe_vrx_events.
+    ++vrx_event_generation_;
+    VrxEventEndedCallback callable = std::move(vrx_event_ended_);
+    vrx_event_callback_ = nullptr;
+    vrx_event_ended_ = nullptr;
+    if (state_ != nullptr) {
+        state_->vrx_events = nullptr;
     }
     if (callable) {
         callable(read_text(reason));

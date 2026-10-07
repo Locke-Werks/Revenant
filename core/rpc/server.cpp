@@ -1166,6 +1166,53 @@ struct VrxOwner {
     bool keep = false;
 };
 
+// One receiver event as it happened, before anybody's point of view is put on
+// it. Taken once and shared by every subscriber's queue, so a burst costs one
+// status read per event and not one per subscriber.
+//
+// THE STATUS IS READ WHEN THE EVENT HAPPENS AND NOT WHEN IT IS SENT. A
+// subscriber behind its queue would otherwise be told three changes that all
+// carry the last tuning, which is a client redrawing the same receiver three
+// times and never seeing the two states between. The owner is captured too,
+// because a removed is written after the ownership record has gone.
+struct VrxEventItem {
+    schema::VrxEventKind kind = schema::VrxEventKind::ADDED;
+    engine::VrxId vrx;
+    VrxOwner owner;
+    std::optional<engine::VrxStatus> status;
+    TranscribeChoice transcribe = TranscribeChoice::Auto;
+    bool transcribing = false;
+    std::string reason;
+};
+
+// One subscriber to receiver events. Loop thread only, like TranscriptNode.
+//
+// `session` is the subscribing session's number, which is what every owner
+// in the stream is classified against. `known` is every receiver this
+// subscriber has been sent added for and not yet removed: changed and removed
+// go only to a subscriber that knows the id. That is what keeps an RDS
+// companion out of the stream without asking whether it is one at removal
+// time, which by then it may no longer be: end_rds_for_vrx forgets the
+// companion before a front-end retune reports it removed.
+struct VrxEventNode : std::enable_shared_from_this<VrxEventNode> {
+    VrxEventNode(schema::VrxEventReceiver::Client client, std::uint64_t subscriber)
+        : receiver(kj::mv(client)), session(subscriber) {}
+
+    schema::VrxEventReceiver::Client receiver;
+    std::uint64_t session = 0;
+    bool in_flight = false;
+    bool cancelled = false;
+    std::deque<std::shared_ptr<const VrxEventItem>> queue;
+    std::set<std::uint32_t> known;
+};
+
+// A receiver event subscription's queue, in events. Far past anything a
+// healthy client reaches: a trunk tracker opening a receiver per call makes a
+// few events a second. A subscriber this far behind has stalled, and it is
+// ended rather than thinned, for the reason the schema gives on
+// subscribeVrxEvents: a removed lost from the middle leaves a ghost.
+constexpr std::size_t kVrxEventQueueDepth = 1024;
+
 // What the engine's sink reaches the server through.
 //
 // Heap-allocated and co-owned by the sink callable, because the callable
@@ -1525,6 +1572,35 @@ public:
     // from across the room. Audio goes quiet instead, and a quiet channel with
     // the squelch shut sounds identical, so the subscriber is told in words.
     void after_vrx_removed(engine::VrxId vrx, kj::StringPtr reason);
+
+    // Receiver events for clients, the schema's subscribeVrxEvents. Loop
+    // thread, all of them.
+    //
+    // add_vrx_event_node replays every receiver that exists into the new
+    // node's queue before it joins the list, so nothing that happens after
+    // can overtake the replay. The three announce_* are the hooks: added from
+    // record_vrx, changed from after_vrx_retuned, removed from
+    // after_vrx_removed and, for every receiver at once, release_source_state.
+    // Each of them reads the ownership record, so removed has to run before
+    // the record is erased.
+    //
+    // vrx_owner_kind classifies a creator against the session asking, by
+    // emit_plugin_event's rule turned round for a client, and
+    // write_owned_vrx_status is vrxStatus's answer, shared so an event's
+    // status and a poll's cannot come to differ.
+    void add_vrx_event_node(const std::shared_ptr<VrxEventNode>& node);
+    void end_vrx_event_node(const std::shared_ptr<VrxEventNode>& node);
+    void announce_vrx_added(engine::VrxId vrx);
+    void announce_vrx_changed(engine::VrxId vrx);
+    void announce_vrx_removed(engine::VrxId vrx, kj::StringPtr reason);
+    [[nodiscard]] std::shared_ptr<const VrxEventItem> capture_vrx(schema::VrxEventKind kind,
+                                                                  engine::VrxId vrx,
+                                                                  std::string reason = {});
+    [[nodiscard]] std::pair<schema::VrxOwnerKind, std::string> vrx_owner_kind(
+        std::uint64_t creator, std::uint64_t asker) const;
+    void write_owned_vrx_status(schema::VrxStatus::Builder out, const engine::VrxStatus& status,
+                                const VrxOwner& owner, TranscribeChoice transcribe,
+                                bool transcribing, std::uint64_t asker) const;
 
     // Decoded messages. Event loop thread unless marked.
     //
@@ -1970,6 +2046,14 @@ private:
     std::deque<transcribe::Transcript> transcript_pending_;
     std::uint64_t transcript_pending_dropped_ = 0;
 
+    // Receiver event subscribers. Loop thread only, and every event they are
+    // sent is raised on the loop thread too, so there is no hand-off and no
+    // lock: the hooks queue onto the nodes directly.
+    std::vector<std::shared_ptr<VrxEventNode>> vrx_event_nodes_;
+    void enqueue_vrx_event(const std::shared_ptr<VrxEventNode>& node,
+                           std::shared_ptr<const VrxEventItem> item);
+    void pump_vrx_events(const std::shared_ptr<VrxEventNode>& node);
+
     // Loop thread. See the definitions.
     [[nodiscard]] Expected<std::shared_ptr<AudioRoute>> ensure_audio_route(
         engine::VrxId vrx, const engine::VrxStatus& status);
@@ -2185,6 +2269,35 @@ private:
 
     ServerImpl& owner_;
     std::shared_ptr<TranscriptNode> node_;
+};
+
+class VrxEventSubscriptionImpl final : public schema::VrxEventSubscription::Server {
+public:
+    VrxEventSubscriptionImpl(ServerImpl& owner, std::shared_ptr<VrxEventNode> node)
+        : owner_(owner), node_(std::move(node)) {}
+
+    VrxEventSubscriptionImpl(const VrxEventSubscriptionImpl&) = delete;
+    VrxEventSubscriptionImpl& operator=(const VrxEventSubscriptionImpl&) = delete;
+
+    // Not an override, for the reason SubscriptionImpl's destructor gives.
+    ~VrxEventSubscriptionImpl() { end(); }
+
+    kj::Promise<void> cancel(CancelContext) override {
+        end();
+        return kj::READY_NOW;
+    }
+
+private:
+    void end() {
+        if (node_ == nullptr) {
+            return;
+        }
+        owner_.end_vrx_event_node(node_);
+        node_.reset();
+    }
+
+    ServerImpl& owner_;
+    std::shared_ptr<VrxEventNode> node_;
 };
 
 class SubscriptionImpl final : public schema::SpectrumSubscription::Server {
@@ -2470,22 +2583,12 @@ public:
         if (!status) {
             return to_exception(status.error());
         }
-        auto out = context.getResults().initStatus();
-        write_vrx_status(out, *status);
-
-        // The server's half, which convert.cpp cannot write because the
-        // engine does not know sessions exist.
-        const VrxOwner owner = owner_.owner_of(*id);
-        out.setCreatorSession(owner.session);
-        out.setKept(owner.keep);
-        out.setOwnedByCaller(owner.session != 0 && owner.session == id_);
-
-        switch (owner_.transcribe_choice(*id)) {
-            case TranscribeChoice::Auto: out.setTranscribe(schema::TranscribeChoice::AUTO); break;
-            case TranscribeChoice::On: out.setTranscribe(schema::TranscribeChoice::ON); break;
-            case TranscribeChoice::Off: out.setTranscribe(schema::TranscribeChoice::OFF); break;
-        }
-        out.setTranscribing(owner_.transcribing(*id));
+        // The engine's half and the server's, which convert.cpp cannot write
+        // because the engine does not know sessions exist. One function for
+        // this and for VrxEvent.status, so the two answers cannot drift.
+        owner_.write_owned_vrx_status(context.getResults().initStatus(), *status,
+                                      owner_.owner_of(*id), owner_.transcribe_choice(*id),
+                                      owner_.transcribing(*id), id_);
         return kj::READY_NOW;
     }
 
@@ -3018,6 +3121,25 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> subscribeVrxEvents(SubscribeVrxEventsContext context) override {
+        auto request = context.getParams();
+        if (!request.hasReceiver()) {
+            return to_exception(Error{"subscribeVrxEvents needs a receiver capability, and "
+                                      "this request carried a null pointer in its place"});
+        }
+        auto node = std::make_shared<VrxEventNode>(request.getReceiver(), id_);
+
+        // The capability before the registry entry, subscribeSpectrum's
+        // order: a throw on the way to the client cannot leave a node that
+        // nothing ends. The replay starts going out inside add, ahead of this
+        // answer, which is why the client installs its callbacks first.
+        schema::VrxEventSubscription::Client handle =
+            kj::heap<VrxEventSubscriptionImpl>(owner_, node);
+        owner_.add_vrx_event_node(node);
+        context.getResults().setSubscription(kj::mv(handle));
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> vocoderPlugins(VocoderPluginsContext context) override {
         write_vocoder_plugins(context.getResults().initPlugins(), owner_.vocoders());
         return kj::READY_NOW;
@@ -3285,6 +3407,7 @@ void ServerImpl::serve(ServerOptions options) {
         sends.clear();
         sends_ = nullptr;
         subscriptions_.clear();
+        vrx_event_nodes_.clear();
 
         // Audio subscriptions hold a capability made on this thread, so they
         // are dropped here rather than left to stop(), which runs on the
@@ -4172,6 +4295,7 @@ void ServerImpl::end_rds_for_vrx(engine::VrxId vrx) {
 void ServerImpl::record_vrx(engine::VrxId vrx, std::uint64_t session, bool keep) {
     vrx_owners_[vrx.value] = VrxOwner{.session = session, .keep = keep};
     emit_plugin_event(vrx_event(RV_ENGINE_EVENT_VRX_ADDED, vrx), vrx);
+    announce_vrx_added(vrx);
 }
 
 VrxOwner ServerImpl::owner_of(engine::VrxId vrx) const {
@@ -4188,6 +4312,9 @@ void ServerImpl::after_vrx_removed(engine::VrxId vrx, kj::StringPtr reason) {
         event.text = std::string(reason.cStr(), reason.size());
         emit_plugin_event(event, vrx);
     }
+
+    // The clients, on the same terms: the owner they are told is the record's.
+    announce_vrx_removed(vrx, reason);
 
     end_audio_for_vrx(vrx, reason);
 
@@ -6036,6 +6163,22 @@ void ServerImpl::release_source_state(kj::StringPtr reason) {
         end_decode_route(route, reason);
     }
 
+    // Every receiver a client was told about goes with the source, and the
+    // engine reports none of them one by one, so each subscriber is told here,
+    // receiver by receiver, while the ownership record can still say whose
+    // each was. Without this a client that never polls would go on showing
+    // every receiver the closed source had.
+    //
+    // Gathered first because announcing edits each node's known set.
+    std::set<std::uint32_t> announced;
+    for (const auto& node : vrx_event_nodes_) {
+        announced.insert(node->known.begin(), node->known.end());
+    }
+    for (const std::uint32_t id : announced) {
+        announce_vrx_removed(engine::VrxId{id},
+                             "the engine's source was closed, and every receiver went with it");
+    }
+
     // Every receiver goes with the source, so nothing is left to own. A
     // session ending later would otherwise try to remove ids that belonged to
     // the old stream, which the engine refuses harmlessly and which would
@@ -6711,6 +6854,234 @@ void ServerImpl::pump_transcript(const std::shared_ptr<TranscriptNode>& node) {
 }
 
 // ---------------------------------------------------------------------------
+// Receiver events for clients
+// ---------------------------------------------------------------------------
+
+// emit_plugin_event's classification, from a client's side of the wire. A
+// plugin is named because "plugin" alone tells an operator nothing about
+// which of several opened the receiver, and the name is the one the plugin
+// gave itself, which is what enginePlugins lists it under.
+std::pair<schema::VrxOwnerKind, std::string> ServerImpl::vrx_owner_kind(
+    std::uint64_t creator, std::uint64_t asker) const {
+    if (creator == 0) {
+        return {schema::VrxOwnerKind::ENGINE, {}};
+    }
+    if (creator == asker) {
+        return {schema::VrxOwnerKind::THIS_SESSION, {}};
+    }
+    for (const PluginSlot& slot : plugins_) {
+        if (slot.session == creator) {
+            return {schema::VrxOwnerKind::PLUGIN,
+                    slot.runner == nullptr ? std::string{} : slot.runner->name()};
+        }
+    }
+    return {schema::VrxOwnerKind::OTHER_SESSION, {}};
+}
+
+void ServerImpl::write_owned_vrx_status(schema::VrxStatus::Builder out,
+                                        const engine::VrxStatus& status, const VrxOwner& owner,
+                                        TranscribeChoice transcribe, bool transcribing,
+                                        std::uint64_t asker) const {
+    write_vrx_status(out, status);
+    out.setCreatorSession(owner.session);
+    out.setKept(owner.keep);
+    out.setOwnedByCaller(owner.session != 0 && owner.session == asker);
+    auto [kind, name] = vrx_owner_kind(owner.session, asker);
+    out.setOwnerKind(kind);
+    out.setOwnerName(kj::StringPtr(name.c_str()));
+
+    switch (transcribe) {
+        case TranscribeChoice::Auto: out.setTranscribe(schema::TranscribeChoice::AUTO); break;
+        case TranscribeChoice::On: out.setTranscribe(schema::TranscribeChoice::ON); break;
+        case TranscribeChoice::Off: out.setTranscribe(schema::TranscribeChoice::OFF); break;
+    }
+    out.setTranscribing(transcribing);
+}
+
+std::shared_ptr<const VrxEventItem> ServerImpl::capture_vrx(schema::VrxEventKind kind,
+                                                            engine::VrxId vrx,
+                                                            std::string reason) {
+    auto item = std::make_shared<VrxEventItem>();
+    item->kind = kind;
+    item->vrx = vrx;
+    item->owner = owner_of(vrx);
+    item->reason = std::move(reason);
+    if (kind != schema::VrxEventKind::REMOVED) {
+        auto status = engine_.vrx_status(vrx);
+        if (!status) {
+            // Gone between the change and this read, which on the loop
+            // thread means the engine took it on its own. Nothing is sent:
+            // the removal that follows, when the server learns of it, is
+            // the event that matters, and a status that is the engine's
+            // refusal would be worse than none.
+            return nullptr;
+        }
+        item->status = *std::move(status);
+        item->transcribe = transcribe_choice(vrx);
+        item->transcribing = transcribing(vrx);
+    }
+    return item;
+}
+
+void ServerImpl::add_vrx_event_node(const std::shared_ptr<VrxEventNode>& node) {
+    // THE REPLAY, straight into the queue and not through enqueue's bound.
+    // A subscriber that is ended for the size of the engine it joined could
+    // never subscribe at all, and the receivers that exist are a list the
+    // server already holds rather than a backlog a slow client built up.
+    //
+    // vrx_ids and not vrx_owners_, because a receiver the hosting process
+    // added has no ownership record and is still a receiver a client should
+    // see. RDS companions are left out for the reason vrxIds leaves them out.
+    for (const engine::VrxId id : engine_.vrx_ids()) {
+        if (is_rds_companion(id)) {
+            continue;
+        }
+        if (auto item = capture_vrx(schema::VrxEventKind::ADDED, id)) {
+            node->known.insert(id.value);
+            node->queue.push_back(std::move(item));
+        }
+    }
+    vrx_event_nodes_.push_back(node);
+    pump_vrx_events(node);
+}
+
+void ServerImpl::end_vrx_event_node(const std::shared_ptr<VrxEventNode>& node) {
+    node->cancelled = true;
+    std::erase(vrx_event_nodes_, node);
+}
+
+void ServerImpl::announce_vrx_added(engine::VrxId vrx) {
+    // record_vrx is reached by a client's addVrx and a plugin's add_vrx and
+    // by nothing else. open_rds adds its companions straight to the engine,
+    // which is what keeps them out of here; the check is for the day that
+    // changes.
+    if (vrx_event_nodes_.empty() || is_rds_companion(vrx)) {
+        return;
+    }
+    auto item = capture_vrx(schema::VrxEventKind::ADDED, vrx);
+    if (item == nullptr) {
+        return;
+    }
+    const auto nodes = vrx_event_nodes_;
+    for (const auto& node : nodes) {
+        node->known.insert(vrx.value);
+        enqueue_vrx_event(node, item);
+    }
+}
+
+void ServerImpl::announce_vrx_changed(engine::VrxId vrx) {
+    if (vrx_event_nodes_.empty()) {
+        return;
+    }
+    auto item = capture_vrx(schema::VrxEventKind::CHANGED, vrx);
+    if (item == nullptr) {
+        return;
+    }
+    const auto nodes = vrx_event_nodes_;
+    for (const auto& node : nodes) {
+        if (node->known.contains(vrx.value)) {
+            enqueue_vrx_event(node, item);
+        }
+    }
+}
+
+void ServerImpl::announce_vrx_removed(engine::VrxId vrx, kj::StringPtr reason) {
+    if (vrx_event_nodes_.empty()) {
+        return;
+    }
+    std::shared_ptr<const VrxEventItem> item;
+    // A copy of the list, because enqueue ends a subscriber that has fallen
+    // too far behind and ending one erases it from the list.
+    const auto nodes = vrx_event_nodes_;
+    for (const auto& node : nodes) {
+        if (node->known.erase(vrx.value) == 0) {
+            continue;
+        }
+        if (item == nullptr) {
+            // Built once and only when somebody knew the receiver, so a
+            // companion's removal costs nothing.
+            item = capture_vrx(schema::VrxEventKind::REMOVED, vrx,
+                               std::string(reason.cStr(), reason.size()));
+        }
+        enqueue_vrx_event(node, item);
+    }
+}
+
+void ServerImpl::enqueue_vrx_event(const std::shared_ptr<VrxEventNode>& node,
+                                   std::shared_ptr<const VrxEventItem> item) {
+    if (node->cancelled) {
+        return;
+    }
+    if (node->queue.size() < kVrxEventQueueDepth) {
+        node->queue.push_back(std::move(item));
+        pump_vrx_events(node);
+        return;
+    }
+
+    // ENDED AND NOT THINNED, on the schema's argument: evicting the oldest,
+    // which is what the transcript queue does, would sooner or later evict a
+    // removed and leave the client a receiver that does not exist. Ending it
+    // says so, and subscribing again replays the truth. The ended() goes out
+    // behind whatever call is in flight, since calls on one capability are
+    // delivered in order, and no event follows it.
+    node->queue.clear();
+    node->known.clear();
+    end_vrx_event_node(node);
+    if (sends_ == nullptr) {
+        return;
+    }
+    const std::string reason = std::format(
+        "this subscriber fell more than {} receiver events behind, so the engine ended the "
+        "subscription rather than drop one. Subscribe again for the receivers as they are now",
+        kVrxEventQueueDepth);
+    auto request = node->receiver.endedRequest();
+    request.setReason(kj::StringPtr(reason.c_str()));
+    sends_->add(request.send().ignoreResult().catch_([](kj::Exception&&) {}));
+}
+
+void ServerImpl::pump_vrx_events(const std::shared_ptr<VrxEventNode>& node) {
+    // One in flight per subscription, pump_transcript's rule, which is also
+    // what keeps the events in order.
+    if (node->cancelled || node->in_flight || sends_ == nullptr || node->queue.empty()) {
+        return;
+    }
+    const std::shared_ptr<const VrxEventItem> item = std::move(node->queue.front());
+    node->queue.pop_front();
+
+    auto request = node->receiver.eventRequest();
+    auto out = request.initEvent();
+    out.setKind(item->kind);
+    out.setVrx(item->vrx.value);
+    auto [kind, name] = vrx_owner_kind(item->owner.session, node->session);
+    out.setOwner(kind);
+    out.setOwnerName(kj::StringPtr(name.c_str()));
+    if (item->status) {
+        write_owned_vrx_status(out.initStatus(), *item->status, item->owner, item->transcribe,
+                               item->transcribing, node->session);
+    }
+    out.setReason(kj::StringPtr(item->reason.c_str()));
+    node->in_flight = true;
+
+    auto weak = node->weak_from_this();
+    sends_->add(request.send().ignoreResult().then(
+        [this, weak]() {
+            if (auto live = weak.lock()) {
+                live->in_flight = false;
+                pump_vrx_events(live);
+            }
+        },
+        [this, weak](kj::Exception&&) {
+            // A receiver that threw or went is not coming back, on deliver's
+            // argument for the spectrum. Taken off the list as well as
+            // marked, since unlike a transcript node nothing else sweeps it.
+            if (auto live = weak.lock()) {
+                live->in_flight = false;
+                end_vrx_event_node(live);
+            }
+        }));
+}
+
+// ---------------------------------------------------------------------------
 // Receiver and front-end changes, shared by clients and plugins
 // ---------------------------------------------------------------------------
 
@@ -6753,6 +7124,7 @@ Status ServerImpl::after_vrx_retuned(engine::VrxId vrx, const engine::VrxParams&
     reset_audio_for_vrx(vrx, status->tuning_epoch);
 
     emit_plugin_event(vrx_event(RV_ENGINE_EVENT_VRX_CHANGED, vrx), vrx);
+    announce_vrx_changed(vrx);
     return {};
 }
 

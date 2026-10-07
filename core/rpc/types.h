@@ -507,6 +507,14 @@ struct VrxPlacement {
 // speech but wfm), on takes it in whatever the mode, off leaves it out.
 enum class TranscribeChoice : std::uint8_t { Auto, On, Off };
 
+// Who a receiver belongs to from the asking session's side, mirroring the
+// schema's VrxOwnerKind ordinal for ordinal. Engine is a receiver no session
+// created, which the process hosting the engine added; Plugin is one an
+// engine plugin opened, named in owner_name. creator_session says the same
+// thing as a number, which a client cannot classify on its own because it
+// does not know its own session's number or which numbers are plugins.
+enum class VrxOwnerKind : std::uint8_t { Engine, ThisSession, OtherSession, Plugin };
+
 struct VrxStatus {
     std::uint64_t id = 0;
     VrxParams params;
@@ -558,6 +566,29 @@ struct VrxStatus {
     // whether the engine is transcribing it now. See TranscriptionStatus.
     TranscribeChoice transcribe = TranscribeChoice::Auto;
     bool transcribing = false;
+
+    // The owner classified against the session asking, and the plugin's name
+    // when owner_kind is Plugin, empty otherwise. Engine and empty from an
+    // engine that predates the fields.
+    VrxOwnerKind owner_kind = VrxOwnerKind::Engine;
+    std::string owner_name;
+};
+
+// What happened to a receiver, mirroring the schema's VrxEventKind ordinal for
+// ordinal.
+enum class VrxEventKind : std::uint8_t { Added, Changed, Removed };
+
+// One receiver event from subscribe_vrx_events. Mirrors the schema's VrxEvent:
+// owner is relative to the subscribing session, status is the receiver at the
+// moment of the event for Added and Changed and absent for Removed, and reason
+// is why it went, for Removed.
+struct VrxEvent {
+    VrxEventKind kind = VrxEventKind::Added;
+    std::uint64_t vrx = 0;
+    VrxOwnerKind owner = VrxOwnerKind::Engine;
+    std::string owner_name;
+    std::optional<VrxStatus> status;
+    std::string reason;
 };
 
 // What addVrx is asked to do with a receiver when the session that created

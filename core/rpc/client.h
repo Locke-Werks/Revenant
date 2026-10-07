@@ -590,6 +590,27 @@ public:
                                                        TranscriptEndedCallback on_ended) = 0;
     virtual void unsubscribe_transcripts() = 0;
 
+    // Every receiver's coming, change and going, whoever caused it: this
+    // client, another session, an engine plugin or the engine itself. The
+    // engine first sends Added for every receiver that exists, then each
+    // event as it happens, in order; see the schema's subscribeVrxEvents.
+    // One subscription per client; subscribing again replaces it, and the new
+    // one replays from the start, so a caller rebuilding its list clears it
+    // first.
+    //
+    // The callbacks run on the event loop thread under the rule
+    // subscribe_decoded states. They are installed before the request goes
+    // out, because the replay can arrive ahead of the answer. on_ended fires
+    // at most once and never for an unsubscribe; the engine ends a subscriber
+    // that fell too far behind rather than drop an event, and the answer to
+    // that is to subscribe again. An engine older than this refuses it as
+    // unimplemented.
+    using VrxEventCallback = std::function<void(const VrxEvent&)>;
+    using VrxEventEndedCallback = std::function<void(const std::string& reason)>;
+    [[nodiscard]] virtual Status subscribe_vrx_events(VrxEventCallback on_event,
+                                                      VrxEventEndedCallback on_ended) = 0;
+    virtual void unsubscribe_vrx_events() = 0;
+
     // Frames this client was sent.
     [[nodiscard]] virtual std::uint64_t frames_received() const = 0;
 

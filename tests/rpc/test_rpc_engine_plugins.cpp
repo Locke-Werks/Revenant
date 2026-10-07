@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <numbers>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -382,4 +383,102 @@ TEST_CASE("a front-end retune reaches a plugin with what it removed", "[gpu][rpc
     INFO(log.dump());
     REQUIRE_FALSE(retuned.empty());
     CHECK(retuned.find("removed=") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// What a client is told about a plugin's receivers
+// ---------------------------------------------------------------------------
+
+TEST_CASE("a client is told of a plugin's receiver as the plugin's, by name",
+          "[gpu][rpc][plugin][vrx-events]") {
+    REVENANT_NEEDS_GPU();
+
+    // The reason subscribeVrxEvents exists: a client never learned of a
+    // receiver a plugin opened, so it could neither show it nor play it.
+    // Retunable so the case can also take the receiver away the way a trunk
+    // tracker's receivers most often go when nobody removes them, with the
+    // front end moving out from under them.
+    const auto dir = plugin_directory("vrx-events", {kRpcTestEnginePluginGood});
+    const plugin::EnginePluginSet set = scan(dir);
+    REQUIRE(set.modules().size() == 1);
+
+    PluginLog log;
+    HarnessOptions options;
+    options.retunable = true;
+    options.engine_plugins = &set;
+    options.plugin_log = log.sink();
+    Harness harness;
+    const auto ready = harness.open(options);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    // The fixture opens its receiver from the source-opened replay, as tag 1.
+    INFO(log.dump());
+    REQUIRE_FALSE(log.find({event_type(RV_ENGINE_EVENT_COMMAND_RESULT), "tag=1 ", "code=0"})
+                      .empty());
+    const auto ids = harness.client().vrx_ids();
+    INFO(test::message_of(ids));
+    REQUIRE(ids.has_value());
+    REQUIRE(ids->size() == 1);
+    const std::uint64_t vrx = ids->front();
+
+    // Polled, it is the plugin's.
+    const auto status = harness.client().vrx_status(vrx);
+    INFO(test::message_of(status));
+    REQUIRE(status.has_value());
+    CHECK(status->owner_kind == rpc::VrxOwnerKind::Plugin);
+    CHECK(status->owner_name == "test-tracker");
+    CHECK_FALSE(status->owned_by_caller);
+    CHECK(status->params.demod == rpc::Demod::P25p1);
+
+    // Pushed, it is the plugin's too, in the replay.
+    std::mutex lock;
+    std::vector<rpc::VrxEvent> events;
+    const auto subscribed = harness.client().subscribe_vrx_events(
+        [&](const rpc::VrxEvent& event) {
+            const std::scoped_lock held(lock);
+            events.push_back(event);
+        },
+        [](const std::string&) {});
+    INFO(test::message_of(subscribed));
+    REQUIRE(subscribed.has_value());
+
+    const auto wait_for = [&](rpc::VrxEventKind kind) -> std::optional<rpc::VrxEvent> {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        for (;;) {
+            {
+                const std::scoped_lock held(lock);
+                for (const rpc::VrxEvent& event : events) {
+                    if (event.kind == kind && event.vrx == vrx) {
+                        return event;
+                    }
+                }
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return std::nullopt;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    };
+
+    const auto added = wait_for(rpc::VrxEventKind::Added);
+    REQUIRE(added.has_value());
+    CHECK(added->owner == rpc::VrxOwnerKind::Plugin);
+    CHECK(added->owner_name == "test-tracker");
+    REQUIRE(added->status.has_value());
+    CHECK(added->status->owner_kind == rpc::VrxOwnerKind::Plugin);
+    CHECK(added->status->owner_name == "test-tracker");
+
+    // A long way: the plugin's receiver falls outside the new span, and the
+    // client is told it went and whose it was.
+    const auto landed = harness.client().set_source_center(500'000'000);
+    INFO(test::message_of(landed));
+    REQUIRE(landed.has_value());
+    const auto removed = wait_for(rpc::VrxEventKind::Removed);
+    REQUIRE(removed.has_value());
+    CHECK(removed->owner == rpc::VrxOwnerKind::Plugin);
+    CHECK(removed->owner_name == "test-tracker");
+    CHECK_FALSE(removed->reason.empty());
+
+    harness.client().unsubscribe_vrx_events();
 }
