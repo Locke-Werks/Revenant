@@ -55,6 +55,10 @@ KrakenSDR runs as five single RTL-SDR channels already; coherent direction
 finding waits for multi-radio work after M5. Fobos SDR waits on reports of
 its imaging problems being resolved.
 
+The order is a plan, not a gate. Send a radio and it gets built for, wherever
+it sits in the list. Open an
+[issue](https://github.com/Locke-Werks/Revenant/issues) to arrange it.
+
 ## What it is
 
 A software defined radio application where samples cross the bus once, into
