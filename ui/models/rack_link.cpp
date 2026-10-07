@@ -24,8 +24,10 @@
 #include "models/engine_link.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -89,6 +91,14 @@ int EngineLink::focusedSlot() const
 {
     const RackEntry* entry = rack_.find(pane_key_);
     return entry == nullptr ? 0 : static_cast<int>(entry->slot);
+}
+
+QString EngineLink::focusedLabel() const
+{
+    // An empty entry with no pane, which labels as the first slot: what the
+    // audio section said before it asked here, "RX " and focusedSlot plus one.
+    const RackEntry* entry = rack_.find(pane_key_);
+    return QString::fromStdString(rack_entry_label(entry == nullptr ? RackEntry{} : *entry));
 }
 
 std::vector<RackMarker> EngineLink::rackMarkers() const
@@ -178,7 +188,7 @@ QVariantList EngineLink::rackEntries() const
             {QStringLiteral("key"), QVariant::fromValue<qulonglong>(entry.key)},
             {QStringLiteral("slot"), static_cast<int>(entry.slot)},
             {QStringLiteral("colour"), colour_text(entry.slot)},
-            {QStringLiteral("label"), QStringLiteral("RX %1").arg(entry.slot + 1)},
+            {QStringLiteral("label"), QString::fromStdString(rack_entry_label(entry))},
             {QStringLiteral("frequencyHz"), centre},
             {QStringLiteral("lowHz"), low},
             {QStringLiteral("highHz"), high},
@@ -194,6 +204,8 @@ QVariantList EngineLink::rackEntries() const
             {QStringLiteral("gain"), entry.gain},
             {QStringLiteral("gainText"), QString::fromStdString(rack_gain_text(entry.gain))},
             {QStringLiteral("transcribing"), transcribing},
+            {QStringLiteral("adopted"), entry.adopted},
+            {QStringLiteral("owner"), QString::fromStdString(entry.owner)},
         });
     }
     return out;
@@ -296,6 +308,12 @@ void EngineLink::park_pane()
 void EngineLink::focus_entry(std::uint64_t key)
 {
     if (key == 0 || key == pane_key_) {
+        return;
+    }
+    // Every focus path ends here, so this is the one test that keeps the pane
+    // off a receiver a plugin owns: the pane would retune it.
+    if (const RackEntry* entry = rack_.find(key);
+        entry == nullptr || !rack_entry_focusable(*entry)) {
         return;
     }
     const HeldView* found = held_view(key);
@@ -430,13 +448,21 @@ void EngineLink::addStartupReceiver(double absolute_hz, const QString& mode)
     startup_extra_.emplace_back(absolute_hz, mode);
 }
 
-bool EngineLink::spanClick(double pointer_hz, double center_hz, double bandwidth_hz,
-                           qulonglong detection_id)
+std::vector<RackBand> EngineLink::rack_bands() const
 {
     std::vector<RackBand> bands;
     for (const RackMarker& marker : rackMarkers()) {
-        bands.push_back({marker.key, marker.band.low_hz, marker.band.high_hz});
+        const RackEntry* entry = rack_.find(marker.key);
+        const bool focusable = entry != nullptr && rack_entry_focusable(*entry);
+        bands.push_back({marker.key, marker.band.low_hz, marker.band.high_hz, focusable});
     }
+    return bands;
+}
+
+bool EngineLink::spanClick(double pointer_hz, double center_hz, double bandwidth_hz,
+                           qulonglong detection_id)
+{
+    const std::vector<RackBand> bands = rack_bands();
 
     SpanClickInput in;
     in.under = receiver_under(bands, pointer_hz, pane_key_);
@@ -480,10 +506,7 @@ bool EngineLink::spanClick(double pointer_hz, double center_hz, double bandwidth
 
 bool EngineLink::spanDoubleClick(double pointer_hz, double center_hz, double bandwidth_hz)
 {
-    std::vector<RackBand> bands;
-    for (const RackMarker& marker : rackMarkers()) {
-        bands.push_back({marker.key, marker.band.low_hz, marker.band.high_hz});
-    }
+    const std::vector<RackBand> bands = rack_bands();
 
     const ClickSnapshot first = click_snapshot_;
     click_snapshot_.valid = false;
@@ -584,7 +607,9 @@ void EngineLink::removeRackReceiver(qulonglong key)
         removeReceiver();
         return;
     }
-    if (rack_.find(key) == nullptr) {
+    // Not an adopted one: the plugin closes its own receivers, and the strip
+    // offers no remove. drop_adopted_entry is how one leaves the rack.
+    if (const RackEntry* entry = rack_.find(key); entry == nullptr || entry->adopted) {
         return;
     }
     rack_.remove(key);
@@ -603,6 +628,9 @@ void EngineLink::dismissReceiver(qulonglong key)
 {
     const std::uint64_t which = key == 0 ? pane_key_ : key;
     if (which == 0) {
+        return;
+    }
+    if (const RackEntry* entry = rack_.find(which); entry != nullptr && entry->adopted) {
         return;
     }
 
@@ -742,6 +770,14 @@ void EngineLink::adopt_held_reports()
 
         RackEntry* entry = rack_.find(report.key);
         if (entry == nullptr || report.key == pane_key_) {
+            continue;
+        }
+
+        if (report.gone && entry->adopted) {
+            // Quietly, the way the Removed event takes one out: a trunk call
+            // ending is the ordinary life of the receiver, not news.
+            drop_adopted_entry(report.key, false);
+            membership = true;
             continue;
         }
 
@@ -950,6 +986,36 @@ void EngineLink::apply_rack_op(const RackOp& op)
             held_.erase(it);
             return;
         }
+
+        case RackOp::Kind::AdoptHeld: {
+            // A receiver from a connection that has gone would be held under
+            // a dead engine's id, and the new engine issues ids from one
+            // again, so it would end up naming one of theirs.
+            if (client_ == nullptr || op.generation != vrx_events_generation_ ||
+                op.engine_id == 0) {
+                return;
+            }
+            if (std::any_of(held_.begin(), held_.end(), [&op](const HeldVrx& h) {
+                    return h.key == op.key || h.id == op.engine_id;
+                })) {
+                return;
+            }
+            held_.push_back(HeldVrx{op.key, op.engine_id, op.params});
+            return;
+        }
+
+        case RackOp::Kind::ForgetHeld: {
+            const auto it = std::find_if(held_.begin(), held_.end(),
+                                         [&op](const HeldVrx& h) { return h.key == op.key; });
+            if (it == held_.end()) {
+                return;
+            }
+            // Audio first, for the reason drop_receiver gives, and no
+            // remove_vrx: see the kind's note.
+            stop_audio_for(it->id);
+            held_.erase(it);
+            return;
+        }
     }
 }
 
@@ -1025,6 +1091,296 @@ void EngineLink::forget_held(const QString& why)
         post_held_reports(std::move(reports));
     }
     held_.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Receivers an engine plugin opened
+// ---------------------------------------------------------------------------
+//
+// ADOPTED, NOT MADE. The trunk tracker opens a p25p1 receiver per voice call
+// and removes it when the call ends; this window learns of both from the
+// engine's receiver events and shows the receiver as a strip that is heard
+// and cannot be focused or removed. models/adopted_receivers.h has the rules
+// and the reasons. Everything below is bookkeeping: no call in this section
+// writes to a receiver, because they are the plugin's.
+
+void EngineLink::apply_vrx_events(bool probe)
+{
+    if (client_ == nullptr || vrx_events_unsupported_) {
+        return;
+    }
+
+    bool ended = false;
+    {
+        const std::lock_guard<std::mutex> lock(vrx_event_mutex_);
+        ended = std::exchange(vrx_events_ended_, false);
+    }
+
+    // AN ENDED STREAM IS SUBSCRIBED AGAIN AT ONCE, unlike the transcripts'.
+    // The engine ends a subscriber that fell too far behind rather than drop
+    // an event (past 1024 queued), and core/rpc/client.h says the answer is
+    // to subscribe again. Events lost in the gap cannot be known, so the rack
+    // starts over: a reset goes into the hand-off AHEAD of the subscription,
+    // the drain takes every adopted entry out when it reaches it, and the
+    // replay that follows in the same queue adopts what the plugin still has.
+    // Rebuilt rather than reconciled, because the replay has no end marker,
+    // so nothing could say which strips it did not mention.
+    if (ended) {
+        vrx_events_subscribed_ = false;
+        {
+            const std::lock_guard<std::mutex> lock(vrx_event_mutex_);
+            PendingVrxEvent reset;
+            reset.generation = vrx_events_generation_;
+            reset.reset = true;
+            pending_vrx_events_.push_back(std::move(reset));
+        }
+        if (!vrx_event_wake_pending_.exchange(true, std::memory_order_acq_rel)) {
+            QMetaObject::invokeMethod(this, [this] { drain_vrx_events(); },
+                                      Qt::QueuedConnection);
+        }
+    }
+    if (vrx_events_subscribed_ || (vrx_events_failed_ && !probe)) {
+        return;
+    }
+
+    const std::uint64_t generation = vrx_events_generation_;
+    auto subscribed = client_->subscribe_vrx_events(
+        [this, generation](const rpc::VrxEvent& event) { on_vrx_event(generation, event); },
+        [this](const std::string& why) { on_vrx_events_ended(why); });
+    if (!subscribed) {
+        // An engine built before the events existed is not a fault: the rack
+        // shows this window's own receivers, as it always did, and nothing
+        // is asked again until the next connection. Anything else is tried
+        // again once a second.
+        if (subscribed.error().category == ErrorCategory::Unimplemented) {
+            vrx_events_unsupported_ = true;
+        } else {
+            vrx_events_failed_ = true;
+        }
+        return;
+    }
+    vrx_events_subscribed_ = true;
+    vrx_events_failed_ = false;
+}
+
+void EngineLink::forget_vrx_events()
+{
+    // Nothing to cancel: the Client is gone and took the subscription. What
+    // is left in the hand-off was said by that engine about receivers it took
+    // with it, so it goes too, and the generation moves on so an AdoptHeld
+    // already queued from it is dropped when the supervisor comes to it.
+    //
+    // AND A RESET TAKES ITS PLACE, ahead of anything the next connection
+    // replays. The Qt thread used to be the one to drop the adopted entries,
+    // in adopt() on seeing connected_ false, but adopt() reads the hand-off's
+    // connection state when it RUNS, not when it was queued. A Qt thread that
+    // stalled across a disconnect and a reconnect ran both queued adopt()
+    // calls reading true, so the drop never ran: the old engine's adopted
+    // strips stayed, and a plugin receiver on the new engine that reused one
+    // of their ids was taken for a Changed on a strip already held, so it
+    // was never adopted and never heard. The hand-off is ordered by the
+    // supervisor, which is the one thread that saw the connection go, so the
+    // drop rides in it and lands before the replay whatever adopt() reads.
+    vrx_events_subscribed_ = false;
+    vrx_events_failed_ = false;
+    vrx_events_unsupported_ = false;
+    ++vrx_events_generation_;
+    {
+        const std::lock_guard<std::mutex> lock(vrx_event_mutex_);
+        pending_vrx_events_.clear();
+        PendingVrxEvent reset;
+        reset.generation = vrx_events_generation_;
+        reset.reset = true;
+        reset.connection_gone = true;
+        pending_vrx_events_.push_back(std::move(reset));
+        vrx_events_ended_ = false;
+    }
+    if (!vrx_event_wake_pending_.exchange(true, std::memory_order_acq_rel)) {
+        QMetaObject::invokeMethod(this, [this] { drain_vrx_events(); }, Qt::QueuedConnection);
+    }
+}
+
+void EngineLink::on_vrx_event(std::uint64_t generation, const rpc::VrxEvent& event)
+{
+    // Not capped, unlike the transcripts' hand-off: an event dropped here is
+    // a strip that never goes or a call never heard, and the engine already
+    // bounds how far behind a subscriber may fall by ending it.
+    {
+        const std::lock_guard<std::mutex> lock(vrx_event_mutex_);
+        pending_vrx_events_.push_back(PendingVrxEvent{generation, event});
+    }
+    if (!vrx_event_wake_pending_.exchange(true, std::memory_order_acq_rel)) {
+        QMetaObject::invokeMethod(this, [this] { drain_vrx_events(); }, Qt::QueuedConnection);
+    }
+}
+
+void EngineLink::on_vrx_events_ended(const std::string& reason)
+{
+    // The reason is not shown: the answer to every one of them is the same
+    // resubscription, and there is nowhere an operator would act on it. No
+    // wake either; the next pass is a quarter second away at most.
+    static_cast<void>(reason);
+    const std::lock_guard<std::mutex> lock(vrx_event_mutex_);
+    vrx_events_ended_ = true;
+}
+
+void EngineLink::note_adopted_status(HeldView& view, const rpc::VrxStatus& status) const
+{
+    view.params = status.params;
+    view.absolute_hz = status.params.center + info_.source_center;
+    view.level_dbfs = status.level_dbfs;
+    view.transcribe = status.transcribe;
+    view.transcribing = status.transcribing;
+    view.granted_low = static_cast<int>(status.placement.granted_low);
+    view.granted_high = static_cast<int>(status.placement.granted_high);
+}
+
+void EngineLink::drain_vrx_events()
+{
+    // Cleared before the swap, on drain_decoded's argument.
+    vrx_event_wake_pending_.store(false, std::memory_order_release);
+
+    std::vector<PendingVrxEvent> events;
+    {
+        const std::lock_guard<std::mutex> lock(vrx_event_mutex_);
+        events.swap(pending_vrx_events_);
+    }
+    if (events.empty()) {
+        return;
+    }
+
+    bool membership = false;
+    bool changed = false;
+    for (const PendingVrxEvent& one : events) {
+        if (one.reset && one.connection_gone) {
+            // The engine went, so held_ is already empty on the supervisor's
+            // side and nothing is posted to it; see the field's note. Asked
+            // first because drop_adopted_receivers does not say whether it
+            // took anything, and the rack only changed if it did.
+            const bool had_adopted =
+                std::any_of(rack_.entries().begin(), rack_.entries().end(),
+                            [](const RackEntry& entry) { return entry.adopted; });
+            drop_adopted_receivers();
+            membership = membership || had_adopted;
+            continue;
+        }
+        if (one.reset) {
+            std::vector<std::uint64_t> keys;
+            for (const RackEntry& entry : rack_.entries()) {
+                if (entry.adopted) {
+                    keys.push_back(entry.key);
+                }
+            }
+            for (const std::uint64_t key : keys) {
+                drop_adopted_entry(key, true);
+            }
+            plugin_vrx_ids_.clear();
+            membership = membership || !keys.empty();
+            continue;
+        }
+
+        const rpc::VrxEvent& event = one.event;
+        const auto vrx = static_cast<qulonglong>(event.vrx);
+
+        if (event.kind == rpc::VrxEventKind::Removed) {
+            std::erase(plugin_vrx_ids_, vrx);
+            if (const RackEntry* entry = rack_.find_adopted(event.vrx); entry != nullptr) {
+                drop_adopted_entry(entry->key, true);
+                membership = true;
+            }
+            continue;
+        }
+
+        if (!rack_adopts(event.owner) || !event.status) {
+            continue;
+        }
+        if (std::find(plugin_vrx_ids_.begin(), plugin_vrx_ids_.end(), vrx) ==
+            plugin_vrx_ids_.end()) {
+            plugin_vrx_ids_.push_back(vrx);
+        }
+
+        // Known: a retune or a mode change by the plugin. A front-end retune
+        // sends none, and needs none: the absolute frequency did not move.
+        if (const RackEntry* entry = rack_.find_adopted(event.vrx); entry != nullptr) {
+            if (HeldView* view = held_view(entry->key); view != nullptr) {
+                note_adopted_status(*view, *event.status);
+                changed = true;
+            }
+            continue;
+        }
+
+        // New, or a Changed for one a full rack passed over, which is taken
+        // in now if there is room. With none it is passed over again, quietly:
+        // the rack note is the operator's, and a busy trunk would otherwise
+        // write over it on every call. The stranded count still knows it is
+        // the plugin's, through plugin_vrx_ids_.
+        const std::string& owner =
+            event.owner_name.empty() ? event.status->owner_name : event.owner_name;
+        const auto key = rack_.add_adopted(owner, event.vrx);
+        if (!key) {
+            continue;
+        }
+        HeldView view;
+        note_adopted_status(view, *event.status);
+        held_views_.emplace_back(*key, view);
+
+        RackOp op;
+        op.kind = RackOp::Kind::AdoptHeld;
+        op.key = *key;
+        op.params = event.status->params;
+        op.engine_id = vrx;
+        op.generation = one.generation;
+        post_rack_op(std::move(op));
+        membership = true;
+    }
+
+    // Audio follows on its own: post_audio_wants wants every heard entry, and
+    // the supervisor resolves an adopted key through held_ like any other.
+    if (membership) {
+        post_audio_wants();
+    }
+    if (membership || changed) {
+        emit rackChanged();
+    }
+}
+
+void EngineLink::drop_adopted_entry(std::uint64_t key, bool forget)
+{
+    const RackEntry* entry = rack_.find(key);
+    if (entry == nullptr || !entry->adopted) {
+        return;
+    }
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    recently_adopted_.remember(entry->engine_id,
+                               ReceiverAttribution{entry->slot, rack_entry_label(*entry)},
+                               static_cast<std::int64_t>(now_ms));
+
+    // Focus never rests on an adopted entry, so this moves none.
+    static_cast<void>(rack_.remove(key));
+    std::erase_if(held_views_, [key](const auto& held) { return held.first == key; });
+
+    if (forget) {
+        RackOp op;
+        op.kind = RackOp::Kind::ForgetHeld;
+        op.key = key;
+        post_rack_op(std::move(op));
+    }
+}
+
+void EngineLink::drop_adopted_receivers()
+{
+    const std::vector<RackEntry> gone = rack_.drop_adopted();
+    for (const RackEntry& entry : gone) {
+        std::erase_if(held_views_,
+                      [key = entry.key](const auto& held) { return held.first == key; });
+    }
+    plugin_vrx_ids_.clear();
+    recently_adopted_.clear();
+    if (!gone.empty()) {
+        post_audio_wants();
+    }
 }
 
 }  // namespace revenant::ui

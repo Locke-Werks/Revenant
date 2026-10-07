@@ -100,7 +100,7 @@ ColumnLayout {
             // focused receiver can be the one not heard, muted or soloed away.
             Label {
                 text: engineLink.audioActive
-                      ? "RX " + (engineLink.focusedSlot + 1)
+                      ? engineLink.focusedLabel
                       : !engineLink.audioWanted ? ""
                       : engineLink.rackCount > 0 ? "focused receiver not heard"
                       : "no receiver"

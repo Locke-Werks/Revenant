@@ -2,6 +2,12 @@
 // its mode, a live meter, a gain, and mute and solo. A click anywhere on it
 // that is not one of its controls focuses the receiver.
 //
+// AN ADOPTED STRIP, a receiver an engine plugin opened such as one of the
+// trunk tracker's voice calls, is named for the plugin, is heard, and keeps
+// mute, solo and gain, which act on this window's mix alone. It cannot be
+// focused or removed: the plugin owns it and closes it when the call ends.
+// models/adopted_receivers.h has the reasons.
+//
 // Everything shown comes from one entry of EngineLink::rackEntries, which
 // ui/models/rack_link.cpp builds; the rules behind mute, solo and the gain
 // are models/receiver_rack.h.
@@ -23,6 +29,7 @@ Rectangle {
 
     readonly property color tint: entry.colour
     readonly property bool focused: entry.focused
+    readonly property bool adopted: entry.adopted === true
 
     implicitHeight: body.implicitHeight + 16
     radius: Theme.radius
@@ -33,8 +40,11 @@ Rectangle {
     // Behind the controls, so a press on a button is the button's.
     MouseArea {
         anchors.fill: parent
-        cursorShape: strip.focused ? Qt.ArrowCursor : Qt.PointingHandCursor
-        onClicked: engineLink.focusReceiver(strip.entry.key)
+        cursorShape: strip.focused || strip.adopted ? Qt.ArrowCursor : Qt.PointingHandCursor
+        onClicked: {
+            if (!strip.adopted)
+                engineLink.focusReceiver(strip.entry.key)
+        }
     }
 
     // The receiver's colour down the left edge, which is what ties the strip
@@ -67,6 +77,15 @@ Rectangle {
                 color: strip.tint
                 font.pixelSize: Theme.sizeBody
                 font.bold: true
+
+                HoverHandler { id: labelHover }
+
+                Tip {
+                    visible: labelHover.hovered && strip.adopted
+                    text: "Opened by the engine's " + strip.entry.owner + " plugin, which "
+                          + "closes it when it is done. It plays here, and mute, solo and "
+                          + "gain work; tune a receiver of your own to change anything else."
+                }
             }
 
             Label {
@@ -135,7 +154,9 @@ Rectangle {
                 }
             }
 
+            // Not on an adopted strip: the plugin removes its own receivers.
             RButton {
+                visible: !strip.adopted
                 implicitWidth: 22
                 implicitHeight: 20
                 flat: true
@@ -176,13 +197,13 @@ Rectangle {
             // sentence is its hover, and remove is beside it because that
             // or a retune is all there is to do.
             StatusChip {
-                visible: strip.entry.refused
+                visible: strip.entry.refused && !strip.adopted
                 label: "refused"
                 detail: strip.entry.refusal
             }
 
             RButton {
-                visible: strip.entry.refused
+                visible: strip.entry.refused && !strip.adopted
                 flat: true
                 text: "remove"
                 ink: Theme.inkDim

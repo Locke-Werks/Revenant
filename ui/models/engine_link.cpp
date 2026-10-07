@@ -285,6 +285,7 @@ void EngineLink::supervise()
             poll_vocoder_plugins();
             poll_engine_plugins();
             apply_transcription(false);
+            apply_vrx_events(false);
             poll_receiver_status();
             poll_held_status();
             poll_detections();
@@ -372,6 +373,11 @@ void EngineLink::supervise()
             client_->unsubscribe_spectrum();
             client_.reset();
 
+            // The receiver events, after the Client and not beside the other
+            // forgets: its loop thread is joined by that destructor, so only
+            // now can nothing more arrive in the hand-off this empties.
+            forget_vrx_events();
+
             // Cleared before the connection state is published, so a
             // refusal the operator has not fixed does not sit on screen
             // beside "disconnected" claiming the engine said something.
@@ -416,6 +422,10 @@ void EngineLink::supervise()
             // The probe pass reads the recogniser's status as well, which is
             // the once a second the download's progress moves at.
             apply_transcription(true);
+
+            // After the receiver work, so a resubscription's replay meets a
+            // rack that already holds whatever this pass settled.
+            apply_vrx_events(true);
             poll_receiver_status();
             poll_held_status();
 
@@ -471,6 +481,7 @@ void EngineLink::supervise()
         // separate call. See receiver_link.cpp.
         drop_receiver();
         client_->unsubscribe_transcripts();
+        client_->unsubscribe_vrx_events();
         client_->unsubscribe_spectrum();
         client_.reset();
     }
@@ -913,6 +924,20 @@ void EngineLink::adopt()
     emit receiverStatusChanged();
     emit passbandChanged();
 
+    // A plugin's receivers went with the engine and are not this window's to
+    // put back; see rack_entry_rejoins. On the way down only: on the way up
+    // anything adopted came on the new connection, which is up.
+    //
+    // NOT THE ONLY DROP, and not the one that can be relied on: connected_
+    // is read from the hand-off when this runs, so a Qt thread that stalled
+    // across a disconnect and a reconnect sees true on both passes and never
+    // gets here. forget_vrx_events queues a reset in the receiver events'
+    // own hand-off that does the same drop ahead of the next connection's
+    // replay; this one only does it sooner when the Qt thread keeps up.
+    if (!connected_) {
+        drop_adopted_receivers();
+    }
+
     // Every rack entry's id was issued by the engine that has gone, on the
     // same argument as the pane's.
     rack_.forget_engine_ids();
@@ -941,7 +966,7 @@ void EngineLink::adopt()
     // the new engine's centre.
     if (connected_ && !was_connected) {
         for (const RackEntry& entry : rack_.entries()) {
-            if (entry.key == pane_key_) {
+            if (entry.key == pane_key_ || !rack_entry_rejoins(entry)) {
                 continue;
             }
             if (const HeldView* view = held_view(entry.key); view != nullptr) {

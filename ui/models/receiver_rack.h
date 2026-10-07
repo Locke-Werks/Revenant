@@ -72,7 +72,51 @@ struct RackEntry {
     // refused in the same words is not reported twice and would otherwise
     // put the strip back to opening for good.
     std::string refusal;
+
+    // True for a receiver an engine plugin opened and this rack took in, the
+    // trunk tracker's voice calls among them; owner is the plugin's name. See
+    // models/adopted_receivers.h for which receivers are taken in and why.
+    //
+    // AN ADOPTED ENTRY IS HEARD AND NOTHING ELSE. Its mute, solo and gain are
+    // this client's, because they act on the mix and touch nothing on the
+    // engine. It is never focused, since focus hands the receiver to the pane
+    // and the pane retunes it, and never removed from here, since the plugin
+    // closes it when its call ends. A write to it would be this window
+    // arguing with the plugin over a receiver that is the plugin's.
+    bool adopted = false;
+    std::string owner;
 };
+
+// Whether focus may land on an entry: anything this client made, and nothing
+// it adopted.
+[[nodiscard]] inline bool rack_entry_focusable(const RackEntry& entry)
+{
+    return !entry.adopted;
+}
+
+// What the strip, the audio section and a transcript's hover card call an
+// entry. "RX 3" for one this client made; the plugin's name and the same
+// number for one it adopted, "p25trunk 3", so a voice call the operator did
+// not open says who opened it. The number is the slot's in both, which is
+// what tells two strips of one colour apart.
+[[nodiscard]] inline std::string rack_entry_label(const RackEntry& entry)
+{
+    const std::string number = std::to_string(entry.slot + 1);
+    if (!entry.adopted) {
+        return "RX " + number;
+    }
+    return (entry.owner.empty() ? std::string("plugin") : entry.owner) + " " + number;
+}
+
+// Whether a reconnection asks the new engine to make this entry's receiver
+// again. An adopted one is not: it was the plugin's to open and is the
+// plugin's to open again, and the new connection's replay brings back
+// whatever the plugin still has. Re-adding it from here would make a second
+// receiver nobody owns, which the plugin would never close.
+[[nodiscard]] inline bool rack_entry_rejoins(const RackEntry& entry)
+{
+    return !entry.adopted;
+}
 
 // What a strip says about its receiver's existence on the engine.
 enum class RackEntryState : std::uint8_t {
@@ -156,10 +200,46 @@ public:
         return entry.key;
     }
 
+    // An entry for a receiver an engine plugin opened, already live under
+    // the engine's id, on the lowest free slot as any other; nothing when the
+    // rack is full. Never focused, here or later; see RackEntry::adopted.
+    [[nodiscard]] std::optional<std::uint64_t> add_adopted(std::string owner,
+                                                           std::uint64_t engine_id)
+    {
+        const auto key = add();
+        if (!key) {
+            return std::nullopt;
+        }
+        RackEntry& entry = entries_.back();
+        entry.adopted = true;
+        entry.owner = std::move(owner);
+        entry.engine_id = engine_id;
+        return key;
+    }
+
+    // The adopted entry for an engine id, or nothing. Adopted entries only:
+    // an id this client's own entry carries can be zero or stale while a
+    // rebuild is in flight, and the plugin's events never name one of those.
+    [[nodiscard]] const RackEntry* find_adopted(std::uint64_t engine_id) const
+    {
+        if (engine_id == 0) {
+            return nullptr;
+        }
+        const auto it =
+            std::find_if(entries_.begin(), entries_.end(), [engine_id](const RackEntry& e) {
+                return e.adopted && e.engine_id == engine_id;
+            });
+        return it == entries_.end() ? nullptr : &*it;
+    }
+
     // Takes the entry out. When it was the focused one, focus moves to the
     // entry that took its place in the rack, or the one above it when it was
     // the last, which is what closing a tab does; to nothing when the rack is
     // now empty. Answers the key focus moved to, zero for none.
+    //
+    // Adopted entries are stepped over on the way, in both directions, so
+    // closing the receiver beside a trunk call's strip lands on the next one
+    // the operator made and never on the call.
     std::uint64_t remove(std::uint64_t key)
     {
         const auto index = index_of(key);
@@ -170,19 +250,28 @@ public:
         if (focused_ != key) {
             return focused_;
         }
-        if (entries_.empty()) {
-            focused_ = 0;
-        } else {
-            focused_ = entries_[std::min(*index, entries_.size() - 1)].key;
+        focused_ = 0;
+        for (std::size_t i = *index; i < entries_.size(); ++i) {
+            if (rack_entry_focusable(entries_[i])) {
+                focused_ = entries_[i].key;
+                return focused_;
+            }
+        }
+        for (std::size_t i = std::min(*index, entries_.size()); i > 0; --i) {
+            if (rack_entry_focusable(entries_[i - 1])) {
+                focused_ = entries_[i - 1].key;
+                return focused_;
+            }
         }
         return focused_;
     }
 
-    // Focuses an entry the rack holds; anything else is refused and nothing
-    // moves.
+    // Focuses an entry the rack holds and focus may land on; anything else
+    // is refused and nothing moves.
     bool focus(std::uint64_t key)
     {
-        if (find(key) == nullptr) {
+        const RackEntry* entry = find(key);
+        if (entry == nullptr || !rack_entry_focusable(*entry)) {
             return false;
         }
         focused_ = key;
@@ -190,20 +279,47 @@ public:
     }
 
     // The entry step places away from the focused one, wrapping at both ends,
-    // or zero when there is nothing to move to. Does not move focus.
+    // or zero when there is nothing to move to. Does not move focus. Counted
+    // over the entries focus may land on, so stepping through the rack walks
+    // past every adopted strip rather than stopping on one it cannot take.
     [[nodiscard]] std::uint64_t neighbour(int step) const
     {
-        if (entries_.size() < 2) {
+        std::vector<std::uint64_t> ring;
+        ring.reserve(entries_.size());
+        for (const RackEntry& e : entries_) {
+            if (rack_entry_focusable(e)) {
+                ring.push_back(e.key);
+            }
+        }
+        if (ring.size() < 2) {
             return 0;
         }
-        const auto here = index_of(focused_);
-        const auto n = static_cast<long long>(entries_.size());
-        const long long from = here ? static_cast<long long>(*here) : 0;
+        const auto here = std::find(ring.begin(), ring.end(), focused_);
+        const auto n = static_cast<long long>(ring.size());
+        const long long from =
+            here == ring.end() ? 0 : static_cast<long long>(here - ring.begin());
         long long to = (from + step) % n;
         if (to < 0) {
             to += n;
         }
-        return entries_[static_cast<std::size_t>(to)].key;
+        return ring[static_cast<std::size_t>(to)];
+    }
+
+    // Takes every adopted entry out and answers them, for a connection that
+    // has gone: their ids were that engine's and their receivers the plugin's
+    // on it. Focus never rests on one, so it does not move.
+    std::vector<RackEntry> drop_adopted()
+    {
+        std::vector<RackEntry> out;
+        for (auto it = entries_.begin(); it != entries_.end();) {
+            if (it->adopted) {
+                out.push_back(std::move(*it));
+                it = entries_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return out;
     }
 
     void clear()
@@ -214,10 +330,16 @@ public:
 
     // The engine that issued every id has gone. The entries stay, because a
     // reconnection puts their receivers back. A refusal goes too: it was that
-    // engine's, and the reconnection asks the new one again.
+    // engine's, and the reconnection asks the new one again. Adopted entries
+    // are not put back by this client, so the caller takes them out with
+    // drop_adopted when the engine goes, and any this leaves alone came on
+    // the connection that is up: their ids are the only thing that names them.
     void forget_engine_ids()
     {
         for (RackEntry& e : entries_) {
+            if (e.adopted) {
+                continue;
+            }
             e.engine_id = 0;
             e.refusal.clear();
         }
@@ -342,6 +464,9 @@ struct RackBand {
     std::uint64_t key = 0;
     double low_hz = 0.0;
     double high_hz = 0.0;
+
+    // False for an adopted receiver, which a click cannot focus.
+    bool focusable = true;
 };
 
 // The receiver whose band a frequency is inside, other than the focused one,
@@ -351,13 +476,17 @@ struct RackBand {
 //
 // THE FOCUSED RECEIVER IS NOT A TARGET. A click inside its own band is a
 // retune within it, which is the fine adjustment a click has always been.
+//
+// NOR IS AN ADOPTED ONE. Its band is drawn, and a click inside it is a click
+// on the span like any other: it tunes the focused receiver there, which is
+// how to listen to a trunk call's channel with a receiver of one's own.
 [[nodiscard]] inline std::uint64_t receiver_under(const std::vector<RackBand>& bands,
                                                   double hz, std::uint64_t focused)
 {
     std::uint64_t best = 0;
     double best_width = 0.0;
     for (const RackBand& band : bands) {
-        if (band.key == focused || !(band.high_hz > band.low_hz)) {
+        if (band.key == focused || !band.focusable || !(band.high_hz > band.low_hz)) {
             continue;
         }
         if (hz < band.low_hz || hz > band.high_hz) {

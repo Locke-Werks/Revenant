@@ -170,7 +170,12 @@ void EngineLink::post_transcribe_wants()
     wants.reserve(rack_.size());
     for (const RackEntry& entry : rack_.entries()) {
         const std::uint64_t id = entry.key == pane_key_ ? receiver_id_ : entry.engine_id;
-        if (id == 0) {
+
+        // Not an adopted receiver's: whether a plugin's receiver is
+        // transcribed is the plugin's to say, and a choice sent from here
+        // would be a write to a receiver this window does not own. It is
+        // never focused, so the operator has no control that sets one anyway.
+        if (id == 0 || entry.adopted) {
             continue;
         }
         VrxTranscribeWant want;
@@ -240,6 +245,12 @@ void EngineLink::drain_transcripts()
         return;
     }
 
+    const auto now_ms = static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    recently_adopted_.prune(now_ms);
+
     std::vector<DecodedLine> lines;
     lines.reserve(transcripts.size());
     for (std::size_t i = 0; i < transcripts.size(); ++i) {
@@ -249,14 +260,26 @@ void EngineLink::drain_transcripts()
         // and the log line to its strip, and its name heads the hover card. A
         // receiver that has left the rack keeps its text and loses its colour.
         int slot = -1;
+        std::string label;
         for (const RackEntry& entry : rack_.entries()) {
             const std::uint64_t id = entry.key == pane_key_ ? receiver_id_ : entry.engine_id;
             if (id != 0 && id == transcript.vrx) {
                 slot = static_cast<int>(entry.slot);
+                label = rack_entry_label(entry);
             }
         }
-        const std::string label =
-            slot < 0 ? std::string() : "RX " + std::to_string(slot + 1);
+
+        // EXCEPT A PLUGIN'S, which has usually left already. The trunk tracker
+        // closes a call's receiver when the call ends and Whisper answers a
+        // couple of seconds after the speech does, so without this nearly
+        // every trunk transcript would arrive colourless and unnamed. See
+        // kAdoptedMemoryMs.
+        if (slot < 0) {
+            if (const auto gone = recently_adopted_.find(transcript.vrx, now_ms)) {
+                slot = static_cast<int>(gone->slot);
+                label = gone->label;
+            }
+        }
 
         const QString when = QDateTime::fromMSecsSinceEpoch(arrived[i])
                                  .toString(QStringLiteral("HH:mm:ss.zzz"));

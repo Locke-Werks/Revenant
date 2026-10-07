@@ -157,6 +157,7 @@
 #include "audio/audio_ring.h"
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
+#include "models/adopted_receivers.h"
 #include "models/aft.h"
 #include "models/auto_filter.h"
 #include "models/bookmarks.h"
@@ -1217,6 +1218,11 @@ class EngineLink : public QObject {
     // The focused receiver's key and colour slot, zero and zero with none.
     Q_PROPERTY(qulonglong focusedKey READ focusedKey NOTIFY rackChanged)
     Q_PROPERTY(int focusedSlot READ focusedSlot NOTIFY rackChanged)
+
+    // The focused receiver's name as its strip carries it, "RX 3", from the
+    // same rack_entry_label the strip and a transcript's hover card use, so
+    // the three cannot disagree.
+    Q_PROPERTY(QString focusedLabel READ focusedLabel NOTIFY rackChanged)
 
     // The last thing the rack has to say that no strip carries: a receiver
     // the engine let go, an add the engine refused, a double click on a full
@@ -2489,6 +2495,7 @@ public:
     [[nodiscard]] bool rackFull() const { return rack_.full(); }
     [[nodiscard]] qulonglong focusedKey() const { return pane_key_; }
     [[nodiscard]] int focusedSlot() const;
+    [[nodiscard]] QString focusedLabel() const;
     [[nodiscard]] QString rackNote() const { return rack_note_; }
 
     // Every receiver's band for the span displays, focused one last.
@@ -3694,11 +3701,27 @@ private:
             AddHeld,
             // The held receiver under key is removed from the engine.
             RemoveHeld,
+            // A receiver an engine plugin opened, already live under
+            // engine_id, is held under key: the supervisor only starts
+            // knowing it, so audio can find it. Nothing is asked of the
+            // engine. Dropped when generation is not the connection the
+            // supervisor is on, because then the id is a dead engine's.
+            AdoptHeld,
+            // The adopted receiver under key has gone: its audio stops and
+            // the supervisor forgets it. Nothing is asked of the engine
+            // either, since the plugin removed it, and a remove_vrx here
+            // could only ever be refused or, worse, land on a receiver the
+            // plugin opened since under a reused id.
+            ForgetHeld,
         };
         Kind kind = Kind::Park;
         std::uint64_t key = 0;
         rpc::VrxParams params;
         PaneRequest outgoing;
+
+        // AdoptHeld only.
+        qulonglong engine_id = 0;
+        std::uint64_t generation = 0;
     };
 
     // Qt thread. Takes the pane's outstanding request into op and queues op.
@@ -3740,6 +3763,10 @@ private:
     // says needs one, when autoDv is on. Qt thread, after each detection list
     // lands and when the switch goes on. rack_link.cpp.
     void spawn_dv_receivers();
+
+    // Qt thread. Every receiver's band for the span's hit test, with whether
+    // a click may focus it.
+    [[nodiscard]] std::vector<RackBand> rack_bands() const;
 
     // Qt thread. Moves the pane onto the held receiver under key, parking
     // the pane's own first. The one path every focus change takes.
@@ -3850,6 +3877,83 @@ private:
         QString why;
     };
     std::vector<HeldReport> handover_held_;  // guarded by receiver_mutex_
+
+    // ------------------------------------------------------------------
+    // Receivers an engine plugin opened. Implemented in rack_link.cpp;
+    // models/adopted_receivers.h has the rules.
+    // ------------------------------------------------------------------
+    //
+    // THE THREE THREADS, AS FOR TRANSCRIPTS. The supervisor subscribes, once
+    // per connection, and forgets the subscription with the connection. The
+    // Cap'n Proto loop thread runs on_vrx_event, which copies the event into
+    // a hand-off and posts one drain. The Qt thread drains it into the rack
+    // and posts AdoptHeld and ForgetHeld for the supervisor's half.
+
+    // Supervisor thread. Subscribes when there is no subscription, and again
+    // after the engine ended one; on the probe pass only after a failure.
+    void apply_vrx_events(bool probe);
+
+    // Supervisor thread, after the Client has gone: nothing to cancel, and
+    // nothing still in the hand-off is about an engine that exists. Leaves a
+    // connection_gone reset in its place, so the drain empties the rack of
+    // adopted entries before anything the next connection replays.
+    void forget_vrx_events();
+
+    // Cap'n Proto loop thread.
+    void on_vrx_event(std::uint64_t generation, const rpc::VrxEvent& event);
+    void on_vrx_events_ended(const std::string& reason);
+
+    // Qt thread.
+    void drain_vrx_events();
+
+    // Qt thread. The engine's status for an adopted receiver, onto its view.
+    void note_adopted_status(HeldView& view, const rpc::VrxStatus& status) const;
+
+    // Qt thread. Takes an adopted entry out of the rack without a word in the
+    // rack note, keeping its slot and name for late transcripts. Does nothing
+    // for a key the rack no longer holds, so the Removed event and the status
+    // poll noticing the same removal take it out once between them. forget
+    // posts ForgetHeld; the poll's path has already forgotten it.
+    void drop_adopted_entry(std::uint64_t key, bool forget);
+
+    // Qt thread, for a connection that went. Every adopted entry goes, with
+    // nothing remembered: the next engine issues ids from the start again.
+    void drop_adopted_receivers();
+
+    // The loop thread's hand-off. Each event carries the connection it came
+    // on, which the AdoptHeld it becomes carries to the supervisor.
+    // A reset is no event: the supervisor's mark, queued ahead of a
+    // resubscription, that every adopted entry goes before its replay lands.
+    // connection_gone marks the reset forget_vrx_events queues when the
+    // engine goes, which drops through drop_adopted_receivers instead: no
+    // ForgetHeld, since forget_held has emptied held_ already, and nothing
+    // remembered, since the next engine issues ids from the start again.
+    struct PendingVrxEvent {
+        std::uint64_t generation = 0;
+        rpc::VrxEvent event;
+        bool reset = false;
+        bool connection_gone = false;
+    };
+    std::mutex vrx_event_mutex_;
+    std::vector<PendingVrxEvent> pending_vrx_events_;  // guarded by vrx_event_mutex_
+    bool vrx_events_ended_ = false;                     // guarded by vrx_event_mutex_
+    std::atomic<bool> vrx_event_wake_pending_{false};
+
+    // Supervisor thread only. generation counts connections: forget_vrx_events
+    // moves it on, so a subscription made on the next one is told apart from
+    // anything the last one left queued. A resubscription on the same
+    // connection keeps it, since the receivers it replays are the same ones.
+    bool vrx_events_subscribed_ = false;
+    bool vrx_events_failed_ = false;
+    bool vrx_events_unsupported_ = false;
+    std::uint64_t vrx_events_generation_ = 1;
+
+    // Qt thread only. Every receiver a plugin holds on the engine as the
+    // events have said, adopted or skipped for a full rack, so the stranded
+    // count never offers to release one; and the adopted ones that have gone,
+    // for their late transcripts.
+    std::vector<qulonglong> plugin_vrx_ids_;
+    RecentlyAdopted recently_adopted_;
 
     // Set by any write, cleared by the supervisor when it has applied one.
     // It is in the wait predicate, so a drag is applied on the next tick of
@@ -4461,8 +4565,9 @@ private:
     std::array<AudioSub, kMaxReceivers> live_audio_{};
 
     // Supervisor thread only: receivers whose stream the engine ended, which
-    // are not asked again. The ids of receivers that have gone, so the list
-    // only matters until the next connection and is cleared there.
+    // are not asked again. Pruned on every apply_audio_request pass to the
+    // pane's id and held_'s, since nothing else can be asked for, and cleared
+    // on the next connection.
     std::vector<qulonglong> audio_ended_vrx_;
 
     // Written by the Qt thread under audio_mutex_: which rack entries are

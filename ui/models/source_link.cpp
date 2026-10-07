@@ -528,7 +528,9 @@ void EngineLink::adopt_source_tuning()
     // the rack's.
     for (const rpc::RetuneRemoval& gone : removed) {
         for (const RackEntry& entry : rack_.entries()) {
-            if (entry.key != pane_key_ && entry.engine_id != 0 &&
+            // Not an adopted one: its Removed event takes it out, quietly,
+            // and removeRackReceiver would refuse it anyway.
+            if (entry.key != pane_key_ && !entry.adopted && entry.engine_id != 0 &&
                 entry.engine_id == static_cast<qulonglong>(gone.id)) {
                 const std::uint64_t key = entry.key;
                 set_rack_note(QString::fromStdString(receiver_gone_sentence(

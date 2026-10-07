@@ -353,6 +353,23 @@ void EngineLink::apply_audio_request()
         }
     }
 
+    // PRUNED ON EVERY PASS to the ids something here can still ask for: the
+    // pane's receiver and the held ones, which are the only two places
+    // id_for_key resolves a want to. A receiver that has left both is never
+    // asked for again, so remembering that its stream ended says nothing.
+    // Without this the list grew by one entry per trunk call, since an
+    // adopted receiver's stream ends with the call and the receiver goes
+    // with it, and it was only emptied on a reconnect. Pruned here rather
+    // than at each place an id leaves held_ (ForgetHeld, RemoveHeld, the
+    // gone report, a park, a rebuild), so a new way out cannot forget it.
+    std::erase_if(audio_ended_vrx_, [this](qulonglong vrx) {
+        if (vrx == live_receiver_id_) {
+            return false;
+        }
+        return std::none_of(held_.begin(), held_.end(),
+                            [vrx](const HeldVrx& held) { return held.id == vrx; });
+    });
+
     // WHAT AN ENDED ARRIVAL USED TO DO: switch listening off, so the
     // reconcile would not resubscribe on the pane's stale id. With a rack
     // that silenced every other receiver for the sake of one, so the

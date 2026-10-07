@@ -648,6 +648,7 @@ if(REVENANT_UI_TESTS)
             audio/audio_mix.cpp
             audio/audio_ring.cpp
             audio/resampler.cpp
+            tests/test_adopted_receivers.cpp
             tests/test_aft.cpp
             tests/test_audio_counters.cpp
             tests/test_audio_mix.cpp

@@ -29,7 +29,8 @@ ColumnLayout {
         "frequencyHz": 0, "lowHz": 0, "highHz": 0, "levelDbfs": -200,
         "focused": false, "pending": true, "refused": false, "refusal": "",
         "muted": false, "solo": false,
-        "heard": false, "gain": 0, "gainText": ""
+        "heard": false, "gain": 0, "gainText": "",
+        "adopted": false, "owner": ""
     })
 
     spacing: 8

@@ -1564,7 +1564,13 @@ void EngineLink::adopt_receiver_inventory()
     for (const qulonglong id : engine_receiver_ids_) {
         const bool racked = std::any_of(rack_.entries().begin(), rack_.entries().end(),
                                         [id](const RackEntry& e) { return e.engine_id == id; });
-        if (id != receiver_id_ && !racked) {
+
+        // Nor a plugin's, adopted or passed over for a full rack. Those are
+        // not stranded: the plugin closes them, and a count that included
+        // them would offer to release a trunk call mid-sentence.
+        const bool plugin = std::find(plugin_vrx_ids_.begin(), plugin_vrx_ids_.end(), id) !=
+                            plugin_vrx_ids_.end();
+        if (id != receiver_id_ && !racked && !plugin) {
             ++others;
         }
     }
@@ -1636,6 +1642,16 @@ void EngineLink::apply_stranded_release()
         const bool held = std::any_of(held_.begin(), held_.end(),
                                       [id](const HeldVrx& h) { return h.id == id; });
         if (id == mine || held) {
+            continue;
+        }
+
+        // NEVER A PLUGIN'S. held_ covers every one the rack adopted, but not
+        // one a full rack passed over, nor one opened since the last event
+        // reached the Qt thread; the engine's own word on the owner covers
+        // both. One more round trip per candidate, on a click. An engine
+        // older than owner_kind reports Engine, which is what this did before.
+        if (auto status = client_->vrx_status(id);
+            status && status->owner_kind == rpc::VrxOwnerKind::Plugin) {
             continue;
         }
         static_cast<void>(client_->remove_vrx(id));
