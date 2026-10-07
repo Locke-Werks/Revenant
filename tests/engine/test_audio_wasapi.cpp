@@ -240,12 +240,25 @@ TEST_CASE("a full cycle against the default endpoint joins its render thread",
     engine::AudioTap tap(ring->get(), kAudioRate, 1);
     REQUIRE((*backend)->attach(tap).has_value());
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
     // The device asked for buffers and got them. If nothing was read the
     // render thread never ran, and everything below would pass for the wrong
     // reason.
+    //
+    // Waited for rather than slept for. A wired endpoint asks within a buffer
+    // or two, but a Bluetooth one that has been idle starts its link first:
+    // on 2026-10-06 the default was a Bluetooth headset and a fixed 200 ms
+    // wait read nothing, in CI and on the first of three runs here, and
+    // passed on the two after it, once the link was awake. The deadline is
+    // for a device that never asks at all.
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + std::chrono::seconds(5);
+    while (ring->get()->total_read() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
     const std::uint64_t consumed = ring->get()->total_read();
+    INFO("milliseconds before the device's first read: " << waited.count());
     INFO("samples the device consumed while running: " << consumed);
     INFO("underrun events while running: " << tap.underrun_events());
     REQUIRE(consumed > 0);
