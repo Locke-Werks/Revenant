@@ -25,6 +25,11 @@ Revenant moves the whole chain onto the GPU and leaves the samples there.
 
 ## Roadmap
 
+<img src="assets/roadmap.webp" alt="Revenant roadmap: M0 to M3 done, M4 rolling capture and search in progress, M5 device support next, then multi-radio. M5 device order: 1 HackRF, 2 SDRplay, 3 rtl_tcp and SpyServer, 4 Airspy and HydraSDR, 5 RX888 MkII, 6 Pluto and AD936x, 7 SoapySDR for the long tail.">
+
+<details>
+<summary>The same roadmap as text, with the reasons for the order</summary>
+
 | Milestone | What it delivers | State |
 | --- | --- | --- |
 | M0 | The device path: open the RTL-SDR, read its descriptors, find the bulk endpoint that carries IQ | Done |
@@ -35,9 +40,7 @@ Revenant moves the whole chain onto the GPU and leaves the samples there.
 | M5 | Device support beyond the RTL-SDR, in the order below | Next |
 | After M5 | More than one radio at a time, and the modes `docs/modes.md` lists as not done | Not ordered |
 
-### M5 device order
-
-Ordered by how many people own the radio against how much work it is.
+M5 device order. Ordered by how many people own the radio against how much work it is.
 Today Revenant runs the RTL-SDR family through librtlsdr, including direct
 sampling for HF, plus the synthetic and file sources.
 
@@ -50,6 +53,8 @@ sampling for HF, plus the synthetic and file sources.
 | 5 | RX888 MkII | 16-bit direct sampling of 0 to 64 MHz, the radio this design is built for | Own USB 3 streaming and firmware loader | High |
 | 6 | ADALM-Pluto and AD936x Zynq boards | One backend covers the family; transport limits full-band use | Link libiio | Medium |
 | 7 | The long tail: USRP B2xx, LimeSDR, bladeRF, Airspy HF+ | Small user bases each, one bridge covers them | SoapySDR in a separate process | Medium |
+
+</details>
 
 KrakenSDR runs as five single RTL-SDR channels already; coherent direction
 finding waits for multi-radio work after M5. Fobos SDR waits on reports of
