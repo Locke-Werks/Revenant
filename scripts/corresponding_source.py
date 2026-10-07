@@ -445,21 +445,47 @@ def check_against_qt(pins: dict, qt: Path) -> list[str]:
     return lines
 
 
-def coverage(stage: Path, pins: dict, qt: Path | None = None) -> list[str]:
+# Every engine plugin plugins/CMakeLists.txt declares through
+# revenant_engine_plugin(), which puts it at plugins/<target>.dll in the
+# payload. The function's own definition starts "function(" and so is not a
+# call, and neither is a commented-out line.
+ENGINE_PLUGINS = REPO / "plugins" / "CMakeLists.txt"
+ENGINE_PLUGIN_CALL = re.compile(r"^[ \t]*revenant_engine_plugin\([ \t]*([A-Za-z0-9_.-]+)", re.MULTILINE)
+
+
+def own_plugin_dlls(cmake: Path = ENGINE_PLUGINS) -> set[str]:
+    """The payload paths of the engine plugins Revenant builds itself."""
+    if not cmake.is_file():
+        return set()
+    names = ENGINE_PLUGIN_CALL.findall(cmake.read_text(encoding="utf-8"))
+    return {f"plugins/{name}.dll".lower() for name in names}
+
+
+def coverage(stage: Path, pins: dict, qt: Path | None = None, own: set[str] | None = None) -> list[str]:
     """Match every DLL in a staged payload to the archive that is its source.
 
-    The Visual C++ runtime is the one exception: it is redistributed under
-    Microsoft's terms, which ask for no source. Revenant's own programs are
-    executables and their source is the corresponding-source archive.
+    Two exceptions. The Visual C++ runtime is redistributed under Microsoft's
+    terms, which ask for no source. Revenant's own programs are the two
+    executables, which this does not look at, and the engine plugins in
+    `own`, by default every one plugins/CMakeLists.txt builds; the source of
+    all of them is the corresponding-source archive.
+
+    WHAT THIS USED TO SAY: "Revenant's own programs are executables". True
+    until v0.1.8 shipped plugins/p25trunk.dll, which this then refused as a
+    DLL with no pinned source and stopped that release at this check.
     """
     covered = {c.lower(): a for a in pins["archives"] for c in a["covers"]}
+    own = own_plugin_dlls() if own is None else own
     dlls = staged_dlls(stage)
     if not dlls:
         raise SourceError(f"{stage} holds no DLL, so it is not a staged client payload")
 
-    uncovered, counted = [], {a["name"]: 0 for a in pins["archives"]}
+    uncovered, counted, ours = [], {a["name"]: 0 for a in pins["archives"]}, 0
     for path in dlls:
         if "/" not in path and notices.MSVC_RUNTIME.match(path):
+            continue
+        if path.lower() in own:
+            ours += 1
             continue
         archive = covered.get(path.lower())
         if archive is None:
@@ -483,6 +509,8 @@ def coverage(stage: Path, pins: dict, qt: Path | None = None) -> list[str]:
         )
 
     lines = [f"{name}: {count} DLLs" for name, count in counted.items()]
+    if ours:
+        lines.append(f"Revenant's own engine plugins: {ours} DLLs, source in the corresponding-source archive")
     if qt is not None:
         lines += check_against_qt(pins, qt)
     return lines
@@ -720,6 +748,32 @@ def self_test() -> int:
             expect("a pin for a file the payload no longer carries fails", "avcodec-61.dll" in str(error))
         (stage / "avcodec-61.dll").write_bytes(b"binary")
 
+        (stage / "plugins").mkdir()
+        (stage / "plugins" / "p25trunk.dll").write_bytes(b"binary")
+        report = coverage(stage, pins, own={"plugins/p25trunk.dll"})
+        expect("an engine plugin Revenant builds needs no pin",
+               "Revenant's own engine plugins: 1 DLLs, source in the corresponding-source archive" in report)
+        (stage / "plugins" / "other.dll").write_bytes(b"binary")
+        try:
+            coverage(stage, pins, own={"plugins/p25trunk.dll"})
+            expect("a plugin Revenant does not build fails the payload", False)
+        except SourceError as error:
+            expect("a plugin Revenant does not build fails the payload", "plugins/other.dll" in str(error))
+        shutil.rmtree(stage / "plugins")
+
+        cmake = scratch / "CMakeLists.txt"
+        cmake.write_text(
+            "function(revenant_engine_plugin target)\nendfunction()\n"
+            "# revenant_engine_plugin(retired retired.cpp)\n"
+            "revenant_engine_plugin(p25trunk p25trunk/p25trunk.cpp)\n"
+            "  revenant_engine_plugin( logger logger/logger.cpp)\n",
+            encoding="utf-8",
+        )
+        expect("the plugins are read from their calls, not the definition or a comment",
+               own_plugin_dlls(cmake) == {"plugins/p25trunk.dll", "plugins/logger.dll"})
+        expect("this checkout's plugins/CMakeLists.txt declares p25trunk",
+               "plugins/p25trunk.dll" in own_plugin_dlls())
+
         qt = scratch / "Qt" / "6.8.3" / "msvc2022_64"
         (qt / "sbom").mkdir(parents=True)
 
@@ -795,7 +849,8 @@ def main(argv: list[str]) -> int:
             make_client(pins, args.out)
         elif args.command == "coverage":
             print("\n".join(coverage(args.stage, load_pins(), args.qt)))
-            print(f"every DLL in {args.stage} has its source pinned in {notices.CLIENT_SOURCES.name}")
+            print(f"every DLL in {args.stage} has its source pinned in {notices.CLIENT_SOURCES.name} "
+                  f"or is Revenant's own")
         else:
             parser.print_help()
             return 2

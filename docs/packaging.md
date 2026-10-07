@@ -282,11 +282,18 @@ carries the reasoning for each of these inline; the summary:
   folder as far as it trusts the executable beside it:
   `core/decode/vocoder_plugin.h` says why nothing can do better. The radio
   panel's vocoders section lists what the engine loaded and refused.
-- **No engine plugins.** The same arrangement for the `plugins` folder beside
+- **Only the engine plugins this tree builds.** Since v0.1.8 the payload
+  carries `plugins\p25trunk.dll` beside `revenant-engine.exe`. The release job
+  signs it with the two executables, and `scripts/corresponding_source.py`
+  counts every plugin `plugins/CMakeLists.txt` builds as Revenant's own, with
+  its source in the corresponding-source archive. No settings file ships, so
+  p25trunk follows whichever p25p1 receiver a client opens on a control
+  channel. A plugin somebody else adds to `{ProgramFiles}\Revenant\plugins` is
+  on the same terms as a vocoder: put there as an administrator and signed by
+  nobody here. `docs/plugins.md`. WHAT THIS ITEM USED TO SAY: "No engine
+  plugins. The same arrangement for the `plugins` folder beside
   `revenant-engine.exe`, since 2026-10-03: the payload carries neither a
-  plugin nor the folder, an installed engine looks in
-  `{ProgramFiles}\Revenant\plugins`, and nothing that goes there is signed.
-  `docs/plugins.md`.
+  plugin nor the folder". True until v0.1.8.
 - **No speech model.** Whisper's weights, 1.6 GB, are fetched by the engine
   on first use into `%LOCALAPPDATA%\Revenant\models` of whoever turned speech
   to text on, under their own token, and verified there. The installer does
