@@ -23,6 +23,38 @@ and everything else in the band that moment goes past unrecorded.
 
 Revenant moves the whole chain onto the GPU and leaves the samples there.
 
+## Roadmap
+
+| Milestone | What it delivers | State |
+| --- | --- | --- |
+| M0 | The device path: open the RTL-SDR, read its descriptors, find the bulk endpoint that carries IQ | Done |
+| M1 | The engine: the GPU channelizer, receivers, demodulators and the wideband detector, with fifty receivers on one 20 MHz grid faster than realtime | Done |
+| M2 | The graphical client, a separate process over Cap'n Proto, drawing the spectrum and waterfall at monitor refresh within its frame budget | Done, 2026-09-27 |
+| M3 | The first public release, v0.1.0: a signed installer, with the corresponding sources on the same release page | Done, 2026-09-27 |
+| M4 | Rolling capture of the band, and search over what it stored. This is the reason the design exists | In progress |
+| M5 | Device support beyond the RTL-SDR, in the order below | Next |
+| After M5 | More than one radio at a time, and the modes `docs/modes.md` lists as not done | Not ordered |
+
+### M5 device order
+
+Ordered by how many people own the radio against how much work it is.
+Today Revenant runs the RTL-SDR family through librtlsdr, including direct
+sampling for HF, plus the synthetic and file sources.
+
+| # | Radio | Why here | Approach | Work |
+| --- | --- | --- | --- | --- |
+| 1 | HackRF One and Pro | Large install base, small documented protocol, BSD-3 host library | Link libhackrf, receive only | Low |
+| 2 | SDRplay RSP1B, RSPdx-R2, RSPduo | Among the most widely owned receivers; no open driver exists for current models | Load the SDRplay API at runtime if the user installed it; never shipped | Medium |
+| 3 | rtl_tcp and SpyServer clients | Remote RTL-SDR and Airspy servers that already exist in large numbers | Network clients written from the protocols | Low |
+| 4 | Airspy R2 and Mini, HydraSDR RFOne | Established 12-bit receivers that share one USB protocol | Own driver on the BSD protocol code, IQ conversion on the GPU | Medium |
+| 5 | RX888 MkII | 16-bit direct sampling of 0 to 64 MHz, the radio this design is built for | Own USB 3 streaming and firmware loader | High |
+| 6 | ADALM-Pluto and AD936x Zynq boards | One backend covers the family; transport limits full-band use | Link libiio | Medium |
+| 7 | The long tail: USRP B2xx, LimeSDR, bladeRF, Airspy HF+ | Small user bases each, one bridge covers them | SoapySDR in a separate process | Medium |
+
+KrakenSDR runs as five single RTL-SDR channels already; coherent direction
+finding waits for multi-radio work after M5. Fobos SDR waits on reports of
+its imaging problems being resolved.
+
 ## What it is
 
 A software defined radio application where samples cross the bus once, into
@@ -67,13 +99,9 @@ has been measured is below, with the numbers rather than the adjectives.
 
 M1, M2 and M3 are done: v0.1.0, the first public release, shipped on
 2026-09-27, and the release page has every one since. M4, the rolling
-capture, is next.
+capture, is in progress.
 There are two things to run: a command line, and a Qt client that reaches a
 running engine over a socket.
-
-WHAT THIS PARAGRAPH USED TO SAY: "M1 and M2 are done, and M3, the first public
-release, is next." v0.1.0 shipped on 2026-09-27 and the sentence went on
-pointing at it as future work through six more releases.
 
 ```
 revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20" \
@@ -149,10 +177,6 @@ runs both trees. The counts move with nearly every commit, so they are dated
 rather than kept current: on 2026-09-23 `ctest -N` listed 841 tests in the
 engine tree and 334 in `ui/`.
 
-WHAT THIS PARAGRAPH USED TO SAY: "seven demodulators and a raw complex tap,
-three digital voice modes". Synchronous AM made eight demodulators and DMR made
-four digital voice modes, both on 2026-09-23 (`core/engine/vrx.h`, `Demod`).
-
 Sixteen decoders run on a live receiver, in the engine, from
 `revenant-cli --decode` and over the wire through `Session.subscribeDecoded`:
 P25 Phase 1, D-STAR, TETRA, DMR and M17 on complex baseband, and RTTY, SITOR-B,
@@ -179,14 +203,6 @@ its codec, and with no plugin loaded the audio is silence rather than a
 refusal. No plugin ships with Revenant; "AMBE, and why you will not find it
 here" below says why. TETRA voice is not decoded.
 
-WHAT THIS PARAGRAPH USED TO SAY: "D-STAR, TETRA and DMR voice is not decoded."
-The framing decoders for D-STAR and DMR now hand their voice to a vocoder
-plugin, so only TETRA's half of that sentence is still true. And before that:
-"P25's IMBE voice decodes to audio in `core/decode` and is not served", and
-"Thirteen decoders run on a live receiver"; DMR's framing decoder made
-fourteen on 2026-09-23. And then "Fourteen decoders run on a live receiver";
-AIS and VHF DSC made sixteen the same day.
-
 The client has had its first design pass. The main window is the span, a
 frequency ruler between the spectrum and the waterfall, and a top bar with a
 per-digit frequency dial and a band menu backed by a cited band table. The
@@ -201,13 +217,6 @@ verifies on a frequency no receiver covers. The radio panel lists the vocoder pl
 what each serves and why any was refused. Every action has a key, one table
 decides them all, and a command palette on Ctrl+K lists every action and
 band. `docs/ui-spectrum.md` has each of those and what it measured.
-
-WHAT THIS PARAGRAPH USED TO SAY: "The receivers have a window of their own: a
-rack of up to eight receivers". The limit went to 64 on 2026-10-02, which is
-what the engine carries audio for, and the rack has docked in the main window
-by default since 2026-09-23. It also said "an "auto P25" switch in the rack
-header opens a held receiver on every P25 signal the detector verifies"; the
-switch became "auto DV" on 2026-10-03 and covers every digital voice protocol.
 
 Speech to text, since 2026-10-03. One switch, "speech" in the top bar or
 Ctrl+Shift+T, has the engine transcribe every receiver that makes speech: P25
@@ -242,62 +251,10 @@ subcarriers are not implemented, and RDS-TMC is recognised, counted and kept
 raw but not decoded into events and locations, because the field positions are
 in clauses of ISO 14819-1 nobody here has read; `docs/modes.md` has both.
 
-WHAT THIS PARAGRAPH USED TO SAY: "P25 voice does not reach the client, for the
-reason above." It has reached the client since 2026-09-23, as the paragraph on
-decoders says, and the sentence sat two paragraphs below its own correction.
-
-This paragraph used to read "What does not: a decoder on a live signal, other
-than RDS." and went on to say that nothing in the engine or the command line
-ran P25, D-STAR or TETRA on a receiver, "their demodulator modes hand out a raw
-tap and nothing reads it". Fourteen decoders now run on a live receiver and
-over the wire, those three among them, so a reader who took it at its word
-would not have looked for any of them.
-
-This paragraph used to read "What does not: every decoder but RDS.
-`docs/modes.md` is the scoped list and none of the rest of it is written." The
-framing decoders for three voice modes and the IMBE vocoder were written after
-it, so a reader following it would not have looked for them. The two counts
-above it, 547 engine tests and 84 in `ui/`, were each true on the day they were
-written and read as current long after.
-
-This paragraph used to read "WFM is mono and has no de-emphasis, so broadcast
-stations decode bright and one channel only." Both halves stopped being true in
-`09e998f` and `f3c0544`, and this sentence went on asserting them. WFM decodes
-the pilot-tone stereo system on the device: pilot recovery, coherent detection
-at twice the pilot, the matrix, and 75 microsecond de-emphasis, with a CPU twin
-the conformance suite diffs bit-exactly. A station with no pilot comes back as
-two bit-identical channels rather than faded, so a consumer tests for that
-rather than thresholding a level.
-
-This paragraph used to read "The session cannot open or stop a source, and
-nothing saves a set of receivers across a restart. Those last two are in
-`docs/rpc.md`, each with what it would take and what the gap costs meanwhile."
-The first half is no longer true. `openSource` and `closeSource` are on the
-session, an engine's source can be closed and another opened without restarting
-the process, and `EngineInfo::sourceEpoch` is what tells a client the sample
-indices started again. Starting is still the host's, because `run()` blocks for
-the length of a stream; `revenant-engine` loops on it.
-
-This paragraph used to read "every decoder. Audio and RDS have a shape on the
-wire and nothing behind them, so the client is still silent and the command
-line is what listens; both methods refuse in words saying the surface exists
-and is not wired, because a stream that produced nothing would read as a
-broken radio." Every clause of it is now false. `subscribeAudio` carries
-float32 PCM and the Qt client plays it through a `QAudioSink`, and
-`rdsStation` and `setRdsRegion` serve a real decoder that runs per receiver
-on the engine's completion thread. The retraction is left here rather than
-swapped out because the sentence was an instruction to whoever read it: it
-told them not to look for audio in the client, and there is audio in the
-client.
-
 A client logs in with a pre-shared token before it holds anything at all, and
 still binds loopback by default: the wire is plaintext, so a token crossing a
 network is readable and replayable, and off loopback still means a tunnel.
-`docs/rpc.md` has where the token lives and how to pass it. This paragraph
-used to say the session had no authentication of any kind and binds loopback
-for that reason; the first half is no longer true and the second half survives
-for a different reason, which is why the sentence is replaced rather than
-edited.
+`docs/rpc.md` has where the token lives and how to pass it.
 
 ### What has been measured
 
@@ -321,22 +278,7 @@ further, and on 2026-09-22 the device was dropped from CI rather than chased.
 `docs/fft.md` keeps the measurements as history, and `tools/gpustress` is
 still the instrument if a new driver is worth a second look.
 
-WHAT THIS SECTION USED TO SAY. It gave the same failure rates and went on "So
-the spectrum kernel is refereed on the discrete card and skipped elsewhere, and
-on that device the waterfall is not to be trusted." That described a device
-still in the test matrix with one kernel excused on it. The device is out of
-the matrix now, so nothing about it is refereed, not only the spectrum.
-
-### Where it is going
-
-| Milestone | What it delivers | State |
-| --- | --- | --- |
-| M0 | The device path: open the RTL-SDR, read its descriptors, find the bulk endpoint that carries IQ | Done |
-| M1 | The engine: the GPU channelizer, receivers, demodulators and the wideband detector, with fifty receivers on one 20 MHz grid faster than realtime | Done |
-| M2 | The graphical client, a separate process over Cap'n Proto, drawing the spectrum and waterfall at monitor refresh within its frame budget | Done, 2026-09-27 |
-| M3 | The first public release, v0.1.0: a signed installer, with the corresponding sources on the same release page | Done, 2026-09-27. v0.1.1 has the client start the engine |
-| M4 | Rolling capture of the band, and search over what it stored. This is the reason the design exists, and nothing of it is built | Next |
-| After M4 | More than one radio at a time, and the modes `docs/modes.md` lists as not done | Not ordered |
+### Known shortfalls
 
 What a release does not do is the "What does not" paragraph under Status, and
 what each decoder does not do is `docs/modes.md`. One known shortfall arrived
@@ -377,36 +319,6 @@ window is not within budget: 473 of 35758, 1.32%, against 0.65% on
 what is left is open, and `docs/ui-spectrum.md`, "Frame budget", has the
 numbers, the command and what is still open.
 
-WHAT THIS PARAGRAPH USED TO SAY. It ended "A run on 2026-09-27 missed 4.56% in
-the receiver window with a CI run testing on the same GPU under it, so M2
-waits on an idle rerun." The idle rerun missed 5.42%, a real regression, and
-M2 closed on the docked layout instead, by the owner's decision.
-
-WHAT THIS PARAGRAPH USED TO SAY. It ended "The display is the streamed virtual
-one, and a physical monitor is still to measure". The owner decided on
-2026-09-27 that the virtual display, composed by DWM at 120 Hz, is the one the
-budget is held on, since the only other display is a 60 Hz television.
-
-WHAT THIS PARAGRAPH USED TO SAY. After the first measurement it said "The
-misses are waits between the two windows and in the swap chain". The swap
-chain was withdrawn as a cause once the windows were kept on top, where the
-main window alone missed 0.4% and 0.5%.
-
-WHAT THIS PARAGRAPH USED TO SAY. It ended "nothing has measured the client's
-frame time, at full load or at any load, so neither can be claimed. That
-measurement is what M2 lacks." `revenant-ui --frame-stats` and
-`scripts/frame-budget.ps1` measure it.
-
-WHAT THIS SECTION USED TO SAY about M3 and after: "M3 is the first public
-release. Until then the layout moves and there are no binaries." With v0.1.0
-there are binaries. And "M4 and beyond: the rolling capture and search over
-it, more than one radio at a time, and the modes `docs/modes.md` lists as not
-done", which the table now splits into M4 and what follows it.
-
-An older version of that line read "M4 and beyond: the decoders, and search over stored
-captures." Thirteen decoders arrived during M2, so the line pointed a reader
-past work that had already landed.
-
 ## Requirements
 
 Windows 11, x64.
@@ -416,11 +328,6 @@ which is what development and CI run against. Other Vulkan 1.3 devices may
 work and are not tested. The integrated Radeon in a Ryzen 9 7950X is not
 supported: its driver corrupts the spectrum kernel, as "What has been
 measured" above says.
-
-This paragraph used to read, at its end, "Development and CI run against an
-NVIDIA RTX 4090 and the integrated Radeon in a Ryzen 9 7950X." Until
-2026-09-22 CI did, and the sentence read as a statement that the integrated
-part was a tested configuration. It is neither tested nor supported now.
 
 An SDR device, optionally: an RTL-SDR v3 works today, through librtlsdr. The
 synthetic wideband source and the file source need no hardware at all and are
@@ -457,10 +364,6 @@ instance, is left alone:
 ```
 "C:\Program Files\Revenant\revenant-engine.exe" "rtlsdr://0?freq=98.1M&rate=2400000&gain=20"
 ```
-
-WHAT THIS PARAGRAPH USED TO SAY, in v0.1.0: "The Start Menu entry opens the
-client, which connects to an engine on port 17690. Start the engine first,
-with a source". v0.1.1 starts it.
 
 The same release page carries the source for everything the installer
 ships: `Revenant-<version>-corresponding-source.zip` for Revenant, libusb and
@@ -500,13 +403,6 @@ and Intel get none, and a kernel that behaves differently on either would not
 be caught until somebody runs it on one. A discrete AMD card and an Intel
 device in the conformance machine are the fix, and until that happens this
 table is the honest statement of what is verified.
-
-WHAT THIS SECTION USED TO SAY. Until 2026-09-22 the AMD row read "Radeon
-integrated graphics on a Ryzen 9 7950X, Vulkan 1.4.315. Every push." and the
-paragraph under the table said "Two of the three target vendors get genuine
-driver coverage on every commit". The integrated part left the matrix that
-day, so anyone who chose AMD hardware on the strength of that row was relying
-on coverage that no longer exists.
 
 macOS through MoltenVK is out of scope until there is something to render.
 
@@ -645,22 +541,6 @@ carries the corresponding source beside the installer:
 librtlsdr, and the Qt and FFmpeg source archives the client is built from,
 listed in `SOURCES-client.txt`. The release obligations are in
 [docs/clean-room.md](docs/clean-room.md).
-
-WHAT THIS PARAGRAPH USED TO SAY: "No binary has been handed to anyone yet, so
-the release obligations in docs/clean-room.md are the ones still ahead rather
-than the ones outstanding." The release job published v0.1.0 with a signed
-installer on 2026-09-27, so the obligations are current ones, and the release
-page is where they are met.
-
-WHAT THIS PARAGRAPH USED TO SAY
-
-Until 2026-09-20 it ended "This repository is private today and goes public
-when there is a reason to, not because the licence changed." The repository
-is public and has been for some time: `gh repo view` reports
-`"isPrivate": false`. Recorded rather than swapped because the false half
-was the premise the rest of the paragraph reasoned from, so anyone who
-worked out their obligations by following it was told the private case
-applied to them when it does not.
 
 Clean-room is still the default everywhere it is affordable, which is
 everywhere a specification is published. The policy, the exceptions and the
