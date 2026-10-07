@@ -641,6 +641,13 @@ class EngineLink : public QObject {
     Q_PROPERTY(qulonglong sourceSamplesDelivered READ sourceSamplesDelivered
                    NOTIFY openedSourceChanged)
 
+    // DIRECT SAMPLING ON THE OPEN SOURCE. openedSource carries what it was
+    // opened with: directSamplingAvailable, directSampling ("off", "i", "q" or
+    // "auto") and upconverter, true on an RTL-SDR Blog V4. This is the branch
+    // in force NOW, "off", "i" or "q", which under auto moves with the centre
+    // and is read off the SourceStats poll that already runs.
+    Q_PROPERTY(QString sourceDirectBranch READ sourceDirectBranch NOTIFY openedSourceChanged)
+
     // THE OPEN SOURCE'S GAIN STAGE, and whether there is one to draw.
     //
     // Off Session.sourceDescriptor, which describes the source that is already
@@ -2044,6 +2051,19 @@ public:
     Q_INVOKABLE void openSource(const QString& uri);
     Q_INVOKABLE void closeSource();
 
+    // Reopens the open source in another direct sampling mode, "off", "i",
+    // "q" or "auto", and keeps the choice for this radio under
+    // source/radios/<radio>/directSampling, which composeSourceUri reads the
+    // next time the radio is picked.
+    //
+    // A REOPEN, AND IT COSTS WHAT A REOPEN COSTS: every receiver and the
+    // waterfall's history. The mode decides what the engine will tune, so it
+    // is fixed for a stream; see core/rpc/revenant.capnp's
+    // SourceDescriptor::directSampling. Under auto the switching between the
+    // tuner and the Q branch is live and needs nothing from here. Ignored for
+    // a source that does not have the feature and for a mode it is already in.
+    Q_INVOKABLE void setDirectSampling(const QString& mode);
+
     // What the last open or close said when it refused, and empty otherwise.
     // Kept apart from errorText for the reason detectionFault and tuneFault
     // are: that field belongs to the connection, and a refused open on a
@@ -3070,6 +3090,7 @@ signals:
 public:
     [[nodiscard]] QVariantMap openedSource() const { return open_source_; }
     [[nodiscard]] qulonglong sourceSamplesDelivered() const { return samples_delivered_; }
+    [[nodiscard]] QString sourceDirectBranch() const { return direct_branch_; }
 
 private:
     // ---- the open source, by name: open_source_link.cpp --------------------
@@ -3083,6 +3104,9 @@ private:
     // SourceStats this is read off. No round trip of its own.
     void note_samples_delivered(std::uint64_t delivered);
 
+    // The same poll, the same handover: the ADC branch in force.
+    void note_direct_branch(rpc::DirectSamplingMode branch);
+
     // Qt thread, queued from the two above.
     void adopt_open_source();
 
@@ -3093,6 +3117,8 @@ private:
     QVariantMap handover_open_source_;        // guarded by open_source_mutex_
     bool handover_has_delivered_ = false;     // guarded by open_source_mutex_
     std::uint64_t handover_delivered_ = 0;    // guarded by open_source_mutex_
+    bool handover_has_branch_ = false;        // guarded by open_source_mutex_
+    rpc::DirectSamplingMode handover_branch_ = rpc::DirectSamplingMode::Off;  // same
 
     // Supervisor thread only. Cleared by attempt_connect, because an engine
     // restarted under this window starts its epochs at one again and would
@@ -3102,10 +3128,13 @@ private:
     QVariantMap posted_open_source_;
     std::uint64_t posted_delivered_ = 0;
     bool delivered_posted_ = false;
+    rpc::DirectSamplingMode posted_branch_ = rpc::DirectSamplingMode::Off;
+    bool branch_posted_ = false;
 
     // Qt thread only.
     QVariantMap open_source_;
     qulonglong samples_delivered_ = 0;
+    QString direct_branch_ = QStringLiteral("off");
 
 private:
     // The supervisor thread, and the two halves of what it does.

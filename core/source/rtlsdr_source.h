@@ -46,17 +46,11 @@
 #include "core/dsp/types.h"
 #include "core/error.h"
 #include "core/source/capabilities.h"
+#include "core/source/direct_sampling.h"
 #include "core/source/rtlsdr_lock.h"
 #include "core/source/source.h"
 
 namespace revenant::source {
-
-// Direct sampling taps the RTL2832U's ADC ahead of the tuner, which is how an
-// RTL-SDR v3 hears HF at all. The two branches are the I and Q inputs of the
-// ADC; the v3 wires its HF input to Q. The values match
-// rtlsdr_set_direct_sampling's argument so the mapping is one cast and not a
-// table that can be got backwards.
-enum class DirectSampling : std::uint8_t { Off = 0, IBranch = 1, QBranch = 2 };
 
 // The tuner gain a URI that does not say gets, in decibels.
 //
@@ -134,7 +128,11 @@ struct RtlSdrSourceConfig {
     // Read the header. Off unless the URI said otherwise, every time.
     bool bias_tee = false;
 
-    DirectSampling direct = DirectSampling::Off;
+    // direct=off|i|q|auto. See core/source/direct_sampling.h for what each
+    // does, Auto's switching rule and the Blog V4 exception. The branch the
+    // device is put in follows from this and the centre, at open and at every
+    // tune.
+    DirectSamplingMode direct = DirectSamplingMode::Off;
 
     // Only written to the device when true. rtlsdr_set_offset_tuning fails on
     // the R820T family whichever value it is handed, so asking for the state

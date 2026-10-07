@@ -386,6 +386,22 @@ struct PromiseValue<kj::Promise<T>> {
     return out;
 }
 
+static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::OFF) ==
+              static_cast<std::uint16_t>(DirectSamplingMode::Off));
+static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::I_BRANCH) ==
+              static_cast<std::uint16_t>(DirectSamplingMode::IBranch));
+static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::Q_BRANCH) ==
+              static_cast<std::uint16_t>(DirectSamplingMode::QBranch));
+static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
+              static_cast<std::uint16_t>(DirectSamplingMode::Auto));
+
+[[nodiscard]] DirectSamplingMode read_direct_sampling(schema::DirectSamplingMode in) {
+    const auto value = static_cast<std::uint16_t>(in);
+    return value <= static_cast<std::uint16_t>(DirectSamplingMode::Auto)
+               ? static_cast<DirectSamplingMode>(value)
+               : DirectSamplingMode::Off;
+}
+
 [[nodiscard]] SourceDescriptor read_source_descriptor(schema::SourceDescriptor::Reader in) {
     SourceDescriptor out;
     out.uri = read_text(in.getUri());
@@ -459,6 +475,12 @@ struct PromiseValue<kj::Promise<T>> {
     out.seekable = in.getSeekable();
     out.length_samples = in.getLengthSamples();
     out.serial = read_text(in.getSerial());
+
+    // An ordinal from a newer engine reads as Off, on the precedent the flow
+    // control sets above: a descriptor read must not fail over one field.
+    out.direct_sampling_available = in.getDirectSamplingAvailable();
+    out.direct_sampling = read_direct_sampling(in.getDirectSampling());
+    out.upconverter = in.getUpconverter();
     return out;
 }
 
@@ -510,6 +532,7 @@ struct PromiseValue<kj::Promise<T>> {
     // call of their own.
     out.vrx_retune_refusals = in.getVrxRetuneRefusals();
     out.frame_stalls = in.getFrameStalls();
+    out.direct_sampling = read_direct_sampling(in.getDirectSampling());
     return out;
 }
 

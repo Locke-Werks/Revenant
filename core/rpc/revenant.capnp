@@ -632,6 +632,41 @@ struct SourceDescriptor {
     # ship with "00000001" and most are never reprogrammed, so two stock
     # dongles share one calibration. docs/calibration.md says what to do.
     serial @15 :Text;
+
+    # Whether the device can take its signal straight into the ADC, bypassing
+    # the tuner. True for every RTL-SDR, false for everything else. A client
+    # offers the direct sampling control only when this is true.
+    directSamplingAvailable @16 :Bool;
+
+    # The direct sampling mode the source was opened with, which is the
+    # `direct=` key of an rtlsdr URI. CHANGING IT IS A REOPEN: the mode decides
+    # what tuneRanges claims, and a client reaching for HF has to see the new
+    # reach before it tunes there. Under auto the branch in force moves with
+    # the centre and is reported in SourceStats::directSampling, not here.
+    directSampling @17 :DirectSamplingMode;
+
+    # An RTL-SDR Blog V4, read from its USB product string. The V4 reaches HF
+    # through its own upconverter on the tuner path, so auto never selects a
+    # branch on one, and tuneRanges reaches down to 500 kHz under off and auto.
+    upconverter @18 :Bool;
+}
+
+# How an RTL-SDR's ADC is fed. See core/source/direct_sampling.h.
+#
+# off is the tuner. iBranch and qBranch take the antenna straight into one ADC
+# input with the tuner out of circuit; an RTL-SDR v3 wires its HF port to Q.
+# auto uses qBranch below the tuner's lowest frequency and returns to the tuner
+# 2 MHz above it, so a centre moved back and forth across the edge does not
+# switch the input on every step.
+#
+# Under direct sampling the tuner's gain acts on nothing and the input is real,
+# so images appear. The engine holds a gain set in that state and applies it
+# when auto brings the tuner back.
+enum DirectSamplingMode {
+    off @0;
+    iBranch @1;
+    qBranch @2;
+    auto @3;
 }
 
 struct CalibrationSettings {
@@ -809,6 +844,12 @@ struct SourceStats {
     # A client that draws this without the flow control beside it reports the
     # healthy case as a fault on every file and every synthetic scene.
     frameStalls @10 :UInt64;
+
+    # The ADC branch in force now: off, iBranch or qBranch, never auto. Moves
+    # with the centre on a source opened with directSampling auto, which is
+    # why it is here on the polled message rather than on SourceDescriptor.
+    # off on every source that has no direct sampling.
+    directSampling @11 :DirectSamplingMode;
 }
 
 struct VrxParams {

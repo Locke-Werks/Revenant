@@ -16,6 +16,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "core/rpc/types.h"
@@ -400,4 +401,87 @@ TEST_CASE("a box the operator left empty leaves its key off", "[ui][source]")
     SourceChoice automatic;
     automatic.gains.push_back(GainChoice{.stage = "tuner", .automatic = true});
     CHECK(compose_source_uri(source, automatic) == "rtlsdr://0?gain=auto");
+}
+
+// ---------------------------------------------------------------------------
+// Direct sampling
+// ---------------------------------------------------------------------------
+
+namespace {
+
+[[nodiscard]] revenant::rpc::SourceDescriptor a_dongle_with_direct_sampling() {
+    revenant::rpc::SourceDescriptor source;
+    source.uri = "rtlsdr://0";
+    source.backend = "rtlsdr";
+    source.serial = "00000001";
+    source.tune_ranges.push_back({24'000'000, 1'766'000'000, 0});
+    source.direct_sampling_available = true;
+    return source;
+}
+
+}  // namespace
+
+TEST_CASE("direct sampling is kept per radio under source/radios", "[source_choice][direct]") {
+    using namespace revenant;
+    CHECK(ui::direct_sampling_key("rtlsdr:00000001") ==
+          "source/radios/rtlsdr:00000001/directSampling");
+    CHECK(ui::descriptor_calibration_key(a_dongle_with_direct_sampling()) == "rtlsdr:00000001");
+
+    rpc::SourceDescriptor no_serial = a_dongle_with_direct_sampling();
+    no_serial.serial.clear();
+    CHECK(ui::descriptor_calibration_key(no_serial).empty());
+}
+
+TEST_CASE("only the four direct sampling spellings are taken", "[source_choice][direct]") {
+    using namespace revenant;
+    CHECK(ui::direct_sampling_choice("Q") == std::optional<std::string>("q"));
+    CHECK(ui::direct_sampling_choice("auto") == std::optional<std::string>("auto"));
+    CHECK(ui::direct_sampling_choice("off") == std::optional<std::string>("off"));
+    CHECK_FALSE(ui::direct_sampling_choice("yes").has_value());
+    CHECK_FALSE(ui::direct_sampling_choice("").has_value());
+}
+
+TEST_CASE("an open source's URI is rewritten for another mode and nothing else moves",
+          "[source_choice][direct]") {
+    using namespace revenant;
+    CHECK(ui::with_direct_sampling("rtlsdr://0?rate=2400000&freq=98100000&gain=20", "q") ==
+          "rtlsdr://0?rate=2400000&freq=98100000&gain=20&direct=q");
+    CHECK(ui::with_direct_sampling("rtlsdr://0?direct=q&freq=7000000", "auto") ==
+          "rtlsdr://0?freq=7000000&direct=auto");
+    // Off drops the key, so a tuner URI reads as it always did.
+    CHECK(ui::with_direct_sampling("rtlsdr://0?freq=7000000&direct=auto", "off") ==
+          "rtlsdr://0?freq=7000000");
+    CHECK(ui::with_direct_sampling("rtlsdr://0?direct=i", "off") == "rtlsdr://0");
+    CHECK(ui::with_direct_sampling("rtlsdr://0", "q") == "rtlsdr://0?direct=q");
+
+    // The centre is replaced the same way, by name and not by prefix: a key
+    // that merely starts with "freq" is somebody else's.
+    CHECK(ui::with_query_value("rtlsdr://0?freq=98100000&freqx=1", "freq", "7000000") ==
+          "rtlsdr://0?freqx=1&freq=7000000");
+}
+
+TEST_CASE("an HF centre is not clamped to the tuner's floor when direct sampling is chosen",
+          "[source_choice][direct]") {
+    using namespace revenant;
+    const rpc::SourceDescriptor source = a_dongle_with_direct_sampling();
+
+    ui::SourceChoice choice;
+    choice.center_hz = 7'000'000;
+
+    // Off: the listing's envelope is the tuner's, and 7 MHz lands on its floor.
+    CHECK(ui::compose_source_uri(source, choice) == "rtlsdr://0?freq=24000000");
+
+    choice.direct_sampling = "auto";
+    CHECK(ui::compose_source_uri(source, choice) == "rtlsdr://0?freq=7000000&direct=auto");
+
+    choice.direct_sampling = "q";
+    choice.center_hz = 100'000'000;
+    CHECK(ui::compose_source_uri(source, choice) == "rtlsdr://0?freq=28800000&direct=q");
+
+    // A device without the feature never sees the key.
+    rpc::SourceDescriptor file;
+    file.uri = "file://x.wav";
+    ui::SourceChoice for_file;
+    for_file.direct_sampling = "q";
+    CHECK(ui::compose_source_uri(file, for_file) == "file://x.wav");
 }

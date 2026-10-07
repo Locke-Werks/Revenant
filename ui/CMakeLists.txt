@@ -300,6 +300,7 @@ qt_add_qml_module(revenant_ui
         qml/TuneBar.qml
         qml/ControlRow.qml
         qml/GainControl.qml
+        qml/DirectSamplingControl.qml
         qml/StatusDrawer.qml
         qml/ReceiverDetail.qml
         qml/ReceiverPanel.qml

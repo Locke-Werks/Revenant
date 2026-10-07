@@ -53,6 +53,10 @@ Rectangle {
         // under it do not move when one comes or goes.
         GainControl {}
 
+        // Beside the gain because it decides whether the gain does anything.
+        // Absent, with its divider, on a source that has no direct sampling.
+        DirectSamplingControl {}
+
         Rectangle {
             Layout.preferredWidth: 1
             Layout.preferredHeight: 16

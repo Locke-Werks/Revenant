@@ -33,11 +33,13 @@
 #include <vector>
 
 #include <QMetaObject>
+#include <QSettings>
 #include <QString>
 #include <QVariantList>
 #include <QVariantMap>
 
 #include "core/rpc/client.h"
+#include "models/detector_scope.h"
 #include "models/frequency_entry.h"
 #include "models/source_choice.h"
 #include "models/wire_seam.h"
@@ -392,6 +394,7 @@ void EngineLink::poll_front_end(bool engine_running)
     }
 
     note_samples_delivered(stats->samples_delivered);
+    note_direct_branch(stats->direct_sampling);
 
     FrontEndSample sample;
     sample.engine_running = engine_running;
@@ -793,7 +796,71 @@ QString EngineLink::composeSourceUri(int index, const QString& center, const QSt
         }
         choice.gains.push_back(std::move(gain));
     }
+
+    // The mode this radio was last used in, so picking it again does not drop
+    // an HF operator back onto the tuner. Read here rather than handed in by
+    // the panel because the radio's identity is the descriptor's serial, which
+    // the panel has no reason to know.
+    if (source.direct_sampling_available) {
+        const std::string radio = descriptor_calibration_key(source);
+        if (!radio.empty()) {
+            const QString stored =
+                QSettings()
+                    .value(QString::fromStdString(direct_sampling_key(radio_settings_id(radio))))
+                    .toString();
+            choice.direct_sampling = direct_sampling_choice(stored.toStdString());
+        }
+    }
     return QString::fromStdString(compose_source_uri(source, choice));
+}
+
+void EngineLink::setDirectSampling(const QString& mode)
+{
+    const auto chosen = direct_sampling_choice(mode.toStdString());
+    if (!chosen || !open_source_.value(QStringLiteral("directSamplingAvailable")).toBool()) {
+        return;
+    }
+
+    // Kept before the reopen, so a refused open still remembers what the
+    // operator asked for and the picker offers it next time.
+    const std::string backend =
+        open_source_.value(QStringLiteral("backend")).toString().toStdString();
+    const std::string serial =
+        open_source_.value(QStringLiteral("serial")).toString().toStdString();
+    if (!backend.empty() && !serial.empty()) {
+        QSettings().setValue(QString::fromStdString(direct_sampling_key(
+                                 radio_settings_id(backend + ":" + serial))),
+                             QString::fromStdString(*chosen));
+    }
+
+    if (open_source_.value(QStringLiteral("directSampling")).toString().toStdString() ==
+        *chosen) {
+        return;
+    }
+
+    // The URI the engine reports, with only direct= changed, reopened at the
+    // centre it is on now so a switch to the Q branch while listening at 7 MHz
+    // lands back at 7 MHz rather than wherever the URI first said. freq= is
+    // replaced the same way direct= is.
+    std::string uri = open_source_.value(QStringLiteral("uri")).toString().toStdString();
+    if (uri.empty()) {
+        return;
+    }
+    uri = with_direct_sampling(uri, *chosen);
+
+    // BACK TO THE TUNER FROM HF LANDS AT 28.8 MHz, the top of the
+    // direct-sampling range, because the centre the Q branch was on is below
+    // every tuner's floor and an open there is refused. 28.8 MHz is above the
+    // floor of the R820T and R828D that nearly every RTL-SDR carries; an
+    // E4000 or FC2580 still refuses it, in the engine's words, which name
+    // the range it does reach.
+    std::int64_t centre = info_.source_center;
+    if (*chosen == "off" && centre < kDirectSamplingCeilingHz) {
+        centre = kDirectSamplingCeilingHz;
+    }
+    const std::string centre_text = std::to_string(centre);
+    uri = with_query_value(uri, "freq", centre_text);
+    openSource(QString::fromStdString(uri));
 }
 
 void EngineLink::apply_source_request()

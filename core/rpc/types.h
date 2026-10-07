@@ -278,6 +278,20 @@ enum class SampleFormat : std::uint8_t { Cu8, Cs8, Cs16, Cf32, Cs24, Unknown };
     return "unknown";
 }
 
+// Mirrors the schema's DirectSamplingMode ordinal for ordinal, and
+// source::DirectSamplingMode with it. client.cpp holds the asserts.
+enum class DirectSamplingMode : std::uint8_t { Off = 0, IBranch = 1, QBranch = 2, Auto = 3 };
+
+[[nodiscard]] constexpr const char* direct_sampling_mode_name(DirectSamplingMode mode) {
+    switch (mode) {
+        case DirectSamplingMode::Off: return "off";
+        case DirectSamplingMode::IBranch: return "i";
+        case DirectSamplingMode::QBranch: return "q";
+        case DirectSamplingMode::Auto: return "auto";
+    }
+    return "off";
+}
+
 struct SourceDescriptor {
     std::string uri;
     std::string backend;
@@ -323,6 +337,12 @@ struct SourceDescriptor {
     // The device's serial, which a calibration is kept under. Empty for a file,
     // a synthetic scene and a dongle nobody could open to ask.
     std::string serial;
+
+    // See the schema. The mode is what the source was opened with; changing
+    // it is a reopen with `direct=` in the URI.
+    bool direct_sampling_available = false;
+    DirectSamplingMode direct_sampling = DirectSamplingMode::Off;
+    bool upconverter = false;
 };
 
 // What an operator sets per device. See the schema's CalibrationSettings.
@@ -415,6 +435,9 @@ struct SourceStats {
     // reports the healthy case as a fault on every file and every synthetic
     // scene.
     std::uint64_t frame_stalls = 0;
+
+    // The ADC branch in force now, never Auto. See the schema.
+    DirectSamplingMode direct_sampling = DirectSamplingMode::Off;
 };
 
 struct VrxParams {

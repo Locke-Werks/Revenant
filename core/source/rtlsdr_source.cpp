@@ -193,10 +193,7 @@ constexpr std::int64_t kAnchorAccuracyNs = 2'000'000;
 constexpr double kUncalibratedTolerancePpm = 20.0;
 constexpr double kCalibratedTolerancePpm = 2.0;
 
-// The RTL2832U's crystal, which is what clocks the ADC. Under direct sampling
-// the tuner is out of circuit and the DDC tunes inside the first Nyquist zone
-// of this.
-constexpr dsp::Hertz kRtl2832XtalHz = 28'800'000;
+// kRtl2832XtalHz, the ADC clock, is in core/source/direct_sampling.h.
 
 [[nodiscard]] std::int64_t unix_now_ns()
 {
@@ -278,16 +275,11 @@ constexpr dsp::Hertz kRtl2832XtalHz = 28'800'000;
 // divider the PLL happens to land in, so a single figure would be wrong in
 // both directions. tune() reads the achieved frequency back from the device
 // rather than predicting it, which is what the exactness actually rests on.
-[[nodiscard]] std::vector<TuneRange> tune_ranges_for(rtlsdr_tuner tuner, DirectSampling direct)
+// The tuner path's own reach. What the source claims also depends on the
+// direct-sampling mode and on whether the board has an upconverter, which
+// direct_sampling_ranges in core/source/direct_sampling.h adds.
+[[nodiscard]] std::vector<TuneRange> tuner_ranges_for(rtlsdr_tuner tuner)
 {
-    if (direct != DirectSampling::Off) {
-        // The tuner is bypassed and rtlsdr_set_center_freq drives the
-        // RTL2832U's DDC instead. The first Nyquist zone of the 28.8 MHz ADC
-        // is what can be received without relying on an alias, so that is
-        // what is claimed.
-        return {TuneRange{0, kRtl2832XtalHz / 2, 0}};
-    }
-
     switch (tuner) {
         case RTLSDR_TUNER_E4000:
             // Two ranges because the part has a genuine hole around the
@@ -509,14 +501,23 @@ struct OpenedDevice {
     return steps;
 }
 
-// The dongle's USB serial string, read off the handle that is already open.
+struct UsbStrings {
+    std::string manufacturer;
+    std::string product;
+    std::string serial;
+};
+
+// The dongle's USB string descriptors, read off the handle that is already
+// open. The serial keys calibration; the product is how a Blog V4 is told
+// apart from a v3, see is_blog_v4.
 //
 // rtlsdr_get_usb_strings on the handle rather than rtlsdr_get_device_usb_strings
 // on the index, because the index form opens the device a second time, and
 // that is refused while this process holds it. Empty when the device will not
-// say, which leaves the calibration unkeyed rather than failing an open that
-// is otherwise fine. rtl-sdr.h documents each buffer as 256 bytes.
-[[nodiscard]] std::string serial_of(rtlsdr_dev_t* device)
+// say, which leaves the calibration unkeyed and the board taken for a v3
+// rather than failing an open that is otherwise fine. rtl-sdr.h documents
+// each buffer as 256 bytes.
+[[nodiscard]] UsbStrings usb_strings_of(rtlsdr_dev_t* device)
 {
     char manufacturer[256] = {};
     char product[256] = {};
@@ -524,8 +525,10 @@ struct OpenedDevice {
     if (rtlsdr_get_usb_strings(device, manufacturer, product, serial) != 0) {
         return {};
     }
+    manufacturer[sizeof(manufacturer) - 1] = '\0';
+    product[sizeof(product) - 1] = '\0';
     serial[sizeof(serial) - 1] = '\0';
-    return std::string(serial);
+    return UsbStrings{manufacturer, product, serial};
 }
 
 [[nodiscard]] int nearest_step(const std::vector<int>& steps, int wanted)
@@ -546,7 +549,8 @@ struct OpenedDevice {
                                                  std::uint32_t index,
                                                  std::string_view device_name,
                                                  rtlsdr_tuner tuner,
-                                                 const std::vector<int>& gain_steps)
+                                                 const std::vector<int>& gain_steps,
+                                                 const UsbStrings& strings)
 {
     SourceCapabilities caps;
     caps.uri = config.uri;
@@ -554,8 +558,30 @@ struct OpenedDevice {
     caps.display_name =
         std::format("{} ({} tuner) at index {}", device_name, tuner_name(tuner), index);
     caps.device_index = index;
+    caps.serial = strings.serial;
 
-    caps.tune_ranges = tune_ranges_for(tuner, config.direct);
+    const bool upconverter = is_blog_v4(strings.manufacturer, strings.product);
+    caps.direct_sampling_available = true;
+    caps.direct_sampling_mode = config.direct;
+    caps.upconverter = upconverter;
+    caps.tune_ranges = direct_sampling_ranges(config.direct, tuner_ranges_for(tuner), upconverter);
+
+    if (upconverter) {
+        if (config.direct == DirectSamplingMode::IBranch ||
+            config.direct == DirectSamplingMode::QBranch) {
+            caps.notes.push_back(std::format(
+                "direct={} on an RTL-SDR Blog V4: this board reaches HF through its own "
+                "upconverter on the tuner path and its {} input is not an HF port, so this is "
+                "unlikely to hear anything. direct=off or auto is what a V4 wants.",
+                direct_sampling_name(config.direct),
+                config.direct == DirectSamplingMode::QBranch ? "Q" : "I"));
+        } else if (config.direct == DirectSamplingMode::Auto) {
+            caps.notes.push_back(
+                "RTL-SDR Blog V4: direct=auto stays on the tuner path at every frequency, "
+                "because this board's upconverter handles HF and librtlsdr switches it in "
+                "below 28.8 MHz by itself.");
+        }
+    }
 
     // THE ONE PLACE THIS DESCRIPTION IS LOOSER THAN THE HARDWARE.
     //
@@ -625,7 +651,8 @@ public:
 
     [[nodiscard]] Status open(const RtlSdrSourceConfig& config, DeviceLock lock, Device device,
                               SourceCapabilities caps, std::vector<int> gain_steps,
-                              dsp::SampleRate rate, dsp::Hertz center);
+                              dsp::SampleRate rate, dsp::Hertz center,
+                              std::vector<TuneRange> tuner_ranges, DirectSampling branch);
 
     [[nodiscard]] const SourceCapabilities& capabilities() const override { return caps_; }
 
@@ -796,6 +823,14 @@ private:
     [[nodiscard]] Expected<double> set_gain_locked(double db, int attempts);
     [[nodiscard]] Status set_gain_auto_locked(bool on, int attempts);
     [[nodiscard]] Expected<dsp::Hertz> retune_streaming_locked(dsp::Hertz center);
+
+    // Moves the ADC to the branch `centre` needs under the configured mode,
+    // when that is not the branch it is in. Called from tune_locked before the
+    // frequency is written, so it runs inside the same pause a streaming
+    // retune already takes and nothing else has to stop the transfers for it.
+    // On the way back to the tuner it writes the gain held while the tuner was
+    // out of circuit.
+    [[nodiscard]] Status switch_branch_locked(dsp::Hertz centre, int attempts);
     [[nodiscard]] Expected<ClockModel> make_clock_model() const;
 
     SourceCapabilities caps_{};
@@ -808,6 +843,21 @@ private:
     Device device_{};
     std::vector<int> gain_steps_{};
     bool ppm_given_ = false;
+
+    // Direct sampling. The mode and the tuner's own reach are fixed at open;
+    // the branch moves under Auto and is written only under control_, but read
+    // by stats() from any thread, hence the atomic.
+    DirectSamplingMode direct_mode_ = DirectSamplingMode::Off;
+    std::vector<TuneRange> tuner_ranges_{};
+    bool upconverter_ = false;
+    std::atomic<DirectSampling> branch_{DirectSampling::Off};
+
+    // The tuner gain last asked for, kept so a request made while the tuner is
+    // out of circuit is not lost, and so the tuner comes back at what the
+    // operator last set rather than at whatever librtlsdr leaves. Under
+    // control_.
+    bool held_gain_auto_ = false;
+    double held_gain_db_ = kRtlSdrDefaultGainDb;
 
     dsp::SampleRate rate_ = 0;
     std::atomic<dsp::Hertz> center_hz_{0};
@@ -884,8 +934,16 @@ RtlSdrSource::~RtlSdrSource()
 
 Status RtlSdrSource::open(const RtlSdrSourceConfig& config, DeviceLock lock, Device device,
                           SourceCapabilities caps, std::vector<int> gain_steps,
-                          dsp::SampleRate rate, dsp::Hertz center)
+                          dsp::SampleRate rate, dsp::Hertz center,
+                          std::vector<TuneRange> tuner_ranges, DirectSampling branch)
 {
+    direct_mode_ = config.direct;
+    tuner_ranges_ = std::move(tuner_ranges);
+    upconverter_ = caps.upconverter;
+    branch_.store(branch, std::memory_order_release);
+    held_gain_auto_ = config.gain_auto;
+    held_gain_db_ = config.gain_db;
+
     caps_ = std::move(caps);
     lock_ = std::move(lock);
     device_ = std::move(device);
@@ -966,6 +1024,10 @@ Expected<dsp::Hertz> RtlSdrSource::tune(dsp::Hertz center)
 // than four times over.
 Expected<dsp::Hertz> RtlSdrSource::tune_locked(dsp::Hertz center, int attempts)
 {
+    if (auto switched = switch_branch_locked(center, attempts); !switched) {
+        return std::unexpected(std::move(switched.error()));
+    }
+
     const auto requested = static_cast<std::uint32_t>(center);
 
     int rc = 0;
@@ -1034,6 +1096,46 @@ Expected<dsp::Hertz> RtlSdrSource::retune_streaming_locked(dsp::Hertz center)
     // middle would do exactly that, and it would do it silently, because
     // running() is held true across the pause.
     return with_transfers_paused([this, center] { return tune_locked(center, kRetunePipeRetries); });
+}
+
+Status RtlSdrSource::switch_branch_locked(dsp::Hertz centre, int attempts)
+{
+    const DirectSampling current = branch_.load(std::memory_order_acquire);
+    const DirectSampling wanted =
+        resolve_direct_sampling(direct_mode_, current, centre, tuner_ranges_, upconverter_);
+    if (wanted == current) {
+        return {};
+    }
+
+    int rc = 0;
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        rc = rtlsdr_set_direct_sampling(device_.get(), static_cast<int>(wanted));
+        if (rc == 0) {
+            break;
+        }
+    }
+    if (rc != 0) {
+        return fail(std::format("could not move the ADC from {} to {} for {} Hz: "
+                                "rtlsdr_set_direct_sampling returned {}{}",
+                                direct_sampling_name(current), direct_sampling_name(wanted),
+                                centre, rc_text(rc), attempts_text(attempts)),
+                    rc);
+    }
+    branch_.store(wanted, std::memory_order_release);
+
+    // Back on the tuner: give it the gain the operator last asked for. A
+    // failure here is reported and the retune does not go on, because the
+    // operator would otherwise be listening through a tuner at a gain nobody
+    // chose with nothing saying so.
+    if (wanted == DirectSampling::Off) {
+        if (held_gain_auto_ || gain_steps_.empty()) {
+            return set_gain_auto_locked(true, attempts);
+        }
+        if (auto set = set_gain_locked(held_gain_db_, attempts); !set) {
+            return std::unexpected(std::move(set.error()));
+        }
+    }
+    return {};
 }
 
 // THE TRANSFERS STOP AND THE DELIVERY THREAD DOES NOT.
@@ -1177,6 +1279,19 @@ Expected<double> RtlSdrSource::set_gain(std::string_view stage, double db)
 
     std::scoped_lock lock(control_);
 
+    held_gain_auto_ = false;
+    held_gain_db_ = db;
+
+    // Held rather than written while the tuner is bypassed: the tuner's gain
+    // acts on nothing there, and writing it would cost a pause in the stream
+    // for no effect. The answer is the step it will land on when the tuner
+    // comes back, which is the truth about the setting if not about the
+    // signal.
+    if (branch_.load(std::memory_order_acquire) != DirectSampling::Off) {
+        const int landed = nearest_step(gain_steps_, static_cast<int>(std::llround(db * 10.0)));
+        return static_cast<double>(landed) / 10.0;
+    }
+
     // Paused around it while streaming, for the reason with_transfers_paused
     // gives: these are the same I2C-repeater transfers a retune uses and the
     // platform stalls them the same way.
@@ -1241,6 +1356,12 @@ Status RtlSdrSource::set_gain_auto(std::string_view stage, bool on)
     }
 
     std::scoped_lock lock(control_);
+
+    held_gain_auto_ = on;
+    if (branch_.load(std::memory_order_acquire) != DirectSampling::Off) {
+        // Held for the tuner's return; see set_gain.
+        return {};
+    }
 
     // THE CALL THAT FROZE THE WINDOW. Switching the tuner's gain mode is the
     // same class of transfer as a retune, and it was going straight at a
@@ -1479,6 +1600,7 @@ SourceStats RtlSdrSource::stats() const
     out.samples_lost = samples_lost_.load(std::memory_order_relaxed);
     out.last_loss_index = last_loss_index_.load(std::memory_order_relaxed);
     out.write_index = write_index_.load(std::memory_order_relaxed);
+    out.direct_sampling = branch_.load(std::memory_order_acquire);
     return out;
 }
 
@@ -1824,14 +1946,27 @@ struct Applied {
     dsp::SampleRate rate = 0;
     dsp::Hertz center = 0;
 
-    // The step the tuner was set to, or nothing when its AGC has it.
+    // The step the tuner was set to, or nothing when its AGC has it or when
+    // the tuner is out of circuit and the gain is being held for it.
     std::optional<double> gain_db;
+
+    // The ADC branch the device was left in.
+    DirectSampling branch = DirectSampling::Off;
 };
 
 [[nodiscard]] Expected<Applied> configure(rtlsdr_dev_t* device, const RtlSdrSourceConfig& config,
                                           const std::vector<int>& gain_steps,
-                                          const std::vector<TuneRange>& tune_ranges)
+                                          const std::vector<TuneRange>& tune_ranges,
+                                          const std::vector<TuneRange>& tuner_ranges,
+                                          bool upconverter)
 {
+    // The branch follows from the mode and the centre. Auto with no centre
+    // resolves at 0 Hz, which is the Q branch on every tuner here, and that is
+    // the one path that can sit at DC, so the guard below lets it through.
+    const DirectSampling branch = resolve_direct_sampling(
+        config.direct, DirectSampling::Off, config.center_given ? config.center_hz : 0,
+        tuner_ranges, upconverter);
+
     // First, because it changes what a frequency means: with direct sampling
     // on, rtlsdr_set_center_freq drives the RTL2832U's DDC rather than the
     // tuner.
@@ -1841,12 +1976,12 @@ struct Applied {
     // Unlike the bias tee this is safe to leave alone: rtlsdr_open resets the
     // demodulator, so the mode is known rather than inherited from whatever
     // ran last.
-    if (rtlsdr_get_direct_sampling(device) != static_cast<int>(config.direct)) {
-        if (const int rc = rtlsdr_set_direct_sampling(device, static_cast<int>(config.direct));
+    if (rtlsdr_get_direct_sampling(device) != static_cast<int>(branch)) {
+        if (const int rc = rtlsdr_set_direct_sampling(device, static_cast<int>(branch));
             rc != 0) {
             return fail(std::format("the device refused direct sampling mode {}: "
                                     "rtlsdr_set_direct_sampling returned {}",
-                                    static_cast<int>(config.direct), rc_text(rc)),
+                                    direct_sampling_name(branch), rc_text(rc)),
                         rc);
         }
     }
@@ -1877,7 +2012,7 @@ struct Applied {
     // no centre is an open nobody can have meant.
     //
     // NOT REFUSED WHEN THE DEVICE CAN LEGITIMATELY SIT AT DC, which is direct
-    // sampling: tune_ranges_for reports {0, xtal/2} there, so the test is
+    // sampling: direct_sampling_ranges reports {0, xtal} there, so the test is
     // whether zero is reachable rather than whether a mode was named. A caller
     // who wants HF through the direct-sampling branch is asking for something
     // real and gets it.
@@ -1966,8 +2101,13 @@ struct Applied {
                     rc);
     }
 
+    // THE TUNER'S GAIN IS NOT WRITTEN WHILE THE TUNER IS OUT OF CIRCUIT. It
+    // acts on nothing there, and the source holds the request and writes it
+    // when Auto brings the tuner back; see RtlSdrSource::switch_branch_locked.
     std::optional<double> gain_set;
-    if (config.gain_auto) {
+    if (branch != DirectSampling::Off) {
+        // Nothing written, nothing in force.
+    } else if (config.gain_auto) {
         if (const int rc = rtlsdr_set_tuner_gain_mode(device, 0); rc != 0) {
             return fail(std::format("the device refused automatic tuner gain: "
                                     "rtlsdr_set_tuner_gain_mode returned {}",
@@ -1998,6 +2138,7 @@ struct Applied {
 
     Applied applied;
     applied.gain_db = gain_set;
+    applied.branch = branch;
 
     const std::uint32_t achieved_rate = rtlsdr_get_sample_rate(device);
     if (achieved_rate == 0) {
@@ -2064,8 +2205,8 @@ Expected<SourceCapabilities> describe_rtlsdr_source(const RtlSdrSourceConfig& co
     const std::vector<int> gain_steps = gain_steps_of(device);
 
     SourceCapabilities caps = capabilities_of(
-        config, index, (name == nullptr || *name == '\0') ? "RTL-SDR" : name, tuner, gain_steps);
-    caps.serial = serial_of(device);
+        config, index, (name == nullptr || *name == '\0') ? "RTL-SDR" : name, tuner, gain_steps,
+        usb_strings_of(device));
     return caps;
 }
 
@@ -2093,10 +2234,12 @@ Expected<std::unique_ptr<Source>> open_rtlsdr_source(const RtlSdrSourceConfig& c
     std::vector<int> gain_steps = gain_steps_of(device);
 
     SourceCapabilities caps = capabilities_of(
-        config, index, (name == nullptr || *name == '\0') ? "RTL-SDR" : name, tuner, gain_steps);
-    caps.serial = serial_of(device);
+        config, index, (name == nullptr || *name == '\0') ? "RTL-SDR" : name, tuner, gain_steps,
+        usb_strings_of(device));
 
-    auto applied = configure(device, config, gain_steps, caps.tune_ranges);
+    const std::vector<TuneRange> tuner_ranges = tuner_ranges_for(tuner);
+    auto applied =
+        configure(device, config, gain_steps, caps.tune_ranges, tuner_ranges, caps.upconverter);
     if (!applied) {
         return std::unexpected(with_context(applied.error(), caps.display_name));
     }
@@ -2113,7 +2256,8 @@ Expected<std::unique_ptr<Source>> open_rtlsdr_source(const RtlSdrSourceConfig& c
     auto source = std::make_unique<RtlSdrSource>();
     if (auto started = source->open(config, std::move(opened->lock),
                                     std::move(opened->handle.device), std::move(caps),
-                                    std::move(gain_steps), applied->rate, applied->center);
+                                    std::move(gain_steps), applied->rate, applied->center,
+                                    tuner_ranges, applied->branch);
         !started) {
         return std::unexpected(started.error());
     }

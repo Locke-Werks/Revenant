@@ -28,10 +28,12 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <numbers>
 #include <optional>
 #include <string>
 #include <thread>
@@ -41,6 +43,7 @@
 
 #include "core/dsp/types.h"
 #include "core/source/device_lock.h"
+#include "core/source/direct_sampling.h"
 #include "core/source/registry.h"
 #include "core/source/rtlsdr_lock.h"
 #include "core/source/rtlsdr_source.h"
@@ -1261,7 +1264,7 @@ TEST_CASE("a dongle with no centre frequency is refused rather than left at DC",
     auto opened = source::open_source("rtlsdr://0?rate=2400000");
 
     // A dongle whose tuner can reach DC is a different question and is not this
-    // case: tune_ranges_for reports {0, xtal/2} under direct sampling, and an
+    // case: direct_sampling_ranges reports {0, xtal} under direct sampling, and an
     // open with no centre is legitimate there. Every tuner this has run on
     // starts above DC, so a success here means the hardware changed and the case
     // needs its own arm rather than a louder assertion.
@@ -1947,4 +1950,426 @@ TEST_CASE("a second process contends for the dongle",
     WARN("poked the dongle " << opens << " times: " << locked_out
                              << " refused by the lock before librtlsdr, " << refused
                              << " refused by rtlsdr_open, " << granted << " granted");
+}
+
+// ---------------------------------------------------------------------------
+// Direct sampling. core/source/direct_sampling.h holds the rules; the cases
+// below the hardware line check that the dongle follows them.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// An R820T's own reach, which is what Auto switches against.
+const std::vector<source::TuneRange> kR820t{{24'000'000, 1'766'000'000, 0}};
+
+[[nodiscard]] bool reaches(const std::vector<source::TuneRange>& ranges, dsp::Hertz hz) {
+    return std::any_of(ranges.begin(), ranges.end(),
+                       [hz](const source::TuneRange& range) { return range.contains(hz); });
+}
+
+}  // namespace
+
+TEST_CASE("direct sampling parses its four spellings and nothing else", "[source][rtlsdr][direct]") {
+    using source::DirectSamplingMode;
+    CHECK(source::parse_direct_sampling("off") == DirectSamplingMode::Off);
+    CHECK(source::parse_direct_sampling("I") == DirectSamplingMode::IBranch);
+    CHECK(source::parse_direct_sampling("q") == DirectSamplingMode::QBranch);
+    CHECK(source::parse_direct_sampling("AUTO") == DirectSamplingMode::Auto);
+    CHECK_FALSE(source::parse_direct_sampling("yes").has_value());
+    CHECK_FALSE(source::parse_direct_sampling("").has_value());
+}
+
+TEST_CASE("a URI asking for direct=auto is accepted as far as the device",
+          "[source][rtlsdr][direct]") {
+    // An index nobody has, so the parse is all this reaches. A refusal naming
+    // direct= would mean the grammar did not take auto.
+    auto opened = source::open_source("rtlsdr://97?direct=auto&freq=10M");
+    REQUIRE_FALSE(opened.has_value());
+    INFO(opened.error().message);
+    CHECK(opened.error().message.find("not a direct sampling mode") == std::string::npos);
+}
+
+TEST_CASE("fixed direct sampling modes ignore the centre", "[source][rtlsdr][direct]") {
+    using source::DirectSampling;
+    using source::DirectSamplingMode;
+    for (const dsp::Hertz centre : {dsp::Hertz{1'000'000}, dsp::Hertz{100'000'000}}) {
+        CHECK(source::resolve_direct_sampling(DirectSamplingMode::Off, DirectSampling::QBranch,
+                                              centre, kR820t, false) == DirectSampling::Off);
+        CHECK(source::resolve_direct_sampling(DirectSamplingMode::QBranch, DirectSampling::Off,
+                                              centre, kR820t, false) == DirectSampling::QBranch);
+        CHECK(source::resolve_direct_sampling(DirectSamplingMode::IBranch, DirectSampling::Off,
+                                              centre, kR820t, false) == DirectSampling::IBranch);
+    }
+}
+
+TEST_CASE("auto enters the Q branch below the tuner and leaves it with hysteresis",
+          "[source][rtlsdr][direct]") {
+    using source::DirectSampling;
+    using source::DirectSamplingMode;
+    const auto resolve = [](DirectSampling current, dsp::Hertz centre) {
+        return source::resolve_direct_sampling(DirectSamplingMode::Auto, current, centre, kR820t,
+                                               false);
+    };
+
+    // From the tuner: anything it reaches stays on it, anything below goes to Q.
+    CHECK(resolve(DirectSampling::Off, 100'000'000) == DirectSampling::Off);
+    CHECK(resolve(DirectSampling::Off, 24'000'000) == DirectSampling::Off);
+    CHECK(resolve(DirectSampling::Off, 23'999'999) == DirectSampling::QBranch);
+    CHECK(resolve(DirectSampling::Off, 10'000'000) == DirectSampling::QBranch);
+    CHECK(resolve(DirectSampling::Off, 0) == DirectSampling::QBranch);
+
+    // From Q: the band between the tuner's floor and floor + hysteresis keeps
+    // Q, so a centre dithered across 24 MHz does not flip the ADC input.
+    CHECK(resolve(DirectSampling::QBranch, 24'000'000) == DirectSampling::QBranch);
+    CHECK(resolve(DirectSampling::QBranch, 24'000'000 + source::kAutoDirectHysteresisHz) ==
+          DirectSampling::QBranch);
+    CHECK(resolve(DirectSampling::QBranch, 24'000'001 + source::kAutoDirectHysteresisHz) ==
+          DirectSampling::Off);
+    CHECK(resolve(DirectSampling::QBranch, 100'000'000) == DirectSampling::Off);
+
+    // A walk up and back down across the edge switches exactly twice.
+    DirectSampling branch = DirectSampling::Off;
+    int switches = 0;
+    std::vector<dsp::Hertz> walk;
+    for (dsp::Hertz hz = 20'000'000; hz <= 30'000'000; hz += 250'000) walk.push_back(hz);
+    for (dsp::Hertz hz = 30'000'000; hz >= 20'000'000; hz -= 250'000) walk.push_back(hz);
+    for (int dither = 0; dither < 20; ++dither) {
+        walk.push_back(dither % 2 == 0 ? 23'900'000 : 24'100'000);
+    }
+    for (const dsp::Hertz hz : walk) {
+        const DirectSampling next = resolve(branch, hz);
+        if (next != branch) {
+            ++switches;
+        }
+        branch = next;
+    }
+    // Up: Q at 20 MHz from Off is one, Off past 26 MHz is two; down: Q below
+    // 24 MHz is three; the dither around 24 MHz then adds none.
+    CHECK(switches == 3);
+    CHECK(branch == DirectSampling::QBranch);
+}
+
+TEST_CASE("auto stays on the tuner path on a Blog V4", "[source][rtlsdr][direct]") {
+    using source::DirectSampling;
+    using source::DirectSamplingMode;
+    CHECK(source::is_blog_v4("RTLSDRBlog", "Blog V4"));
+    CHECK_FALSE(source::is_blog_v4("Realtek", "RTL2838UHIDIR"));
+    CHECK_FALSE(source::is_blog_v4("", ""));
+
+    for (const dsp::Hertz centre : {dsp::Hertz{1'000'000}, dsp::Hertz{10'000'000},
+                                    dsp::Hertz{100'000'000}}) {
+        CHECK(source::resolve_direct_sampling(DirectSamplingMode::Auto, DirectSampling::Off,
+                                              centre, kR820t, true) == DirectSampling::Off);
+    }
+    // An explicit branch is still honoured: it was asked for by name.
+    CHECK(source::resolve_direct_sampling(DirectSamplingMode::QBranch, DirectSampling::Off,
+                                          1'000'000, kR820t, true) == DirectSampling::QBranch);
+}
+
+TEST_CASE("the reported reach follows the direct sampling mode", "[source][rtlsdr][direct]") {
+    using source::DirectSamplingMode;
+
+    const auto off = source::direct_sampling_ranges(DirectSamplingMode::Off, kR820t, false);
+    CHECK_FALSE(reaches(off, 10'000'000));
+    CHECK(reaches(off, 100'000'000));
+
+    // Q alone reaches HF up to the crystal and nothing above it.
+    const auto q = source::direct_sampling_ranges(DirectSamplingMode::QBranch, kR820t, false);
+    CHECK(reaches(q, 0));
+    CHECK(reaches(q, 10'000'000));
+    CHECK(reaches(q, 28'800'000));
+    CHECK_FALSE(reaches(q, 100'000'000));
+
+    // Auto reaches both, as one continuous span, which is what lets a band
+    // picker light every HF band without a gap at the tuner's floor.
+    const auto automatic = source::direct_sampling_ranges(DirectSamplingMode::Auto, kR820t, false);
+    REQUIRE(automatic.size() == 1);
+    CHECK(automatic.front().low == 0);
+    CHECK(automatic.front().high == 1'766'000'000);
+
+    // A V4 reaches HF through its upconverter under off and auto alike.
+    for (const DirectSamplingMode mode : {DirectSamplingMode::Off, DirectSamplingMode::Auto}) {
+        const auto v4 = source::direct_sampling_ranges(mode, kR820t, true);
+        REQUIRE(v4.size() == 1);
+        CHECK(v4.front().low == source::kBlogV4HfLowHz);
+        CHECK(v4.front().high == 1'766'000'000);
+    }
+
+    // A tuner librtlsdr does not know reaches nothing on its own, and Auto
+    // still offers the branch that does not need it.
+    CHECK(source::direct_sampling_ranges(DirectSamplingMode::Off, {}, false).empty());
+    CHECK(reaches(source::direct_sampling_ranges(DirectSamplingMode::Auto, {}, false), 7'000'000));
+}
+
+TEST_CASE("an FC2580's gap is not claimed under auto", "[source][rtlsdr][direct]") {
+    // A tuner whose floor is far above the direct-sampling ceiling: Auto adds
+    // the HF span and does not paper over the gap between them.
+    const std::vector<source::TuneRange> fc2580{{146'000'000, 308'000'000, 0},
+                                                {438'000'000, 924'000'000, 0}};
+    const auto ranges =
+        source::direct_sampling_ranges(source::DirectSamplingMode::Auto, fc2580, false);
+    CHECK(reaches(ranges, 14'000'000));
+    CHECK(reaches(ranges, 28'800'000));
+    CHECK_FALSE(reaches(ranges, 50'000'000));
+    CHECK(reaches(ranges, 200'000'000));
+}
+
+namespace {
+
+// Power spectrum of a cu8 capture, averaged over every whole frame, in
+// decibels relative to an arbitrary reference. Bin 0 is DC, bins above half
+// are negative frequencies. A radix-2 transform written out here because the
+// engine's own runs on the GPU and this case should depend on the dongle and
+// nothing else.
+[[nodiscard]] std::vector<double> averaged_spectrum_db(const std::vector<std::uint8_t>& bytes,
+                                                       std::size_t size) {
+    std::vector<double> power(size, 0.0);
+    const std::size_t frames = bytes.size() / (2 * size);
+    std::vector<std::complex<double>> work(size);
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+        for (std::size_t n = 0; n < size; ++n) {
+            const std::size_t at = 2 * (frame * size + n);
+            // Hann window, so a carrier stays in its own bins.
+            const double window =
+                0.5 - 0.5 * std::cos(2.0 * std::numbers::pi * static_cast<double>(n) /
+                                     static_cast<double>(size));
+            work[n] = window * std::complex<double>((bytes[at] - 127.5) / 127.5,
+                                                    (bytes[at + 1] - 127.5) / 127.5);
+        }
+        for (std::size_t i = 1, j = 0; i < size; ++i) {
+            std::size_t bit = size >> 1;
+            for (; (j & bit) != 0; bit >>= 1) {
+                j ^= bit;
+            }
+            j ^= bit;
+            if (i < j) {
+                std::swap(work[i], work[j]);
+            }
+        }
+        for (std::size_t length = 2; length <= size; length <<= 1) {
+            const double angle = -2.0 * std::numbers::pi / static_cast<double>(length);
+            const std::complex<double> step(std::cos(angle), std::sin(angle));
+            for (std::size_t start = 0; start < size; start += length) {
+                std::complex<double> twiddle(1.0, 0.0);
+                for (std::size_t k = 0; k < length / 2; ++k) {
+                    const auto even = work[start + k];
+                    const auto odd = work[start + k + length / 2] * twiddle;
+                    work[start + k] = even + odd;
+                    work[start + k + length / 2] = even - odd;
+                    twiddle *= step;
+                }
+            }
+        }
+        for (std::size_t k = 0; k < size; ++k) {
+            power[k] += std::norm(work[k]);
+        }
+    }
+    for (double& bin : power) {
+        bin = 10.0 * std::log10(bin / static_cast<double>(std::max<std::size_t>(frames, 1)) +
+                                1e-20);
+    }
+    return power;
+}
+
+struct CarrierReading {
+    double peak_over_median_db = 0.0;
+    double peak_offset_hz = 0.0;
+};
+
+// The strongest bin against the median, leaving out the bins around DC, where
+// the RTL2832U's own offset sits on every branch.
+[[nodiscard]] CarrierReading strongest_carrier(const std::vector<double>& spectrum_db,
+                                               double rate) {
+    const std::size_t size = spectrum_db.size();
+    const std::size_t guard = size / 64;
+    std::vector<double> sorted;
+    double peak = -1e9;
+    std::size_t peak_bin = 0;
+    for (std::size_t k = guard; k < size - guard; ++k) {
+        sorted.push_back(spectrum_db[k]);
+        if (spectrum_db[k] > peak) {
+            peak = spectrum_db[k];
+            peak_bin = k;
+        }
+    }
+    std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2),
+                     sorted.end());
+    const double median = sorted[sorted.size() / 2];
+    const double signed_bin = peak_bin < size / 2 ? static_cast<double>(peak_bin)
+                                                  : static_cast<double>(peak_bin) -
+                                                        static_cast<double>(size);
+    return CarrierReading{peak - median, signed_bin * rate / static_cast<double>(size)};
+}
+
+// Captures about `seconds` of raw bytes from a running source.
+struct RawCapture {
+    std::mutex lock;
+    std::vector<std::uint8_t> bytes;
+    std::size_t wanted = 0;
+};
+
+[[nodiscard]] source::BlockSink raw_sink(RawCapture& into) {
+    return [&into](const source::SourceBlock& block) -> Status {
+        std::scoped_lock guard(into.lock);
+        if (into.bytes.size() < into.wanted) {
+            const auto* first = reinterpret_cast<const std::uint8_t*>(block.bytes.data());
+            into.bytes.insert(into.bytes.end(), first, first + block.bytes.size());
+        }
+        return {};
+    };
+}
+
+[[nodiscard]] std::vector<std::uint8_t> capture(source::Source& radio, std::size_t bytes) {
+    RawCapture captured;
+    captured.wanted = bytes;
+    source::StreamOptions options;
+    options.block_samples = 32'768;
+    REQUIRE(radio.start(options, raw_sink(captured)).has_value());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::scoped_lock guard(captured.lock);
+            if (captured.bytes.size() >= bytes) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(radio.stop().has_value());
+    std::scoped_lock guard(captured.lock);
+    return captured.bytes;
+}
+
+}  // namespace
+
+TEST_CASE("the Q branch hears the AM broadcast band", "[source][rtlsdr][device][dongle][direct]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
+
+    // Centred at 1 MHz, so 0 to 2.2 MHz of the band is in the span and there
+    // is no evening or morning in which nothing at all is on the air there.
+    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=1M&direct=q");
+    if (!opened) {
+        SKIP("the dongle could not be opened: " + opened.error().message);
+    }
+    source::Source& radio = **opened;
+    if (radio.capabilities().upconverter) {
+        SKIP("a Blog V4's Q input is not its HF port; its HF case is the auto one below");
+    }
+    CHECK(radio.stats().direct_sampling == source::DirectSampling::QBranch);
+    CHECK(radio.capabilities().can_tune(10'000'000));
+
+    const auto bytes = capture(radio, 2 * 4096 * 200);
+    const auto reading = strongest_carrier(averaged_spectrum_db(bytes, 4096), 2'400'000.0);
+    WARN("Q branch at 1 MHz: strongest carrier " << reading.peak_over_median_db
+                                                 << " dB over the median, at "
+                                                 << (1'000'000.0 + reading.peak_offset_hz)
+                                                 << " Hz");
+    CHECK(reading.peak_over_median_db > 15.0);
+}
+
+TEST_CASE("auto moves a streaming dongle between the tuner and the Q branch",
+          "[source][rtlsdr][device][dongle][direct]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
+
+    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=20&direct=auto");
+    if (!opened) {
+        SKIP("the dongle could not be opened: " + opened.error().message);
+    }
+    source::Source& radio = **opened;
+    const bool v4 = radio.capabilities().upconverter;
+    const auto hf_branch = v4 ? source::DirectSampling::Off : source::DirectSampling::QBranch;
+
+    CHECK(radio.stats().direct_sampling == source::DirectSampling::Off);
+    CHECK(radio.capabilities().can_tune(1'000'000));
+    CHECK(radio.capabilities().can_tune(100'000'000));
+
+    // While streaming, past the half second after which a control transfer
+    // has to be paused around, so the switch takes the same path a retune from
+    // the window does.
+    RawCapture captured;
+    source::StreamOptions options;
+    options.block_samples = 32'768;
+    REQUIRE(radio.start(options, raw_sink(captured)).has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+    auto landed = radio.tune(1'000'000);
+    if (!landed) {
+        INFO(landed.error().message);
+    }
+    REQUIRE(landed.has_value());
+    CHECK(radio.stats().direct_sampling == hf_branch);
+
+    // Inside the hysteresis band: no switch back yet.
+    landed = radio.tune(25'000'000);
+    REQUIRE(landed.has_value());
+    CHECK(radio.stats().direct_sampling == hf_branch);
+
+    // Past it: back on the tuner, with the gain the URI asked for.
+    landed = radio.tune(98'100'000);
+    REQUIRE(landed.has_value());
+    CHECK(radio.stats().direct_sampling == source::DirectSampling::Off);
+
+    // And down again for a listen.
+    landed = radio.tune(1'000'000);
+    REQUIRE(landed.has_value());
+    CHECK(radio.stats().direct_sampling == hf_branch);
+
+    // Captured from the same stream, after the last switch, so what is heard
+    // is what the switch left rather than what a fresh open would.
+    constexpr std::size_t kWanted = 2 * 4096 * 200;
+    {
+        std::scoped_lock guard(captured.lock);
+        captured.bytes.clear();
+        captured.wanted = kWanted;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::scoped_lock guard(captured.lock);
+            if (captured.bytes.size() >= kWanted) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(radio.stop().has_value());
+    std::vector<std::uint8_t> bytes;
+    {
+        std::scoped_lock guard(captured.lock);
+        bytes = captured.bytes;
+    }
+    REQUIRE(bytes.size() >= kWanted);
+    const auto reading = strongest_carrier(averaged_spectrum_db(bytes, 4096), 2'400'000.0);
+    WARN("auto at 1 MHz after two switches: strongest carrier "
+         << reading.peak_over_median_db << " dB over the median, at "
+         << (1'000'000.0 + reading.peak_offset_hz) << " Hz");
+    CHECK(reading.peak_over_median_db > 15.0);
+}
+
+TEST_CASE("WWV through the Q branch", "[.probe][source][rtlsdr][device][dongle][direct]") {
+    // Hidden: whether 10 and 15 MHz are open depends on the hour and the sun,
+    // so this reports rather than asserts. Each centre is 100 kHz below the
+    // carrier, which puts WWV at +100 kHz and clear of the DC offset.
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
+    for (const dsp::Hertz carrier : {dsp::Hertz{5'000'000}, dsp::Hertz{10'000'000},
+                                     dsp::Hertz{15'000'000}}) {
+        auto opened = source::open_source(
+            "rtlsdr://0?rate=2400000&direct=q&freq=" + std::to_string(carrier - 100'000));
+        REQUIRE(opened.has_value());
+        const auto bytes = capture(**opened, 2 * 16384 * 100);
+        const auto spectrum = averaged_spectrum_db(bytes, 16384);
+        // 100 kHz is bin 682.67 at 146.5 Hz per bin; take the strongest of the
+        // three nearest so the crystal's error does not hide it.
+        const std::size_t centre_bin = 683;
+        double carrier_db = -1e9;
+        for (std::size_t k = centre_bin - 3; k <= centre_bin + 3; ++k) {
+            carrier_db = std::max(carrier_db, spectrum[k]);
+        }
+        std::vector<double> sorted(spectrum.begin() + 300, spectrum.begin() + 8000);
+        std::nth_element(sorted.begin(),
+                         sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2),
+                         sorted.end());
+        WARN("WWV " << carrier / 1'000'000 << " MHz: " << (carrier_db - sorted[sorted.size() / 2])
+                    << " dB over the median");
+    }
 }

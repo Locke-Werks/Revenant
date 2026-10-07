@@ -31,6 +31,12 @@ RowLayout {
     readonly property bool hasStage: engineLink.connected && engineLink.sourceOpen
                                      && engineLink.sourceGainStage !== ""
 
+    // The tuner is out of circuit on a direct-sampling branch, so its gain
+    // acts on nothing. The engine holds what is set here and applies it when
+    // auto brings the tuner back, so the control stays readable but is not
+    // offered as though it moved the signal.
+    readonly property bool bypassed: engineLink.sourceDirectBranch !== "off"
+
     // Why there is nothing to set, word and sentence, both empty while there
     // is a stage. A recording, a synthetic scene and no source at all are
     // three reasons, and a slider greyed out with none is a broken control.
@@ -60,7 +66,7 @@ RowLayout {
         // and not off the distance between two of them.
         stepSize: engineLink.sourceGainStep
         snapMode: Slider.SnapAlways
-        enabled: gain.hasStage && !engineLink.sourceGainAuto
+        enabled: gain.hasStage && !engineLink.sourceGainAuto && !gain.bypassed
 
         // THE HANDLE FOLLOWS THE DEVICE, NOT THE POINTER. The binding is
         // restored whenever the link answers, so a step the tuner rounded to
@@ -95,6 +101,7 @@ RowLayout {
         // reason fits as well as a figure does.
         widest: "recording"
         text: !gain.hasStage ? gain.absence.word
+              : gain.bypassed ? "bypassed"
               : engineLink.sourceGainAuto ? "auto"
               : engineLink.sourceGainKnown ? engineLink.sourceGainDb.toFixed(1) + " dB"
               : "unset"
@@ -108,7 +115,7 @@ RowLayout {
     // operator's call: README.md has the measurement of what this dongle's
     // own AGC did to the detector's track list.
     RButton {
-        visible: gain.hasStage && engineLink.sourceGainHasAuto
+        visible: gain.hasStage && engineLink.sourceGainHasAuto && !gain.bypassed
         flat: true
         text: engineLink.sourceGainAuto ? "manual" : "auto"
         ink: Theme.inkDim

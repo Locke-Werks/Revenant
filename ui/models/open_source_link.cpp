@@ -73,6 +73,11 @@ void EngineLink::poll_open_source(std::uint64_t epoch)
         map.insert(QStringLiteral("format"),
                    QString::fromLatin1(rpc::sample_format_name(open.native_format)));
         map.insert(QStringLiteral("seekable"), open.seekable);
+        map.insert(QStringLiteral("directSamplingAvailable"), open.direct_sampling_available);
+        map.insert(QStringLiteral("directSampling"),
+                   QString::fromLatin1(rpc::direct_sampling_mode_name(open.direct_sampling)));
+        map.insert(QStringLiteral("upconverter"), open.upconverter);
+        map.insert(QStringLiteral("serial"), QString::fromStdString(open.serial));
         map.insert(QStringLiteral("epoch"), static_cast<qulonglong>(epoch));
     }
 
@@ -116,6 +121,23 @@ void EngineLink::note_samples_delivered(std::uint64_t delivered)
     QMetaObject::invokeMethod(this, [this] { adopt_open_source(); }, Qt::QueuedConnection);
 }
 
+void EngineLink::note_direct_branch(rpc::DirectSamplingMode branch)
+{
+    // On a change only, which under auto is a retune across the tuner's floor
+    // and otherwise never.
+    if (branch_posted_ && branch == posted_branch_) {
+        return;
+    }
+    branch_posted_ = true;
+    posted_branch_ = branch;
+    {
+        const std::lock_guard<std::mutex> lock(open_source_mutex_);
+        handover_has_branch_ = true;
+        handover_branch_ = branch;
+    }
+    QMetaObject::invokeMethod(this, [this] { adopt_open_source(); }, Qt::QueuedConnection);
+}
+
 void EngineLink::adopt_open_source()
 {
     bool moved = false;
@@ -129,6 +151,11 @@ void EngineLink::adopt_open_source()
         if (handover_has_delivered_) {
             handover_has_delivered_ = false;
             samples_delivered_ = static_cast<qulonglong>(handover_delivered_);
+            moved = true;
+        }
+        if (handover_has_branch_) {
+            handover_has_branch_ = false;
+            direct_branch_ = QString::fromLatin1(rpc::direct_sampling_mode_name(handover_branch_));
             moved = true;
         }
     }

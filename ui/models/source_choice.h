@@ -50,6 +50,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/rpc/types.h"
@@ -116,7 +117,120 @@ struct SourceChoice {
     std::optional<std::int64_t> rate;
 
     std::vector<GainChoice> gains;
+
+    // The direct sampling mode, "off", "i", "q" or "auto", for a device whose
+    // descriptor says it has the feature. Nothing leaves the key off and the
+    // backend's default, off, applies. Filled from the per-radio setting, see
+    // direct_sampling_key, so a radio opened from the picker comes back in
+    // the mode it was last used in.
+    std::optional<std::string> direct_sampling;
 };
+
+// DIRECT SAMPLING, which on an RTL-SDR is the `direct=` key.
+//
+// CHANGING IT IS A REOPEN. The mode decides what the source claims it can
+// reach, and the engine sizes the tune range it checks against at open, so a
+// live switch would leave a client offering bands the engine refuses. Under
+// auto the engine moves between the tuner and the Q branch by itself on every
+// retune, which is the live part, and needs nothing from here.
+//
+// KEPT PER RADIO under source/radios/<radio>/directSampling, on the scheme
+// detector_scope.h uses for the detector's settings and with the same radio
+// id: the engine's calibration key made safe for a settings path. A v3 on HF
+// and a dongle with no HF port plugged in after it want different answers.
+
+inline constexpr std::string_view kSourceGroup = "source";
+
+[[nodiscard]] inline std::string direct_sampling_key(std::string_view radio_id)
+{
+    std::string key(kSourceGroup);
+    key += "/radios/";
+    key += radio_id;
+    key += "/directSampling";
+    return key;
+}
+
+// The calibration key a descriptor's device will be kept under, which the
+// engine builds the same way: backend, a colon, serial. Empty without a serial,
+// in which case nothing is remembered for it.
+[[nodiscard]] inline std::string descriptor_calibration_key(const rpc::SourceDescriptor& source)
+{
+    if (source.backend.empty() || source.serial.empty()) {
+        return {};
+    }
+    return source.backend + ":" + source.serial;
+}
+
+// One of the four spellings, lowered, or nothing.
+[[nodiscard]] inline std::optional<std::string> direct_sampling_choice(std::string_view text)
+{
+    std::string lowered;
+    for (const char c : text) {
+        if (c != ' ') {
+            lowered.push_back(static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c));
+        }
+    }
+    if (lowered == "off" || lowered == "i" || lowered == "q" || lowered == "auto") {
+        return lowered;
+    }
+    return std::nullopt;
+}
+
+// `uri` with `key` set to `value`, or removed when there is no value. Every
+// other key keeps its place and its spelling, which is what lets an open source
+// be reopened with one setting changed from the URI it reported, without the
+// window having to know the rest of the grammar.
+[[nodiscard]] inline std::string with_query_value(std::string_view uri, std::string_view key,
+                                                  std::optional<std::string_view> value)
+{
+    const std::size_t mark = uri.find('?');
+    std::string out(uri.substr(0, mark));
+    bool has_query = false;
+    const auto append = [&out, &has_query](std::string_view part) {
+        out.push_back(has_query ? '&' : '?');
+        has_query = true;
+        out.append(part);
+    };
+
+    if (mark != std::string_view::npos) {
+        std::string_view query = uri.substr(mark + 1);
+        while (!query.empty()) {
+            const std::size_t amp = query.find('&');
+            const std::string_view part = query.substr(0, amp);
+            query = amp == std::string_view::npos ? std::string_view{} : query.substr(amp + 1);
+            const std::string_view name = part.substr(0, part.find('='));
+            if (part.empty() || name == key) {
+                continue;
+            }
+            append(part);
+        }
+    }
+    if (value.has_value()) {
+        std::string part(key);
+        part.push_back('=');
+        part.append(*value);
+        append(part);
+    }
+    return out;
+}
+
+// direct= set to `mode`, or removed for "off" so an ordinary tuner URI stays
+// the URI it always was.
+[[nodiscard]] inline std::string with_direct_sampling(std::string_view uri, std::string_view mode)
+{
+    if (mode.empty() || mode == "off") {
+        return with_query_value(uri, "direct", std::nullopt);
+    }
+    return with_query_value(uri, "direct", mode);
+}
+
+// What the source can reach once `mode` is in force, for clamping a centre
+// typed into the picker. The descriptor a listing carries was described with
+// direct sampling off, so its envelope starts at the tuner's floor, and
+// clamping an HF centre into it is what would open an R820T at 24 MHz when the
+// operator asked for 7. The 28.8 MHz figure is core/source/direct_sampling.h's
+// kDirectSamplingCeilingHz, restated because that header is not reachable here.
+inline constexpr std::int64_t kDirectSamplingCeilingHz = 28'800'000;
 
 // Whether the front end can be pointed anywhere, and the outer bounds of where.
 //
@@ -335,7 +449,19 @@ namespace detail {
     // AND ONLY WHEN A CENTRE WAS GIVEN. Clamping a centre nobody typed into the
     // envelope is what opened an R820T at 24 MHz, its low edge, because
     // std::clamp of zero into [24 MHz, 1766 MHz] is 24 MHz.
-    const TuneEnvelope envelope = tune_envelope(source);
+    TuneEnvelope envelope = tune_envelope(source);
+    const bool direct = source.direct_sampling_available && choice.direct_sampling.has_value() &&
+                        *choice.direct_sampling != "off";
+    if (direct) {
+        envelope.tunable = true;
+        if (*choice.direct_sampling == "auto") {
+            envelope.low_hz = 0;
+            envelope.high_hz = std::max(envelope.high_hz, kDirectSamplingCeilingHz);
+        } else {
+            envelope.low_hz = 0;
+            envelope.high_hz = kDirectSamplingCeilingHz;
+        }
+    }
     if (envelope.tunable && choice.center_hz.has_value()) {
         const std::int64_t centre =
             std::clamp(*choice.center_hz, envelope.low_hz, envelope.high_hz);
@@ -375,6 +501,10 @@ namespace detail {
             append("gain", detail::decimal(settle_gain(stage, *chosen->db)));
         }
         break;
+    }
+
+    if (direct) {
+        append("direct", *choice.direct_sampling);
     }
 
     return out;

@@ -437,6 +437,9 @@ void write_source_descriptor(schema::SourceDescriptor::Builder out,
     out.setSeekable(in.seekable);
     out.setLengthSamples(in.length_samples);
     out.setSerial(in.serial);
+    out.setDirectSamplingAvailable(in.direct_sampling_available);
+    out.setDirectSampling(static_cast<schema::DirectSamplingMode>(in.direct_sampling_mode));
+    out.setUpconverter(in.upconverter);
 }
 
 source::DeviceCalibration read_calibration_settings(schema::CalibrationSettings::Reader in) {
@@ -508,6 +511,18 @@ void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo
     out.setRealtimeWindowSeconds(pacing.window_seconds);
 }
 
+// The casts in write_source_stats and write_source_descriptor rest on these.
+static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::OFF) ==
+              static_cast<std::uint16_t>(source::DirectSamplingMode::Off));
+static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::I_BRANCH) ==
+              static_cast<std::uint16_t>(source::DirectSamplingMode::IBranch));
+static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::Q_BRANCH) ==
+              static_cast<std::uint16_t>(source::DirectSamplingMode::QBranch));
+static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
+              static_cast<std::uint16_t>(source::DirectSamplingMode::Auto));
+static_assert(static_cast<std::uint16_t>(source::DirectSampling::QBranch) ==
+              static_cast<std::uint16_t>(source::DirectSamplingMode::QBranch));
+
 void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in,
                         const detect::FrontEndObservation& front_end,
                         const engine::GraphConditions& conditions) {
@@ -527,6 +542,7 @@ void write_source_stats(schema::SourceStats::Builder out, const source::SourceSt
     // fields on source::SourceStats.
     out.setVrxRetuneRefusals(conditions.vrx_retune_refusals);
     out.setFrameStalls(conditions.frame_stalls);
+    out.setDirectSampling(static_cast<schema::DirectSamplingMode>(in.direct_sampling));
 }
 
 void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& in) {

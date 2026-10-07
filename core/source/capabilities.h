@@ -76,6 +76,16 @@ enum class FlowControl : std::uint8_t { Paced, Demand };
 
 enum class ClockSource : std::uint8_t { Internal, Tcxo, ExternalReference, Gps, Pps };
 
+// The branch the hardware is in. The values match rtlsdr_set_direct_sampling's
+// argument so the mapping is one cast and not a table that can be got
+// backwards.
+enum class DirectSampling : std::uint8_t { Off = 0, IBranch = 1, QBranch = 2 };
+
+// What an operator asked for. Auto is not a hardware state: it is a rule that
+// picks Off or QBranch per centre frequency, see resolve_direct_sampling.
+// The first three share their values with DirectSampling on purpose.
+enum class DirectSamplingMode : std::uint8_t { Off = 0, IBranch = 1, QBranch = 2, Auto = 3 };
+
 struct TuneRange {
     dsp::Hertz low = 0;
     dsp::Hertz high = 0;
@@ -324,6 +334,17 @@ struct SourceCapabilities {
 
     std::vector<GainStage> gain_stages;
     std::vector<ClockSource> clock_sources;
+
+    // Direct sampling, on a backend that has it, which today is the RTL-SDR
+    // alone. core/source/direct_sampling.h has the rules. The mode is what the
+    // source was opened with; the branch actually in force moves with the
+    // centre under Auto and is reported in SourceStats::direct_sampling.
+    bool direct_sampling_available = false;
+    DirectSamplingMode direct_sampling_mode = DirectSamplingMode::Off;
+
+    // An RTL-SDR Blog V4, whose HF path is its own upconverter rather than an
+    // ADC branch. Auto stays on the tuner path there.
+    bool upconverter = false;
 
     FlowControl flow = FlowControl::Demand;
 

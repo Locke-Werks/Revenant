@@ -103,6 +103,11 @@ struct SourceStats {
 
     // Next index the source will produce.
     dsp::SampleIndex write_index = 0;
+
+    // The direct-sampling branch in force now, on a source that has one. Not
+    // a capability, because under Auto it moves with the centre: see
+    // core/source/direct_sampling.h. Off on every source without the feature.
+    DirectSampling direct_sampling = DirectSampling::Off;
 };
 
 class Source {

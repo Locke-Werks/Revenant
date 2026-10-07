@@ -1008,19 +1008,15 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     config.bias_tee = *bias;
     config.offset_tuning = *offset;
 
-    const std::string direct_text = lowercased(*direct);
-    if (direct_text == "off") {
-        config.direct = DirectSampling::Off;
-    } else if (direct_text == "i") {
-        config.direct = DirectSampling::IBranch;
-    } else if (direct_text == "q") {
-        config.direct = DirectSampling::QBranch;
-    } else {
+    const auto direct_mode = parse_direct_sampling(*direct);
+    if (!direct_mode) {
         return fail(std::format(
-            "direct='{}' is not a direct sampling mode. It takes off, i or q: the two letters "
-            "are the ADC input the HF signal is wired to, and an RTL-SDR v3 uses q.",
+            "direct='{}' is not a direct sampling mode. It takes off, i, q or auto: the two "
+            "letters are the ADC input the HF signal is wired to, and an RTL-SDR v3 uses q. "
+            "auto uses q below the tuner's lowest frequency and the tuner above it.",
             *direct));
     }
+    config.direct = *direct_mode;
 
     return config;
 }
