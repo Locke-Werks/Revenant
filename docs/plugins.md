@@ -103,8 +103,9 @@ channel is not decoding no time passes and open calls stay open.
 
 It does not retune the front end, so only voice channels inside the span are
 followed; the rest are refused by the engine and logged. It does not follow
-Phase 2 grants or adjacent sites, and it does not decrypt. Voice audio needs
-an IMBE vocoder in `vocoders`, the same as a receiver opened by hand.
+Phase 2 grants or adjacent sites, and it does not decrypt. The voice is the
+engine's own: a p25p1 receiver decodes IMBE with `core/decode/imbe.h`, so a
+followed call plays with nothing in `vocoders`.
 
 Optional settings in `p25trunk.ini` beside the DLL, one `key=value` per line:
 
