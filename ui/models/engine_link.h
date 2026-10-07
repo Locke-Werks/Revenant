@@ -162,8 +162,10 @@
 #include "models/auto_filter.h"
 #include "models/bookmarks.h"
 #include "models/calibration.h"
+#include "models/call_model.h"
 #include "models/composite_probe.h"
 #include "models/decoded_model.h"
+#include "models/detector_scope.h"
 #include "models/detector_settings.h"
 #include "models/label_tune.h"
 #include "models/mode_choice.h"
@@ -890,6 +892,15 @@ class EngineLink : public QObject {
     // control there is guessing either way and a property here would only
     // move the guess.
     Q_PROPERTY(double maxConfidenceBar READ maxConfidenceBar CONSTANT)
+
+    // The radio the detector's settings are kept under, the engine's
+    // calibration key, and where each value in use came from: "this radio",
+    // "all radios" or "default". Empty radio for a source with no serial.
+    // models/detector_scope.h has the keying and why it is per radio.
+    Q_PROPERTY(QString detectorRadio READ detectorRadio NOTIFY detectorScopeChanged)
+    Q_PROPERTY(QString thresholdScope READ thresholdScope NOTIFY detectorScopeChanged)
+    Q_PROPERTY(QString confidenceScope READ confidenceScope NOTIFY detectorScopeChanged)
+    Q_PROPERTY(QString marginScope READ marginScope NOTIFY detectorScopeChanged)
 
     // Rows after the confidence bar, and rows the detector holds before it,
     // so a short list and a filtered one are distinguishable on screen.
@@ -1649,6 +1660,10 @@ class EngineLink : public QObject {
     // was decoded is still what was decoded; the operator clears it.
     Q_PROPERTY(revenant::ui::DecodedLogModel* decodedLog READ decodedLog CONSTANT)
 
+    // Who is talking, across every digital voice receiver and not only the
+    // focused one. models/call_log.h.
+    Q_PROPERTY(revenant::ui::CallLogModel* callLog READ callLog CONSTANT)
+
     // ------------------------------------------------------------------
     // Speech to text. Implemented in ui/models/transcribe_link.cpp; the
     // rules are models/transcription.h's and the captions on the span
@@ -2101,6 +2116,29 @@ public:
     // settings and should not draw with the operator's either: the bars and
     // the threshold go back to their defaults and nothing is re-sent.
     void setRememberDetector(bool remember);
+
+    // The settings window's two actions on one detector field, named as
+    // detector_field_name has them ("threshold", "held", "margin").
+    //
+    // Reset forgets this radio's value, or every radio's when this radio has
+    // none of its own, and applies whatever is left: the other level, or the
+    // default. Share writes the value in use as every radio's and forgets this
+    // radio's own, so the radio follows the shared value from then on.
+    Q_INVOKABLE void resetDetectorSetting(const QString& field);
+    Q_INVOKABLE void shareDetectorSetting(const QString& field);
+
+    [[nodiscard]] QString detectorRadio() const {
+        return QString::fromStdString(detector_radio_key_);
+    }
+    [[nodiscard]] QString thresholdScope() const {
+        return detector_scope_text(DetectorField::Threshold);
+    }
+    [[nodiscard]] QString confidenceScope() const {
+        return detector_scope_text(DetectorField::ConfidenceBar);
+    }
+    [[nodiscard]] QString marginScope() const {
+        return detector_scope_text(DetectorField::MarginBar);
+    }
 
     [[nodiscard]] uint detectionCount() const {
         return static_cast<uint>(shown_.detections.size());
@@ -2783,6 +2821,7 @@ public:
     [[nodiscard]] QString decodeLabel() const { return decode_label_; }
     [[nodiscard]] QString decodeDetail() const { return decode_detail_; }
     [[nodiscard]] DecodedLogModel* decodedLog() { return &decoded_log_; }
+    [[nodiscard]] CallLogModel* callLog() { return &call_log_; }
 
     // The engine's one sentence about a decoder, for the menu's tooltip.
     // Empty for auto and for a name the engine did not list.
@@ -2984,6 +3023,10 @@ signals:
     // The calibration the engine holds, its measurement, or the last refusal
     // moved.
     void calibrationChanged();
+
+    // The radio the detector's settings are kept under changed, or where one
+    // of its values comes from did.
+    void detectorScopeChanged();
 
     // The known-carrier measurement took a reading or started again.
     void knownCarrierChanged();
@@ -3269,6 +3312,28 @@ private:
     // written as each moves. models/detector_settings.h.
     DetectorMemory detector_memory_;
     bool remember_detector_ = true;
+
+    // The radio those are kept under, and where each came from. Qt thread.
+    // models/detector_scope.h; the code is models/detector_link.cpp.
+    std::string detector_radio_key_;
+    std::string detector_radio_id_;
+    std::array<SettingScope, 3> detector_scopes_{};
+
+    [[nodiscard]] QString detector_scope_text(DetectorField field) const;
+
+    // Reads all three for detector_radio_id_ and puts them in force: the bars
+    // at once, the threshold queued for the next detection pass when send_now.
+    // Nothing is read with remember_detector_ off.
+    void load_detector_settings(bool send_now);
+
+    // The open radio changed, from adopt_calibration.
+    void note_detector_radio(const std::string& calibration_key);
+
+    // Writes one value where write_scope says, and notes the scope.
+    void store_detector_value(DetectorField field, double value);
+
+    // Queues a threshold for the next detection pass without remembering it.
+    void queue_threshold(double threshold_db);
 
     // The clock behind report_rate. Lives on the Qt thread and is started by
     // start(), which main() calls from that thread before the event loop
@@ -4690,8 +4755,41 @@ private:
     void on_decoded_ended(std::uint64_t vrx, const std::string& decoder,
                           const std::string& reason);
 
+    // THE CALL TABLE'S FEEDS. One subscription per digital voice decoder on
+    // every receiver this client knows, the rack's held and adopted ones as
+    // well as the pane's. Subscribing again under a pair the pane already
+    // holds would replace the pane's (core/rpc/client.h), so a pair the pane
+    // holds is fed from the pane's own callback, and only the rest are
+    // subscribed here. When the pane takes a pair over, its subscription has
+    // replaced this one and the pair is dropped from call_feeds_ without an
+    // unsubscribe; when the pane lets one go, the next pass takes it back.
+    //
+    // Supervisor thread: reconciles after apply_decode_request on every pass.
+    void apply_call_feeds();
+
+    // Cap'n Proto loop thread, for the feeds above and for the pane's.
+    void on_call_message(const rpc::DecodedMessage& message);
+    void on_call_feed_ended(std::uint64_t vrx, const std::string& decoder);
+
+    // Qt thread.
+    void drain_calls();
+
+    struct CallFeed {
+        qulonglong vrx = 0;
+        std::string decoder;
+    };
+    std::vector<CallFeed> call_feeds_;          // supervisor thread
+    std::vector<CallFeed> call_feeds_ended_;    // supervisor thread
+    int posted_call_feed_count_ = -1;           // supervisor thread
+    std::vector<CallFeed> pending_call_ended_;  // guarded by decoded_mutex_
+    std::vector<rpc::DecodedMessage> pending_calls_;      // guarded by decoded_mutex_
+    std::vector<std::int64_t> pending_calls_arrived_ms_;  // guarded by decoded_mutex_
+    std::atomic<bool> calls_wake_pending_{false};
+    std::atomic<int> call_feed_count_{0};
+
     // Qt thread only.
     DecodedLogModel decoded_log_;
+    CallLogModel call_log_;
     std::vector<rpc::DecoderInfo> decoder_infos_;
     QString decode_choice_ = QStringLiteral("auto");
     QString decode_choice_shown_;

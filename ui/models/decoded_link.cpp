@@ -480,6 +480,10 @@ void EngineLink::on_decoded_message(const rpc::DecodedMessage& message)
         pending_decoded_arrived_ms_.push_back(now_ms);
     }
 
+    // The call table reads the pane's subscriptions too, so a pair the pane
+    // holds is never subscribed a second time for it. See apply_call_feeds.
+    on_call_message(message);
+
     // One wake outstanding at a time, for the reason wake_pending_ gives.
     if (!decoded_wake_pending_.exchange(true, std::memory_order_acq_rel)) {
         QMetaObject::invokeMethod(this, [this] { drain_decoded(); }, Qt::QueuedConnection);
@@ -531,9 +535,15 @@ void EngineLink::forget_decoded()
     decoder_infos_fault_.clear();
     vocoders_asked_ = false;
     plugins_asked_ = false;
+    call_feeds_.clear();
+    call_feeds_ended_.clear();
+    posted_call_feed_count_ = 0;
+    call_feed_count_.store(0, std::memory_order_release);
+    QMetaObject::invokeMethod(this, [this] { call_log_.set_feeds(0); }, Qt::QueuedConnection);
     {
         const std::lock_guard<std::mutex> lock(decoded_mutex_);
         pending_decoded_ended_.clear();
+        pending_call_ended_.clear();
     }
     note_decode();
 }
@@ -705,6 +715,201 @@ void EngineLink::note_decode()
         handover_decode_detail_ = detail;
     }
     QMetaObject::invokeMethod(this, [this] { adopt_decode(); }, Qt::QueuedConnection);
+}
+
+// ---------------------------------------------------------------------------
+// The call table's feeds
+// ---------------------------------------------------------------------------
+
+namespace {
+
+[[nodiscard]] bool same_feed(const auto& a, const auto& b)
+{
+    return a.vrx == b.vrx && a.decoder == b.decoder;
+}
+
+[[nodiscard]] bool holds_feed(const auto& list, const auto& feed)
+{
+    return std::ranges::any_of(list, [&feed](const auto& known) { return same_feed(known, feed); });
+}
+
+// The call table's own pending queue. Far more than a drain ever finds, and
+// a bound on what a stalled Qt thread can cost in memory.
+constexpr std::size_t kPendingCallsCap = 4096;
+
+}  // namespace
+
+void EngineLink::apply_call_feeds()
+{
+    if (client_ == nullptr) {
+        return;
+    }
+
+    std::vector<CallFeed> ended;
+    {
+        const std::lock_guard<std::mutex> lock(decoded_mutex_);
+        ended.swap(pending_call_ended_);
+    }
+    // Only a feed still held here: one the pane replaced is the pane's now,
+    // and an ended() from the replaced subscription says nothing about it.
+    for (CallFeed& gone : ended) {
+        if (!holds_feed(call_feeds_, gone)) {
+            continue;
+        }
+        std::erase_if(call_feeds_, [&gone](const CallFeed& f) { return same_feed(f, gone); });
+        call_feeds_ended_.push_back(std::move(gone));
+    }
+
+    // auto's choice for each digital voice receiver, whatever the pane's
+    // decode switch says: the table is about the air, not about the pane.
+    std::vector<CallFeed> wanted;
+    const auto want = [&](qulonglong vrx, rpc::Demod demod) {
+        if (vrx == 0 ||
+            (demod != rpc::Demod::P25p1 && demod != rpc::Demod::Dmr && demod != rpc::Demod::Dstar)) {
+            return;
+        }
+        for (std::string& name : resolve_decoder_choice(kAutoDecoder, work_decoder_infos_,
+                                                        demod_name(demod).toStdString())) {
+            if (is_call_decoder(name)) {
+                wanted.push_back(CallFeed{vrx, std::move(name)});
+            }
+        }
+    };
+    want(live_receiver_id_, live_receiver_demod_);
+    for (const HeldVrx& held : held_) {
+        want(held.id, held.params.demod);
+    }
+
+    const auto pane_holds = [this](const CallFeed& feed) {
+        return feed.vrx == live_decoded_vrx_ &&
+               std::ranges::find(live_decoded_, feed.decoder) != live_decoded_.end();
+    };
+
+    // An ended feed is not asked again while its receiver keeps the mode.
+    std::erase_if(call_feeds_ended_,
+                  [&wanted](const CallFeed& f) { return !holds_feed(wanted, f); });
+
+    for (auto held = call_feeds_.begin(); held != call_feeds_.end();) {
+        if (pane_holds(*held)) {
+            held = call_feeds_.erase(held);
+        } else if (!holds_feed(wanted, *held)) {
+            client_->unsubscribe_decoded(held->vrx, held->decoder);
+            held = call_feeds_.erase(held);
+        } else {
+            ++held;
+        }
+    }
+
+    int feeding = 0;
+    for (const CallFeed& feed : wanted) {
+        if (pane_holds(feed) || holds_feed(call_feeds_, feed)) {
+            ++feeding;
+            continue;
+        }
+        if (holds_feed(call_feeds_ended_, feed)) {
+            continue;
+        }
+        auto resolved = client_->subscribe_decoded(
+            feed.vrx, feed.decoder,
+            [this](const rpc::DecodedMessage& message) { on_call_message(message); },
+            [this, vrx = feed.vrx, name = feed.decoder](const std::string&) {
+                on_call_feed_ended(vrx, name);
+            });
+        if (!resolved) {
+            call_feeds_ended_.push_back(feed);
+            continue;
+        }
+        call_feeds_.push_back(feed);
+        ++feeding;
+    }
+
+    if (feeding != posted_call_feed_count_) {
+        posted_call_feed_count_ = feeding;
+        call_feed_count_.store(feeding, std::memory_order_release);
+        QMetaObject::invokeMethod(
+            this,
+            [this] { call_log_.set_feeds(call_feed_count_.load(std::memory_order_acquire)); },
+            Qt::QueuedConnection);
+    }
+}
+
+void EngineLink::on_call_message(const rpc::DecodedMessage& message)
+{
+    if (!is_call_decoder(message.decoder)) {
+        return;
+    }
+    const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+    {
+        const std::lock_guard<std::mutex> lock(decoded_mutex_);
+        if (pending_calls_.size() >= kPendingCallsCap) {
+            pending_calls_.erase(pending_calls_.begin());
+            pending_calls_arrived_ms_.erase(pending_calls_arrived_ms_.begin());
+        }
+        pending_calls_.push_back(message);
+        pending_calls_arrived_ms_.push_back(now_ms);
+    }
+    if (!calls_wake_pending_.exchange(true, std::memory_order_acq_rel)) {
+        QMetaObject::invokeMethod(this, [this] { drain_calls(); }, Qt::QueuedConnection);
+    }
+}
+
+void EngineLink::on_call_feed_ended(std::uint64_t vrx, const std::string& decoder)
+{
+    {
+        const std::lock_guard<std::mutex> lock(decoded_mutex_);
+        pending_call_ended_.push_back(CallFeed{vrx, decoder});
+    }
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        decode_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+}
+
+void EngineLink::drain_calls()
+{
+    calls_wake_pending_.store(false, std::memory_order_release);
+
+    std::vector<rpc::DecodedMessage> messages;
+    std::vector<std::int64_t> arrived;
+    {
+        const std::lock_guard<std::mutex> lock(decoded_mutex_);
+        messages.swap(pending_calls_);
+        arrived.swap(pending_calls_arrived_ms_);
+    }
+
+    std::vector<CallFrame> frames;
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        const rpc::DecodedMessage& message = messages[i];
+
+        // The receiver's frequency and whose it is, which the message does
+        // not carry. A receiver the rack has already let go keeps neither.
+        std::int64_t hz = 0;
+        std::string owner;
+        for (const RackEntry& entry : rack_.entries()) {
+            if (entry.engine_id != message.vrx) {
+                continue;
+            }
+            owner = entry.adopted ? (entry.owner.empty() ? std::string("plugin") : entry.owner)
+                                  : std::string("user");
+            if (entry.key == pane_key_) {
+                hz = receiver_absolute_hz_;
+            } else if (const HeldView* view = held_view(entry.key); view != nullptr) {
+                hz = view->absolute_hz;
+            }
+            break;
+        }
+        if (owner.empty() && message.vrx == receiver_id_) {
+            owner = "user";
+            hz = receiver_absolute_hz_;
+        }
+        for (CallFrame& frame : call_frames(message, arrived[i], hz, owner)) {
+            frames.push_back(std::move(frame));
+        }
+    }
+    call_log_.apply(frames);
 }
 
 }  // namespace revenant::ui

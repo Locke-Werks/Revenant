@@ -32,11 +32,26 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 namespace revenant::ui {
+
+// Which administrations a row holds for. A bit each, so a row identical on
+// both sides of the border is one row and not two.
+enum Region : std::uint32_t { kRegionUS = 1u << 0, kRegionCA = 1u << 1 };
+inline constexpr std::uint32_t kRegionUSCA = kRegionUS | kRegionCA;
+
+// An allocation is a whole band, a sub-band a segment of one, and a channel a
+// single assignment inside one. They overlap on purpose.
+enum class BandKind : std::uint8_t { kAllocation, kSubBand, kChannel };
+
+enum class BandColour : std::uint8_t {
+    kAmateur, kBroadcast, kAviation, kMarine, kLandMobile, kPublicSafety,
+    kPersonal, kWeather, kSatellite, kIsm, kGovernment, kOther };
 
 struct Band {
     std::string_view group;
@@ -45,70 +60,78 @@ struct Band {
     std::int64_t high_hz = 0;
     std::int64_t centre_hz = 0;
 
-    // A demodulator name as core/engine/vrx.h spells it.
+    // A demodulator name as core/engine/vrx.h spells it, "" if none fits.
     std::string_view mode;
 
     // Shown as a one-click shortcut beside the dial. The rest are in the menu.
     bool favourite = false;
+
+    std::uint32_t regions = kRegionUSCA;
+    BandKind kind = BandKind::kAllocation;
+    BandColour colour = BandColour::kOther;
+
+    // The rule or plan the edges were read from, e.g. "47 CFR 97.301".
+    std::string_view source;
+
+    // "" for a top-level row; for a channel, the submenu it is listed under.
+    std::string_view parent;
 };
 
+// The rows live one file per service under models/band_plan/, each holding
+// nothing but initialisers, so the files can be sourced and reviewed apart.
 // Grouped, and in frequency order within a group, which is the order the menu
 // draws them in.
-inline constexpr std::array kBands{
-    Band{"Broadcast", "MW AM", 530'000, 1'700'000, 1'000'000, "am", false},
-    Band{"Broadcast", "FM", 88'000'000, 108'000'000, 98'100'000, "wfm", true},
+inline constexpr auto kBands = std::to_array<Band>({
+#include "band_plan/amateur.inc"
+#include "band_plan/personal_radio.inc"
+#include "band_plan/aviation.inc"
+#include "band_plan/marine.inc"
+#include "band_plan/land_mobile_public_safety.inc"
+#include "band_plan/broadcast.inc"
+#include "band_plan/weather_sat_space.inc"
+#include "band_plan/ism_unlicensed.inc"
+#include "band_plan/canada_only.inc"
+});
 
-    Band{"Shortwave broadcast", "SW 120 m", 2'300'000, 2'495'000, 2'400'000, "am", false},
-    Band{"Shortwave broadcast", "SW 90 m", 3'200'000, 3'400'000, 3'300'000, "am", false},
-    Band{"Shortwave broadcast", "SW 75 m", 3'900'000, 4'000'000, 3'950'000, "am", false},
-    Band{"Shortwave broadcast", "SW 60 m", 4'750'000, 5'060'000, 4'900'000, "am", false},
-    Band{"Shortwave broadcast", "SW 49 m", 5'900'000, 6'200'000, 6'050'000, "am", false},
-    Band{"Shortwave broadcast", "SW 41 m", 7'200'000, 7'450'000, 7'325'000, "am", false},
-    Band{"Shortwave broadcast", "SW 31 m", 9'400'000, 9'900'000, 9'650'000, "am", false},
-    Band{"Shortwave broadcast", "SW 25 m", 11'600'000, 12'100'000, 11'850'000, "am", false},
-    Band{"Shortwave broadcast", "SW 22 m", 13'570'000, 13'870'000, 13'720'000, "am", false},
-    Band{"Shortwave broadcast", "SW 19 m", 15'100'000, 15'800'000, 15'450'000, "am", false},
-    Band{"Shortwave broadcast", "SW 16 m", 17'480'000, 17'900'000, 17'690'000, "am", false},
-    Band{"Shortwave broadcast", "SW 15 m", 18'900'000, 19'020'000, 18'960'000, "am", false},
-    Band{"Shortwave broadcast", "SW 13 m", 21'450'000, 21'850'000, 21'650'000, "am", false},
-    Band{"Shortwave broadcast", "SW 11 m", 25'670'000, 26'100'000, 25'885'000, "am", false},
+// The rows that hold in any of the regions in the mask, in table order.
+[[nodiscard]] inline std::vector<const Band*> bands_for_region(std::uint32_t mask)
+{
+    std::vector<const Band*> out;
+    for (const Band& band : kBands) {
+        if ((band.regions & mask) != 0) {
+            out.push_back(&band);
+        }
+    }
+    return out;
+}
 
-    // Lower sideband below 10 MHz and upper above it, which is the phone
-    // convention and not a rule; 30 m carries no phone at all.
-    Band{"Amateur HF", "160 m", 1'800'000, 2'000'000, 1'900'000, "lsb", false},
-    Band{"Amateur HF", "80 m", 3'500'000, 4'000'000, 3'750'000, "lsb", false},
-    Band{"Amateur HF", "60 m", 5'330'500, 5'406'400, 5'357'000, "usb", false},
-    Band{"Amateur HF", "40 m", 7'000'000, 7'300'000, 7'150'000, "lsb", false},
-    Band{"Amateur HF", "30 m", 10'100'000, 10'150'000, 10'125'000, "cw", false},
-    Band{"Amateur HF", "20 m", 14'000'000, 14'350'000, 14'175'000, "usb", false},
-    Band{"Amateur HF", "17 m", 18'068'000, 18'168'000, 18'118'000, "usb", false},
-    Band{"Amateur HF", "15 m", 21'000'000, 21'450'000, 21'225'000, "usb", false},
-    Band{"Amateur HF", "12 m", 24'890'000, 24'990'000, 24'940'000, "usb", false},
-    Band{"Amateur HF", "10 m", 28'000'000, 29'700'000, 28'500'000, "usb", false},
-
-    Band{"Amateur VHF and up", "6 m", 50'000'000, 54'000'000, 50'200'000, "usb", false},
-    Band{"Amateur VHF and up", "2 m", 144'000'000, 148'000'000, 145'000'000, "nfm", true},
-    Band{"Amateur VHF and up", "1.25 m", 222'000'000, 225'000'000, 223'500'000, "nfm", false},
-    Band{"Amateur VHF and up", "70 cm", 420'000'000, 450'000'000, 435'000'000, "nfm", true},
-    Band{"Amateur VHF and up", "33 cm", 902'000'000, 928'000'000, 915'000'000, "nfm", false},
-    Band{"Amateur VHF and up", "23 cm", 1'240'000'000, 1'300'000'000, 1'270'000'000, "nfm",
-         false},
-
-    Band{"Aviation and marine", "Airband", 118'000'000, 137'000'000, 124'000'000, "am", true},
-    Band{"Aviation and marine", "Marine VHF", 156'000'000, 162'025'000, 156'800'000, "nfm",
-         false},
-    Band{"Aviation and marine", "ADS-B", 1'087'000'000, 1'093'000'000, 1'090'000'000, "raw",
-         false},
-
-    Band{"Land mobile and weather", "NOAA", 162'400'000, 162'550'000, 162'475'000, "nfm", true},
-    Band{"Land mobile and weather", "GMRS / FRS", 462'550'000, 467'725'000, 462'562'500, "nfm",
-         true},
-    Band{"Land mobile and weather", "460-464 MHz", 460'000'000, 464'000'000, 462'000'000, "nfm",
-         false},
-
-    Band{"ISM", "ISM 433", 433'050'000, 434'790'000, 433'920'000, "am", false},
-    Band{"ISM", "ISM 915", 902'000'000, 928'000'000, 915'000'000, "am", false},
-};
+// The rows in the mask that share any frequency with [lo_hz, hi_hz], widest
+// first so a drawing pass lays allocations under their sub-bands and channels.
+// Ties go to the lower edge and then the name, so the order never depends on
+// where a row sits in the table.
+[[nodiscard]] inline std::vector<const Band*> bands_overlapping(std::int64_t lo_hz,
+                                                                std::int64_t hi_hz,
+                                                                std::uint32_t mask)
+{
+    std::vector<const Band*> out;
+    for (const Band& band : kBands) {
+        if ((band.regions & mask) != 0 && band.low_hz < hi_hz && band.high_hz > lo_hz) {
+            out.push_back(&band);
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const Band* a, const Band* b) {
+        const std::int64_t wa = a->high_hz - a->low_hz;
+        const std::int64_t wb = b->high_hz - b->low_hz;
+        if (wa != wb) {
+            return wa > wb;
+        }
+        if (a->low_hz != b->low_hz) {
+            return a->low_hz < b->low_hz;
+        }
+        return a->name < b->name;
+    });
+    return out;
+}
 
 // Whether the front end can be put at this band's centre.
 //

@@ -27,7 +27,10 @@
 #include <QSGTexture>
 #include <QSGTextureMaterial>
 #include <QString>
+#include <QSettings>
 #include <QWheelEvent>
+
+#include "models/settings.h"
 
 #include "models/frame_stats.h"
 #include "models/label_tune.h"
@@ -1709,6 +1712,283 @@ QSGNode* SpectrumItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
     node->noise->setQuads(noise_quads_);
     node->trace->setTrace(levels_, w, h);
     node->overlay->setQuads(quads_);
+    return node;
+}
+
+// ---------------------------------------------------------------------------
+// BandBarItem
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The service colours are qml/Theme.qml's tokens, because the theme has only
+// so many colours that mean something and a band bar inventing twelve more
+// would compete with the receiver palette for the operator's eye. Magenta,
+// Theme.inkTune, is not among them: it is the detection colour and nothing
+// else on the span may look like it.
+[[nodiscard]] QColor band_colour(BandColour colour)
+{
+    switch (colour) {
+        case BandColour::kAmateur:
+            return QColor(0x45, 0xc4, 0xb0);  // Theme.accent
+        case BandColour::kBroadcast:
+            return QColor(0xd6, 0xa2, 0x4a);  // Theme.inkWarn
+        case BandColour::kPublicSafety:
+        case BandColour::kGovernment:
+            return QColor(0xd6, 0x62, 0x4a);  // Theme.inkBad
+        case BandColour::kAviation:
+        case BandColour::kMarine:
+        case BandColour::kWeather:
+        case BandColour::kSatellite:
+            return QColor(0xc6, 0xd0, 0xdd);  // Theme.ink
+        case BandColour::kLandMobile:
+        case BandColour::kPersonal:
+        case BandColour::kIsm:
+            return QColor(0x2a, 0x7a, 0x6e);  // Theme.accentDim
+        case BandColour::kOther:
+            break;
+    }
+    return QColor(0x6f, 0x7b, 0x8c);  // Theme.inkDim
+}
+
+// Translucent so the lanes read as a stack and an allocation under its
+// sub-band stays visible as a colour, opaque edges so where a band ends is
+// exact.
+constexpr int kBandFillAlpha = 70;
+constexpr int kBandEdgeAlpha = 230;
+constexpr double kBandLanePitchPx = 14.0;
+
+[[nodiscard]] QString megahertz(std::int64_t hz)
+{
+    return QString::number(static_cast<double>(hz) / 1e6, 'f', 4);
+}
+
+}  // namespace
+
+double BandBarItem::laneHeight()
+{
+    return std::max(kBandLanePitchPx, overlay_label_height());
+}
+
+BandBarItem::BandBarItem(QQuickItem* parent) : QQuickItem(parent)
+{
+    setFlag(ItemHasContents, true);
+
+    // Clicks pass through to nothing on purpose: a click on a band is
+    // reserved, and the plan keeps it from competing with click-to-tune.
+    setAcceptedMouseButtons(Qt::NoButton);
+    setAcceptHoverEvents(true);
+
+    const QSettings store;
+    show_bar_ = store.value(settings::kShowBandBar, settings::kShowBandBarDefault).toBool();
+    region_ = store.value(settings::kBandPlanRegion, settings::kBandPlanRegionDefault).toUInt();
+
+    for (int lane = 0; lane < kBandBarMaxLanes; ++lane) {
+        auto* labels = new OverlayLabelItem(this);
+        labels->setVisible(false);
+        lane_labels_.push_back(labels);
+    }
+}
+
+void BandBarItem::setLink(EngineLink* link)
+{
+    if (link_ == link) {
+        return;
+    }
+    if (link_ != nullptr) {
+        disconnect(link_, nullptr, this, nullptr);
+    }
+    link_ = link;
+    if (link_ != nullptr) {
+        // A retune arrives as a frame with a new span, and a reconnect as a
+        // new engine; takeSpan turns either into a rebuild only when the
+        // span actually moved.
+        connect(link_, &EngineLink::frameChanged, this, &BandBarItem::takeSpan);
+        connect(link_, &EngineLink::connectionChanged, this, &BandBarItem::takeSpan);
+    }
+    rebuild();
+    emit linkChanged();
+}
+
+void BandBarItem::setShowBar(bool show)
+{
+    if (show_bar_ == show) {
+        return;
+    }
+    show_bar_ = show;
+    rebuild();
+    emit showBarChanged();
+}
+
+void BandBarItem::setRegion(int region)
+{
+    const auto mask = static_cast<std::uint32_t>(region);
+    if (region_ == mask) {
+        return;
+    }
+    region_ = mask;
+    rebuild();
+    emit regionChanged();
+}
+
+double BandBarItem::barHeight() const
+{
+    return show_bar_ ? laneHeight() * bar_.lanes_used : 0.0;
+}
+
+void BandBarItem::geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry)
+{
+    QQuickItem::geometryChange(newGeometry, oldGeometry);
+    if (newGeometry.width() != oldGeometry.width()) {
+        rebuild();
+    }
+}
+
+void BandBarItem::takeSpan()
+{
+    const double low = link_ == nullptr ? 0.0 : link_->spanLowHz();
+    const double high = link_ == nullptr ? 0.0 : link_->spanHighHz();
+    if (low != laid_low_hz_ || high != laid_high_hz_) {
+        rebuild();
+    }
+}
+
+void BandBarItem::rebuild()
+{
+    const double low = link_ == nullptr ? 0.0 : link_->spanLowHz();
+    const double high = link_ == nullptr ? 0.0 : link_->spanHighHz();
+    laid_low_hz_ = low;
+    laid_high_hz_ = high;
+    laid_width_ = width();
+
+    const int lanes_before = bar_.lanes_used;
+    bar_ = {};
+    if (show_bar_ && high > low) {
+        const auto rows = bands_overlapping(static_cast<std::int64_t>(std::floor(low)),
+                                            static_cast<std::int64_t>(std::ceil(high)),
+                                            region_);
+        bar_ = build_band_bar(rows, low, high, laid_width_);
+    }
+
+    const double pitch = laneHeight();
+    quads_.clear();
+    std::vector<std::vector<OverlayLabel>> labels(lane_labels_.size());
+    const QFontMetricsF metrics(overlay_label_font());
+    const QColor ink(0xc6, 0xd0, 0xdd);  // Theme.ink
+
+    for (const BandBarSegment& segment : bar_.segments) {
+        const double top = segment.lane * pitch;
+        const QColor base = band_colour(segment.band->colour);
+        QColor fill = base;
+        fill.setAlpha(kBandFillAlpha);
+        QColor edge = base;
+        edge.setAlpha(kBandEdgeAlpha);
+
+        // One pixel short of the pitch, so stacked lanes stay apart.
+        const double lane_h = pitch - 1.0;
+        push_quad(quads_, QRectF(segment.x0, top, segment.x1 - segment.x0, lane_h), fill);
+        if (!segment.clipped_left) {
+            push_quad(quads_, QRectF(segment.x0, top, 1.0, lane_h), edge);
+        }
+        if (!segment.clipped_right) {
+            push_quad(quads_, QRectF(segment.x1 - 1.0, top, 1.0, lane_h), edge);
+        }
+
+        // Elided to the segment less the plate's padding, and dropped rather
+        // than shown as a lone ellipsis, which names nothing.
+        const double room = segment.x1 - segment.x0 - 8.0;
+        const QString name = QString::fromUtf8(segment.band->name.data(),
+                                               static_cast<qsizetype>(segment.band->name.size()));
+        const QString text = metrics.elidedText(name, Qt::ElideRight, std::max(0.0, room));
+        if (text.isEmpty() || text == QStringLiteral("…") || room <= 0.0) {
+            continue;
+        }
+        labels[static_cast<std::size_t>(segment.lane)].push_back(
+            OverlayLabel{text, (segment.x0 + segment.x1) / 2.0, ink});
+    }
+
+    // The overflow sits in the deepest lane, appended last so it is painted
+    // over a label it collides with: a hidden "+N" would be the bar saying
+    // nothing more is here when something is.
+    if (!bar_.overflow.empty() && !labels.empty()) {
+        for (const BandBarOverflow& more : bar_.overflow) {
+            labels.back().push_back(OverlayLabel{QStringLiteral("+%1").arg(more.count),
+                                                 more.x, QColor(0xd6, 0xa2, 0x4a)});
+        }
+    }
+
+    for (std::size_t lane = 0; lane < lane_labels_.size(); ++lane) {
+        OverlayLabelItem* item = lane_labels_[lane];
+        item->setX(0.0);
+        item->setY(static_cast<double>(lane) * pitch);
+        item->setWidth(laid_width_);
+        item->setHeight(overlay_label_height());
+        item->setLabels(std::move(labels[lane]));
+    }
+
+    setHover(-1, 0.0);
+    if (bar_.lanes_used != lanes_before) {
+        emit barChanged();
+    }
+    update();
+}
+
+void BandBarItem::setHover(int segment, double x)
+{
+    QString text;
+    if (segment >= 0 && static_cast<std::size_t>(segment) < bar_.segments.size()) {
+        const Band& band = *bar_.segments[static_cast<std::size_t>(segment)].band;
+        const auto qs = [](std::string_view s) {
+            return QString::fromUtf8(s.data(), static_cast<qsizetype>(s.size()));
+        };
+        text = qs(band.name) + QStringLiteral("\n") + megahertz(band.low_hz) +
+               QStringLiteral(" to ") + megahertz(band.high_hz) + QStringLiteral(" MHz");
+        if (!band.source.empty()) {
+            text += QStringLiteral("\n") + qs(band.source);
+        }
+    }
+    if (segment == hovered_ && text == hover_text_) {
+        return;
+    }
+    hovered_ = segment;
+    hover_text_ = text;
+    hover_x_ = x;
+    emit hoverChanged();
+}
+
+void BandBarItem::hoverMoveEvent(QHoverEvent* event)
+{
+    const double x = event->position().x();
+    const int lane = static_cast<int>(event->position().y() / laneHeight());
+    int found = -1;
+    for (std::size_t i = 0; i < bar_.segments.size(); ++i) {
+        const BandBarSegment& segment = bar_.segments[i];
+        if (segment.lane == lane && x >= segment.x0 && x < segment.x1) {
+            found = static_cast<int>(i);
+            break;
+        }
+    }
+    setHover(found, x);
+    event->accept();
+}
+
+void BandBarItem::hoverLeaveEvent(QHoverEvent* event)
+{
+    setHover(-1, 0.0);
+    event->accept();
+}
+
+QSGNode* BandBarItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)
+{
+    if (width() <= 0.0 || height() <= 0.0 || quads_.empty()) {
+        delete old_node;
+        return nullptr;
+    }
+    auto* node = static_cast<OverlayNode*>(old_node);
+    if (node == nullptr) {
+        node = new OverlayNode;
+    }
+    node->setQuads(quads_);
     return node;
 }
 

@@ -255,7 +255,10 @@ inline constexpr std::string_view kBandKeywords = "band";
         entry.id = "band." + std::to_string(i);
         entry.label = band.name;
         entry.group = band.group;
-        entry.keywords = std::string(kBandKeywords) + " " + std::string(band.mode);
+        // A channel is also found by its submenu, so "frs" lists every FRS
+        // channel and not only the rows that happen to say it in their name.
+        entry.keywords = std::string(kBandKeywords) + " " + std::string(band.mode) + " " +
+                         std::string(band.parent);
         entry.needs = kNeedsRetune;
         entry.handler = "tune.band";
         entry.argument = std::to_string(i);

@@ -92,6 +92,7 @@
 #include <QVariantMap>
 
 #include "core/rpc/types.h"
+#include "models/band_bar.h"
 #include "models/engine_link.h"
 #include "models/level_scale.h"
 #include "models/scale_settings.h"
@@ -858,6 +859,100 @@ private:
     unsigned pending_notify_ = 0;
     QTimer notify_timer_;
     QElapsedTimer notify_clock_;
+};
+
+// ---------------------------------------------------------------------------
+// The band bar
+// ---------------------------------------------------------------------------
+//
+// Which band-plan rows the span crosses, as a strip of its own directly above
+// the spectrum. models/band_bar.h lays it out; this draws it.
+//
+// A SEPARATE ITEM AND NOT A STRIP INSIDE SpectrumItem. The top of the spectrum
+// is already spoken for: the detection labels are painted at kLabelTopPx, the
+// ceiling pin and the hover card sit 28 px down in qml/SpanView.qml, and the
+// receiver markers run the full height. A bar drawn over that strip would
+// cover the detection labels or push all three down, and one drawn under the
+// receiver fills would tint the passband the operator is lining a signal up
+// against. As its own row in the span's column it hides nothing, its rebuild
+// is independent of the trace's 258 frames a second, and the spectrum's
+// mouse handling, click-to-tune included, is untouched because a press on
+// the bar never reaches it. It shares the overlay's machinery: one
+// OverlayNode batch for the fills and ticks, OverlayLabelItem for the text.
+class BandBarItem : public QQuickItem {
+    Q_OBJECT
+    QML_ELEMENT
+
+    Q_PROPERTY(revenant::ui::EngineLink* link READ link WRITE setLink NOTIFY linkChanged)
+
+    // Both start from the stored settings, models/settings.h, and are
+    // writable so the window can bind them to a toggle without this item
+    // having to watch QSettings, which has no change signal.
+    Q_PROPERTY(bool showBar READ showBar WRITE setShowBar NOTIFY showBarChanged)
+    Q_PROPERTY(int region READ region WRITE setRegion NOTIFY regionChanged)
+
+    // The lane height times the lanes in use, zero when hidden or empty
+    // of bands, so a layout can give the bar exactly its height.
+    Q_PROPERTY(double barHeight READ barHeight NOTIFY barChanged)
+
+    // The segment under the pointer, for the tooltip. Empty when none is.
+    Q_PROPERTY(QString hoverText READ hoverText NOTIFY hoverChanged)
+    Q_PROPERTY(double hoverX READ hoverX NOTIFY hoverChanged)
+
+public:
+    explicit BandBarItem(QQuickItem* parent = nullptr);
+
+    [[nodiscard]] EngineLink* link() const { return link_; }
+    void setLink(EngineLink* link);
+
+    [[nodiscard]] bool showBar() const { return show_bar_; }
+    void setShowBar(bool show);
+    [[nodiscard]] int region() const { return static_cast<int>(region_); }
+    void setRegion(int region);
+
+    [[nodiscard]] double barHeight() const;
+    [[nodiscard]] QString hoverText() const { return hover_text_; }
+    [[nodiscard]] double hoverX() const { return hover_x_; }
+
+    // The lane pitch, about 14 px and never less than one label plate.
+    [[nodiscard]] static double laneHeight();
+
+signals:
+    void linkChanged();
+    void showBarChanged();
+    void regionChanged();
+    void barChanged();
+    void hoverChanged();
+
+protected:
+    QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
+    void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
+    void hoverMoveEvent(QHoverEvent* event) override;
+    void hoverLeaveEvent(QHoverEvent* event) override;
+
+private:
+    // Checks the span against the last one laid out, so the per-frame signal
+    // costs two compares and a rebuild happens only when something moved.
+    void takeSpan();
+    void rebuild();
+    void setHover(int segment, double x);
+
+    EngineLink* link_ = nullptr;
+    bool show_bar_ = true;
+    std::uint32_t region_ = 3U;
+
+    double laid_low_hz_ = 0.0;
+    double laid_high_hz_ = 0.0;
+    double laid_width_ = 0.0;
+
+    // What the rows looked like when laid out; the segments point into
+    // kBands, which is static, so they stay valid across rebuilds.
+    BandBar bar_;
+    std::vector<OverlayQuad> quads_;
+    std::vector<OverlayLabelItem*> lane_labels_;
+    int hovered_ = -1;
+    QString hover_text_;
+    double hover_x_ = 0.0;
 };
 
 }  // namespace revenant::ui

@@ -167,4 +167,14 @@ inline constexpr QLatin1StringView kTranscription{"speech/transcribe"};
 // ui/models/recent_recordings.h.
 inline constexpr QLatin1StringView kRecentRecordings{"recordings/recent"};
 
+// Which administrations' band plan the bar and the menu show, as the Region
+// mask in models/band_plan.h. An unset key reads as both, so a fresh install
+// lists every row rather than guessing which side of the border it is on.
+inline constexpr QLatin1StringView kBandPlanRegion{"bands/region"};
+inline constexpr unsigned kBandPlanRegionDefault = 3U;  // kRegionUSCA
+
+// Whether the band bar is drawn over the span.
+inline constexpr QLatin1StringView kShowBandBar{"bands/showBar"};
+inline constexpr bool kShowBandBarDefault = true;
+
 }  // namespace revenant::ui::settings

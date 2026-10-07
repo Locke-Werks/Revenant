@@ -37,6 +37,7 @@ Rectangle {
     function togglePanel(name) {
         const panel = name === "radio" ? radioPanel
                     : name === "memories" ? memoriesPanel
+                    : name === "settings" ? settingsPanel
                     : null
         if (panel === null)
             return
@@ -221,6 +222,36 @@ Rectangle {
                 id: radioPanel
                 parent: radioButton
                 SourcePicker {}
+            }
+        }
+
+        // The application's settings. Shown with no engine too: the band plan
+        // needs none, and the detector's values are kept on this machine.
+        // Modal, unlike the bar's other panels, because it is a place to
+        // change things and not something to glance at over the span.
+        RButton {
+            id: settingsButton
+            flat: true
+            text: "settings"
+            ink: Theme.inkDim
+            onClicked: settingsPanel.opened ? settingsPanel.close() : settingsPanel.open()
+
+            Tip {
+                visible: parent.hovered && !settingsPanel.opened
+                text: "detection, band plan and speech settings  "
+                      + KeyMap.keysText("panel.settings")
+            }
+
+            Popover {
+                id: settingsPanel
+                parent: settingsButton
+                modal: true
+                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                onOpened: settingsView.sync()
+
+                SettingsPanel {
+                    id: settingsView
+                }
             }
         }
 

@@ -54,6 +54,18 @@ RowLayout {
         thresholdSlider.forceActiveFocus(Qt.ShortcutFocusReason)
     }
 
+    // A different radio opened, or the settings window reset or shared a
+    // value, so the stored values in force changed under handles a drag has
+    // unbound. Put each back where the link now is.
+    Connections {
+        target: engineLink
+        function onDetectorScopeChanged() {
+            thresholdSlider.value = engineLink.detectionThresholdWanted
+            confidenceSlider.value = engineLink.confidenceBar
+            marginSlider.value = engineLink.marginBar
+        }
+    }
+
     Label {
         text: "detect"
         color: detector.enabled ? Theme.inkDim : Theme.inkOff

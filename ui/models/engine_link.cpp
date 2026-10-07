@@ -117,24 +117,12 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
     //
     // The margin bar and the threshold are read here too since 2026-09-23;
     // models/detector_settings.h has what each restore refuses and why.
+    //
+    // No radio is known yet, so this is every radio's value. The open radio's
+    // own replaces it when adopt_calibration learns which radio that is; see
+    // models/detector_scope.h. Not sent from here: a connection queues it.
     const QSettings store;
-    const auto stored = [&store](QLatin1StringView key) -> std::optional<double> {
-        if (!store.contains(key)) {
-            return std::nullopt;
-        }
-        bool ok = false;
-        const double value = store.value(key).toDouble(&ok);
-        return ok ? std::optional<double>(value) : std::nullopt;
-    };
-    detector_memory_ =
-        restore_detector_memory(stored(settings::kConfidenceBar), stored(settings::kMarginBar),
-                                stored(settings::kDetectionThresholdDb), kMaxConfidenceBar);
-    confidence_bar_.store(detector_memory_.confidence_bar, std::memory_order_release);
-    margin_bar_.store(detector_memory_.margin_bar, std::memory_order_release);
-    if (const auto threshold = threshold_for_connection(detector_memory_)) {
-        remembered_threshold_db_.store(*threshold, std::memory_order_release);
-        threshold_remembered_.store(true, std::memory_order_release);
-    }
+    load_detector_settings(false);
 
     // The listen switch, which is a switch and not a state: it survives a
     // retune, a mode change and a reconnect within a session, and this is
@@ -282,6 +270,7 @@ void EngineLink::supervise()
             // longer exists until the next pass.
             apply_audio_request();
             apply_decode_request();
+            apply_call_feeds();
             poll_vocoder_plugins();
             poll_engine_plugins();
             apply_transcription(false);
@@ -416,6 +405,7 @@ void EngineLink::supervise()
 
             apply_audio_request();
             apply_decode_request();
+            apply_call_feeds();
             poll_vocoder_plugins();
             poll_engine_plugins();
 
@@ -1206,9 +1196,7 @@ void EngineLink::setConfidenceBar(double bar)
     // actually using: storing the request would let a bar the engine
     // refuses survive a restart and refuse every poll of the next
     // session, with the slider apparently in a legal place.
-    if (remember_detector_) {
-        QSettings().setValue(settings::kConfidenceBar, clamped);
-    }
+    store_detector_value(DetectorField::ConfidenceBar, clamped);
 
     // No signal here. The bar changes what the next poll asks for, and the
     // poll emits detectionsChanged when the answer differs. Emitting now
@@ -1238,9 +1226,7 @@ void EngineLink::setMarginBar(double bar)
     const double clamped = std::clamp(wanted, 0.0, kMaxConfidenceBar);
     margin_bar_.store(clamped, std::memory_order_release);
     detector_memory_.margin_bar = clamped;
-    if (remember_detector_) {
-        QSettings().setValue(settings::kMarginBar, clamped);
-    }
+    store_detector_value(DetectorField::MarginBar, clamped);
 }
 
 void EngineLink::setDetectionThresholdDb(double threshold_db)
@@ -1255,9 +1241,7 @@ void EngineLink::setDetectionThresholdDb(double threshold_db)
         detector_memory_.threshold_db = keep;
         remembered_threshold_db_.store(*keep, std::memory_order_release);
         threshold_remembered_.store(true, std::memory_order_release);
-        if (remember_detector_) {
-            QSettings().setValue(settings::kDetectionThresholdDb, *keep);
-        }
+        store_detector_value(DetectorField::Threshold, *keep);
     }
 
     // detectionThresholdDb reads the value in force, which is not this one

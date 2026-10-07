@@ -41,6 +41,35 @@ ColumnLayout {
     spacing: 0
 
     // ------------------------------------------------------------------
+    // The band bar
+    // ------------------------------------------------------------------
+    // Its own row rather than a strip over the trace, so it covers neither the
+    // detection labels nor the receiver markers; render/spectrum_item.h has
+    // the argument. As tall as the lanes in use, and gone when hidden or when
+    // the span crosses no band.
+    BandBarItem {
+        id: bandBar
+        Layout.fillWidth: true
+        // Not toggled invisible at zero height: a layout stops sizing an
+        // invisible item, and a bar with no width lays out no bands, so it
+        // would never come back.
+        Layout.preferredHeight: barHeight
+        link: engineLink
+        // Live from the settings window; models/band_plan_settings.h.
+        showBar: BandPlanSettings.showBar
+        region: BandPlanSettings.region
+
+        ToolTip {
+            parent: bandBar
+            visible: bandBar.hoverText !== ""
+            text: bandBar.hoverText
+            x: Math.min(Math.max(0, bandBar.hoverX - width / 2), bandBar.width - width)
+            y: bandBar.height + 2
+            delay: 300
+        }
+    }
+
+    // ------------------------------------------------------------------
     // The instantaneous spectrum
     // ------------------------------------------------------------------
     Item {

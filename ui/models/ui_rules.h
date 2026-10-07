@@ -22,6 +22,7 @@
 #include <vector>
 
 #include <QObject>
+#include <QSettings>
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
@@ -41,6 +42,7 @@
 #include "models/receiver_rack.h"
 #include "models/ruler.h"
 #include "models/scroll_tune.h"
+#include "models/settings.h"
 #include "models/squelch_control.h"
 #include "models/status_summary.h"
 #include "models/window_raise.h"
@@ -148,13 +150,30 @@ public:
     // The band plan. See models/band_plan.h.
     // ---------------------------------------------------------------------
 
-    // Every band, in the table's order, as a map the menu can draw. The
-    // index is the band's position and is what bandReachable takes.
+    // Every band the region setting holds for, in the table's order, as a map
+    // the menu can draw. A row's "index" is its position in kBands and is what
+    // bandReachable takes; the list position is not, because the filter skips
+    // rows.
     [[nodiscard]] Q_INVOKABLE QVariantList bands() const
     {
+        static_assert(settings::kBandPlanRegionDefault == kRegionUSCA);
+        const std::uint32_t mask =
+            QSettings()
+                .value(settings::kBandPlanRegion, settings::kBandPlanRegionDefault)
+                .toUInt();
         QVariantList out;
-        for (const Band& band : kBands) {
+        for (std::size_t i = 0; i < kBands.size(); ++i) {
+            const Band& band = kBands[i];
+            if ((band.regions & mask) == 0) {
+                continue;
+            }
             out.append(QVariantMap{
+                {QStringLiteral("index"), static_cast<int>(i)},
+                {QStringLiteral("regions"), static_cast<int>(band.regions)},
+                {QStringLiteral("kind"), static_cast<int>(band.kind)},
+                {QStringLiteral("colour"), static_cast<int>(band.colour)},
+                {QStringLiteral("source"), to_qstring(band.source)},
+                {QStringLiteral("parent"), to_qstring(band.parent)},
                 {QStringLiteral("group"), to_qstring(band.group)},
                 {QStringLiteral("name"), to_qstring(band.name)},
                 {QStringLiteral("low"), static_cast<double>(band.low_hz)},

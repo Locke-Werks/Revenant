@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -156,7 +157,12 @@ TEST_CASE("bands are found by name, by group and by the word band")
         return kBands[std::stoul(std::string(id.substr(5)))].name;
     };
     CHECK(band_named(top("airband")) == "Airband");
-    CHECK(band_named(top("20m", PaletteScope::Bands)) == "20 m");
+    // On a source whose range is unknown, so no band sinks below another for
+    // being out of reach and the order is the match alone.
+    PaletteState unranged = everything();
+    unranged.tune_low_hz = 0;
+    unranged.tune_high_hz = 0;
+    CHECK(band_named(top("20m", PaletteScope::Bands, unranged)) == "20 m");
     CHECK(band_named(top("band 2 m")) == "2 m");
 
     // The band scope lists bands and only bands, all of them for no query.
@@ -210,10 +216,18 @@ TEST_CASE("a band out of the radio's range is listed and not offered")
     PaletteState dongle = everything();
     static const std::vector<PaletteEntry> entries = palette_entries();
     const auto hits = rank_palette(entries, "160", PaletteScope::Bands, dongle);
-    REQUIRE_FALSE(hits.empty());
-    CHECK(entries[hits.front().entry].label == "160 m");
-    CHECK_FALSE(hits.front().enabled);
-    CHECK(hits.front().reason == "out of this radio's range");
+    // Found among the hits rather than first: rows the radio does reach, such
+    // as channels with 160 in their frequency, rank above it.
+    const PaletteHit* band = nullptr;
+    for (const PaletteHit& hit : hits) {
+        if (entries[hit.entry].label == "160 m") {
+            band = &hit;
+            break;
+        }
+    }
+    REQUIRE(band != nullptr);
+    CHECK_FALSE(band->enabled);
+    CHECK(band->reason == "out of this radio's range");
 }
 
 // Rejects an empty query that filters or shuffles. With nothing typed the
@@ -234,12 +248,14 @@ TEST_CASE("no query lists everything in the table's order")
     }
 
     // With everything to hand, the only entries that cannot run are the bands
-    // an R820T does not reach, which are the ones below 24 MHz.
+    // an R820T does not reach, which are the ones below 24 MHz or above
+    // 1766 MHz.
     for (const PaletteHit& hit : hits) {
         if (!hit.enabled) {
             const PaletteEntry& entry = entries[hit.entry];
             REQUIRE(entry.band >= 0);
-            CHECK(kBands[static_cast<std::size_t>(entry.band)].centre_hz < 24'000'000);
+            const std::int64_t centre = kBands[static_cast<std::size_t>(entry.band)].centre_hz;
+            CHECK((centre < 24'000'000 || centre > 1'766'000'000));
         }
     }
 

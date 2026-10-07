@@ -135,6 +135,10 @@ Item {
             fills: panel.sideBySide
         }
 
+        CallsPane {
+            Layout.minimumWidth: 0
+        }
+
         // Beside the receiver, what the log leaves goes to the bottom of the
         // column, so the audio section sits at the foot of it whatever else
         // is shown.

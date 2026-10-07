@@ -182,7 +182,14 @@ qt_add_executable(revenant_ui
     models/decoded_log.h
     models/decoded_model.cpp
     models/decoded_model.h
+    models/call_log.h
+    models/call_model.cpp
+    models/call_model.h
+    models/band_plan_settings.h
+    models/detector_link.cpp
+    models/detector_scope.h
     models/detector_settings.h
+    models/region_choice.h
     models/engine_launcher.cpp
     models/engine_launcher.h
     models/engine_link.cpp
@@ -279,12 +286,14 @@ qt_add_qml_module(revenant_ui
         qml/RecordingSection.qml
         qml/RecordingStrip.qml
         qml/DetectionControls.qml
+        qml/SettingsPanel.qml
         qml/SpanView.qml
         qml/Ruler.qml
         qml/BandPicker.qml
         qml/FrequencyDial.qml
         qml/RdsPane.qml
         qml/DecodePane.qml
+        qml/CallsPane.qml
         qml/AudioPane.qml
         qml/ClickReadout.qml
         qml/TopBar.qml
@@ -659,6 +668,7 @@ if(REVENANT_UI_TESTS)
             tests/test_voice_gain.cpp
             tests/test_dv_spawn.cpp
             tests/test_auto_filter.cpp
+            tests/test_band_bar.cpp
             tests/test_band_plan.cpp
             tests/test_bookmarks.cpp
             tests/test_box_history.cpp
@@ -667,7 +677,9 @@ if(REVENANT_UI_TESTS)
             tests/test_colour_map.cpp
             tests/test_composite_probe.cpp
             tests/test_decoded_log.cpp
+            tests/test_call_log.cpp
             tests/test_detector_settings.cpp
+            tests/test_detector_scope.cpp
             tests/test_engine_start.cpp
             tests/test_frame_stats.cpp
             tests/test_front_end_note.cpp

@@ -187,6 +187,14 @@ void EngineLink::adopt_calibration() {
         }
     }
     if (changed) {
+        // The calibration key is the radio's identity, so this is where the
+        // detector learns which radio's settings to put in force. Only while
+        // a source is open: a closed source has no key, and reading that as
+        // "a radio with no serial" would flip to the shared values and back
+        // on every reopen.
+        if (calibration_.open) {
+            note_detector_radio(calibration_.key);
+        }
         emit calibrationChanged();
     }
 }
