@@ -147,6 +147,100 @@ TEST_CASE("segments narrower than a pixel are dropped", "[band_bar]")
     CHECK(bar.overflow.empty());
 }
 
+// Rejects: abutting bands painted flush, so "][" fuses into one thick bar and
+// the boundary between them disappears.
+TEST_CASE("abutting segments get the gap and both brackets", "[band_bar]")
+{
+    const Band a = make(100, 200);
+    const Band b = make(200, 300);
+    const BandBar bar = build_band_bar({&a, &b}, 50.0, 350.0, 300.0);
+    REQUIRE(bar.segments.size() == 2);
+    const auto& left = bar.segments[0];
+    const auto& right = bar.segments[1];
+    REQUIRE(left.lane == right.lane);
+
+    CHECK_FALSE(left.abuts_left);
+    CHECK(left.abuts_right);
+    CHECK(right.abuts_left);
+    CHECK_FALSE(right.abuts_right);
+
+    CHECK(left.bracket_left());
+    CHECK(left.bracket_right());
+    CHECK(right.bracket_left());
+    CHECK(right.bracket_right());
+
+    // True edges unchanged for hover; the painted extents leave the gap.
+    CHECK_THAT(left.x1, WithinAbs(150.0, 1e-9));
+    CHECK_THAT(right.x0, WithinAbs(150.0, 1e-9));
+    CHECK_THAT(left.draw_x0, WithinAbs(left.x0, 1e-9));
+    CHECK_THAT(right.draw_x1, WithinAbs(right.x1, 1e-9));
+    const double gap = right.draw_x0 - left.draw_x1;
+    CHECK(gap >= 1.0);
+    CHECK(gap <= 2.0);
+}
+
+// Rejects: a gap opened against a segment in another lane, which would nick
+// an allocation wherever a sub-band beneath it happens to end.
+TEST_CASE("segments in different lanes do not abut", "[band_bar]")
+{
+    const Band alloc = make(100, 300);
+    const Band sub = make(300, 400, BandKind::kSubBand);
+    const Band over = make(150, 350, BandKind::kSubBand);
+    const BandBar bar = build_band_bar({&alloc, &over, &sub}, 0.0, 500.0, 500.0);
+    REQUIRE(bar.segments.size() == 3);
+    CHECK(bar.segments[0].lane == 0);
+    CHECK(bar.segments[1].lane == 1);
+    // sub touches alloc in lane 0 and shares it.
+    CHECK(bar.segments[2].lane == 0);
+    CHECK(bar.segments[0].abuts_right);
+    CHECK(bar.segments[2].abuts_left);
+    CHECK_FALSE(bar.segments[1].abuts_left);
+    CHECK_FALSE(bar.segments[1].abuts_right);
+}
+
+// Rejects: a bracket at the view's edge, closing a band that runs on.
+TEST_CASE("a clipped side has no bracket and no gap", "[band_bar]")
+{
+    const Band runs_left = make(0, 400);
+    const Band runs_right = make(400, 1000);
+    const BandBar bar = build_band_bar({&runs_left, &runs_right}, 200.0, 800.0, 600.0);
+    REQUIRE(bar.segments.size() == 2);
+    const auto& l = bar.segments[0];
+    const auto& r = bar.segments[1];
+
+    CHECK_FALSE(l.bracket_left());
+    CHECK(l.bracket_right());
+    CHECK(r.bracket_left());
+    CHECK_FALSE(r.bracket_right());
+
+    CHECK_FALSE(l.abuts_left);
+    CHECK_FALSE(r.abuts_right);
+    CHECK_THAT(l.draw_x0, WithinAbs(0.0, 1e-9));
+    CHECK_THAT(r.draw_x1, WithinAbs(600.0, 1e-9));
+}
+
+// Rejects: the bracket change disturbing packing, so overlaps stop going to a
+// new lane or the cap and "+N" move.
+TEST_CASE("overlaps still take new lanes up to the cap", "[band_bar]")
+{
+    const Band a = make(0, 600);
+    const Band b = make(100, 500);
+    const Band c = make(200, 400);
+    const Band d = make(250, 350);
+    const BandBar bar = build_band_bar({&a, &b, &c, &d}, 0.0, 600.0, 600.0);
+    REQUIRE(bar.segments.size() == 3);
+    CHECK(bar.segments[0].lane == 0);
+    CHECK(bar.segments[1].lane == 1);
+    CHECK(bar.segments[2].lane == 2);
+    CHECK(bar.lanes_used == 3);
+    REQUIRE(bar.overflow.size() == 1);
+    CHECK(bar.overflow[0].count == 1);
+    for (const auto& s : bar.segments) {
+        CHECK_FALSE(s.abuts_left);
+        CHECK_FALSE(s.abuts_right);
+    }
+}
+
 // Rejects: a division by a zero span, or a bar laid out on no width.
 TEST_CASE("a zero or inverted span, or no width, lays out nothing", "[band_bar]")
 {

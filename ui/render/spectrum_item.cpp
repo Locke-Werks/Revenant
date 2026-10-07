@@ -1755,7 +1755,11 @@ namespace {
 // sub-band stays visible as a colour, opaque edges so where a band ends is
 // exact.
 constexpr int kBandFillAlpha = 70;
-constexpr int kBandEdgeAlpha = 230;
+constexpr int kBandEdgeAlpha = 255;
+// The bracket is the band's own colour brightened, so it reads as the same
+// band as the fill but stands clear of it and of the neighbouring fill.
+constexpr int kBandEdgeLighter = 135;
+constexpr double kBandSerifPx = 3.0;
 constexpr double kBandLanePitchPx = 14.0;
 
 [[nodiscard]] QString megahertz(std::int64_t hz)
@@ -1877,21 +1881,38 @@ void BandBarItem::rebuild()
     const QColor ink(0xc6, 0xd0, 0xdd);  // Theme.ink
 
     for (const BandBarSegment& segment : bar_.segments) {
-        const double top = segment.lane * pitch;
+        // Whole pixels throughout: a 1 px stroke on a fractional x is smeared
+        // across two columns at half strength and the bracket goes soft.
+        const double top = std::round(segment.lane * pitch);
         const QColor base = band_colour(segment.band->colour);
         QColor fill = base;
         fill.setAlpha(kBandFillAlpha);
-        QColor edge = base;
+        QColor edge = base.lighter(kBandEdgeLighter);
         edge.setAlpha(kBandEdgeAlpha);
 
         // One pixel short of the pitch, so stacked lanes stay apart.
-        const double lane_h = pitch - 1.0;
-        push_quad(quads_, QRectF(segment.x0, top, segment.x1 - segment.x0, lane_h), fill);
-        if (!segment.clipped_left) {
-            push_quad(quads_, QRectF(segment.x0, top, 1.0, lane_h), edge);
+        const double lane_h = std::max(3.0, std::floor(pitch) - 1.0);
+        const double left = std::round(segment.draw_x0);
+        const double right = std::max(left + 1.0, std::round(segment.draw_x1));
+        push_quad(quads_, QRectF(left, top, right - left, lane_h), fill);
+
+        // Serifs at most a third of the segment each, so a narrow band's
+        // "[" and "]" do not meet in the middle and close it into a box.
+        const double serif = std::clamp(std::floor((right - left) / 3.0), 0.0, kBandSerifPx);
+        if (segment.bracket_left()) {
+            push_quad(quads_, QRectF(left, top, 1.0, lane_h), edge);
+            if (serif > 0.0) {
+                push_quad(quads_, QRectF(left + 1.0, top, serif, 1.0), edge);
+                push_quad(quads_, QRectF(left + 1.0, top + lane_h - 1.0, serif, 1.0), edge);
+            }
         }
-        if (!segment.clipped_right) {
-            push_quad(quads_, QRectF(segment.x1 - 1.0, top, 1.0, lane_h), edge);
+        if (segment.bracket_right()) {
+            push_quad(quads_, QRectF(right - 1.0, top, 1.0, lane_h), edge);
+            if (serif > 0.0) {
+                push_quad(quads_, QRectF(right - 1.0 - serif, top, serif, 1.0), edge);
+                push_quad(quads_, QRectF(right - 1.0 - serif, top + lane_h - 1.0, serif, 1.0),
+                          edge);
+            }
         }
 
         // Elided to the segment less the plate's padding, and dropped rather

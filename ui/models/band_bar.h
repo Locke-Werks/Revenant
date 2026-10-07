@@ -21,6 +21,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -39,6 +40,14 @@ inline constexpr double kBandBarMinSegmentPx = 1.0;
 // Below this a channel row is left out, see above.
 inline constexpr double kBandBarMinChannelPx = 6.0;
 
+// Clear space between two segments that share an edge in one lane, split
+// evenly between them so neither band looks shorter than the other.
+inline constexpr double kBandBarAbutGapPx = 2.0;
+
+// Edges this close count as shared. Two rows a few hertz apart land within a
+// pixel of each other and would merge just the same.
+inline constexpr double kBandBarAbutTolerancePx = 1.0;
+
 struct BandBarSegment {
     double x0 = 0.0;
     double x1 = 0.0;
@@ -50,7 +59,22 @@ struct BandBarSegment {
     bool clipped_left = false;
     bool clipped_right = false;
 
+    // Another segment in the same lane ends where this one starts (or starts
+    // where it ends). Drawn flush, the two brackets would fuse into one thick
+    // bar and "][" would read as a single band.
+    bool abuts_left = false;
+    bool abuts_right = false;
+
+    // The extent to paint: x0..x1 pulled in by half the gap on each abutting
+    // side. x0..x1 stay the true edges, for hover and for labels.
+    double draw_x0 = 0.0;
+    double draw_x1 = 0.0;
+
     const Band* band = nullptr;
+
+    // A bracket is drawn on a side that is the band's real edge.
+    [[nodiscard]] bool bracket_left() const { return !clipped_left; }
+    [[nodiscard]] bool bracket_right() const { return !clipped_right; }
 };
 
 // A run of rows that fit in no lane, and where to say so.
@@ -124,9 +148,44 @@ struct BandBar {
         }
 
         lanes[static_cast<std::size_t>(lane)].push_back(here);
-        out.segments.push_back(BandBarSegment{x0, x1, lane, true_x0 < 0.0,
-                                              true_x1 > width_px, band});
+        BandBarSegment segment;
+        segment.x0 = x0;
+        segment.x1 = x1;
+        segment.lane = lane;
+        segment.clipped_left = true_x0 < 0.0;
+        segment.clipped_right = true_x1 > width_px;
+        segment.band = band;
+        out.segments.push_back(segment);
         out.lanes_used = std::max(out.lanes_used, lane + 1);
+    }
+
+    // Abutment is decided after packing, since a later row can land against
+    // an earlier one. Lanes hold a handful of segments, so pairwise is fine.
+    for (auto& a : out.segments) {
+        for (const auto& b : out.segments) {
+            if (&a == &b || a.lane != b.lane) {
+                continue;
+            }
+            if (!a.clipped_left && std::abs(b.x1 - a.x0) <= kBandBarAbutTolerancePx &&
+                b.x0 < a.x0) {
+                a.abuts_left = true;
+            }
+            if (!a.clipped_right && std::abs(b.x0 - a.x1) <= kBandBarAbutTolerancePx &&
+                b.x1 > a.x1) {
+                a.abuts_right = true;
+            }
+        }
+    }
+    const double half_gap = kBandBarAbutGapPx / 2.0;
+    for (auto& s : out.segments) {
+        s.draw_x0 = s.abuts_left ? s.x0 + half_gap : s.x0;
+        s.draw_x1 = s.abuts_right ? s.x1 - half_gap : s.x1;
+        // A segment narrower than its own gaps still keeps a sliver to show.
+        if (s.draw_x1 <= s.draw_x0) {
+            const double mid = (s.x0 + s.x1) / 2.0;
+            s.draw_x0 = mid - 0.5;
+            s.draw_x1 = mid + 0.5;
+        }
     }
 
     // One marker per cluster of overlapping drops rather than one per row, so
