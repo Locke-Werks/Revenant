@@ -251,3 +251,68 @@ TEST_CASE("a zero or inverted span, or no width, lays out nothing", "[band_bar]"
     CHECK(build_band_bar({&a}, 100.0, 200.0, 100.0, 0).segments.empty());
     CHECK(build_band_bar({}, 100.0, 200.0, 100.0).lanes_used == 0);
 }
+
+namespace {
+
+Band named(const char* name, std::int64_t low, std::int64_t high, BandKind kind)
+{
+    Band band = make(low, high, kind);
+    band.name = name;
+    return band;
+}
+
+}  // namespace
+
+// Rejects: labels that repeat the parent's name ("2 m CW only" under "2 m"),
+// and rewriting the data to fix it, which would leave the menu and the
+// tooltip with "CW only" and no band.
+TEST_CASE("a child drawn under its parent drops the parent's name", "[band_bar]")
+{
+    const Band alloc = named("2 m", 144'000'000, 148'000'000, BandKind::kAllocation);
+    const Band cw = named("2 m CW only", 144'000'000, 144'100'000, BandKind::kSubBand);
+    const Band other = named("Simplex", 146'400'000, 146'580'000, BandKind::kSubBand);
+    const BandBar bar =
+        build_band_bar({&alloc, &cw, &other}, 144'000'000.0, 148'000'000.0, 4000.0);
+    REQUIRE(bar.segments.size() == 3);
+    CHECK(bar.segments[0].display_name == "2 m");
+    CHECK(bar.segments[1].display_name == "CW only");
+    CHECK(bar.segments[2].display_name == "Simplex");
+    CHECK(cw.name == "2 m CW only");
+}
+
+// Rejects: stripping against a parent that is not on screen. With the
+// allocation absent, or pushed off the bar, nothing supplies "2 m".
+TEST_CASE("no parent drawn above, no prefix stripped", "[band_bar]")
+{
+    const Band cw = named("2 m CW only", 144'000'000, 144'100'000, BandKind::kSubBand);
+    const BandBar alone = build_band_bar({&cw}, 144'000'000.0, 144'100'000.0, 400.0);
+    REQUIRE(alone.segments.size() == 1);
+    CHECK(alone.segments[0].display_name == "2 m CW only");
+
+    // A same-named band in a lane below, or beside rather than around it,
+    // is not an ancestor.
+    const Band wide = named("Other", 144'000'000, 148'000'000, BandKind::kAllocation);
+    const Band beside = named("2 m", 145'000'000, 146'000'000, BandKind::kSubBand);
+    const BandBar bar =
+        build_band_bar({&wide, &cw, &beside}, 144'000'000.0, 148'000'000.0, 4000.0);
+    REQUIRE(bar.segments.size() == 3);
+    CHECK(bar.segments[1].display_name == "2 m CW only");
+
+    // Rejects: cutting on a bare string prefix, so "2 mm" under "2 m" read "m".
+    CHECK(revenant::ui::band_bar_strip_prefix("2 mm", "2 m") == "2 mm");
+    CHECK(revenant::ui::band_bar_strip_prefix("2 m", "2 m") == "2 m");
+}
+
+// Rejects: "8…", "2 m …" and a lone ellipsis drawn as labels, and also
+// hiding a short name such as "8TAC91" that fits whole.
+TEST_CASE("a label keeps four characters before its ellipsis or is not drawn", "[band_bar]")
+{
+    using revenant::ui::band_bar_label_readable;
+    CHECK_FALSE(band_bar_label_readable(20, 0));
+    CHECK_FALSE(band_bar_label_readable(20, 1));
+    CHECK_FALSE(band_bar_label_readable(20, 3));
+    CHECK(band_bar_label_readable(20, 4));
+    CHECK(band_bar_label_readable(6, 6));
+    CHECK(band_bar_label_readable(3, 3));
+    CHECK_FALSE(band_bar_label_readable(0, 0));
+}

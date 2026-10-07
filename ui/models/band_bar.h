@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 #include "models/band_plan.h"
@@ -48,6 +49,39 @@ inline constexpr double kBandBarAbutGapPx = 2.0;
 // pixel of each other and would merge just the same.
 inline constexpr double kBandBarAbutTolerancePx = 1.0;
 
+// An elided label must keep at least this many characters before its
+// ellipsis. "8…" or "2 m …" names nothing; the bracket alone says a band is
+// there and the tooltip says which.
+inline constexpr int kBandBarMinLabelChars = 4;
+
+// Whether a label is worth drawing, given the name's length and how many of
+// its characters survived eliding. A name that fits whole is always drawn,
+// so a short channel name such as "8TAC91" shows whenever it has the room.
+[[nodiscard]] inline bool band_bar_label_readable(int full_chars, int visible_chars)
+{
+    if (full_chars <= 0 || visible_chars <= 0) {
+        return false;
+    }
+    return visible_chars >= full_chars || visible_chars >= kBandBarMinLabelChars;
+}
+
+// name with a leading "prefix " removed, or name unchanged when it does not
+// start that way. The space is required so "2 mm" is not cut under "2 m", and
+// a name equal to the prefix stays whole rather than becoming empty.
+[[nodiscard]] inline std::string_view band_bar_strip_prefix(std::string_view name,
+                                                            std::string_view prefix)
+{
+    if (prefix.empty() || name.size() <= prefix.size() + 1 ||
+        name.substr(0, prefix.size()) != prefix || name[prefix.size()] != ' ') {
+        return name;
+    }
+    std::string_view rest = name.substr(prefix.size());
+    while (!rest.empty() && rest.front() == ' ') {
+        rest.remove_prefix(1);
+    }
+    return rest.empty() ? name : rest;
+}
+
 struct BandBarSegment {
     double x0 = 0.0;
     double x1 = 0.0;
@@ -71,6 +105,12 @@ struct BandBarSegment {
     double draw_x1 = 0.0;
 
     const Band* band = nullptr;
+
+    // The label text: band->name less a leading prefix that repeats the name
+    // of a band drawn in a lane above and containing it, so "2 m CW only"
+    // under "2 m" reads "CW only". The data keeps full names because the menu,
+    // the palette and the tooltip show a row with no parent beside it.
+    std::string_view display_name;
 
     // A bracket is drawn on a side that is the band's real edge.
     [[nodiscard]] bool bracket_left() const { return !clipped_left; }
@@ -185,6 +225,28 @@ struct BandBar {
             const double mid = (s.x0 + s.x1) / 2.0;
             s.draw_x0 = mid - 0.5;
             s.draw_x1 = mid + 0.5;
+        }
+    }
+
+    // Prefix stripping only against bands actually drawn above: a parent that
+    // went to the overflow or was never in view leaves the child its full
+    // name, since nothing on screen supplies the part that was cut. Deepest
+    // ancestor first, so "2 m repeater in 1" under "2 m repeater" under "2 m"
+    // loses both layers.
+    for (auto& s : out.segments) {
+        s.display_name = s.band->name;
+        for (int lane = s.lane - 1; lane >= 0; --lane) {
+            for (const auto& p : out.segments) {
+                if (p.lane != lane || p.band->low_hz > s.band->low_hz ||
+                    p.band->high_hz < s.band->high_hz) {
+                    continue;
+                }
+                const std::string_view cut = band_bar_strip_prefix(s.display_name, p.band->name);
+                if (cut.size() != s.display_name.size()) {
+                    s.display_name = cut;
+                    break;
+                }
+            }
         }
     }
 

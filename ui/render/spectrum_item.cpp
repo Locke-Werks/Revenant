@@ -1916,12 +1916,26 @@ void BandBarItem::rebuild()
         }
 
         // Elided to the segment less the plate's padding, and dropped rather
-        // than shown as a lone ellipsis, which names nothing.
+        // than shown as an ellipsis with a stub in front of it, which names
+        // nothing. The bracket still marks the band and the tooltip names it.
         const double room = segment.x1 - segment.x0 - 8.0;
-        const QString name = QString::fromUtf8(segment.band->name.data(),
-                                               static_cast<qsizetype>(segment.band->name.size()));
-        const QString text = metrics.elidedText(name, Qt::ElideRight, std::max(0.0, room));
-        if (text.isEmpty() || text == QStringLiteral("…") || room <= 0.0) {
+        if (room <= 0.0) {
+            continue;
+        }
+        const QString name =
+            QString::fromUtf8(segment.display_name.data(),
+                              static_cast<qsizetype>(segment.display_name.size()));
+        const QString text = metrics.elidedText(name, Qt::ElideRight, room);
+        // Spaces before the ellipsis are not characters anyone reads, so
+        // "2 m …" counts as two, not four.
+        QString kept = text;
+        if (kept != name && kept.endsWith(QChar(0x2026))) {
+            kept.chop(1);
+        }
+        kept.remove(QLatin1Char(' '));
+        const int visible = text == name ? static_cast<int>(name.size())
+                                         : static_cast<int>(kept.size());
+        if (!band_bar_label_readable(static_cast<int>(name.size()), visible)) {
             continue;
         }
         labels[static_cast<std::size_t>(segment.lane)].push_back(
