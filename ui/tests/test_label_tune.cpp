@@ -131,3 +131,32 @@ TEST_CASE("the hover line tells not probed from probed and found nothing", "[lab
     CHECK(revenant::ui::hover_line(p25, 149'850'000, 25.04) ==
           "P25, protocol, sync verified, 0.99, sets the receiver  ·  149.8500 MHz, 25.0 dB");
 }
+
+// REJECTS: a refined protocol, "P25 control", that tunes nothing because its
+// name is not a protocol's, and a hover that drops the path the engine sent.
+TEST_CASE("a refined label tunes as its protocol and shows its path", "[label-tune]") {
+    DetectionLabel control = labelled(LabelKind::Protocol, "P25 control");
+    control.confidence = 0.91;
+    control.path = {{"NFM", 0.98, true},
+                    {"4FSK", 0.96, true},
+                    {"P25", 0.95, true},
+                    {"control", 0.91, true}};
+    control.confirmed_depth = 4;
+
+    const LabelTune tune = label_tune(control, 8'100.0);
+    CHECK(tune.drives);
+    CHECK(tune.mode == "p25p1");
+    CHECK(tune.decoder == "p25p1");
+    CHECK(bracket_text(control, 853'050'100, 30.0) == "P25 control");
+    CHECK(revenant::ui::label_path(control) ==
+          "NFM 0.98 > 4FSK 0.96 > P25 0.95 > control 0.91");
+    CHECK(label_detail(control).ends_with("  ·  NFM 0.98 > 4FSK 0.96 > P25 0.95 > control 0.91"));
+
+    // An unconfirmed candidate is marked, and a path past confirmed_depth is
+    // not searched for a protocol.
+    DetectionLabel nfm = labelled(LabelKind::AnalogModulation, "NFM");
+    nfm.path = {{"NFM", 0.7, true}, {"4FSK", 0.4, false}};
+    nfm.confirmed_depth = 1;
+    CHECK(revenant::ui::label_path(nfm) == "NFM 0.70 > 4FSK? 0.40");
+    CHECK(label_tune(nfm, 11'000.0).mode == "nfm");
+}

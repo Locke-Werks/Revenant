@@ -168,8 +168,34 @@ struct IdentifyConfig {
     bool dmr = true;
 };
 
+// What the P25 row's data units were, by their Data Unit Identifier. Free:
+// the row already decoded every one of them to count its verifications, and
+// the DUID is in the NID it checked. A control channel carries TSDUs and a
+// voice channel carries HDUs, LDUs and terminators (TIA-102.BAAA-A Table 8-4,
+// TIA-102.AABB-B clause 4.2), which is what core/detect/refine.h reads to tell
+// the two apart without attaching a decoder.
+struct P25Census {
+    // TSDUs with at least one TSBK whose CRC checked. A TSDU whose blocks all
+    // failed their CRC is not counted: the NID alone does not say much about
+    // the payload, and a bad block is no evidence of trunking.
+    std::uint32_t tsbk = 0;
+
+    // HDU, LDU1, LDU2 and both terminators.
+    std::uint32_t voice = 0;
+
+    // Everything else that verified, PDUs and reserved DUIDs.
+    std::uint32_t other = 0;
+
+    // The NAC of the first data unit, and whether every one carried it.
+    std::uint16_t nac = 0;
+    bool nac_steady = false;
+};
+
 struct Identification {
     Protocol protocol = Protocol::None;
+
+    // Filled whenever the P25 row ran, verified or not.
+    P25Census p25;
 
     // 0.9 at exactly the verifications the row needs, halving the distance
     // to one with each verification past it. A count of independent checks

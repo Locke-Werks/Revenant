@@ -671,6 +671,14 @@ void write_detection(schema::Detection::Builder out, const detect::Track& in) {
     wire.setMayDrive(label.may_drive);
     wire.setSymbolRateHz(label.symbol_rate_hz);
     wire.setProbes(in.probes);
+    auto path = wire.initPath(static_cast<unsigned>(label.path_size));
+    for (std::size_t i = 0; i < label.path_size; ++i) {
+        auto step = path[static_cast<unsigned>(i)];
+        step.setName(literal_text(label.path[i].name));
+        step.setConfidence(label.path[i].confidence);
+        step.setConfirmed(label.path[i].confirmed);
+    }
+    wire.setConfirmedDepth(static_cast<std::uint32_t>(label.confirmed_depth));
 }
 
 void write_rds_bits_status(schema::RdsHealth::Builder out, const decode::RdsBitsStatus& in) {

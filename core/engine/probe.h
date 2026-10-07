@@ -283,6 +283,19 @@ struct ProbeOutcome {
     std::uint32_t protocol_verified;
     double identify_ms;
 
+    // Rows identify() ran that did not verify, one bit per identify::Protocol
+    // ordinal. core/detect/refine.h counts a run row that found nothing as
+    // weak evidence against that protocol, which is how a wrong protocol
+    // guess on a track falls back to its family rather than sticking.
+    std::uint32_t protocols_unverified;
+
+    // identify::P25Census, flattened, from the same decode the P25 row
+    // already ran. Zero when the row did not run.
+    std::uint32_t p25_tsbk;
+    std::uint32_t p25_voice;
+    std::uint16_t p25_nac;
+    bool p25_nac_steady;
+
     // What was asked and what was built for it.
     dsp::Hertz center;
     dsp::Hertz occupied_hz;

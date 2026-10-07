@@ -1588,6 +1588,32 @@ struct DetectionLabel {
     # was looked at and named nothing, which is a different thing to tell an
     # operator.
     probes @5 :UInt32;
+
+    # The label refined from the obvious to the specific, core/detect/refine.h:
+    # the levels from the top of the tree down to `name`, each with its own
+    # confidence, then at most one level below it that has evidence and has
+    # not passed the bar yet. "NFM", "4FSK", "P25", "control" for a P25
+    # control channel, whose name is "P25 control".
+    #
+    # Empty, with confirmedDepth zero, while the engine has confirmed no
+    # level and `name` is the latest probe's reading on its own. An engine
+    # built before these fields reads the same way, which is the point of
+    # adding them at new ordinals.
+    path @6 :List(LabelStep);
+
+    # How many leading entries of path are confirmed. The rest, zero or one,
+    # is the candidate.
+    confirmedDepth @7 :UInt32;
+}
+
+struct LabelStep {
+    # Short, for a path: "control" rather than "P25 control".
+    name @0 :Text;
+
+    # Support over support, against and a prior; refine.h has the model.
+    confidence @1 :Float64;
+
+    confirmed @2 :Bool;
 }
 
 enum LabelKind {

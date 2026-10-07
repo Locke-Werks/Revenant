@@ -51,6 +51,8 @@
 
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -81,6 +83,16 @@ inline constexpr dsp::Hertz kWfmMinimumBandwidthHz = 50'000;
 // modulator, and nothing calibrated puts a number on it.
 inline constexpr double kVoiceSidebandConfidence = 0.5;
 
+// One level of a refined label: "P25" at 0.93, confirmed.
+struct LabelStep {
+    std::string_view name;
+    double confidence = 0.0;
+    bool confirmed = false;
+};
+
+// Root's children down to the deepest leaf, plus one unconfirmed candidate.
+inline constexpr std::size_t kMaxLabelPath = 6;
+
 struct TrackLabel {
     LabelKind kind = LabelKind::Unknown;
 
@@ -104,8 +116,25 @@ struct TrackLabel {
     // the hover card. Not part of the name: a bracket a few pixels high has no
     // room for it.
     double symbol_rate_hz = 0.0;
+
+    // THE OWNER'S REQUEST OF 2026-10-07, core/detect/refine.h: the levels
+    // from the most obvious to the deepest confirmed, each with its own
+    // confidence, and then the best unconfirmed child if one has support, so
+    // a hover can read "NFM > 4FSK > P25 > control?". confirmed_depth counts
+    // the confirmed ones, and `name` is the last of those. Both zero while
+    // the refinement has confirmed nothing and the one-probe rule above is
+    // what named the track.
+    std::array<LabelStep, kMaxLabelPath> path{};
+    std::size_t path_size = 0;
+    std::size_t confirmed_depth = 0;
 };
 
+// The rule, in this order: the refinement's deepest confirmed node when it
+// has one, and the one-probe rule numbered above when it has not. The
+// refinement goes first because it is every probe rather than the latest, and
+// because it is how a wrong deeper guess falls back to its parent: a
+// protocol the refinement has demoted is not the label even though
+// Track::protocol still holds it.
 [[nodiscard]] TrackLabel label_track(const Track& track);
 
 }  // namespace revenant::detect

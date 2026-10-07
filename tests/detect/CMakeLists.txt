@@ -32,6 +32,7 @@ add_executable(revenant_detect_tests
     test_front_end.cpp
     test_groups.cpp
     test_label.cpp
+    test_refine.cpp
     test_shape.cpp
 )
 

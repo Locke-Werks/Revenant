@@ -163,13 +163,27 @@ std::vector<std::uint64_t> TierTwo::pick(
         if (track.state != TrackState::Live) {
             continue;
         }
-        if (track.classification != Classification::Unknown) {
-            continue;
-        }
         if (std::find(in_flight.begin(), in_flight.end(), track.id) != in_flight.end()) {
             continue;
         }
         const auto tried = attempts.find(track.id);
+
+        // A track with a family is probed again only to drill down its label,
+        // core/detect/refine.h, and only behind everything still unnamed and
+        // at kRefineReprobeFactor times the retry interval: the pool is small,
+        // and a deeper label is worth less than a first one.
+        if (track.classification != Classification::Unknown) {
+            if (!refine::wants_refinement(track.refinement)) {
+                continue;
+            }
+            const dsp::SampleIndex since =
+                tried == attempts.end() ? track.first_seen : tried->second;
+            if (now < since + kRefineReprobeFactor * reprobe_samples) {
+                continue;
+            }
+            eligible.emplace_back(2, since, track.id);
+            continue;
+        }
         if (tried == attempts.end()) {
             eligible.emplace_back(0, track.first_seen, track.id);
             continue;
@@ -273,6 +287,12 @@ void TierTwo::take(Detector& detector, engine::Engine& engine) {
             finding.voice_sideband = outcome.voice_sideband;
             finding.protocol = outcome.protocol;
             finding.protocol_confidence = outcome.protocol_confidence;
+            finding.protocols_unverified = outcome.protocols_unverified;
+            finding.p25.tsbk = outcome.p25_tsbk;
+            finding.p25.voice = outcome.p25_voice;
+            finding.p25.nac = outcome.p25_nac;
+            finding.p25.nac_steady = outcome.p25_nac_steady;
+            finding.occupied_hz = static_cast<double>(outcome.occupied_hz);
 
             // Whether this is the track's first family, read before the
             // detector writes it, so the time to first classification is
@@ -516,7 +536,11 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
             const auto found = std::find_if(alone.begin(), alone.end(),
                                             [id](const Track& track) { return track.id == id; });
             const auto tried = attempts_.find(id);
-            units.push_back(Unit{.probed = tried == attempts_.end() ? 0 : 1,
+            // A refinement probe ranks behind every first probe and retry.
+            const int probed = found->classification != Classification::Unknown ? 2
+                               : tried == attempts_.end()                         ? 0
+                                                                                  : 1;
+            units.push_back(Unit{.probed = probed,
                                  .key = tried == attempts_.end() ? found->first_seen : tried->second,
                                  .tag = id});
         }

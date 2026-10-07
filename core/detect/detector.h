@@ -107,6 +107,7 @@
 
 #include "core/characterise/catalogue.h"
 #include "core/characterise/characterise.h"
+#include "core/detect/refine.h"
 #include "core/detect/shape.h"
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
@@ -243,6 +244,15 @@ struct ProbeFinding {
     // family, so it is kept whether or not the family may drive anything.
     identify::Protocol protocol = identify::Protocol::None;
     double protocol_confidence = 0.0;
+
+    // engine::ProbeOutcome's, for core/detect/refine.h: the identify rows
+    // that ran and did not verify, and the P25 row's census.
+    std::uint32_t protocols_unverified = 0;
+    identify::P25Census p25;
+
+    // The occupied bandwidth the probe was asked about, hertz. Zero when the
+    // caller did not say, and the track's own bandwidth stands in.
+    double occupied_hz = 0.0;
 
     // The decision at which it was recorded. record_probe sets it.
     dsp::SampleIndex at = 0;
@@ -405,6 +415,19 @@ struct Track {
     // unknown, which is a different thing to tell an operator.
     ProbeFinding last_probe;
     std::uint32_t probes = 0;
+
+    // Every probe folded into the label tree, core/detect/refine.h, seeded at
+    // birth from the emitter this track's frequency was last seen on. The
+    // label is its deepest confirmed node once it has one.
+    refine::Refinement refinement;
+
+    // The refine::EmitterBook entry it belongs to, zero until its first probe
+    // or a birth on a remembered frequency.
+    std::uint64_t emitter = 0;
+
+    // Times it has gone from Live to Held: a continuous carrier stays at zero,
+    // a keyed one counts its gaps.
+    std::uint32_t held_spells = 0;
 
     // Absolute, same frame as Candidate::center, lightly smoothed across
     // decisions so a display is not reading measurement noise.
@@ -1260,6 +1283,9 @@ public:
     [[nodiscard]] std::span<const double> averaged_power() const { return average_; }
     [[nodiscard]] std::span<const double> noise_floor() const { return floor_; }
 
+    // How many emitters the refinement memory holds, for tests and stats.
+    [[nodiscard]] std::size_t remembered_emitters() const { return emitters_.size(); }
+
 private:
     Detector() = default;
 
@@ -1287,6 +1313,9 @@ private:
 
     void update_tracks(dsp::SampleIndex now, double elapsed_seconds);
     void update_channel(Track& track) const;
+
+    // Folds a recorded probe into the track's refinement and its emitter's.
+    void refine_track(Track& track, const ProbeFinding& finding);
 
     // One position and width the summed-bin search liked, before the greedy
     // pass decides which of the overlapping ones survives.
@@ -1438,6 +1467,10 @@ private:
     bool have_decided_ = false;
 
     std::uint64_t next_id_ = 1;
+
+    // Refinements by frequency across tracks, so a repeater or a trunked
+    // voice channel builds evidence over its keyups. core/detect/refine.h.
+    refine::EmitterBook emitters_;
     DetectorStats stats_{};
 };
 

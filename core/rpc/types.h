@@ -645,6 +645,13 @@ enum class LabelKind : std::uint8_t { Unknown, AnalogModulation, DigitalFamily, 
 
 // What a detection is. The schema's DetectionLabel has what each field means;
 // detect::label_track in core/detect/label.h is the rule that fills it.
+// One level of a refined label. The schema's LabelStep.
+struct LabelStep {
+    std::string name;
+    double confidence = 0.0;
+    bool confirmed = false;
+};
+
 struct DetectionLabel {
     LabelKind kind = LabelKind::Unknown;
     std::string name;
@@ -652,6 +659,10 @@ struct DetectionLabel {
     bool may_drive = false;
     double symbol_rate_hz = 0.0;
     std::uint32_t probes = 0;
+
+    // Top of the tree first; the first confirmed_depth are confirmed.
+    std::vector<LabelStep> path;
+    std::uint32_t confirmed_depth = 0;
 };
 
 // One thing the wideband detector is tracking. See the long note on the

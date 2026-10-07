@@ -96,6 +96,10 @@ namespace revenant::detect {
 // one, so they spend only what coverage leaves.
 inline constexpr std::uint32_t kIdentifyDwells = 3;
 
+// A track that already has a family waits this many retry intervals between
+// probes that only drill its label down. See pick().
+inline constexpr dsp::SampleIndex kRefineReprobeFactor = 3;
+
 struct TierTwoConfig {
     // Needed to turn sample indices into seconds; DetectorConfig::source_rate.
     dsp::SampleRate source_rate = 0;

@@ -651,6 +651,16 @@ struct ProbePool::Impl {
                     outcome.protocol = identified->protocol;
                     outcome.protocol_confidence = identified->confidence;
                     outcome.protocol_verified = identified->verified;
+                    for (const identify::Attempt& attempt : identified->attempts) {
+                        if (attempt.result == identify::AttemptResult::NotVerified) {
+                            outcome.protocols_unverified |=
+                                1U << static_cast<unsigned>(attempt.protocol);
+                        }
+                    }
+                    outcome.p25_tsbk = identified->p25.tsbk;
+                    outcome.p25_voice = identified->p25.voice;
+                    outcome.p25_nac = identified->p25.nac;
+                    outcome.p25_nac_steady = identified->p25.nac_steady;
                 }
             }
         }

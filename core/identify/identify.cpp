@@ -90,6 +90,9 @@ constexpr double kCwCentreHz = 700.0;
 
 struct Counted {
     std::uint32_t verified = 0;
+
+    // The P25 row's only; see P25Census.
+    P25Census p25;
 };
 
 // --- the rows ---------------------------------------------------------------
@@ -107,7 +110,33 @@ struct Counted {
     }
     // P25Phase1 appends a data unit only once its sync correlated and its NID
     // decoded, which is the check this row counts.
-    return Counted{.verified = static_cast<std::uint32_t>(frames.size())};
+    Counted counted{.verified = static_cast<std::uint32_t>(frames.size())};
+    counted.p25.nac_steady = !frames.empty();
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        const decode::P25Frame& frame = frames[i];
+        if (i == 0) {
+            counted.p25.nac = frame.nid.network_access_code;
+        } else if (frame.nid.network_access_code != counted.p25.nac) {
+            counted.p25.nac_steady = false;
+        }
+        switch (static_cast<decode::P25Duid>(frame.nid.duid)) {
+            case decode::P25Duid::TrunkingSignalingDataUnit:
+                if (std::any_of(frame.tsbks.begin(), frame.tsbks.end(),
+                                [](const decode::P25Tsbk& block) { return block.crc_ok; })) {
+                    ++counted.p25.tsbk;
+                } else {
+                    ++counted.p25.other;
+                }
+                break;
+            case decode::P25Duid::HeaderDataUnit:
+            case decode::P25Duid::LogicalLinkDataUnit1:
+            case decode::P25Duid::LogicalLinkDataUnit2:
+            case decode::P25Duid::TerminatorWithoutLinkControl:
+            case decode::P25Duid::TerminatorWithLinkControl: ++counted.p25.voice; break;
+            default: ++counted.p25.other; break;
+        }
+    }
+    return counted;
 }
 
 [[nodiscard]] Expected<Counted> attempt_dstar(dsp::ConstComplexSpan samples,
@@ -546,6 +575,9 @@ Expected<Identification> identify(dsp::ConstComplexSpan samples, const IdentifyH
         }
 
         attempt.verified = counted->verified;
+        if (protocol == Protocol::P25Phase1) {
+            out.p25 = counted->p25;
+        }
         attempt.result = attempt.verified >= attempt.required && attempt.required > 0
                              ? AttemptResult::Verified
                              : AttemptResult::NotVerified;

@@ -826,6 +826,40 @@ TEST_CASE("an unlabelled track crosses with an empty name rather than a null one
     CHECK(out.getLabel().getName().size() == 0);
 }
 
+// REJECTS: a refined label that reaches the wire as its name alone, so a
+// display has nothing to show the path with, and a path whose steps are not
+// NUL-safe views, for the reason the case above gives.
+TEST_CASE("a refined track crosses with its label path and confirmed depth",
+          "[rpc][detect][refine]") {
+    detect::Track track;
+    track.id = 9;
+    detect::refine::Reading reading;
+    reading.family = characterise::ModulationFamily::Fsk;
+    reading.family_confidence = 0.8;
+    reading.tones = 4;
+    reading.bandwidth_hz = 8'000.0;
+    reading.protocol = identify::Protocol::P25Phase1;
+    reading.protocol_confidence = 0.95;
+    reading.p25.tsbk = 10;
+    reading.p25.nac = 0xD10;
+    reading.p25.nac_steady = true;
+    detect::refine::observe(track.refinement, reading);
+
+    capnp::MallocMessageBuilder message;
+    auto out = message.initRoot<rpc::schema::Detection>();
+    rpc::write_detection(out, track);
+
+    const auto label = out.getLabel().asReader();
+    CHECK(label.getKind() == rpc::schema::LabelKind::PROTOCOL);
+    CHECK(std::string(label.getName().cStr()) == "P25 control");
+    CHECK(label.getConfirmedDepth() == 4);
+    REQUIRE(label.getPath().size() == 4);
+    CHECK(std::string(label.getPath()[0].getName().cStr()) == "NFM");
+    CHECK(std::string(label.getPath()[3].getName().cStr()) == "control");
+    CHECK(label.getPath()[3].getConfirmed());
+    CHECK(label.getPath()[3].getConfidence() >= detect::refine::kPromote);
+}
+
 TEST_CASE("a merged track crosses the wire carrying the id it was merged into",
           "[gpu][rpc][detect][m2]") {
     REVENANT_NEEDS_GPU();

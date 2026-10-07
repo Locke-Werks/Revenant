@@ -742,6 +742,17 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.label.may_drive = out.label.kind != LabelKind::Unknown && label.getMayDrive();
     out.label.symbol_rate_hz = label.getSymbolRateHz();
     out.label.probes = label.getProbes();
+    if (out.label.kind != LabelKind::Unknown) {
+        for (const auto step : label.getPath()) {
+            out.label.path.push_back(LabelStep{.name = std::string(step.getName().cStr()),
+                                               .confidence = step.getConfidence(),
+                                               .confirmed = step.getConfirmed()});
+        }
+        // Never more confirmed levels than the path holds, whatever a server
+        // says: a display indexes the path by it.
+        out.label.confirmed_depth = std::min<std::uint32_t>(
+            label.getConfirmedDepth(), static_cast<std::uint32_t>(out.label.path.size()));
+    }
     return out;
 }
 

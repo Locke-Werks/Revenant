@@ -403,6 +403,64 @@ Status Detector::set_thresholds(double detection_threshold_db, double confidence
     return {};
 }
 
+void Detector::refine_track(Track& track, const ProbeFinding& finding) {
+    refine::EmitterMemory* emitter = emitters_.find(track.emitter);
+    if (emitter == nullptr) {
+        emitter = &emitters_.remember(track.center, track.bandwidth, last_decision_);
+        emitter->refinement = track.refinement;
+        track.emitter = emitter->id;
+    }
+
+    refine::Reading reading;
+    if (finding.may_drive_detection) {
+        switch (finding.family) {
+            case Classification::Unknown: break;
+            case Classification::Unmodulated:
+                reading.family = characterise::ModulationFamily::Unmodulated;
+                break;
+            case Classification::AnalogueFm:
+                reading.family = characterise::ModulationFamily::AnalogueFm;
+                break;
+            case Classification::Fsk: reading.family = characterise::ModulationFamily::Fsk; break;
+            case Classification::Psk: reading.family = characterise::ModulationFamily::Psk; break;
+            case Classification::Ofdm: reading.family = characterise::ModulationFamily::Ofdm; break;
+        }
+        reading.family_confidence = finding.confidence;
+    }
+    reading.tones = finding.tone_count;
+    reading.order = finding.order;
+    reading.symbol_rate_hz = finding.symbol_rate_hz;
+    reading.bandwidth_hz =
+        finding.occupied_hz > 0.0 ? finding.occupied_hz : static_cast<double>(track.bandwidth);
+    reading.double_sideband = finding.double_sideband;
+    reading.voice_sideband = finding.voice_sideband;
+    reading.protocol = finding.protocol;
+    reading.protocol_confidence = finding.protocol_confidence;
+    reading.protocols_unverified = finding.protocols_unverified;
+    reading.p25 = finding.p25;
+
+    // Continuous: up kContinuousSeconds without a gap, and no earlier keyup
+    // on this frequency. Intermittent: two gaps in this track, or two keyups.
+    // One of either is a fade as often as a keyup, so it decides nothing.
+    const double age_seconds =
+        config_.source_rate > 0
+            ? static_cast<double>(last_decision_ - track.first_seen) /
+                  static_cast<double>(config_.source_rate)
+            : 0.0;
+    if (track.held_spells >= 2 || emitter->keyups >= 2) {
+        reading.continuity = refine::Continuity::Intermittent;
+    } else if (track.held_spells == 0 && emitter->keyups == 0 &&
+               age_seconds >= refine::kContinuousSeconds) {
+        reading.continuity = refine::Continuity::Continuous;
+    }
+
+    refine::observe(track.refinement, reading);
+    emitter->refinement = track.refinement;
+    emitter->center = track.center;
+    emitter->bandwidth = track.bandwidth;
+    emitter->last_live = std::max(emitter->last_live, last_decision_);
+}
+
 Status Detector::record_probe(std::uint64_t track_id, const ProbeFinding& finding) {
     ProbeFinding stamped = finding;
     stamped.at = last_decision_;
@@ -440,22 +498,25 @@ Status Detector::record_probe(std::uint64_t track_id, const ProbeFinding& findin
         track.classification_double_sideband = stamped.double_sideband;
     };
 
-    bool found = false;
+    Track* owner = nullptr;
     for (Track& track : all_) {
         if (track.id == track_id) {
             apply(track);
-            found = true;
+            owner = &track;
             break;
         }
     }
-    if (!found) {
+    if (owner == nullptr) {
         return fail(std::format("track {} is not a track any more, so there is nothing to "
                                 "record a probe against",
                                 track_id));
     }
+    refine_track(*owner, stamped);
     for (Track& track : tracks_) {
         if (track.id == track_id) {
             apply(track);
+            track.refinement = owner->refinement;
+            track.emitter = owner->emitter;
             break;
         }
     }
@@ -1611,6 +1672,9 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
 
         const bool merged = track.state == TrackState::Merged;
         if (!merged) {
+            if (track.state == TrackState::Live) {
+                ++track.held_spells;
+            }
             ++track.misses;
             track.state = TrackState::Held;
             track.confidence *= decay;
@@ -1648,6 +1712,16 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
         track.last_seen = now;
         track.last_detected = now;
         track.hits = 1;
+
+        // A track born where an emitter was picks up what was learned about
+        // it. Keyups are counted below, once it is live, so a pending track
+        // that dies as noise does not count as one.
+        if (refine::EmitterMemory* emitter = emitters_.match(track.center, track.bandwidth);
+            emitter != nullptr) {
+            track.refinement = emitter->refinement;
+            track.emitter = emitter->id;
+        }
+
         if (track.hits >= config_.birth_hits) {
             track.state = TrackState::Live;
             ++stats_.tracks_born;
@@ -1663,6 +1737,28 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
         }
         return a.id < b.id;
     });
+
+    // A live track keeps its emitter remembered. Coming live after the
+    // emitter was quiet for kKeyupGapSeconds is a keyup, whether that is a new
+    // track or a held one resuming: either way the transmitter went away and
+    // came back.
+    const auto keyup_gap = static_cast<dsp::SampleIndex>(
+        refine::kKeyupGapSeconds * static_cast<double>(std::max<dsp::SampleRate>(1, config_.source_rate)));
+    for (const Track& track : all_) {
+        if (track.state != TrackState::Live || track.emitter == 0) {
+            continue;
+        }
+        if (refine::EmitterMemory* emitter = emitters_.find(track.emitter); emitter != nullptr) {
+            if (now > emitter->last_live && now - emitter->last_live > keyup_gap) {
+                ++emitter->keyups;
+            }
+            emitter->last_live = now;
+        }
+    }
+    emitters_.forget_older_than(
+        now, static_cast<dsp::SampleIndex>(
+                 refine::kEmitterMemorySeconds *
+                 static_cast<double>(std::max<dsp::SampleRate>(1, config_.source_rate))));
 
     tracks_.clear();
     for (const Track& track : all_) {

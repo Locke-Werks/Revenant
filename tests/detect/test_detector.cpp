@@ -2483,3 +2483,48 @@ TEST_CASE("tier two retries an unverified long dwell up to the bound and never a
         CHECK(std::find(chosen.begin(), chosen.end(), 1) == chosen.end());
     }
 }
+
+// ---- refinement across keyups: core/detect/refine.h ----------------------
+//
+// A repeater is a new track at every keyup. What one keyup's probe learned has
+// to be there when the next track is born on the same frequency, or the label
+// starts from nothing every time and never drills down.
+
+TEST_CASE("a track born on a remembered emitter inherits its refinement",
+          "[detect][refine]") {
+    constexpr std::uint64_t kSeed = 4242;
+    INFO("seed " << kSeed);
+    Scene scene(-90.0, kSeed);
+    auto made = detect::Detector::create(base_config(), scene.geometry());
+    REQUIRE(made);
+    detect::Detector& detector = *made;
+    const Emitter repeater{.centre_bin = 500, .width_bins = 9, .snr_2500_db = 25.0};
+    const dsp::Hertz where = scene.frequency_of(500);
+
+    // A weak reading per keyup, which no single keyup confirms.
+    const detect::ProbeFinding weak = finding(detect::Classification::AnalogueFm, 0.45, 0.0, true);
+
+    std::uint64_t previous_id = 0;
+    for (int keyup = 0; keyup < 2; ++keyup) {
+        scene.set({repeater});
+        run_for(detector, scene, 2.0);
+        const detect::Track* track = find_near(detector, where, 3000);
+        REQUIRE(track != nullptr);
+        CHECK(track->id != previous_id);
+        CHECK(track->refinement.observations == static_cast<std::uint32_t>(keyup));
+        previous_id = track->id;
+        REQUIRE(detector.record_probe(track->id, weak));
+
+        scene.silence();
+        run_for(detector, scene, 5.0);
+        CHECK(find_near(detector, where, 3000) == nullptr);
+    }
+    CHECK(detector.remembered_emitters() == 1);
+
+    scene.set({repeater});
+    run_for(detector, scene, 2.0);
+    const detect::Track* track = find_near(detector, where, 3000);
+    REQUIRE(track != nullptr);
+    CHECK(track->refinement.observations == 2);
+    CHECK(track->refinement.deepest() == detect::refine::Node::Nfm);
+}

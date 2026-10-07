@@ -23,6 +23,55 @@ namespace {
     }
 }
 
+[[nodiscard]] LabelKind kind_of(refine::Level level) {
+    switch (level) {
+        case refine::Level::Root: return LabelKind::Unknown;
+        case refine::Level::Modulation: return LabelKind::AnalogModulation;
+        case refine::Level::Family: return LabelKind::DigitalFamily;
+        case refine::Level::Protocol: return LabelKind::Protocol;
+    }
+    return LabelKind::Unknown;
+}
+
+// The refinement's answer, with confirmed_depth zero when it has none.
+[[nodiscard]] TrackLabel refined_label(const Track& track) {
+    TrackLabel out;
+    const refine::Refinement& refinement = track.refinement;
+    const refine::Node deepest = refinement.deepest();
+    if (deepest == refine::Node::Root) {
+        return out;
+    }
+
+    std::array<refine::Node, kMaxLabelPath> chain{};
+    std::size_t size = 0;
+    for (refine::Node node = deepest; node != refine::Node::Root && size < kMaxLabelPath;
+         node = refine::parent_of(node)) {
+        chain[size++] = node;
+    }
+    for (std::size_t i = 0; i < size; ++i) {
+        const refine::Node node = chain[size - 1 - i];
+        out.path[i] = LabelStep{.name = refine::node_info(node).step,
+                                .confidence = refinement.confidence(node),
+                                .confirmed = true};
+    }
+    out.path_size = size;
+    out.confirmed_depth = size;
+    if (const refine::Node next = refinement.candidate();
+        next != refine::Node::Root && out.path_size < kMaxLabelPath) {
+        out.path[out.path_size++] = LabelStep{.name = refine::node_info(next).step,
+                                              .confidence = refinement.confidence(next),
+                                              .confirmed = false};
+    }
+
+    const refine::NodeInfo& info = refine::node_info(deepest);
+    out.kind = kind_of(info.level);
+    out.name = info.name;
+    out.confidence = refinement.confidence(deepest);
+    out.may_drive = true;
+    out.symbol_rate_hz = info.level == refine::Level::Modulation ? 0.0 : track.symbol_rate_hz;
+    return out;
+}
+
 }  // namespace
 
 const char* label_kind_name(LabelKind kind) {
@@ -36,6 +85,9 @@ const char* label_kind_name(LabelKind kind) {
 }
 
 TrackLabel label_track(const Track& track) {
+    if (TrackLabel refined = refined_label(track); refined.confirmed_depth > 0) {
+        return refined;
+    }
     TrackLabel out;
 
     if (track.protocol != identify::Protocol::None) {

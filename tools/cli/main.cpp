@@ -4802,12 +4802,24 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 row.tier_protocol = static_cast<std::uint32_t>(track.protocol);
                 // The label a client's bracket prints, core/detect/label.h.
                 const detect::TrackLabel label = detect::label_track(track);
-                std::println("    #{:<5} {:>16}  {:>11}  {:>6.1f} dB  {} probe{}  {}{}", track.id,
+                // The refined path, core/detect/refine.h, as the hover card
+                // reads it.
+                std::string path;
+                for (std::size_t i = 0; i < label.path_size; ++i) {
+                    path += std::format("{}{}{} {:.2f}", i > 0 ? " > " : "", label.path[i].name,
+                                        label.path[i].confirmed ? "" : "?",
+                                        label.path[i].confidence);
+                }
+                if (track.refinement.p25_nac_known) {
+                    path += std::format(", NAC 0x{:03X}", track.refinement.p25_nac);
+                }
+                std::println("    #{:<5} {:>16}  {:>11}  {:>6.1f} dB  {} probe{}  {}{}{}", track.id,
                              format_hz(track.center), format_hz(track.bandwidth),
                              track.snr_2500_db, track.probes, track.probes == 1 ? " " : "s",
                              tier_two_text(row),
                              label.name.empty() ? std::string()
-                                                : std::format("  [label {}]", label.name));
+                                                : std::format("  [label {}]", label.name),
+                             path.empty() ? std::string() : std::format("  ({})", path));
             }
         }
     }

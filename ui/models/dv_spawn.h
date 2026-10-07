@@ -70,9 +70,13 @@ struct DvProtocol {
     double tolerance_hz = 0.0;
 };
 
-inline constexpr std::array<DvProtocol, 5> kDvProtocols = {{
+inline constexpr std::array<DvProtocol, 6> kDvProtocols = {{
     // TIA-102.BAAA-A: a 12.5 kHz FDMA channel.
     {"P25", 6'250.0},
+    // A P25 voice channel, as core/detect/refine.h names one once its data
+    // units say so. A P25 control channel is left out on purpose: it carries
+    // no voice for a spawned receiver to play.
+    {"P25 voice", 6'250.0},
     // TS 102 361-1 clause 10.1.2: a 12.5 kHz RF carrier bandwidth.
     {"DMR", 6'250.0},
     // The JARL system specification: carrier spacing 6.25 kHz or more.

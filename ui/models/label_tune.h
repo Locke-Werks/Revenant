@@ -38,6 +38,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstddef>
 #include <array>
 #include <cstdint>
 #include <format>
@@ -124,6 +126,17 @@ template <std::size_t N>
         case rpc::LabelKind::Protocol:
             if (const Row* row = find(kProtocols, label.name); row != nullptr) {
                 out = LabelTune{true, row->mode, row->decoder};
+                return out;
+            }
+            // A refined protocol, "P25 control", tunes as the protocol above
+            // it in its path: the role says what the channel carries, not how
+            // to receive it.
+            for (std::size_t i = std::min<std::size_t>(label.confirmed_depth, label.path.size());
+                 i > 0; --i) {
+                if (const Row* row = find(kProtocols, label.path[i - 1].name); row != nullptr) {
+                    out = LabelTune{true, row->mode, row->decoder};
+                    return out;
+                }
             }
             return out;
         case rpc::LabelKind::AnalogModulation:
@@ -157,6 +170,23 @@ template <std::size_t N>
                        snr_2500_db);
 }
 
+// The refined label's path for the hover card, most obvious level first, each
+// with its own confidence: "NFM 0.98 > 4FSK 0.96 > P25 0.95 > control 0.91".
+// A level that has evidence and has not passed the bar yet ends the path with
+// a question mark. Empty when the engine sent no path.
+[[nodiscard]] inline std::string label_path(const rpc::DetectionLabel& label)
+{
+    std::string out;
+    for (std::size_t i = 0; i < label.path.size(); ++i) {
+        const rpc::LabelStep& step = label.path[i];
+        if (i > 0) {
+            out += " > ";
+        }
+        out += std::format("{}{} {:.2f}", step.name, step.confirmed ? "" : "?", step.confidence);
+    }
+    return out;
+}
+
 // The hover card's line for the label, which carries what the bracket has no
 // room for: the kind, the confidence, the symbol rate, whether it may set the
 // receiver, and how many probes have looked. The three unknown states are
@@ -186,6 +216,9 @@ template <std::size_t N>
         out += std::format(", {:.0f} Bd", label.symbol_rate_hz);
     }
     out += label.may_drive ? ", sets the receiver" : ", does not set the receiver";
+    if (const std::string path = label_path(label); !path.empty()) {
+        out += "  ·  " + path;
+    }
     return out;
 }
 

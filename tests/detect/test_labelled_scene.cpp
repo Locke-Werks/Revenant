@@ -98,7 +98,9 @@ constexpr SceneEmitter kEmitters[] = {
     {"NFM", -600'000, "NFM"},
     {"CW", -450'000, "CW"},
     {"BPSK", -300'000, "BPSK"},
-    {"P25", -150'000, "P25"},
+    // A voice message, LDUs behind a header, so core/detect/refine.h takes it
+    // past P25 to its role. WHAT THIS ROW USED TO SAY: "P25".
+    {"P25", -150'000, "P25 voice"},
     {"D-STAR", 100'000, "D-STAR"},
     {"TETRA", 250'000, "TETRA"},
     {"M17", 400'000, "M17"},
