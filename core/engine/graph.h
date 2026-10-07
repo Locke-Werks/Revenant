@@ -213,6 +213,14 @@ struct StageOutput {
     // channels", which is what every demodulator means.
     bool complex_iq = false;
 
+    // Whether the readback carries one more float per frame after the audio:
+    // |z|^2 of the receiver's channel after its filter and before the
+    // detector. The squelch and the level meter read that rather than the
+    // audio, because FM audio is the same loudness whatever the signal
+    // strength and its noise is louder than its voice. A stage that leaves
+    // this false is metered on its audio as before.
+    bool channel_power = false;
+
     dsp::SampleRate rate = 0;
 
     // How far the stage's display stream has got after this dispatch, as a

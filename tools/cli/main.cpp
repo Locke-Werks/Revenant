@@ -545,6 +545,10 @@ struct Options {
     bool list_audio = false;
     bool quiet = false;
     bool help = false;
+
+    // Every receiver's squelch threshold, dBFS of channel power. The engine's
+    // default, -200, is off.
+    double squelch_dbfs = -200.0;
     long status_ms = 500;
 };
 
@@ -816,6 +820,7 @@ void print_usage()
         "  --gpu <n>           Device index, default -1, which honours\n"
         "                      REVENANT_GPU_INDEX. See revenant-devices.\n"
         "  --quiet             No periodic status line.\n"
+        "  --squelch DBFS      Squelch every receiver at this channel power, e.g. -70.\n"
         "  --status-ms <n>     Status interval, default 500.\n"
         "  --list              List sources and exit.\n"
         "  --list-audio        List render endpoints and exit.\n"
@@ -887,6 +892,18 @@ void print_usage()
         }
         if (arg == "--quiet") {
             options.quiet = true;
+            continue;
+        }
+        if (arg == "--squelch") {
+            auto text = value_of(i, "--squelch", inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto value = parse_real(*text, "--squelch");
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            options.squelch_dbfs = *value;
             continue;
         }
 
@@ -3458,6 +3475,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         params.bandwidth = spec.passband.width();
         params.demod = spec.demod;
         params.audio_rate = options.audio_rate;
+        params.squelch_dbfs = options.squelch_dbfs;
 
         auto added = eng.add_vrx(params);
         if (!added) {

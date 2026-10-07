@@ -173,6 +173,7 @@ add_executable(revenant_engine_tests
     test_rtlsdr_front_end.cpp
     test_rtlsdr_source.cpp
     test_signal_meter.cpp
+    test_squelch_gate.cpp
     test_sources.cpp
     test_spectrum_scale.cpp
     test_thread_role.cpp

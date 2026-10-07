@@ -183,6 +183,18 @@ layout(constant_id = 5) const uint kChannels = 1;
 // receiver, and the loop folds away when it is.
 layout(constant_id = 6) const uint kPilotTaps = 0;
 
+// One when the graph wants the channel power alongside the audio. The squelch
+// has to compare against the signal's strength in the channel, after the
+// receiver's filter and BEFORE the detector: a limiting discriminator's output
+// is independent of signal amplitude by construction, and its noise output is
+// louder than its voice output, so metering FM audio gave a gate that could
+// not shut on noise without also shutting on every station. AM's DC removal
+// takes the carrier off the same way. So each invocation also writes |z|^2 of
+// the fine sample it detects at, after the audio, at audio.values[count *
+// kChannels + i], and the host averages them. Zero keeps the kernel to its
+// audio alone, which is what the bit-exact twin tests run.
+layout(constant_id = 7) const uint kChannelPower = 0;
+
 const uint kModeRaw = 0u;
 const uint kModeAm = 1u;
 const uint kModeNfm = 2u;
@@ -510,6 +522,15 @@ void main() {
     }
 
     const uint index = params.in_offset + i * kDecimation;
+
+    if (kChannelPower == 1u) {
+        // One fine sample per audio frame. For WFM that samples every
+        // kDecimation-th, which is still thousands per dispatch and plenty
+        // for a mean power.
+        const vec2 z = sample_at(index);
+        precise float power = z.x * z.x + z.y * z.y;
+        audio.values[params.count * kChannels + i] = power;
+    }
 
     if (kComplexTap) {
         // The complex taps are not demodulators. They hand out complex

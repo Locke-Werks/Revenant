@@ -298,8 +298,11 @@ public:
         // stereo, which is a channel count and not a mode: a stereo WFM
         // receiver writes L and R where a mono one wrote one sample, and a
         // buffer sized without it is one the kernel writes past.
+        //
+        // Plus one float per frame for the channel power the kernel writes
+        // after the audio, which is what the squelch compares against.
         return static_cast<VkDeviceSize>(audio_for(outputs_for(blocks))) *
-               plan_.demod.channels * sizeof(float);
+               (plan_.demod.channels + 1U) * sizeof(float);
     }
 
     [[nodiscard]] Expected<StageOutput> record(const StageRecord& record) override;
@@ -767,7 +770,8 @@ Status DemodStage::build_pipelines() {
     {
         const std::uint32_t constants[] = {plan_.demod.mode,      plan_.demod.decimation,
                                            plan_.demod.audio_taps, plan_.demod.dc_taps,
-                                           plan_.demod.channels,   plan_.demod.pilot_taps};
+                                           plan_.demod.channels,   plan_.demod.pilot_taps,
+                                           1U};
         gpu::ComputePipeline::Options options;
         options.spirv = gpu::shaders::vrx_demod();
         options.storage_buffer_count = 3;
@@ -848,7 +852,7 @@ Status DemodStage::build_buffers(VkBuffer channel_ring) {
     const VkDeviceSize weight_bytes = plan_.demod_weights.size() * sizeof(float);
     const VkDeviceSize fine_bytes = static_cast<VkDeviceSize>(fine_capacity_) * kComplexBytes;
     const VkDeviceSize audio_bytes =
-        static_cast<VkDeviceSize>(max_audio_) * plan_.demod.channels * sizeof(float);
+        static_cast<VkDeviceSize>(max_audio_) * (plan_.demod.channels + 1U) * sizeof(float);
 
     auto make_device = [&](VkDeviceSize bytes, const char* what) -> Expected<gpu::Buffer> {
         auto buffer =
@@ -1384,7 +1388,7 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
     }
 
     const VkDeviceSize bytes =
-        static_cast<VkDeviceSize>(audio_count) * plan_.demod.channels * sizeof(float);
+        static_cast<VkDeviceSize>(audio_count) * (plan_.demod.channels + 1U) * sizeof(float);
     if (bytes > record.audio_bytes) {
         return fail(std::format(
             "this receiver produced {} audio frames of {} channels and the graph sized its "
@@ -1420,6 +1424,7 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
 
     next_audio_ += audio_count;
     out.frames = audio_count;
+    out.channel_power = true;
     out.dispatches += 1;
     out.readbacks += 1;
     return out;

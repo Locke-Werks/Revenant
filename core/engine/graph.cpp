@@ -128,6 +128,7 @@
 #include "core/engine/record_util.h"
 #include "core/engine/signal_meter.h"
 #include "core/engine/spectrum_scale.h"
+#include "core/engine/squelch_gate.h"
 #include "core/engine/ring_consumer.h"
 #include "core/gpu/buffer.h"
 #include "core/gpu/kernel.h"
@@ -711,6 +712,12 @@ struct Graph::Impl {
         std::atomic<std::uint64_t> audio_dropped{0};
         std::atomic<std::uint64_t> level_bits{0};
         std::atomic<bool> squelch_open{false};
+
+        // Completion thread only. The gate carries its averaged level, its
+        // attack and tail timers and its fade gain from one dispatch to the
+        // next, which is what the old per-chunk compare had none of.
+        SquelchGate squelch;
+        std::uint64_t squelch_epoch_seen = 0;
 
         // WRITTEN ON THE RECORDING THREAD, unlike the two counters above,
         // which move on the completion thread as frames are delivered. A
@@ -1803,8 +1810,21 @@ struct Graph::Impl {
                 continue;
             }
 
-            const std::span<float> audio(slot.scratch.data(), floats);
-            if (auto read = slot.readback[entry.readback_index].read(std::as_writable_bytes(audio));
+            // A stage reporting channel_power wrote one |z|^2 per frame after
+            // the audio, and the read takes both.
+            const std::size_t power_floats =
+                entry.output.channel_power ? static_cast<std::size_t>(entry.output.frames) : 0;
+            if (floats + power_floats > slot.scratch.size()) {
+                outcome = fail(std::format(
+                    "receiver {} produced {} floats and its scratch holds {}: audio_bytes_for "
+                    "returned less than the stage went on to write",
+                    slot.id.value, floats + power_floats, slot.scratch.size()));
+                lose_frames();
+                continue;
+            }
+            const std::span<float> fetched(slot.scratch.data(), floats + power_floats);
+            const std::span<float> audio = fetched.first(floats);
+            if (auto read = slot.readback[entry.readback_index].read(std::as_writable_bytes(fetched));
                 !read) {
                 outcome = std::unexpected(with_context(
                     read.error(), std::format("receiver {} readback", slot.id.value)));
@@ -1823,8 +1843,25 @@ struct Graph::Impl {
             // its squelch comparison, read 3.01 dB high. StageOutput::
             // complex_iq is the field that says which of the two a pair is,
             // because the channel count cannot.
-            const double level =
-                meter_dbfs(audio, entry.output.frames, entry.output.complex_iq);
+            //
+            // When the stage hands back the channel power, that is the level:
+            // post-filter, pre-detector, the same dBFS a complex tap already
+            // meters as. See core/engine/squelch_gate.h for why the audio is
+            // the wrong thing to meter for a squelch.
+            double mean_power = 0.0;
+            if (power_floats > 0) {
+                double sum = 0.0;
+                for (const float p : fetched.subspan(floats)) {
+                    sum += static_cast<double>(p);
+                }
+                mean_power = sum / static_cast<double>(power_floats);
+            } else {
+                const double audio_level =
+                    meter_dbfs(audio, entry.output.frames, entry.output.complex_iq);
+                const double rms = std::pow(10.0, audio_level / 20.0);
+                mean_power = (audio_level > kSilenceFloorDbfs) ? rms * rms : 0.0;
+            }
+            const double level = dbfs_of(std::sqrt(mean_power));
             slot.store_level(level);
 
             // Squelched means muted, not stopped. The level is stored above
@@ -1852,11 +1889,21 @@ struct Graph::Impl {
             // the threshold they set. Counting it as loss made the field climb
             // for the whole of every quiet channel, which is the one reading
             // that makes it useless for what it is for.
-            const bool open = level >= entry.squelch_dbfs;
-            slot.squelch_open.store(open, std::memory_order_relaxed);
-            if (!open) {
-                std::fill(audio.begin(), audio.end(), 0.0F);
+            //
+            // WHAT THE GATE USED TO BE: `level >= squelch_dbfs` on this one
+            // chunk's audio level, with a hard mute. No averaging, no
+            // hysteresis, no hold, so a signal near the threshold chattered
+            // and every edge clicked; and the level was the demodulated
+            // audio's, which for FM cannot be gated at all. A retune resets
+            // the averaged level, because it belongs to the old frequency.
+            if (entry.tuning_epoch != slot.squelch_epoch_seen) {
+                slot.squelch.reset_level();
+                slot.squelch_epoch_seen = entry.tuning_epoch;
             }
+            const bool open =
+                slot.squelch.process(mean_power, audio, entry.output.channels,
+                                     static_cast<double>(entry.output.rate), entry.squelch_dbfs);
+            slot.squelch_open.store(slot.squelch.open(), std::memory_order_relaxed);
 
             // What a person hears, after the gate and from the same frames,
             // into a buffer of its own so that `audio` reaches every other

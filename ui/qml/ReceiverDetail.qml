@@ -424,6 +424,7 @@ ColumnLayout {
         RowLayout {
             spacing: 8
             RSlider {
+                id: squelchSlider
                 Layout.preferredWidth: 160
                 tint: detail.tint
                 from: UiRules.squelchSliderLow()
@@ -431,6 +432,25 @@ ColumnLayout {
                 stepSize: 1
                 value: UiRules.sliderFromSquelch(engineLink.squelchDbfs)
                 onMoved: engineLink.squelchDbfs = UiRules.squelchFromSlider(value)
+
+                // The receiver's level drawn on the slider's own scale, just
+                // under the track, so setting squelch is putting the handle a
+                // few dB to the right of where the bar sits on an empty
+                // channel. Same number the gate compares: channel power after
+                // the filter, in dBFS.
+                Rectangle {
+                    readonly property real level: engineLink.receiverLevelDbfs
+                    readonly property real fraction: Math.max(0, Math.min(1,
+                        (level - squelchSlider.from) / (squelchSlider.to - squelchSlider.from)))
+                    visible: UiRules.meterHasReading(level)
+                    x: squelchSlider.leftPadding
+                    y: squelchSlider.topPadding + squelchSlider.availableHeight / 2 + 4
+                    width: fraction * squelchSlider.availableWidth
+                    height: 3
+                    radius: 1
+                    color: engineLink.squelchGateOpen ? Theme.ink : Theme.inkDim
+                    opacity: 0.8
+                }
             }
             Readout {
                 widest: "-000 dBFS"
