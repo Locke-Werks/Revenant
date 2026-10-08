@@ -200,14 +200,21 @@ void WaterfallItem::setMapPins(ScaleSettings* pins)
     if (map_pins_ == pins) {
         return;
     }
+    if (map_pins_ != nullptr) {
+        disconnect(map_pins_, nullptr, this, nullptr);
+    }
     map_pins_ = pins;
 
-    // No connection to pinsChanged, unlike the spectrum. A pin changes the
-    // ends of rows not yet written; the rows already in the history were
-    // coloured against the ends in force when they arrived and are left that
-    // way, because recolouring them would need the levels they were drawn
-    // from, which the ring does not keep, and a history repainted to a new
-    // scale would claim those rows were measured against it.
+    // A pin recolours the whole history at once. WHAT THIS USED TO SAY: there
+    // was no connection here, because the ring kept only colours and a row
+    // could not be redrawn without the levels it was drawn from. It keeps the
+    // levels now, and the history is drawn against one pair of ends, so a
+    // pin that reached only rows not yet written would be the patchwork the
+    // owner asked to be rid of.
+    if (map_pins_ != nullptr) {
+        connect(map_pins_, &ScaleSettings::pinsChanged, this, &WaterfallItem::onPinsChanged);
+    }
+    onPinsChanged();
     emit mapPinsChanged();
 }
 
@@ -328,21 +335,26 @@ void WaterfallItem::resizeRows(int rows)
     QImage fresh(wide, tall, QImage::Format_RGBX8888);
     fresh.fill(kBackground);
     std::vector<RowSpan> spans(static_cast<std::size_t>(tall), RowSpan{});
+    std::vector<std::uint16_t> codes(static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall),
+                                     kNoLevel);
 
-    // The pixels and the spans move together, because a row's frequency
-    // axis is in the pixels and its time axis is in the span, and a
+    // The levels and the spans move together, because a row's frequency
+    // axis is in the levels and its time axis is in the span, and a
     // rectangle on this display is placed from both. Copying one without
-    // the other puts every detection rectangle on the wrong rows.
-    const auto row_bytes = static_cast<std::size_t>(wide) * sizeof(std::uint32_t);
+    // the other puts every detection rectangle on the wrong rows. The
+    // pixels are not copied: they are recoloured from the levels below.
+    const auto row_cells = static_cast<std::size_t>(wide);
     for (int row = 0; row < plan.rows_kept; ++row) {
         const int from = history_source_row(plan, old_tall, row);
-        std::memcpy(fresh.scanLine(row), history_.constScanLine(from), row_bytes);
+        std::copy_n(codes_.begin() + static_cast<std::ptrdiff_t>(row_cells * from), row_cells,
+                    codes.begin() + static_cast<std::ptrdiff_t>(row_cells * row));
         spans[static_cast<std::size_t>(row)] =
             row_spans_[static_cast<std::size_t>(from)];
     }
 
     history_ = std::move(fresh);
     row_spans_ = std::move(spans);
+    codes_ = std::move(codes);
     write_row_ = plan.write_row;
     filled_rows_ = plan.rows_kept;
     emit historyChanged();
@@ -353,6 +365,12 @@ void WaterfallItem::resizeRows(int rows)
     // did not either.
     const int tiles = (tall + kTileRows - 1) / kTileRows;
     tile_dirty_.assign(static_cast<std::size_t>(tiles), std::uint8_t{1});
+    tile_ends_.assign(static_cast<std::size_t>(tiles), ends_);
+
+    // The oldest rows went if the item shortened, so the percentiles move;
+    // the ends do not, until the next frame eases them.
+    rebuildHistogram();
+    recolourAll();
 }
 
 QSize WaterfallItem::deviceSize() const
@@ -391,9 +409,13 @@ void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
     filled_rows_ = 0;
     emit historyChanged();
     row_spans_.assign(static_cast<std::size_t>(tall), RowSpan{});
+    codes_.assign(static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall), kNoLevel);
+    histogram_.clear();
+    levels_.reset();
 
     const int tiles = (tall + kTileRows - 1) / kTileRows;
     tile_dirty_.assign(static_cast<std::size_t>(tiles), std::uint8_t{1});
+    tile_ends_.assign(static_cast<std::size_t>(tiles), ends_);
 
     columns_.assign(static_cast<std::size_t>(wide), kSpectrumFloorDb);
     reduced_bins_ = bins;
@@ -422,6 +444,12 @@ void WaterfallItem::clearHistory()
     emit historyChanged();
     std::fill(row_spans_.begin(), row_spans_.end(), RowSpan{});
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
+    std::fill(codes_.begin(), codes_.end(), kNoLevel);
+    histogram_.clear();
+
+    // A new engine or stream starts its scale again from its first row: the
+    // levels the old one settled on belong to another band.
+    levels_.reset();
     axis_ = {};
     box_history_.clear();
     clearCaptions();
@@ -572,6 +600,8 @@ void WaterfallItem::followAxis()
             // are in absolute hertz, fall off the edge on their own.
             history_.fill(kBackground);
             std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
+            std::fill(codes_.begin(), codes_.end(), kNoLevel);
+            histogram_.clear();
         } else if (axis_.valid()) {
             // Hertz per pixel changed with the width and the bins unchanged,
             // which only a new span does: a different picture, so a fresh
@@ -597,8 +627,77 @@ void WaterfallItem::shiftRows(int pixels)
     for (int row = 0; row < history_.height(); ++row) {
         shift_row(reinterpret_cast<std::uint32_t*>(history_.scanLine(row)), wide, pixels,
                   background);
+        shift_row(codes_.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(wide),
+                  wide, pixels, kNoLevel);
     }
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
+
+    // What slid off the edge is no longer in the history, so it no longer
+    // counts towards where the noise is. A retune is rare beside a frame, and
+    // a count of the whole ring is a few milliseconds at most.
+    rebuildHistogram();
+}
+
+void WaterfallItem::rebuildHistogram()
+{
+    histogram_.clear();
+    histogram_.add_row(codes_.data(), static_cast<int>(codes_.size()));
+}
+
+void WaterfallItem::recolourTile(std::size_t tile)
+{
+    const int wide = history_.width();
+    const int tall = history_.height();
+    if (tile >= tile_ends_.size() || wide <= 0 ||
+        codes_.size() != static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall)) {
+        return;
+    }
+    const CodeColourer colour(ends_);
+    const int first = static_cast<int>(tile) * kTileRows;
+    const int last = std::min(first + kTileRows, tall);
+    for (int row = first; row < last; ++row) {
+        colour.row(codes_.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(wide),
+                   reinterpret_cast<std::uint32_t*>(history_.scanLine(row)), wide);
+    }
+    tile_ends_[tile] = ends_;
+    tile_dirty_[tile] = 1;
+}
+
+void WaterfallItem::recolourStale(int budget)
+{
+    for (int done = 0; done < budget; ++done) {
+        std::size_t worst = tile_ends_.size();
+        float worst_db = kRecolourToleranceDb;
+        for (std::size_t tile = 0; tile < tile_ends_.size(); ++tile) {
+            const float distance = ends_distance_db(tile_ends_[tile], ends_);
+            if (distance > worst_db) {
+                worst_db = distance;
+                worst = tile;
+            }
+        }
+        if (worst == tile_ends_.size()) {
+            return;
+        }
+        recolourTile(worst);
+    }
+}
+
+void WaterfallItem::recolourAll()
+{
+    for (std::size_t tile = 0; tile < tile_ends_.size(); ++tile) {
+        recolourTile(tile);
+    }
+}
+
+void WaterfallItem::onPinsChanged()
+{
+    if (!levels_.valid()) {
+        return;
+    }
+    ends_ = levels_.ends(pinsInForce());
+    recolourAll();
+    emit endsChanged();
+    update();
 }
 
 void WaterfallItem::recordDetections()
@@ -917,22 +1016,55 @@ void WaterfallItem::takeFrame()
     followAxis();
 
     reduce_peak(frame.power_db, columns_);
-    ends_ = resolve_ends(frame.floor_db, frame.ceiling_db, headroom_db_, pinsInForce());
 
-    const float span = ends_.span_db();
-    if (span <= 0.0F) {
-        return;
-    }
-
-    auto* row = reinterpret_cast<std::uint32_t*>(history_.scanLine(write_row_));
+    // The row goes in as levels, replacing the oldest row's in the count.
+    std::uint16_t* codes =
+        codes_.data() + static_cast<std::size_t>(write_row_) * static_cast<std::size_t>(wide);
+    histogram_.remove_row(codes, wide);
     for (int c = 0; c < wide; ++c) {
-        const float level =
-            std::clamp((columns_[static_cast<std::size_t>(c)] - ends_.floor_db) / span, 0.0F,
-                       1.0F);
-        const Rgb rgb = colour_at(level);
-        row[c] = 0xFF000000U | (static_cast<std::uint32_t>(rgb.b) << 16) |
-                 (static_cast<std::uint32_t>(rgb.g) << 8) | static_cast<std::uint32_t>(rgb.r);
+        codes[c] = encode_level(columns_[static_cast<std::size_t>(c)]);
     }
+    histogram_.add_row(codes, wide);
+
+    // The ends follow the history's percentiles in source time. A frame
+    // that does not follow on from the last one, the first or one after a
+    // gap, counts as its own length, and a long gap is held to a second so
+    // a stall does not jump the scale to its target.
+    const std::uint64_t frame_end = frame.start + frame.count;
+    const int rate = link_->sourceRate();
+    double seconds = 0.0;
+    if (rate > 0) {
+        const std::uint64_t elapsed = frame_end > last_sample_end_ && last_sample_end_ != 0
+                                          ? frame_end - last_sample_end_
+                                          : frame.count;
+        seconds = std::min(static_cast<double>(elapsed) / static_cast<double>(rate), 1.0);
+    }
+    last_sample_end_ = frame_end;
+    levels_.update(histogram_.percentile(kHistoryNoisePermille),
+                   histogram_.percentile(kHistoryStrongPermille), seconds);
+    ends_ = levels_.ends(pinsInForce());
+
+    // The new row is coloured with the rest of its tile, so a tile is one
+    // scale throughout. A tile already out of tolerance is recoloured whole,
+    // since it is being uploaded this frame anyway.
+    const auto tile = static_cast<std::size_t>(write_row_ / kTileRows);
+    if (ends_distance_db(tile_ends_[tile], ends_) > kRecolourToleranceDb) {
+        recolourTile(tile);
+    } else {
+        CodeColourer(tile_ends_[tile])
+            .row(codes, reinterpret_cast<std::uint32_t*>(history_.scanLine(write_row_)), wide);
+    }
+
+    // Enough more that a stale history is swept within a tenth of a second
+    // of source time whatever the frame rate, and at least two. At the frame
+    // budget's 300 frames a second that is two tiles a frame; at a slow
+    // subscription's 20 frames a second on an 18-tile ring, nine. A tenth of a
+    // second is how long a tile can lag the ends while they expand at their
+    // fastest, which on a 30 dB jump is about a decibel, for a moment.
+    constexpr double kRecolourSweepSeconds = 0.1;
+    const auto sweep = static_cast<int>(std::ceil(
+        static_cast<double>(tile_ends_.size()) * seconds / kRecolourSweepSeconds));
+    recolourStale(std::max(sweep, 2));
 
     // The same index as the pixels, because a rectangle on this display is
     // bounded by the rows a track was present in and this is the only record

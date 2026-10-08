@@ -18,11 +18,14 @@
 using Catch::Matchers::WithinAbs;
 using revenant::ui::colour_argb_at;
 using revenant::ui::colour_at;
+using revenant::ui::kDisplayMinimumSpanDb;
 using revenant::ui::kMinPinnedSpanDb;
+using revenant::ui::kNoiseFraction;
 using revenant::ui::kSpectrumMinimumSpanDb;
 using revenant::ui::map_ends;
 using revenant::ui::peak_reduction_headroom_db;
 using revenant::ui::pin_level;
+using revenant::ui::place_ends;
 using revenant::ui::reduce_peak;
 using revenant::ui::resolve_ends;
 using revenant::ui::ScalePins;
@@ -109,6 +112,9 @@ TEST_CASE("the headroom grows with the bins a column covers", "[scale]")
     CHECK_THAT(peak_reduction_headroom_db(16), WithinAbs(expected, 0.01));
 }
 
+// map_ends is the passband displays' rule since 2026-10-07 and is held here
+// unchanged; the span displays' rule is place_ends, further down.
+//
 // Rejects correcting the ceiling. A column holding a real signal draws that
 // signal's own bin, which a maximum over K does not inflate.
 TEST_CASE("the correction raises the floor and leaves the ceiling", "[scale]")
@@ -155,10 +161,93 @@ TEST_CASE("resolve_ends draws against the pins in place of the frame", "[scale]"
     CHECK(ends.floor_db == -110.0F);
     CHECK(ends.ceiling_db == -30.0F);
 
-    // Unpinned, the frame and its correction are back.
+    // Unpinned, the frame and its correction are back: the drawn noise is
+    // -95 + 12 = -83, the strong level -60, 23 dB over it, which is under the
+    // minimum span, so the map is 40 dB with the noise 12% up it.
     const auto automatic = resolve_ends(-95.0F, -60.0F, 12.0F, ScalePins{});
-    CHECK(automatic.floor_db == -83.0F);
-    CHECK(automatic.ceiling_db == -60.0F);
+    CHECK_THAT(automatic.floor_db, WithinAbs(-83.0 - 0.12 * 40.0, 1e-4));
+    CHECK_THAT(automatic.ceiling_db, WithinAbs(-83.0 + 0.88 * 40.0, 1e-4));
+}
+
+// ---------------------------------------------------------------------------
+// Where the noise sits: place_ends
+// ---------------------------------------------------------------------------
+
+// Where a level lands up the map, 0 at the floor and 1 at the ceiling.
+namespace {
+[[nodiscard]] double height_of(float level_db, const revenant::ui::MapEnds& ends)
+{
+    return (static_cast<double>(level_db) - ends.floor_db) / ends.span_db();
+}
+}  // namespace
+
+// Rejects the rule the owner saw at 145 MHz on 2026-10-07: the noise ON the
+// bottom edge and a twelve decibel map, which is a band of pure noise drawn as
+// a wall from the bottom of the plot to the top. The engine's ceiling decays
+// down into the noise on an empty band, so the strong level here is at or
+// under the noise.
+TEST_CASE("a band of pure noise sits in the bottom eighth of a 40 dB map", "[scale]")
+{
+    for (const float strong : {-90.0F, -88.0F, -95.0F}) {
+        const auto ends = place_ends(-90.0F, strong, ScalePins{});
+        INFO(strong);
+        CHECK_THAT(ends.span_db(), WithinAbs(kDisplayMinimumSpanDb, 1e-4));
+        const double at = height_of(-90.0F, ends);
+        CHECK(at >= 0.10);
+        CHECK(at <= 0.15);
+    }
+}
+
+// Rejects a minimum span narrow enough for noise to fill it. At one bin per
+// column the noise's 99.9th percentile is 10 log10(ln 1000) = 8.4 dB over its
+// mean; it must stay in the lower half, where it reads as noise, and well off
+// the top.
+TEST_CASE("the noise's one-in-a-thousand spike stays in the lower half", "[scale]")
+{
+    const float noise = -100.0F;
+    const auto ends = place_ends(noise, noise, ScalePins{});
+    const auto spike = static_cast<float>(noise + 10.0 * std::log10(std::log(1000.0)));
+    CHECK(height_of(spike, ends) < 0.4);
+}
+
+// Rejects a placement that moves the noise when a strong signal arrives. The
+// map widens to take the signal at the top and the noise stays an eighth up.
+TEST_CASE("a strong signal widens the map and the noise stays put", "[scale]")
+{
+    const auto ends = place_ends(-100.0F, -30.0F, ScalePins{});
+    CHECK_THAT(ends.ceiling_db, WithinAbs(-30.0, 1e-3));
+    CHECK_THAT(height_of(-100.0F, ends), WithinAbs(kNoiseFraction, 1e-4));
+    CHECK(ends.span_db() > kDisplayMinimumSpanDb);
+}
+
+// Rejects a pin that the placement moves. A pinned end is drawn where it was
+// pinned and the automatic end gives; under a pinned ceiling the noise still
+// sits an eighth up.
+TEST_CASE("place_ends draws a pinned end where it was pinned", "[scale]")
+{
+    const auto floor = place_ends(-90.0F, -40.0F, set_floor_pin(ScalePins{}, -120.0F));
+    CHECK(floor.floor_db == -120.0F);
+    CHECK(floor.ceiling_db == -40.0F);
+
+    // A pinned floor too close to the strong level: the ceiling gives.
+    const auto narrow = place_ends(-90.0F, -85.0F, set_floor_pin(ScalePins{}, -100.0F));
+    CHECK(narrow.floor_db == -100.0F);
+    CHECK(narrow.ceiling_db == -100.0F + kDisplayMinimumSpanDb);
+
+    const auto ceiling = place_ends(-100.0F, -95.0F, set_ceiling_pin(ScalePins{}, -20.0F));
+    CHECK(ceiling.ceiling_db == -20.0F);
+    CHECK_THAT(height_of(-100.0F, ceiling), WithinAbs(kNoiseFraction, 1e-4));
+
+    // A pinned ceiling just over the noise: the floor gives the minimum span.
+    const auto low = place_ends(-100.0F, -95.0F, set_ceiling_pin(ScalePins{}, -95.0F));
+    CHECK(low.ceiling_db == -95.0F);
+    CHECK(low.floor_db == -95.0F - kDisplayMinimumSpanDb);
+
+    ScalePins both = set_floor_pin(ScalePins{}, -70.0F);
+    both = set_ceiling_pin(both, -65.0F);
+    const auto pinned = place_ends(-100.0F, -20.0F, both);
+    CHECK(pinned.floor_db == -70.0F);
+    CHECK(pinned.ceiling_db == -65.0F);
 }
 
 // Rejects a pin pair that crosses. Two pins obeyed as written can make a map

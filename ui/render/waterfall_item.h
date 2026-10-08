@@ -91,6 +91,16 @@
 // has been read are drawn one retune out of place: a few rows at most, since
 // the device stops streaming across the tune.
 //
+// THE SCALE IS THE WHOLE HISTORY'S, since 2026-10-07. Each row is kept as
+// levels as well as colours, and every row on screen is coloured against one
+// pair of ends measured from the history itself, so the picture re-contrasts
+// as a whole as signals arrive and leave. render/waterfall_scale.h has the
+// owner's request, the storage and the time constants. The colours in the
+// ring are a cache of the levels: a tile coloured against ends that have
+// since moved is recoloured from its levels a few tiles a frame, which keeps
+// the per-frame upload to a handful of tiles. Before that date a row kept the
+// colours of the moment it was written and the history was a patchwork.
+//
 // WHAT THE DETECTION OVERLAY IS DOING IN HERE
 //
 // render/spectrum_item.h owns it, and this file includes that header for it
@@ -139,6 +149,7 @@
 #include "render/history_shift.h"
 #include "render/spectrum_item.h"
 #include "render/spectrum_scale.h"
+#include "render/waterfall_scale.h"
 
 class QMouseEvent;
 class QHoverEvent;
@@ -285,6 +296,21 @@ private:
     // Moves every stored row sideways; render/history_shift.h has the rule.
     void shiftRows(int pixels);
 
+    // The scale. See render/waterfall_scale.h.
+    //
+    // recolourTile colours one tile from its codes against ends_ and records
+    // that it was. recolourStale does that for at most `budget` of the tiles
+    // whose ends are furthest from ends_, beyond kRecolourToleranceDb: a whole
+    // history recoloured in one frame is every tile uploaded in one frame,
+    // and spreading it keeps a frame's upload to a few tiles while the ends
+    // ease. recolourAll is for the moments that move the ends at once, a pin
+    // or a resize, where the operator's own action is what moved them.
+    void recolourTile(std::size_t tile);
+    void recolourStale(int budget);
+    void recolourAll();
+    void rebuildHistogram();
+    void onPinsChanged();
+
     // Folds the detector's current list into the box history.
     void recordDetections();
 
@@ -356,6 +382,20 @@ private:
     int write_row_ = 0;
     int filled_rows_ = 0;
     std::vector<RowSpan> row_spans_;
+
+    // The level codes behind the pixels, one per pixel and in the same ring
+    // order, so a row can be recoloured. kNoLevel where nothing was written.
+    std::vector<std::uint16_t> codes_;
+    LevelHistogram histogram_;
+    HistoryLevels levels_;
+
+    // The ends each tile's pixels were coloured against.
+    std::vector<MapEnds> tile_ends_;
+
+    // The end of the last frame taken, in source samples, so the scale eases
+    // in source time: a capture replayed faster than real time re-contrasts
+    // as it would have live, which a wall clock would not.
+    std::uint64_t last_sample_end_ = 0;
 
     // Which tiles have had a row written since their texture was built. Only
     // the tile the cursor is in can be dirty from a frame; a resize or a new

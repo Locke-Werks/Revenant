@@ -120,13 +120,15 @@ struct HistoryShift {
     return out;
 }
 
-// Moves one row of 32-bit pixels `pixels` to the RIGHT, negative for left,
+// Moves one row of pixels, or of the span waterfall's 16-bit level codes,
+// `pixels` to the RIGHT, negative for left,
 // and fills what shifts in from outside with `fill`. A shift of the whole
 // width or more fills the row. This is the pixel half of a plan above: every
 // stored row takes the same shift, and what arrives from outside the old axis
 // was never measured, so it is drawn as the bottom of the colour map rather
 // than as anything that could be read as a signal.
-inline void shift_row(std::uint32_t* line, int width_px, int pixels, std::uint32_t fill)
+template <typename Cell>
+inline void shift_row(Cell* line, int width_px, int pixels, Cell fill)
 {
     if (line == nullptr || width_px <= 0 || pixels == 0) {
         return;
@@ -134,10 +136,10 @@ inline void shift_row(std::uint32_t* line, int width_px, int pixels, std::uint32
     const int moved = std::min(std::abs(pixels), width_px);
     const auto keep = static_cast<std::size_t>(width_px - moved);
     if (pixels > 0) {
-        std::memmove(line + moved, line, keep * sizeof(std::uint32_t));
+        std::memmove(line + moved, line, keep * sizeof(Cell));
         std::fill(line, line + moved, fill);
     } else {
-        std::memmove(line, line + moved, keep * sizeof(std::uint32_t));
+        std::memmove(line, line + moved, keep * sizeof(Cell));
         std::fill(line + keep, line + width_px, fill);
     }
 }

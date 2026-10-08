@@ -142,11 +142,11 @@ ColumnLayout {
             // "floor +16.8 dB for the column peak", always on screen and read
             // by nobody who did not already know what it meant.
             detail: spectrum.headroomDb > 0.05
-                    ? "Drawn " + spectrum.headroomDb.toFixed(1) + " dB above the engine's "
-                      + "floor, its fifth percentile. Each column of the display shows the "
-                      + "loudest of the bins under it, and on an empty band the loudest of "
-                      + "those sits that far above the fifth percentile of one, so the "
-                      + "floor is raised to match."
+                    ? "Each column shows the loudest of the bins under it, and on an empty "
+                      + "band that sits " + spectrum.headroomDb.toFixed(1) + " dB above the "
+                      + "engine's floor, its fifth percentile. The map starts below that "
+                      + "level so the noise sits in the bottom eighth of the pane, and is "
+                      + "never narrower than 40 dB, so a band of noise reads as noise."
                     : ""
         }
 

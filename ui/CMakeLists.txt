@@ -257,6 +257,7 @@ qt_add_executable(revenant_ui
     render/spectrum_item.cpp
     render/spectrum_item.h
     render/spectrum_scale.h
+    render/waterfall_scale.h
     render/waterfall_item.cpp
     render/waterfall_item.h
     render/window_pacer.cpp
@@ -718,6 +719,7 @@ if(REVENANT_UI_TESTS)
             tests/test_source_pacing.cpp
             tests/test_span_markers.cpp
             tests/test_spectrum_scale.cpp
+            tests/test_waterfall_scale.cpp
             tests/test_squelch_control.cpp
             tests/test_status_summary.cpp
             tests/test_transcription.cpp

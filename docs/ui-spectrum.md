@@ -834,6 +834,28 @@ measure it would put the one thing this architecture exists to avoid back into
 the path, per the note in `core/engine/engine.h` about what is permitted to
 cross the bus.
 
+**Where the noise sits.** Asked by the owner on 2026-10-07, at 145 MHz on
+tuner auto gain with no strong signal, where noise filled the spectrum from
+bottom to top. Both span displays now place their ends by one rule,
+`place_ends` in `ui/render/spectrum_scale.h`: the drawn noise level goes 12% up
+the map, the strong level at the top, and the map is never narrower than
+40 dB. The old rule put the noise on the bottom edge with a 12 dB minimum, and
+on an empty band the engine's ceiling decays into the noise, so the minimum
+was the whole plot. The header carries the arithmetic for 40: at one bin per
+column the noise's one-in-a-thousand spike is 8.4 dB over its mean, which on a
+40 dB map reaches a third of the height. The passband pane and its waterfall
+keep the old rule.
+
+**The span waterfall scales as a whole.** Also 2026-10-07: "not with each new
+row per se, but all together as signals come into the waterfall." Each row is
+stored as 16-bit level codes beside its colours, and every row on screen is
+coloured against one pair of ends. Those ends come from the history itself,
+the level a quarter of its pixels sit below for the noise and the top
+thousandth for the strong level, placed by the same rule as the spectrum, and
+they ease over 3 s when expanding and 30 s when contracting, in source time.
+Tiles coloured against ends more than a quarter decibel out are recoloured
+from their codes a few a frame. `ui/render/waterfall_scale.h` has the design.
+
 The operator can still pin either end. Automatic is the default because it is
 right almost always, and the exception is comparing two captures, where a
 scale that moves is a scale that lies about which signal was stronger.
@@ -890,7 +912,11 @@ reads "noise ... dBFS est.", with the reasoning on hover. The line is dashed,
 over the fill and under the trace; the plate goes under the bottom of the
 noise, where there is only fill.
 
-On a flat band with the auto-scale free the estimate sits a few decibels
+The next paragraph was measured before 2026-10-07, when the floor still went
+on the noise; since then the noise is drawn 12% up the map (see
+"Auto-scaling, both ends") and the estimate's line sits inside the pane.
+
+On a flat band with the auto-scale free the estimate sat a few decibels
 under the bottom edge, because the floor's reduction correction is built to
 put an empty band's columns on that edge. Measured: the synthetic wideband
 scene, seed 7 at 2.4 MS/s, drew its floor at -92.5 dBFS and the estimate
