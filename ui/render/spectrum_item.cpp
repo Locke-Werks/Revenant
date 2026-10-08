@@ -1373,7 +1373,20 @@ void SpectrumItem::takeFrame()
     }
 
     reduce_peak(frame.power_db, columns_);
-    ends_ = resolve_ends(frame.floor_db, frame.ceiling_db, headroom_db_, pinsInForce());
+
+    // The same frame again, which a pin moving or a resize does, has had no
+    // time pass: it may still raise the hold, since the columns can differ
+    // after a resize, but must not release it or restart it.
+    const float frame_max = drawn_max(columns_);
+    if (have_last_frame_ && frame.start == last_frame_start_) {
+        if (!display_peak_.valid || frame_max > display_peak_.level_db) {
+            display_peak_ = PeakHold{true, frame_max};
+        }
+    } else {
+        display_peak_ = hold_peak(display_peak_, frame_max, sourceSecondsSinceLast(frame));
+    }
+    ends_ = resolve_ends_held(frame.floor_db, frame.ceiling_db, headroom_db_, display_peak_,
+                              pinsInForce());
     have_frame_ = true;
 
     // The detection list has not changed, but the clock the fade is measured
@@ -1387,6 +1400,17 @@ void SpectrumItem::takeFrame()
 
     notifyQml(NotifyEnds);
     update();
+}
+
+double SpectrumItem::sourceSecondsSinceLast(const rpc::SpectrumFrame& frame) const
+{
+    const double span_low_hz = link_->spanLowHz();
+    const auto rate = static_cast<double>(link_->sourceRate());
+    if (have_last_frame_ && frame.start > last_frame_start_ && rate > 0.0 &&
+        span_low_hz == last_span_low_hz_) {
+        return static_cast<double>(frame.start - last_frame_start_) / rate;
+    }
+    return 0.0;
 }
 
 void SpectrumItem::forgetMarkers()
@@ -1415,15 +1439,9 @@ void SpectrumItem::takeMarkers(const rpc::SpectrumFrame& frame)
     // span moved under the bins: after a retune bin 4000 is another frequency,
     // and easing the marker from the old signal's level would be easing
     // between two different things.
-    const double span_low_hz = link_->spanLowHz();
-    const auto rate = static_cast<double>(link_->sourceRate());
-    double dt_seconds = 0.0;
-    if (have_last_frame_ && frame.start > last_frame_start_ && rate > 0.0 &&
-        span_low_hz == last_span_low_hz_) {
-        dt_seconds = static_cast<double>(frame.start - last_frame_start_) / rate;
-    }
+    const double dt_seconds = sourceSecondsSinceLast(frame);
     last_frame_start_ = frame.start;
-    last_span_low_hz_ = span_low_hz;
+    last_span_low_hz_ = link_->spanLowHz();
     have_last_frame_ = true;
 
     // The floor from the trace as drawn, the peak from the frame's own bins:

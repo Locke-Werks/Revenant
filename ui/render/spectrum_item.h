@@ -844,6 +844,14 @@ private:
     double last_span_low_hz_ = 0.0;
     bool have_last_frame_ = false;
 
+    // Source seconds from the last frame to this one, zero for a new start.
+    // Read before takeMarkers moves the clock on.
+    [[nodiscard]] double sourceSecondsSinceLast(const rpc::SpectrumFrame& frame) const;
+
+    // The largest drawn column, held so the top of the plot stays above it.
+    // See hold_peak in render/spectrum_scale.h.
+    PeakHold display_peak_;
+
     // What an engine frame changes for QML, held and sent at most once a
     // refresh. Frames arrive at about 258 a second at full load, and emitting
     // per frame had QML re-evaluate the plates and readouts, allocating a map

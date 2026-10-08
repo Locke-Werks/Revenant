@@ -305,6 +305,96 @@ struct ScalePins {
     return place_ends(frame_floor_db + headroom_db, frame_ceiling_db, pins);
 }
 
+// ---------------------------------------------------------------------------
+// Keeping the drawn peaks under the top edge
+// ---------------------------------------------------------------------------
+//
+// The owner, 2026-10-07, at 98.1 MHz: the plot's top read -37.1 dBFS and the
+// station's trace reached -31.5, so it was drawn clipped flat against the top
+// edge. The engine's ceiling_db is a high percentile, and a percentile is by
+// construction exceeded by the strongest columns, which on a broadcast band
+// are exactly the stations being looked at. Asked for: the peaks always below
+// the top, fast attack, thirty second release.
+//
+// So the spectrum also holds the largest column it has drawn. It rises to a
+// new maximum in the frame it appears, so no frame is ever drawn clipped, and
+// falls back toward the current frame's maximum with kPeakHoldReleaseSeconds,
+// the engine's own decay, so a station that fades or a carrier that keys off
+// does not snap the scale down the moment it goes.
+//
+// The margin. The owner: "it has always been a bit hot. Need a little space
+// above the peak", roughly 5 to 10% of the height. A fixed 3.5 dB is 8.75% of
+// the 40 dB minimum map, but a fixed level shrinks as a fraction when a strong
+// station widens the map, to 4% at 88 dB. So the margin is the larger of
+// kPeakHoldMarginDb and kPeakHoldMarginFraction of the map's height.
+//
+// The fraction is solved rather than applied after the fact, because the
+// map's height is itself computed from the strong level the margin raises.
+// place_ends puts the strong level at the top and the noise kNoiseFraction up,
+// so the height is (strong - noise) / (1 - kNoiseFraction) and the top sits
+// exactly the margin M above the peak. Asking M >= f * height and solving gives
+// M >= f * (peak - noise) / (1 - kNoiseFraction - f); see peak_margin_db.
+// 3.5 dB is also well over the frame-to-frame jitter of a steady carrier's top
+// bin, so the gap does not flicker shut between releases.
+inline constexpr double kPeakHoldReleaseSeconds = 30.0;
+inline constexpr float kPeakHoldMarginDb = 3.5F;
+inline constexpr float kPeakHoldMarginFraction = 0.07F;
+
+struct PeakHold {
+    bool valid = false;
+    float level_db = 0.0F;
+};
+
+// One frame into the hold. dt_seconds of zero or less is a new start, the
+// convention track_noise_floor and track_span_peak use: no history, a
+// retune, or a stream that went backwards, and the hold takes the frame's
+// maximum as it is.
+[[nodiscard]] inline PeakHold hold_peak(PeakHold held, float frame_max_db, double dt_seconds)
+{
+    if (!held.valid || !(dt_seconds > 0.0) || frame_max_db >= held.level_db) {
+        return PeakHold{true, frame_max_db};
+    }
+    const double step = 1.0 - std::exp(-dt_seconds / kPeakHoldReleaseSeconds);
+    held.level_db = static_cast<float>(held.level_db + (frame_max_db - held.level_db) * step);
+    return held;
+}
+
+// The largest drawn column, after the same reduction the trace draws.
+[[nodiscard]] inline float drawn_max(std::span<const float> columns)
+{
+    float most = kSpectrumFloorDb;
+    for (const float c : columns) {
+        if (c > most) {
+            most = c;
+        }
+    }
+    return most;
+}
+
+// How far above the held peak the top of the map goes. See the margin above.
+[[nodiscard]] inline float peak_margin_db(float peak_db, float noise_db)
+{
+    constexpr float kPerAbove =
+        kPeakHoldMarginFraction / (1.0F - kNoiseFraction - kPeakHoldMarginFraction);
+    return std::max(kPeakHoldMarginDb, kPerAbove * std::max(peak_db - noise_db, 0.0F));
+}
+
+// The spectrum's ends with the held peak taken into account: the strong level
+// is the engine's ceiling or the held peak plus the margin, whichever is
+// higher, and then place_ends as before, so the noise height, the 40 dB
+// minimum and the pins all behave exactly as they did. A pinned ceiling still
+// wins: the operator asked for that top, clipped or not.
+[[nodiscard]] inline MapEnds resolve_ends_held(float frame_floor_db, float frame_ceiling_db,
+                                               float headroom_db, const PeakHold& held,
+                                               const ScalePins& pins)
+{
+    const float noise = frame_floor_db + headroom_db;
+    const float strong =
+        held.valid ? std::max(frame_ceiling_db, held.level_db + peak_margin_db(held.level_db, noise))
+                   : frame_ceiling_db;
+    return place_ends(noise, strong, pins);
+}
+
 // Where a pin lands when the operator pins an end: at the level drawn at that
 // moment, to a tenth of a decibel, which is what the plate beside it prints.
 // Pinning where the map already is means the picture does not jump when the

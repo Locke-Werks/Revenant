@@ -307,3 +307,110 @@ TEST_CASE("the packed colour is the same colour", "[scale]")
         CHECK((packed & 0xFFU) == rgb.b);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The held peak: the drawn trace never reaches the top edge
+// ---------------------------------------------------------------------------
+
+using revenant::ui::drawn_max;
+using revenant::ui::hold_peak;
+using revenant::ui::kPeakHoldMarginDb;
+using revenant::ui::kPeakHoldMarginFraction;
+using revenant::ui::kPeakHoldReleaseSeconds;
+using revenant::ui::PeakHold;
+using revenant::ui::resolve_ends_held;
+
+// Rejects an attack with any lag. The 98.1 MHz report was a station drawn
+// above the top; one frame of a slow rise is one frame drawn clipped.
+TEST_CASE("the held peak rises to a new maximum in the same frame", "[scale][peak]")
+{
+    PeakHold held = hold_peak(PeakHold{}, -60.0F, 0.0);
+    held = hold_peak(held, -31.5F, 0.01);
+    CHECK(held.valid);
+    CHECK(held.level_db == -31.5F);
+}
+
+// Rejects a release that snaps down, and one that never comes down: after one
+// time constant it has covered 1 - 1/e of the way, after ten nearly all.
+TEST_CASE("the held peak releases with a thirty second time constant", "[scale][peak]")
+{
+    PeakHold held = hold_peak(PeakHold{}, -30.0F, 0.0);
+    held = hold_peak(held, -70.0F, 1.0 / 60.0);
+    CHECK(held.level_db > -30.1F);
+
+    PeakHold one = hold_peak(PeakHold{true, -30.0F}, -70.0F, kPeakHoldReleaseSeconds);
+    CHECK_THAT(one.level_db, WithinAbs(-30.0 - 40.0 * (1.0 - std::exp(-1.0)), 0.01));
+
+    // Many small steps land where one large step does, so the release does not
+    // depend on the frame rate.
+    PeakHold stepped{true, -30.0F};
+    for (int i = 0; i < 30 * 60; ++i) {
+        stepped = hold_peak(stepped, -70.0F, 1.0 / 60.0);
+    }
+    CHECK_THAT(stepped.level_db, WithinAbs(one.level_db, 0.05));
+}
+
+// Rejects carrying a hold across a retune or a looped recording: dt of zero
+// is a new start and takes the frame as it is.
+TEST_CASE("a new start resets the held peak", "[scale][peak]")
+{
+    const PeakHold held = hold_peak(PeakHold{true, -20.0F}, -70.0F, 0.0);
+    CHECK(held.level_db == -70.0F);
+}
+
+TEST_CASE("the drawn maximum is the largest reduced column", "[scale][peak]")
+{
+    const std::vector<float> bins{-90.0F, -31.5F, -95.0F, -91.0F, -92.0F, -93.0F};
+    std::vector<float> columns(3);
+    reduce_peak(bins, columns);
+    CHECK(drawn_max(columns) == -31.5F);
+}
+
+// Rejects the reported bug: a percentile ceiling under the drawn peak. And
+// rejects a margin of nothing, the peak touching the edge.
+TEST_CASE("the top of the map sits a visible margin above the held peak", "[scale][peak]")
+{
+    // The owner's numbers: ceiling -37.1, peak -31.5.
+    const PeakHold held{true, -31.5F};
+    const auto ends = resolve_ends_held(-100.0F, -37.1F, 5.0F, held, ScalePins{});
+    const float gap = ends.ceiling_db - held.level_db;
+    CHECK(gap >= kPeakHoldMarginDb - 1e-4F);
+    CHECK(gap / ends.span_db() >= 0.05F);
+    CHECK(gap / ends.span_db() <= 0.10F);
+
+    // A strong station on a wide map keeps the fraction, not just the decibels.
+    const PeakHold strong{true, 0.0F};
+    const auto wide = resolve_ends_held(-120.0F, -40.0F, 5.0F, strong, ScalePins{});
+    CHECK_THAT((wide.ceiling_db - strong.level_db) / wide.span_db(),
+               WithinAbs(kPeakHoldMarginFraction, 1e-4));
+
+    // On a quiet band the minimum span wins and the margin is larger still.
+    const PeakHold quiet{true, -88.0F};
+    const auto narrow = resolve_ends_held(-100.0F, -85.0F, 5.0F, quiet, ScalePins{});
+    CHECK(narrow.span_db() == kDisplayMinimumSpanDb);
+    CHECK(narrow.ceiling_db - quiet.level_db > kPeakHoldMarginDb);
+}
+
+// Rejects the hold lowering the engine's ceiling, which is still the floor of
+// the strong level.
+TEST_CASE("the engine ceiling still applies above a low held peak", "[scale][peak]")
+{
+    const auto ends = resolve_ends_held(-100.0F, -20.0F, 5.0F, PeakHold{true, -60.0F}, ScalePins{});
+    CHECK(ends.ceiling_db == -20.0F);
+}
+
+// Rejects the hold overriding a pin.
+TEST_CASE("a pinned ceiling beats the held peak", "[scale][peak]")
+{
+    const auto ends = resolve_ends_held(-100.0F, -37.1F, 5.0F, PeakHold{true, -31.5F},
+                                        set_ceiling_pin(ScalePins{}, -50.0F));
+    CHECK(ends.ceiling_db == -50.0F);
+}
+
+// Rejects the hold moving the noise: it stays kNoiseFraction up the map.
+TEST_CASE("the held peak leaves the noise where place_ends puts it", "[scale][peak]")
+{
+    const float noise = -100.0F + 5.0F;
+    const auto ends = resolve_ends_held(-100.0F, -37.1F, 5.0F, PeakHold{true, -10.0F}, ScalePins{});
+    CHECK_THAT((noise - ends.floor_db) / ends.span_db(), WithinAbs(kNoiseFraction, 1e-4));
+}
