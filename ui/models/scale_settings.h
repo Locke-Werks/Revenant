@@ -49,7 +49,7 @@ public:
         pins_.floor_db = store.value(settings::kScaleFloorDb, 0.0).toFloat();
         pins_.ceiling_pinned = store.value(settings::kScaleCeilingPinned, false).toBool();
         pins_.ceiling_db = store.value(settings::kScaleCeilingDb, 0.0).toFloat();
-        waterfall_contrast_ = clamp_fit(store.value(settings::kWaterfallContrast, 0.0).toDouble());
+        waterfall_contrast_ = clamp_contrast(store.value(settings::kWaterfallContrast, 0.0).toDouble());
         spectrum_range_fit_ = clamp_fit(store.value(settings::kSpectrumRangeFit, 0.0).toDouble());
     }
 
@@ -58,7 +58,7 @@ public:
 
     void setWaterfallContrast(double value)
     {
-        value = clamp_fit(value);
+        value = clamp_contrast(value);
         if (value == waterfall_contrast_) {
             return;
         }
@@ -150,6 +150,13 @@ private:
     [[nodiscard]] static double clamp_fit(double value)
     {
         return value > 0.0 ? std::min(value, 1.0) : 0.0;
+    }
+
+    // The contrast runs on past tight to the hot ends; see HistoryLevels::ends.
+    [[nodiscard]] static double clamp_contrast(double value)
+    {
+        return value > 0.0 ? std::min(value, static_cast<double>(kMaxWaterfallContrast))
+                           : 0.0;
     }
 
     ScalePins pins_;

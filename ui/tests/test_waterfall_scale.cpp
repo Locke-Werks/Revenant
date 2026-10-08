@@ -265,6 +265,22 @@ TEST_CASE("pins override the contrast", "[waterfall-scale][fit]")
     CHECK(levels.ends(both, 1.0F).ceiling_db == -50.0F);
 }
 
+// Rejects a contrast that stops at tight: past it the noise goes to black and
+// the top comes down to halfway between the noise and the strong level.
+TEST_CASE("contrast 2 puts the noise on the floor and halves the range", "[waterfall-scale][fit]")
+{
+    const auto levels = settled(-115.0F, -100.0F, -60.0F);
+    const auto ends = levels.ends(ScalePins{}, 2.0F);
+    CHECK_THAT(ends.floor_db, WithinAbs(-100.0, 1e-4));
+    CHECK_THAT(ends.ceiling_db, WithinAbs(-80.0, 1e-4));
+    const auto at1 = levels.ends(ScalePins{}, 1.0F);
+    const auto mid = levels.ends(ScalePins{}, 1.5F);
+    CHECK_THAT(mid.floor_db, WithinAbs((at1.floor_db + ends.floor_db) / 2.0F, 1e-4));
+    CHECK_THAT(mid.ceiling_db, WithinAbs((at1.ceiling_db + ends.ceiling_db) / 2.0F, 1e-4));
+    const ScalePins floor = set_floor_pin(ScalePins{}, -130.0F);
+    CHECK(levels.ends(floor, 2.0F).floor_db == -130.0F);
+}
+
 // Rejects the minimum as the weak level: one null pixel would set black.
 TEST_CASE("the weak level is the history's hundredth", "[waterfall-scale][fit]")
 {

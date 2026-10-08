@@ -208,6 +208,7 @@ ColumnLayout {
         required property string label
         required property string tip
         property alias slider: fitSlider
+        property real maximum: 1
         signal moved(real value)
 
         spacing: 8
@@ -229,7 +230,7 @@ ColumnLayout {
             id: fitSlider
             Layout.preferredWidth: 180
             from: 0
-            to: 1
+            to: fit.maximum
             stepSize: 0.01
             onMoved: fit.moved(value)
 
@@ -247,7 +248,7 @@ ColumnLayout {
         }
 
         Readout {
-            widest: "100%"
+            widest: "200%"
             horizontalAlignment: Text.AlignLeft
             text: Math.round(fitSlider.value * 100) + "%"
             color: Theme.ink
@@ -257,8 +258,10 @@ ColumnLayout {
     FitRow {
         id: contrastRow
         label: "waterfall contrast"
-        tip: "Padded is the usual look. Tight spreads the weakest to the strongest level in the "
-             + "waterfall's history across the whole colour map. Pins still win."
+        maximum: 2
+        tip: "Padded is the usual look. 100% spreads the weakest to the strongest level in the "
+             + "waterfall's history across the whole colour map. Past that the noise goes black "
+             + "and strong signals saturate, so weak ones stand out. Pins still win."
         onMoved: (value) => ScaleSettings.waterfallContrast = value
     }
 

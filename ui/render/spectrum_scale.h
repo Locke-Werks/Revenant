@@ -412,6 +412,9 @@ struct PeakHold {
 inline constexpr float kWaterfallTightGuardDb = 1.0F;
 inline constexpr float kSpectrumTightGuardDb = 0.5F;
 
+// The waterfall contrast runs on past tight to 2; see HistoryLevels::ends.
+inline constexpr float kMaxWaterfallContrast = 2.0F;
+
 // The tight ends for a measured low and high, honouring pins on the same terms
 // as place_ends: a pinned end is where it was pinned, and the free end keeps at
 // least the guard away from it.

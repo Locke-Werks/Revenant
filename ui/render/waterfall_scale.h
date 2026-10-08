@@ -302,16 +302,30 @@ public:
 
     // Contrast 0 is place_ends as it always was; 1 puts the weak level on the
     // map's bottom and the strong level on its top. See blend_ends.
+    //
+    // 1 to 2 goes on to the hot ends: the noise on the bottom edge and the top
+    // halfway from the noise to the strong level. Past 1 is the owner's
+    // request of 2026-10-08 for more: 0 to 1 alone barely moved the picture,
+    // because the weak level sits only a few dB under the noise, which is
+    // about where place_ends already puts the floor, so the only change was
+    // the ceiling. The hot ends black out the noise and saturate the strongest
+    // signals, which is what lets a weak one stand out.
     [[nodiscard]] MapEnds ends(const ScalePins& pins, float contrast = 0.0F) const
     {
         const MapEnds padded = place_ends(noise_db_, strong_db_, pins);
         if (!(contrast > 0.0F)) {
             return padded;
         }
-        return blend_ends(padded,
-                          tight_ends(weak_db_, strong_db_, kWaterfallTightGuardDb, pins),
-                          contrast);
+        const MapEnds tight = tight_ends(weak_db_, strong_db_, kWaterfallTightGuardDb, pins);
+        if (!(contrast > 1.0F)) {
+            return blend_ends(padded, tight, contrast);
+        }
+        const float hot_top = noise_db_ + kHotTopFraction * std::max(strong_db_ - noise_db_, 0.0F);
+        return blend_ends(tight, tight_ends(noise_db_, hot_top, kWaterfallTightGuardDb, pins),
+                          contrast - 1.0F);
     }
+
+    static constexpr float kHotTopFraction = 0.5F;
 
 private:
     [[nodiscard]] static float follow(float now, float target, double dt, bool expanding)
