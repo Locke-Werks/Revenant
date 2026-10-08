@@ -803,6 +803,11 @@ private:
     {
         return map_pins_ == nullptr ? ScalePins{} : map_pins_->pins();
     }
+
+    [[nodiscard]] float rangeFitInForce() const
+    {
+        return map_pins_ == nullptr ? 0.0F : static_cast<float>(map_pins_->spectrumRangeFit());
+    }
     float headroom_db_ = 0.0F;
     std::size_t reduced_bins_ = 0;
     bool have_frame_ = false;

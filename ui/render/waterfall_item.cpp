@@ -213,6 +213,10 @@ void WaterfallItem::setMapPins(ScaleSettings* pins)
     // owner asked to be rid of.
     if (map_pins_ != nullptr) {
         connect(map_pins_, &ScaleSettings::pinsChanged, this, &WaterfallItem::onPinsChanged);
+        // The contrast slider is an operator's hand on the scale like a pin,
+        // so it recolours everything at once rather than easing tile by tile.
+        connect(map_pins_, &ScaleSettings::waterfallContrastChanged, this,
+                &WaterfallItem::onPinsChanged);
     }
     onPinsChanged();
     emit mapPinsChanged();
@@ -694,7 +698,7 @@ void WaterfallItem::onPinsChanged()
     if (!levels_.valid()) {
         return;
     }
-    ends_ = levels_.ends(pinsInForce());
+    ends_ = levels_.ends(pinsInForce(), contrastInForce());
     recolourAll();
     emit endsChanged();
     update();
@@ -1041,8 +1045,9 @@ void WaterfallItem::takeFrame()
     }
     last_sample_end_ = frame_end;
     levels_.update(histogram_.percentile(kHistoryNoisePermille),
-                   histogram_.percentile(kHistoryStrongPermille), seconds);
-    ends_ = levels_.ends(pinsInForce());
+                   histogram_.percentile(kHistoryStrongPermille), seconds,
+                   histogram_.percentile(kHistoryWeakPermille));
+    ends_ = levels_.ends(pinsInForce(), contrastInForce());
 
     // The new row is coloured with the rest of its tile, so a tile is one
     // scale throughout. A tile already out of tolerance is recoloured whole,

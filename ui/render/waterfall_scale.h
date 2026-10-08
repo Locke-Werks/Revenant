@@ -245,6 +245,16 @@ private:
 inline constexpr std::uint32_t kHistoryNoisePermille = 250;
 inline constexpr std::uint32_t kHistoryStrongPermille = 999;
 
+// The weak level, the bottom of the contrast slider's tight end: one pixel in a
+// hundred below it. Not the minimum, because the drawn noise is a log of an
+// exponential power, whose deepest pixel among a million and a half falls tens
+// of dB under the rest and would spend most of the map on single null pixels.
+// The hundredth sits a little under the bulk of the noise, so at full contrast
+// the noise floor's own texture spans the map rather than one stray pixel
+// setting black. The top keeps the strong level for the same reason in mirror:
+// the maximum is one pixel, the thousandth is the strongest signal on screen.
+inline constexpr std::uint32_t kHistoryWeakPermille = 10;
+
 // How fast the waterfall's ends follow the history. Expanding, the noise
 // falling or the strong level rising, takes a few seconds, so a signal that
 // arrives brightens the whole picture's contrast over the time it takes to
@@ -260,13 +270,22 @@ class HistoryLevels {
 public:
     void update(float noise_db, float strong_db, double seconds)
     {
+        update(noise_db, strong_db, seconds, noise_db);
+    }
+
+    // The weak level eases on the same terms as the noise: falling is
+    // expanding the contrast and takes seconds, rising takes thirty.
+    void update(float noise_db, float strong_db, double seconds, float weak_db)
+    {
         if (!valid_) {
             noise_db_ = noise_db;
             strong_db_ = strong_db;
+            weak_db_ = weak_db;
             valid_ = true;
             return;
         }
         const double dt = std::max(seconds, 0.0);
+        weak_db_ = follow(weak_db_, weak_db, dt, weak_db < weak_db_);
         noise_db_ = follow(noise_db_, noise_db, dt, noise_db < noise_db_);
         strong_db_ = follow(strong_db_, strong_db, dt, strong_db > strong_db_);
     }
@@ -279,9 +298,19 @@ public:
 
     // The ends the waterfall draws against: place_ends, the spectrum's rule,
     // on the smoothed levels, so the noise sits at the same height on both.
-    [[nodiscard]] MapEnds ends(const ScalePins& pins) const
+    [[nodiscard]] float weak_db() const { return weak_db_; }
+
+    // Contrast 0 is place_ends as it always was; 1 puts the weak level on the
+    // map's bottom and the strong level on its top. See blend_ends.
+    [[nodiscard]] MapEnds ends(const ScalePins& pins, float contrast = 0.0F) const
     {
-        return place_ends(noise_db_, strong_db_, pins);
+        const MapEnds padded = place_ends(noise_db_, strong_db_, pins);
+        if (!(contrast > 0.0F)) {
+            return padded;
+        }
+        return blend_ends(padded,
+                          tight_ends(weak_db_, strong_db_, kWaterfallTightGuardDb, pins),
+                          contrast);
     }
 
 private:
@@ -295,6 +324,7 @@ private:
     bool valid_ = false;
     float noise_db_ = 0.0F;
     float strong_db_ = 0.0F;
+    float weak_db_ = 0.0F;
 };
 
 // ---------------------------------------------------------------------------

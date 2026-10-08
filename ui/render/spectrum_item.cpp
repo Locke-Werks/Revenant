@@ -1194,6 +1194,8 @@ void SpectrumItem::setMapPins(ScaleSettings* pins)
         // the operator sees where the end went while their hand is still on
         // the control rather than at the next frame.
         connect(map_pins_, &ScaleSettings::pinsChanged, this, &SpectrumItem::takeFrame);
+        connect(map_pins_, &ScaleSettings::spectrumRangeFitChanged, this,
+                &SpectrumItem::takeFrame);
     }
     emit mapPinsChanged();
     takeFrame();
@@ -1385,8 +1387,8 @@ void SpectrumItem::takeFrame()
     } else {
         display_peak_ = hold_peak(display_peak_, frame_max, sourceSecondsSinceLast(frame));
     }
-    ends_ = resolve_ends_held(frame.floor_db, frame.ceiling_db, headroom_db_, display_peak_,
-                              pinsInForce());
+    ends_ = resolve_ends_fit(frame.floor_db, frame.ceiling_db, headroom_db_, display_peak_,
+                             pinsInForce(), rangeFitInForce());
     have_frame_ = true;
 
     // The detection list has not changed, but the clock the fade is measured

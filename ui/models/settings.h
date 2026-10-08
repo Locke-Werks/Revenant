@@ -111,6 +111,14 @@ inline constexpr QLatin1StringView kScaleFloorDb{"display/floorDb"};
 inline constexpr QLatin1StringView kScaleCeilingPinned{"display/ceilingPinned"};
 inline constexpr QLatin1StringView kScaleCeilingDb{"display/ceilingDb"};
 
+// The two fit sliders, each 0 to 1 with 0 the padded look the displays had
+// before them: the waterfall's contrast and the spectrum's range fit. Global
+// rather than per radio, since they are about how the operator likes to read
+// the picture and not about any one front end. See render/spectrum_scale.h,
+// blend_ends.
+inline constexpr QLatin1StringView kWaterfallContrast{"display/waterfallContrast"};
+inline constexpr QLatin1StringView kSpectrumRangeFit{"display/spectrumRangeFit"};
+
 // The bookmark list, as one JSON array in one value rather than a QSettings
 // array of groups.
 //

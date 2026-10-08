@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <algorithm>
+
 #include <QObject>
 #include <QSettings>
 #include <QtQmlIntegration>
@@ -34,6 +36,10 @@ class ScaleSettings : public QObject {
     Q_PROPERTY(double floorDb READ floorDb NOTIFY pinsChanged)
     Q_PROPERTY(bool ceilingPinned READ ceilingPinned NOTIFY pinsChanged)
     Q_PROPERTY(double ceilingDb READ ceilingDb NOTIFY pinsChanged)
+    Q_PROPERTY(double waterfallContrast READ waterfallContrast WRITE setWaterfallContrast
+                   NOTIFY waterfallContrastChanged)
+    Q_PROPERTY(double spectrumRangeFit READ spectrumRangeFit WRITE setSpectrumRangeFit
+                   NOTIFY spectrumRangeFitChanged)
 
 public:
     explicit ScaleSettings(QObject* parent = nullptr) : QObject(parent)
@@ -43,6 +49,33 @@ public:
         pins_.floor_db = store.value(settings::kScaleFloorDb, 0.0).toFloat();
         pins_.ceiling_pinned = store.value(settings::kScaleCeilingPinned, false).toBool();
         pins_.ceiling_db = store.value(settings::kScaleCeilingDb, 0.0).toFloat();
+        waterfall_contrast_ = clamp_fit(store.value(settings::kWaterfallContrast, 0.0).toDouble());
+        spectrum_range_fit_ = clamp_fit(store.value(settings::kSpectrumRangeFit, 0.0).toDouble());
+    }
+
+    [[nodiscard]] double waterfallContrast() const { return waterfall_contrast_; }
+    [[nodiscard]] double spectrumRangeFit() const { return spectrum_range_fit_; }
+
+    void setWaterfallContrast(double value)
+    {
+        value = clamp_fit(value);
+        if (value == waterfall_contrast_) {
+            return;
+        }
+        waterfall_contrast_ = value;
+        QSettings().setValue(settings::kWaterfallContrast, value);
+        emit waterfallContrastChanged();
+    }
+
+    void setSpectrumRangeFit(double value)
+    {
+        value = clamp_fit(value);
+        if (value == spectrum_range_fit_) {
+            return;
+        }
+        spectrum_range_fit_ = value;
+        QSettings().setValue(settings::kSpectrumRangeFit, value);
+        emit spectrumRangeFitChanged();
     }
 
     [[nodiscard]] bool floorPinned() const { return pins_.floor_pinned; }
@@ -95,6 +128,8 @@ public:
 
 signals:
     void pinsChanged();
+    void waterfallContrastChanged();
+    void spectrumRangeFitChanged();
 
 private:
     // Written as it happens, like the volume: a pin is one event an operator
@@ -110,7 +145,16 @@ private:
         emit pinsChanged();
     }
 
+    // A hand-edited registry value outside 0 to 1, or not a number, reads as
+    // the nearest end rather than extrapolating the blend past either look.
+    [[nodiscard]] static double clamp_fit(double value)
+    {
+        return value > 0.0 ? std::min(value, 1.0) : 0.0;
+    }
+
     ScalePins pins_;
+    double waterfall_contrast_ = 0.0;
+    double spectrum_range_fit_ = 0.0;
 };
 
 }  // namespace revenant::ui

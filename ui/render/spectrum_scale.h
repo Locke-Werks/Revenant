@@ -399,6 +399,78 @@ struct PeakHold {
 // moment, to a tenth of a decibel, which is what the plate beside it prints.
 // Pinning where the map already is means the picture does not jump when the
 // pin goes in.
+// THE FIT SLIDERS, the owner's request of 2026-10-07: one for the waterfall's
+// contrast and one for the spectrum's range. Each runs from 0, which is the
+// ends above exactly as they were, to 1, where the measured low and high levels
+// sit on the screen's bottom and top edges with no padding and no minimum span.
+// Between the two each end moves linearly in dB, so the slider's midpoint is
+// the midpoint of both ends' travel and nothing about it needs explaining.
+//
+// The tight ends keep a guard span only so the colour and pixel arithmetic
+// never divides by zero; it is deliberately far below the 40 dB minimum, since
+// the point of the tight end is that a 1 dB signal fills the display.
+inline constexpr float kWaterfallTightGuardDb = 1.0F;
+inline constexpr float kSpectrumTightGuardDb = 0.5F;
+
+// The tight ends for a measured low and high, honouring pins on the same terms
+// as place_ends: a pinned end is where it was pinned, and the free end keeps at
+// least the guard away from it.
+[[nodiscard]] inline MapEnds tight_ends(float low_db, float high_db, float guard_db,
+                                        const ScalePins& pins)
+{
+    MapEnds ends;
+    if (pins.floor_pinned && pins.ceiling_pinned) {
+        ends.floor_db = pins.floor_db;
+        ends.ceiling_db = pins.ceiling_db;
+        return ends;
+    }
+    if (pins.floor_pinned) {
+        ends.floor_db = pins.floor_db;
+        ends.ceiling_db = std::max(high_db, ends.floor_db + guard_db);
+        return ends;
+    }
+    if (pins.ceiling_pinned) {
+        ends.ceiling_db = pins.ceiling_db;
+        ends.floor_db = std::min(low_db, ends.ceiling_db - guard_db);
+        return ends;
+    }
+    ends.floor_db = low_db;
+    ends.ceiling_db = std::max(high_db, low_db + guard_db);
+    return ends;
+}
+
+// Each end linearly from `padded` at fit 0 to `tight` at fit 1. A pinned end is
+// the pin in both, so it stays the pin at every fit; and since both spans are
+// at least the guard, so is any blend of them.
+[[nodiscard]] inline MapEnds blend_ends(const MapEnds& padded, const MapEnds& tight, float fit)
+{
+    if (!(fit > 0.0F)) {
+        return padded;
+    }
+    const float t = std::min(fit, 1.0F);
+    MapEnds ends;
+    ends.floor_db = padded.floor_db + (tight.floor_db - padded.floor_db) * t;
+    ends.ceiling_db = padded.ceiling_db + (tight.ceiling_db - padded.ceiling_db) * t;
+    return ends;
+}
+
+// The spectrum's ends at a range fit. Tight is the same noise estimate place_ends
+// puts 12% up, on the bottom edge, and the held peak itself, with no margin, on
+// the top. The hold's attack and release are hold_peak's whatever the fit.
+[[nodiscard]] inline MapEnds resolve_ends_fit(float frame_floor_db, float frame_ceiling_db,
+                                              float headroom_db, const PeakHold& held,
+                                              const ScalePins& pins, float fit)
+{
+    const MapEnds padded =
+        resolve_ends_held(frame_floor_db, frame_ceiling_db, headroom_db, held, pins);
+    if (!(fit > 0.0F)) {
+        return padded;
+    }
+    const float noise = frame_floor_db + headroom_db;
+    const float peak = held.valid ? held.level_db : frame_ceiling_db;
+    return blend_ends(padded, tight_ends(noise, peak, kSpectrumTightGuardDb, pins), fit);
+}
+
 [[nodiscard]] inline float pin_level(float drawn_db)
 {
     return std::round(drawn_db * 10.0F) / 10.0F;

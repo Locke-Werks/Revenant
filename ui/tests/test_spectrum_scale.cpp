@@ -414,3 +414,94 @@ TEST_CASE("the held peak leaves the noise where place_ends puts it", "[scale][pe
     const auto ends = resolve_ends_held(-100.0F, -37.1F, 5.0F, PeakHold{true, -10.0F}, ScalePins{});
     CHECK_THAT((noise - ends.floor_db) / ends.span_db(), WithinAbs(kNoiseFraction, 1e-4));
 }
+
+// THE RANGE FIT SLIDER. Fully qualified rather than added to the using list
+// above, so these cases read as one block.
+
+namespace fit_cases {
+
+namespace rv = revenant::ui;
+
+constexpr float kFloor = -110.0F;
+constexpr float kHeadroom = 5.0F;
+constexpr float kNoise = kFloor + kHeadroom;
+
+// Rejects a slider whose zero is merely close to today: any change at 0 would
+// move every existing operator's picture the moment the build landed.
+TEST_CASE("range fit 0 is the held ends exactly", "[scale][fit]")
+{
+    const rv::PeakHold held{true, -60.0F};
+    const auto before = rv::resolve_ends_held(kFloor, -70.0F, kHeadroom, held, rv::ScalePins{});
+    const auto at0 = rv::resolve_ends_fit(kFloor, -70.0F, kHeadroom, held, rv::ScalePins{}, 0.0F);
+    CHECK(at0.floor_db == before.floor_db);
+    CHECK(at0.ceiling_db == before.ceiling_db);
+}
+
+// Rejects keeping the 12% offset or the peak margin at the tight end.
+TEST_CASE("range fit 1 puts the noise on the bottom and the held peak on the top",
+          "[scale][fit]")
+{
+    const rv::PeakHold held{true, -60.0F};
+    const auto at1 = rv::resolve_ends_fit(kFloor, -70.0F, kHeadroom, held, rv::ScalePins{}, 1.0F);
+    CHECK_THAT(at1.floor_db, WithinAbs(kNoise, 1e-4));
+    CHECK_THAT(at1.ceiling_db, WithinAbs(-60.0F, 1e-4));
+}
+
+// Rejects easing in some other space, a log of the span or a curve on the
+// slider: the owner asked for linear in between.
+TEST_CASE("range fit one half is the midpoint of both ends", "[scale][fit]")
+{
+    const rv::PeakHold held{true, -60.0F};
+    const rv::ScalePins none{};
+    const auto at0 = rv::resolve_ends_fit(kFloor, -70.0F, kHeadroom, held, none, 0.0F);
+    const auto at1 = rv::resolve_ends_fit(kFloor, -70.0F, kHeadroom, held, none, 1.0F);
+    const auto half = rv::resolve_ends_fit(kFloor, -70.0F, kHeadroom, held, none, 0.5F);
+    CHECK_THAT(half.floor_db, WithinAbs((at0.floor_db + at1.floor_db) / 2.0F, 1e-4));
+    CHECK_THAT(half.ceiling_db, WithinAbs((at0.ceiling_db + at1.ceiling_db) / 2.0F, 1e-4));
+}
+
+// Rejects keeping the 40 dB minimum at the tight end: a signal 1 dB over the
+// noise must fill the trace's height, not a fortieth of it.
+TEST_CASE("at range fit 1 a 1 dB signal fills the height", "[scale][fit]")
+{
+    const rv::PeakHold held{true, kNoise + 1.0F};
+    const auto at1 = rv::resolve_ends_fit(kFloor, kNoise + 1.0F, kHeadroom, held, rv::ScalePins{},
+                                          1.0F);
+    CHECK_THAT(at1.floor_db, WithinAbs(kNoise, 1e-4));
+    CHECK_THAT(at1.ceiling_db, WithinAbs(kNoise + 1.0F, 1e-4));
+}
+
+// Rejects a zero span, which divides by zero in every pixel's position.
+TEST_CASE("the tight end keeps the guard span when peak and noise meet", "[scale][fit]")
+{
+    const rv::PeakHold held{true, kNoise - 3.0F};
+    const auto at1 = rv::resolve_ends_fit(kFloor, kNoise - 3.0F, kHeadroom, held, rv::ScalePins{},
+                                          1.0F);
+    CHECK_THAT(at1.span_db(), WithinAbs(rv::kSpectrumTightGuardDb, 1e-4));
+    CHECK(at1.floor_db == kNoise);
+}
+
+// Rejects a fit that overrides a pin: a pin is there to compare captures.
+TEST_CASE("pins override the range fit", "[scale][fit]")
+{
+    const rv::PeakHold held{true, -60.0F};
+    rv::ScalePins pins = rv::set_floor_pin(rv::ScalePins{}, -130.0F);
+    for (const float s : {0.0F, 0.5F, 1.0F}) {
+        const auto ends = rv::resolve_ends_fit(kFloor, -70.0F, kHeadroom, held, pins, s);
+        CHECK(ends.floor_db == -130.0F);
+    }
+    CHECK_THAT(rv::resolve_ends_fit(kFloor, -70.0F, kHeadroom, held, pins, 1.0F).ceiling_db,
+               WithinAbs(-60.0F, 1e-4));
+
+    pins = rv::set_ceiling_pin(pins, -20.0F);
+    const auto both = rv::resolve_ends_fit(kFloor, -70.0F, kHeadroom, held, pins, 1.0F);
+    CHECK(both.floor_db == -130.0F);
+    CHECK(both.ceiling_db == -20.0F);
+
+    const rv::ScalePins top = rv::set_ceiling_pin(rv::ScalePins{}, -20.0F);
+    const auto at1 = rv::resolve_ends_fit(kFloor, -70.0F, kHeadroom, held, top, 1.0F);
+    CHECK(at1.ceiling_db == -20.0F);
+    CHECK_THAT(at1.floor_db, WithinAbs(kNoise, 1e-4));
+}
+
+}  // namespace fit_cases

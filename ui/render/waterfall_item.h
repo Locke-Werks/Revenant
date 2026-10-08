@@ -411,6 +411,12 @@ private:
     {
         return map_pins_ == nullptr ? ScalePins{} : map_pins_->pins();
     }
+
+    [[nodiscard]] float contrastInForce() const
+    {
+        return map_pins_ == nullptr ? 0.0F
+                                    : static_cast<float>(map_pins_->waterfallContrast());
+    }
     float headroom_db_ = 0.0F;
     std::size_t reduced_bins_ = 0;
 

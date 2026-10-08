@@ -199,3 +199,82 @@ TEST_CASE("a code is coloured against the ends it is given", "[waterfall-scale]"
     CHECK(CodeColourer(high)(code) == CodeColourer(high)(kNoLevel));
     CHECK(CodeColourer(low)(kNoLevel) == CodeColourer(high)(kNoLevel));
 }
+
+// THE CONTRAST SLIDER.
+
+namespace contrast_cases {
+
+using revenant::ui::kHistoryWeakPermille;
+using revenant::ui::kWaterfallTightGuardDb;
+using revenant::ui::place_ends;
+
+HistoryLevels settled(float weak, float noise, float strong)
+{
+    HistoryLevels levels;
+    levels.update(noise, strong, 0.0, weak);
+    return levels;
+}
+
+// Rejects any change to the look an operator already has.
+TEST_CASE("contrast 0 is place_ends exactly", "[waterfall-scale][fit]")
+{
+    const auto levels = settled(-115.0F, -100.0F, -60.0F);
+    const auto ends = levels.ends(ScalePins{}, 0.0F);
+    const auto today = place_ends(-100.0F, -60.0F, ScalePins{});
+    CHECK(ends.floor_db == today.floor_db);
+    CHECK(ends.ceiling_db == today.ceiling_db);
+}
+
+// Rejects keeping the noise offset or the 40 dB minimum at full contrast.
+TEST_CASE("contrast 1 spans the weakest to the strongest level", "[waterfall-scale][fit]")
+{
+    const auto ends = settled(-115.0F, -100.0F, -95.0F).ends(ScalePins{}, 1.0F);
+    CHECK_THAT(ends.floor_db, WithinAbs(-115.0, 1e-4));
+    CHECK_THAT(ends.ceiling_db, WithinAbs(-95.0, 1e-4));
+}
+
+// Rejects a non-linear slider.
+TEST_CASE("contrast one half is the midpoint of both ends", "[waterfall-scale][fit]")
+{
+    const auto levels = settled(-115.0F, -100.0F, -95.0F);
+    const auto at0 = levels.ends(ScalePins{}, 0.0F);
+    const auto at1 = levels.ends(ScalePins{}, 1.0F);
+    const auto half = levels.ends(ScalePins{}, 0.5F);
+    CHECK_THAT(half.floor_db, WithinAbs((at0.floor_db + at1.floor_db) / 2.0F, 1e-4));
+    CHECK_THAT(half.ceiling_db, WithinAbs((at0.ceiling_db + at1.ceiling_db) / 2.0F, 1e-4));
+}
+
+// Rejects a zero span from a flat history, which divides by zero in the colourer.
+TEST_CASE("full contrast keeps the guard span on a flat history", "[waterfall-scale][fit]")
+{
+    const auto ends = settled(-100.0F, -100.0F, -100.0F).ends(ScalePins{}, 1.0F);
+    CHECK_THAT(ends.span_db(), WithinAbs(kWaterfallTightGuardDb, 1e-4));
+}
+
+// Rejects a contrast that overrides a pin.
+TEST_CASE("pins override the contrast", "[waterfall-scale][fit]")
+{
+    const auto levels = settled(-115.0F, -100.0F, -95.0F);
+    const ScalePins floor = set_floor_pin(ScalePins{}, -130.0F);
+    for (const float c : {0.0F, 0.5F, 1.0F}) {
+        CHECK(levels.ends(floor, c).floor_db == -130.0F);
+    }
+    CHECK_THAT(levels.ends(floor, 1.0F).ceiling_db, WithinAbs(-95.0, 1e-4));
+    const ScalePins both = set_ceiling_pin(floor, -50.0F);
+    CHECK(levels.ends(both, 1.0F).floor_db == -130.0F);
+    CHECK(levels.ends(both, 1.0F).ceiling_db == -50.0F);
+}
+
+// Rejects the minimum as the weak level: one null pixel would set black.
+TEST_CASE("the weak level is the history's hundredth", "[waterfall-scale][fit]")
+{
+    CHECK(kHistoryWeakPermille == 10U);
+    LevelHistogram histogram;
+    histogram.add(encode_level(-200.0F));
+    for (int i = 0; i < 999; ++i) {
+        histogram.add(encode_level(-100.0F + static_cast<float>(i % 100) * 0.1F));
+    }
+    CHECK(histogram.percentile(kHistoryWeakPermille) > -101.0F);
+}
+
+}  // namespace contrast_cases

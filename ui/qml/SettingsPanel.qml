@@ -8,6 +8,10 @@
 // because a threshold is a statement about one front end's noise; see
 // models/detector_scope.h.
 //
+// DISPLAY is the two fit sliders, live through ScaleSettings. Auto-scaling
+// itself is always on; these only set how close it pulls the measured levels
+// to the screen's edges. render/spectrum_scale.h, blend_ends.
+//
 // BAND PLAN is the bar over the span and which administrations' rows it and
 // the band menu list, both live through BandPlanSettings.
 
@@ -29,6 +33,8 @@ ColumnLayout {
         thresholdRow.slider.value = engineLink.detectionThresholdWanted
         heldRow.slider.value = engineLink.confidenceBar
         marginRow.slider.value = engineLink.marginBar
+        contrastRow.slider.value = ScaleSettings.waterfallContrast
+        fitRow.slider.value = ScaleSettings.spectrumRangeFit
     }
 
     Component.onCompleted: sync()
@@ -188,6 +194,89 @@ ColumnLayout {
         tip: "This window only. Hides detections that stood only a little above the threshold. "
              + "Below a half passes everything."
         onMoved: (value) => engineLink.marginBar = Math.min(value, engineLink.maxConfidenceBar)
+    }
+
+    Rule {}
+
+    SectionTitle { text: "display" }
+
+    // One fit slider: a name, the padded end, the slider, the tight end and
+    // the value. Applied as it moves, since the point is to watch the picture.
+    component FitRow: RowLayout {
+        id: fit
+
+        required property string label
+        required property string tip
+        property alias slider: fitSlider
+        signal moved(real value)
+
+        spacing: 8
+
+        Label {
+            text: fit.label
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeBody
+            Layout.minimumWidth: 150
+        }
+
+        Label {
+            text: "padded"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        RSlider {
+            id: fitSlider
+            Layout.preferredWidth: 180
+            from: 0
+            to: 1
+            stepSize: 0.01
+            onMoved: fit.moved(value)
+
+            Tip {
+                visible: parent.hovered
+                delay: 400
+                text: fit.tip
+            }
+        }
+
+        Label {
+            text: "tight"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        Readout {
+            widest: "100%"
+            horizontalAlignment: Text.AlignLeft
+            text: Math.round(fitSlider.value * 100) + "%"
+            color: Theme.ink
+        }
+    }
+
+    FitRow {
+        id: contrastRow
+        label: "waterfall contrast"
+        tip: "Padded is the usual look. Tight spreads the weakest to the strongest level in the "
+             + "waterfall's history across the whole colour map. Pins still win."
+        onMoved: (value) => ScaleSettings.waterfallContrast = value
+    }
+
+    FitRow {
+        id: fitRow
+        label: "spectrum range fit"
+        tip: "Padded is the usual look. Pins still win."
+        onMoved: (value) => ScaleSettings.spectrumRangeFit = value
+    }
+
+    Label {
+        Layout.fillWidth: true
+        Layout.maximumWidth: 640
+        wrapMode: Text.WordWrap
+        color: Theme.inkDim
+        font.pixelSize: Theme.sizeSmall
+        text: "At tight, the spectrum's noise floor sits on the bottom edge and its strongest "
+              + "peak on the top edge."
     }
 
     Rule {}
