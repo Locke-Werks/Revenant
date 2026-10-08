@@ -678,6 +678,28 @@ ColumnLayout {
             spacing: 8
             visible: !!sourceSettings.row
 
+            // A PICKED RADIO FILLS THE BOXES WITH WHAT IT WAS LEFT AT, the
+            // owner's request of 2026-10-07: its rate, centre and gain are
+            // kept per radio, so picking it again opens it where it was. A
+            // radio with no memory, or a file, leaves the boxes as they are.
+            // Typing over a box still wins, because the open composes from
+            // the boxes.
+            Connections {
+                target: sourceRow
+                function onChosenChanged() {
+                    const kept = engineLink.rememberedRadio(sourceRow.chosen)
+                    if (!kept.known)
+                        return
+                    if (kept.centre.length > 0)
+                        sourceFreqField.text = kept.centre
+                    if (kept.rate.length > 0)
+                        sourceRateField.text = kept.rate
+                    sourceGainAuto.checked = kept.gainAuto
+                    if (kept.gain.length > 0)
+                        sourceGainField.text = kept.gain
+                }
+            }
+
             Label {
                 visible: !!sourceSettings.row && sourceSettings.row.tunable
                 text: "centre"

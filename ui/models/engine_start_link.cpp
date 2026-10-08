@@ -164,8 +164,9 @@ void EngineLink::consider_last_source()
         case LastSourceAction::Nothing:
             return;
         case LastSourceAction::Reopen:
-            reopening_uri_ = remembered;
-            openSource(remembered);
+            // The radio comes back as it was left, not as it was opened.
+            reopening_uri_ = restored_last_source(remembered);
+            openSource(reopening_uri_);
             return;
         case LastSourceAction::ShowPicker:
             emit sourcePickerWanted();

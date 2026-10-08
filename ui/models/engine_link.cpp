@@ -189,10 +189,24 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
 
     // What a double click's second press measures its first against.
     click_clock_.start();
+
+    // The open radio's rate, centre and gain, kept per radio once they settle.
+    // These three signals are every way one of them moves: a new source or a
+    // retune is connectionChanged, the serial is openedSourceChanged, and the
+    // gain is sourceGainChanged. models/radio_memory.h has the rules.
+    radio_save_timer_.setSingleShot(true);
+    connect(&radio_save_timer_, &QTimer::timeout, this, &EngineLink::save_due_radio_state);
+    connect(this, &EngineLink::connectionChanged, this, &EngineLink::note_radio_state);
+    connect(this, &EngineLink::openedSourceChanged, this, &EngineLink::note_radio_state);
+    connect(this, &EngineLink::sourceGainChanged, this, &EngineLink::note_radio_state);
 }
 
 EngineLink::~EngineLink()
 {
+    // The last second of tuning before the window closed, which the settle
+    // timer would otherwise drop.
+    flush_radio_state();
+
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
         stopping_ = true;

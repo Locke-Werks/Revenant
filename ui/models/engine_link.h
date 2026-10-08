@@ -169,6 +169,7 @@
 #include "models/detector_settings.h"
 #include "models/label_tune.h"
 #include "models/mode_choice.h"
+#include "models/radio_memory.h"
 #include "models/receiver_gone.h"
 #include "models/receiver_marker.h"
 #include "models/receiver_rack.h"
@@ -2090,6 +2091,13 @@ public:
                                                        const QString& rate,
                                                        const QString& gain_db,
                                                        bool gain_auto) const;
+
+    // What the radio in row `index` was left at, as the picker's boxes read
+    // it: "centre", "rate" and "gain" as text, "gainAuto", and "known", which
+    // is false for a device with no serial or no memory. The picker fills its
+    // boxes from this when a row is picked, so the stored values are what an
+    // open sends unless the operator types over them. models/radio_memory.h.
+    [[nodiscard]] Q_INVOKABLE QVariantMap rememberedRadio(int index) const;
 
     [[nodiscard]] bool clamped() const { return info_.ring_clamped; }
     [[nodiscard]] QString clampReason() const;
@@ -4311,6 +4319,21 @@ private:
     void note_open_answer(const QString& uri, bool ok);
 
     bool remember_last_source_ = true;
+
+    // Per-radio rate, centre and gain; ui/models/radio_memory_link.cpp.
+    // Qt thread only. The timer fires once the open radio's state has held
+    // still for kRadioSaveSettleMs, and the destructor flushes what is left.
+    void note_radio_state();
+    void save_due_radio_state();
+    void flush_radio_state();
+    [[nodiscard]] RadioSnapshot current_radio_snapshot() const;
+    // engine/lastSource with the last radio's own centre, rate, gain and
+    // direct sampling mode written over it, for the reopen at launch. The URI
+    // holds what the radio was opened at; this is what it was left at.
+    [[nodiscard]] QString restored_last_source(const QString& remembered) const;
+    RadioSaveQueue radio_save_;
+    QTimer radio_save_timer_;
+    QElapsedTimer radio_save_clock_;
     bool last_source_considered_ = false;
 
     // Any openSource on this window before the first connection landed, which
