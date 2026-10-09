@@ -38,8 +38,10 @@ namespace revenant::ui {
 //
 //   blanker    every mode that produces audio
 //   notch      AM, USB, LSB, DSB and CW, whose audio frequency follows from
-//              where a signal sits in the passband
-//   auto notch the same less CW, where the steady tone is the signal
+//              where a signal sits in the passband, and NFM, which reads the
+//              offset's magnitude as the audio frequency
+//   auto notch the same; on CW the engine guards the pitch, where the steady
+//              tone is the signal, and refuses it at a pitch of zero
 //   reduction  every mode that produces audio
 //
 // No default label: a twelfth mode has to say what it offers here, as it has
@@ -58,9 +60,9 @@ struct NoiseOffer {
         case rpc::Demod::Sam:
         case rpc::Demod::Usb:
         case rpc::Demod::Lsb:
-        case rpc::Demod::Dsb: return {true, true, true, true};
-        case rpc::Demod::Cw: return {true, true, false, true};
+        case rpc::Demod::Dsb:
         case rpc::Demod::Nfm:
+        case rpc::Demod::Cw: return {true, true, true, true};
         case rpc::Demod::Wfm: return {true, false, false, true};
         case rpc::Demod::Raw:
         case rpc::Demod::P25p1:
@@ -101,7 +103,8 @@ inline constexpr double kNrStrengthMax = 1.0;
 
 // The audio frequency a notch at passband_hz lands on, which is what the
 // operator hears it as, or zero where it lands on none: the discarded side of
-// USB or LSB, or the carrier itself. The engine's own mapping is
+// USB or LSB, or the carrier itself. NFM reads the offset's magnitude as the
+// audio frequency, as AM does. The engine's own mapping is
 // dsp::notch_audio_hz.
 [[nodiscard]] inline double notch_audio_hz(rpc::Demod mode, std::int64_t passband_hz,
                                            std::int64_t cw_pitch)
@@ -112,10 +115,10 @@ inline constexpr double kNrStrengthMax = 1.0;
         case rpc::Demod::Lsb: return f < 0.0 ? -f : 0.0;
         case rpc::Demod::Am:
         case rpc::Demod::Sam:
-        case rpc::Demod::Dsb: return std::abs(f);
+        case rpc::Demod::Dsb:
+        case rpc::Demod::Nfm: return std::abs(f);
         case rpc::Demod::Cw: return std::abs(f + static_cast<double>(cw_pitch));
         case rpc::Demod::Raw:
-        case rpc::Demod::Nfm:
         case rpc::Demod::Wfm:
         case rpc::Demod::P25p1:
         case rpc::Demod::Dstar:
@@ -123,6 +126,14 @@ inline constexpr double kNrStrengthMax = 1.0;
         case rpc::Demod::Dmr: return 0.0;
     }
     return 0.0;
+}
+
+// The engine guards a CW automatic notch at the pitch so it leaves the
+// signal alone, and refuses one at a pitch of zero, where the signal is at
+// DC and there is nothing to guard. True for every other mode.
+[[nodiscard]] constexpr bool auto_notch_pitch_ok(const rpc::VrxParams& params)
+{
+    return params.demod != rpc::Demod::Cw || params.cw_pitch > 0;
 }
 
 // What a mode change does to the noise settings, applied to params whose
@@ -143,7 +154,8 @@ inline void fit_noise_to_mode(rpc::VrxParams& params)
     const NoiseOffer offer = noise_offer(params.demod);
     params.nb_enabled = params.nb_enabled && offer.blanker;
     params.notch_enabled = params.notch_enabled && offer.notch;
-    params.auto_notch_enabled = params.auto_notch_enabled && offer.auto_notch;
+    params.auto_notch_enabled = params.auto_notch_enabled && offer.auto_notch &&
+                                auto_notch_pitch_ok(params);
     params.nr_enabled = params.nr_enabled && offer.reduction;
 
     if (params.demod == rpc::Demod::Usb) {
@@ -206,7 +218,8 @@ enum class NoiseStage : std::uint8_t {
 }
 
 // Switches one stage on or off. Returns false, and changes nothing, when the
-// mode does not offer it or when switching it on would be refused: a manual
+// mode does not offer it or when switching it on would be refused: a CW
+// automatic notch at a pitch of zero has no tone to guard, and a manual
 // notch sitting on the side of the carrier the mode discards is moved to the
 // side it keeps first, and one that still lands on no audio stays off.
 inline bool set_noise_stage(rpc::VrxParams& params, NoiseStage stage, bool on)
@@ -228,7 +241,12 @@ inline bool set_noise_stage(rpc::VrxParams& params, NoiseStage stage, bool on)
             }
             params.notch_enabled = on;
             return true;
-        case NoiseStage::AutoNotch: params.auto_notch_enabled = on; return true;
+        case NoiseStage::AutoNotch:
+            if (on && !auto_notch_pitch_ok(params)) {
+                return false;
+            }
+            params.auto_notch_enabled = on;
+            return true;
         case NoiseStage::Reduction: params.nr_enabled = on; return true;
     }
     return false;
@@ -275,14 +293,11 @@ inline bool toggle_noise_stage(rpc::VrxParams& params, NoiseStage stage)
     if (noise_stage_offered(mode, stage)) {
         return {};
     }
-    if (stage == NoiseStage::AutoNotch && mode == rpc::Demod::Cw) {
-        return "not on cw, where the steady tone is the signal";
-    }
     if (mode == rpc::Demod::Raw || mode == rpc::Demod::P25p1 || mode == rpc::Demod::Dstar ||
         mode == rpc::Demod::Tetra || mode == rpc::Demod::Dmr) {
         return "not on a complex tap, which has no audio";
     }
-    return "not on FM, whose audio is not placed by the passband";
+    return "not on WFM";
 }
 
 }  // namespace revenant::ui

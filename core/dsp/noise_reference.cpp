@@ -275,6 +275,7 @@ Status reference_line(const LineConfig& config, const LineParams& params, RealSp
 
     const bool notch = (params.flags & kLineNotch) != 0U;
     const bool ale = (params.flags & kLineAle) != 0U;
+    const bool guard = ale && (params.flags & kLineGuard) != 0U;
     const std::uint32_t per_lane = config.taps / config.lanes;
     const std::uint32_t history_mask = config.history - 1U;
     float* const weights = state.data() + kLineStateWeights;
@@ -285,6 +286,10 @@ Status reference_line(const LineConfig& config, const LineParams& params, RealSp
     float y1 = state[2];
     float y2 = state[3];
     auto position = static_cast<std::uint32_t>(state[kLineStatePosition]);
+    float gx1 = state[kLineStateGuard + 0];
+    float gx2 = state[kLineStateGuard + 1];
+    float gy1 = state[kLineStateGuard + 2];
+    float gy2 = state[kLineStateGuard + 3];
 
     std::vector<float> reference(config.taps);
     std::vector<float> part_y(config.lanes);
@@ -345,6 +350,24 @@ Status reference_line(const LineConfig& config, const LineParams& params, RealSp
             }
             history[position & history_mask] = v;
             out = e;
+            if (guard) {
+                // The prediction less what it learned near the pitch is what
+                // comes off; the update above used the unguarded error.
+                const float t0 = params.gb0 * y;
+                const float t1 = params.gb1 * gx1;
+                const float t2 = params.gb2 * gx2;
+                const float t3 = params.ga1 * gy1;
+                const float t4 = params.ga2 * gy2;
+                float acc = t0 + t1;
+                acc = acc + t2;
+                acc = acc - t3;
+                acc = acc - t4;
+                gx2 = gx1;
+                gx1 = y;
+                gy2 = gy1;
+                gy1 = acc;
+                out = v - acc;
+            }
         }
         audio[n] = out;
         position = position + 1U;
@@ -355,6 +378,10 @@ Status reference_line(const LineConfig& config, const LineParams& params, RealSp
     state[2] = y1;
     state[3] = y2;
     state[kLineStatePosition] = static_cast<float>(position & history_mask);
+    state[kLineStateGuard + 0] = gx1;
+    state[kLineStateGuard + 1] = gx2;
+    state[kLineStateGuard + 2] = gy1;
+    state[kLineStateGuard + 3] = gy2;
     return {};
 }
 
@@ -627,9 +654,9 @@ bool notch_offered(engine::Demod mode) {
         case engine::Demod::Usb:
         case engine::Demod::Lsb:
         case engine::Demod::Dsb:
+        case engine::Demod::Nfm:
         case engine::Demod::Cw: return true;
         case engine::Demod::Raw:
-        case engine::Demod::Nfm:
         case engine::Demod::Wfm:
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
@@ -640,10 +667,10 @@ bool notch_offered(engine::Demod mode) {
 }
 
 bool auto_notch_offered(engine::Demod mode) {
-    // CW is the one linear mode left out, and the reason is the whole point:
-    // the tone the operator is copying is exactly what an adaptive line
-    // enhancer learns and removes.
-    return notch_offered(mode) && mode != engine::Demod::Cw;
+    // CW is offered because plan_noise guards the pitch: the tone the
+    // operator is copying is exactly what an adaptive line enhancer learns,
+    // and the guard keeps it from being subtracted.
+    return notch_offered(mode);
 }
 
 bool noise_reduction_offered(engine::Demod mode) {
@@ -659,10 +686,13 @@ std::optional<double> notch_audio_hz(engine::Demod mode, Hertz passband_hz, Hert
         case engine::Demod::Lsb: return -f;
         case engine::Demod::Am:
         case engine::Demod::Sam:
-        case engine::Demod::Dsb: return std::abs(f);
+        case engine::Demod::Dsb:
+        // A discriminator's audio has no frequency the passband places, so
+        // NFM reads the offset as the audio frequency itself and the display
+        // can carry the control on the axis it already has.
+        case engine::Demod::Nfm: return std::abs(f);
         case engine::Demod::Cw: return std::abs(f + static_cast<double>(cw_pitch));
         case engine::Demod::Raw:
-        case engine::Demod::Nfm:
         case engine::Demod::Wfm:
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
@@ -688,13 +718,15 @@ Status validate_noise_request(const engine::VrxParams& params) {
                                 "not a function of where a signal sits in the passband",
                                 mode));
     }
-    if (params.auto_notch_enabled && params.demod == engine::Demod::Cw) {
-        return fail("the automatic notch is not offered on cw: it removes a steady tone, and "
-                    "on cw the steady tone is the signal");
+    if (params.auto_notch_enabled && params.demod == engine::Demod::Cw &&
+        !(params.cw_pitch > 0)) {
+        return fail("the automatic notch on cw needs a pitch above zero: it is guarded at the "
+                    "pitch so it leaves the signal alone, and at zero beat there is no audio "
+                    "frequency to guard");
     }
     if (params.auto_notch_enabled && !auto_notch_offered(params.demod)) {
         return fail(std::format("the automatic notch is not offered on {}: it needs audio "
-                                "band-limited by a linear mode's passband",
+                                "from a mode whose tones sit at a known audio frequency",
                                 mode));
     }
     if (!(params.notch_depth_db >= 3.0 && params.notch_depth_db <= 80.0)) {
@@ -771,15 +803,42 @@ Expected<NoisePlan> plan_noise(const engine::VrxParams& params, const VrxPlan& p
     }
 
     if (mono && params.auto_notch_enabled) {
-        const double reach = std::max(std::abs(static_cast<double>(plan.passband.low)),
-                                      std::abs(static_cast<double>(plan.passband.high)));
-        const double stride =
+        const bool cw = params.demod == engine::Demod::Cw;
+        // CW's audio is the passband shifted up by the pitch, so its reach is
+        // measured there; anything else the stride assumes would put an
+        // image on the signal.
+        const double shift = cw ? static_cast<double>(params.cw_pitch) : 0.0;
+        const double reach =
+            std::max(std::abs(static_cast<double>(plan.passband.low) + shift),
+                     std::abs(static_cast<double>(plan.passband.high) + shift));
+        double stride =
             reach > 0.0 ? std::floor(static_cast<double>(fa) / (kLineStrideMargin * reach)) : 1.0;
+        // A discriminator's noise is not limited by the passband, so a stride
+        // on NFM would fold it onto the voice.
+        if (params.demod == engine::Demod::Nfm) {
+            stride = 1.0;
+        }
         lp.stride = static_cast<std::uint32_t>(
             std::clamp(stride, 1.0, static_cast<double>(kMaxLineStride)));
         lp.delay = static_cast<std::uint32_t>(
             std::max(1.0, std::round(kLineDelaySeconds * static_cast<double>(fa))));
         lp.flags |= kLineAle;
+
+        if (cw) {
+            const double half =
+                std::max(static_cast<double>(params.notch_width_hz), kCwGuardMinHz);
+            auto guard = design_notch(static_cast<double>(params.cw_pitch), kCwGuardDepthDb,
+                                      2.0 * half, fa);
+            if (!guard) {
+                return std::unexpected(with_context(guard.error(), "receiver cw guard"));
+            }
+            lp.flags |= kLineGuard;
+            lp.gb0 = to_float(guard->b0);
+            lp.gb1 = to_float(guard->b1);
+            lp.gb2 = to_float(guard->b2);
+            lp.ga1 = to_float(guard->a1);
+            lp.ga2 = to_float(guard->a2);
+        }
     }
 
     if (lp.flags != 0U) {

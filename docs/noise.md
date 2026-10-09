@@ -26,16 +26,20 @@ below comes from.
 | Mode | Blanker | Notch | Automatic notch | Noise reduction |
 | --- | --- | --- | --- | --- |
 | AM, SAM, USB, LSB, DSB | yes | yes | yes | yes |
-| CW | yes | yes | refused | yes |
-| NFM, WFM | yes | no | no | yes |
+| CW | yes | yes | yes, guarded at the pitch | yes |
+| NFM | yes | yes | yes | yes |
+| WFM | yes | no | no | yes |
 | raw, P25, D-STAR, TETRA, DMR | no | no | no | no |
 
 A request for a stage a mode does not offer is refused by `engine::place` on
 the call, in a sentence naming the stage and the mode, rather than accepted
-and quietly ignored. The automatic notch is refused by name on CW because
-the steady tone it exists to remove is the signal a CW operator is copying.
-The manual notch needs a mode whose audio frequency follows from where a
-signal sits in the passband, which the FM modes do not have. The complex taps
+and quietly ignored. On CW the steady tone the automatic notch exists to
+remove is the signal the operator is copying, so what it subtracts is
+guarded at the pitch, below; at a pitch of zero there is no audio frequency
+to guard and it is refused by name. NFM's audio has no frequency the
+passband places, so a notch there is read at the magnitude of its offset
+from the centre, as on AM, which lets the passband display carry it on the
+axis it already has. WFM gets neither notch. The complex taps
 hand out complex baseband rather than demodulated audio, so there is nothing
 for an audio stage to work on: the voice a P25, D-STAR or DMR receiver serves
 is synthesised from decoded bits, by the engine's IMBE vocoder for P25 and by
@@ -104,7 +108,7 @@ Hz, default 100.
 Its frequency is signed hertz from the receiver's centre, in the same frame as
 the passband edges, so a display draws it where the interference is. The
 engine maps it to the audio frequency it lands on: itself on USB, its negative
-on LSB, its magnitude on AM and DSB, and its sum with the pitch on CW. One
+on LSB, its magnitude on AM, DSB and NFM, and its sum with the pitch on CW. One
 outside the granted passband is kept but not applied, because the filter has
 already removed what it would cut, and dragging an edge past it does not fail
 the drag. A notch that lands on no audio at all, the discarded side of a
@@ -127,8 +131,22 @@ The predictor reads every S-th sample, with S the largest whole number that
 keeps the audio rate over S at 2.5 times the passband's reach, up to 8. At
 48 kS/s 128 adjacent taps resolve 375 Hz and would take a wide bite out of any
 voice near the tone; a USB receiver gets S = 7 and resolves about 54 Hz. The
-images the stride makes land where the passband put no audio, which is why it
-is offered on the linear modes only.
+images the stride makes land where the passband put no audio. On CW the reach
+is measured in the audio, the passband shifted up by the pitch. NFM gets
+S = 1: a discriminator's noise runs to half the audio rate whatever the
+passband, and a stride would fold it onto the voice, so NFM has the 375 Hz
+resolution, which is still enough for a heterodyne or a CTCSS tone.
+
+On CW the predictor learns the operator's tone like any other, so what it
+subtracts first passes through a second notch section, the guard: 40 dB deep
+at the pitch and twice max(notch width, 50 Hz) wide. Whatever the predictor
+learned within the guard stays in the audio and a heterodyne outside it is
+cancelled. The predictor adapts on its unguarded error, so it learns exactly
+as it does on any other mode; adapting on the guarded output would grow its
+weights on a tone it is never allowed to remove.
+`tests/reference/test_noise.cpp` holds a 700 Hz pitch within 1 dB and a
+heterodyne 600 Hz above it more than 6 dB down, and the same predictor without
+the guard more than 6 dB down on the pitch.
 
 It costs a voice something, and the step is where that is decided. A voiced
 syllable is a harmonic series that holds long enough to be learned, so a
@@ -248,5 +266,8 @@ found nothing to cut.
   on the test's voice. A detector that switched it off with no steady tone
   present would remove that cost, and does not exist.
 - Stereo WFM gets the blanker and neither audio stage.
+- Neither notch has been measured through the engine on NFM or CW. The
+  figures above are the USB receiver's, and the CW guard's are the twin's on
+  two synthetic tones.
 - Nothing here has been listened to on air. Every figure is the synthetic
   voice above, and a voice is not a harmonic series with three formants.

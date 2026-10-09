@@ -664,7 +664,8 @@ struct VrxParams {
     // The manual notch, at signed hertz from `center` in the same frame as
     // passband_low and passband_high, so a display draws it where the
     // interference is. Offered on AM, USB, LSB, DSB and CW, the modes whose
-    // audio frequency follows from where a signal sits; a notch outside the
+    // audio frequency follows from where a signal sits, and on NFM, where the
+    // offset's magnitude is read as the audio frequency; a notch outside the
     // granted passband is kept but notches nothing, because the filter has
     // already removed what it would have cut. Depth in [3, 80] dB, width in
     // [10, 2000] Hz.
@@ -674,8 +675,10 @@ struct VrxParams {
     dsp::Hertz notch_width_hz = 100;
 
     // The automatic notch, an adaptive line enhancer that removes steady
-    // tones from the audio. Offered on AM, USB, LSB and DSB. REFUSED ON CW,
-    // where the steady tone is the signal.
+    // tones from the audio. Offered on AM, USB, LSB, DSB, NFM and CW. On CW
+    // what it subtracts is guarded at the pitch, where the steady tone is the
+    // signal, and it is refused at a pitch of zero, where there is nothing to
+    // guard.
     bool auto_notch_enabled = false;
 
     // Spectral noise reduction on the audio, with one strength control in

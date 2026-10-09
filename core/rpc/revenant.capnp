@@ -992,15 +992,16 @@ struct VrxParams {
 
     # The manual notch, at signed hertz from `center` in the same frame as
     # passbandLow and passbandHigh, so a display draws it where the
-    # interference is. AM, USB, LSB, DSB and CW. Depth in [3, 80] dB, width
+    # interference is. AM, USB, LSB, DSB, CW and NFM. Depth in [3, 80] dB, width
     # in [10, 2000] Hz.
     notch @13 :Bool = false;
     notchHz @14 :Int64 = 1000;
     notchDepthDb @15 :Float64 = 40.0;
     notchWidthHz @16 :Int64 = 100;
 
-    # The automatic notch, which removes steady tones. AM, USB, LSB and DSB;
-    # refused on CW, where the steady tone is the signal.
+    # The automatic notch, which removes steady tones. AM, USB, LSB, DSB, NFM
+    # and CW; on CW it leaves the pitch alone, where the steady tone is the
+    # signal.
     autoNotch @17 :Bool = false;
 
     # Spectral noise reduction, with one strength in [0, 1].

@@ -24,10 +24,13 @@
 #include <numbers>
 #include <random>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "core/dsp/noise_reference.h"
 #include "core/dsp/types.h"
+#include "core/dsp/vrx_reference.h"
+#include "core/engine/vrx.h"
 #include "core/gpu/buffer.h"
 #include "core/gpu/kernel.h"
 #include "core/gpu/shaders.h"
@@ -341,6 +344,15 @@ void check_line(std::uint32_t flags, std::uint64_t seed) {
     params.mu = 0.002F;
     params.leak = static_cast<float>(1.0 - 1.0e-5);
     params.eps = 1.0e-6F;
+    if ((flags & dsp::kLineGuard) != 0U) {
+        auto guard = dsp::design_notch(700.0, dsp::kCwGuardDepthDb, 200.0, 48'000);
+        REQUIRE(guard.has_value());
+        params.gb0 = static_cast<float>(guard->b0);
+        params.gb1 = static_cast<float>(guard->b1);
+        params.gb2 = static_cast<float>(guard->b2);
+        params.ga1 = static_cast<float>(guard->a1);
+        params.ga2 = static_cast<float>(guard->a2);
+    }
 
     std::vector<float> cpu_state(dsp::line_state_size(config), 0.0F);
     std::vector<float> gpu_state = cpu_state;
@@ -383,6 +395,9 @@ void check_line(std::uint32_t flags, std::uint64_t seed) {
         }
         CHECK(energy > 0.0);
     }
+    if ((flags & dsp::kLineGuard) != 0U) {
+        CHECK(cpu_state[dsp::kLineStateGuard + 2] != 0.0F);
+    }
 }
 
 }  // namespace
@@ -405,6 +420,13 @@ TEST_CASE("both notches together match their twin bit-exactly", "[gpu][reference
     REVENANT_NEEDS_GPU();
     INFO("running on " << test::shared_context_description());
     check_line(dsp::kLineNotch | dsp::kLineAle, 0x4E4F495345000005ULL);
+}
+
+TEST_CASE("the cw guard matches its twin bit-exactly across dispatch boundaries",
+          "[gpu][reference][noise]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+    check_line(dsp::kLineNotch | dsp::kLineAle | dsp::kLineGuard, 0x4E4F495345000009ULL);
 }
 
 TEST_CASE("the notch cuts to its stated depth and width", "[reference][noise]") {
@@ -512,6 +534,150 @@ TEST_CASE("the automatic notch removes a steady tone and keeps a moving one",
     // the trade.
     CHECK(steady_kept < -10.0);
     CHECK(moving_kept > -1.0);
+}
+
+namespace {
+
+[[nodiscard]] dsp::VrxPlan audio_plan(dsp::Hertz low, dsp::Hertz high) {
+    dsp::VrxPlan plan;
+    plan.output_rate = 48'000;
+    plan.demod.channels = 1;
+    plan.passband = dsp::Passband{low, high};
+    return plan;
+}
+
+}  // namespace
+
+// REJECTS a table that still refuses the notches on NFM or the automatic one
+// on CW, and one that lets WFM have them.
+TEST_CASE("nfm takes both notches, cw the automatic one, and wfm neither",
+          "[reference][noise]") {
+    CHECK(dsp::notch_offered(engine::Demod::Nfm));
+    CHECK(dsp::auto_notch_offered(engine::Demod::Nfm));
+    CHECK(dsp::notch_offered(engine::Demod::Cw));
+    CHECK(dsp::auto_notch_offered(engine::Demod::Cw));
+    CHECK_FALSE(dsp::notch_offered(engine::Demod::Wfm));
+    CHECK_FALSE(dsp::auto_notch_offered(engine::Demod::Wfm));
+
+    engine::VrxParams nfm;
+    nfm.demod = engine::Demod::Nfm;
+    nfm.notch_enabled = true;
+    nfm.notch_hz = -1'000;
+    nfm.auto_notch_enabled = true;
+    CHECK(dsp::validate_noise_request(nfm).has_value());
+    CHECK(dsp::notch_audio_hz(engine::Demod::Nfm, -1'000, 700) == 1'000.0);
+
+    // A discriminator's noise runs to half the audio rate, so NFM's
+    // predictor reads every sample rather than folding that noise onto the
+    // voice with a stride.
+    const auto nfm_plan = dsp::plan_noise(nfm, audio_plan(-8'000, 8'000), dsp::LineConfig{});
+    REQUIRE(nfm_plan.has_value());
+    REQUIRE(nfm_plan->line);
+    CHECK((nfm_plan->line_params.flags & dsp::kLineNotch) != 0U);
+    CHECK((nfm_plan->line_params.flags & dsp::kLineAle) != 0U);
+    CHECK((nfm_plan->line_params.flags & dsp::kLineGuard) == 0U);
+    CHECK(nfm_plan->line_params.stride == 1U);
+
+    engine::VrxParams wfm = nfm;
+    wfm.demod = engine::Demod::Wfm;
+    wfm.notch_enabled = false;
+    CHECK_FALSE(dsp::validate_noise_request(wfm).has_value());
+    wfm.auto_notch_enabled = false;
+    wfm.notch_enabled = true;
+    CHECK_FALSE(dsp::validate_noise_request(wfm).has_value());
+
+    // CW is guarded at its pitch, and refused at zero beat where there is
+    // no pitch to guard.
+    engine::VrxParams cw;
+    cw.demod = engine::Demod::Cw;
+    cw.cw_pitch = 700;
+    cw.auto_notch_enabled = true;
+    const auto cw_plan = dsp::plan_noise(cw, audio_plan(-250, 250), dsp::LineConfig{});
+    REQUIRE(cw_plan.has_value());
+    REQUIRE(cw_plan->line);
+    CHECK((cw_plan->line_params.flags & dsp::kLineGuard) != 0U);
+    // The stride follows the audio's reach, the passband shifted up by the
+    // pitch. At a pitch of 2750 that is 3000 Hz and floor(48000 / 7500) is
+    // 6, where the passband's 250 from the carrier would have given 8 and
+    // put an image on the signal.
+    cw.cw_pitch = 2'750;
+    const auto higher_plan = dsp::plan_noise(cw, audio_plan(-250, 250), dsp::LineConfig{});
+    REQUIRE(higher_plan.has_value());
+    CHECK(higher_plan->line_params.stride == 6U);
+
+    cw.cw_pitch = 0;
+    const auto zero_beat = dsp::validate_noise_request(cw);
+    REQUIRE_FALSE(zero_beat.has_value());
+    CHECK(zero_beat.error().message.find("automatic notch") != std::string::npos);
+}
+
+// REJECTS a CW automatic notch that cancels the tone the operator is copying,
+// and a guard so wide it lets a heterodyne 600 Hz away through.
+TEST_CASE("on cw the automatic notch keeps the pitch and removes a heterodyne",
+          "[reference][noise]") {
+    constexpr double kRate = 48'000.0;
+    constexpr std::size_t kCount = 96'000;
+    const dsp::LineConfig config{};
+
+    engine::VrxParams cw;
+    cw.demod = engine::Demod::Cw;
+    cw.cw_pitch = 700;
+    cw.notch_width_hz = 100;
+    cw.auto_notch_enabled = true;
+    const auto planned = dsp::plan_noise(cw, audio_plan(-250, 250), config);
+    REQUIRE(planned.has_value());
+    REQUIRE(planned->line);
+
+    // The operator's signal at the pitch and a heterodyne 600 Hz above it,
+    // both steady, which is the case an unguarded predictor cannot tell
+    // apart.
+    std::vector<float> wanted(kCount);
+    std::vector<float> whistle(kCount);
+    for (std::size_t n = 0; n < kCount; ++n) {
+        const double t = static_cast<double>(n) / kRate;
+        wanted[n] = static_cast<float>(0.3 * std::sin(2.0 * std::numbers::pi * 700.0 * t));
+        whistle[n] = static_cast<float>(0.3 * std::sin(2.0 * std::numbers::pi * 1300.0 * t));
+    }
+    std::vector<float> both(kCount);
+    for (std::size_t n = 0; n < kCount; ++n) {
+        both[n] = wanted[n] + whistle[n];
+    }
+
+    auto run = [&](const dsp::LineParams& base) {
+        dsp::LineParams params = base;
+        params.count = static_cast<std::uint32_t>(kCount);
+        std::vector<float> state(dsp::line_state_size(config), 0.0F);
+        std::vector<float> out = both;
+        REQUIRE(dsp::reference_line(config, params, out, state).has_value());
+        return out;
+    };
+    auto kept_db = [&](const std::vector<float>& out, const std::vector<float>& component) {
+        double dot = 0.0;
+        double self = 0.0;
+        for (std::size_t n = kCount / 2; n < kCount; ++n) {
+            dot += static_cast<double>(out[n]) * component[n];
+            self += static_cast<double>(component[n]) * component[n];
+        }
+        return 20.0 * std::log10(std::abs(dot / self));
+    };
+
+    const std::vector<float> guarded = run(planned->line_params);
+    const double wanted_kept = kept_db(guarded, wanted);
+    const double whistle_kept = kept_db(guarded, whistle);
+    INFO("guarded: pitch kept at " << wanted_kept << " dB, heterodyne at " << whistle_kept
+                                   << " dB");
+    CHECK(wanted_kept > -1.0);
+    CHECK(whistle_kept < -6.0);
+
+    // The same predictor without the guard takes the pitch too, so the
+    // figure above is the guard's doing and not a predictor too slow to
+    // learn the tone.
+    dsp::LineParams bare = planned->line_params;
+    bare.flags &= ~dsp::kLineGuard;
+    const std::vector<float> unguarded = run(bare);
+    const double bare_kept = kept_db(unguarded, wanted);
+    INFO("unguarded: pitch kept at " << bare_kept << " dB");
+    CHECK(bare_kept < -6.0);
 }
 
 // ---------------------------------------------------------------------------

@@ -782,19 +782,35 @@ TEST_CASE("the noise fields ride a retune and a mode change and come back on the
     REQUIRE(status.has_value());
     CHECK(same_noise(status->params, am));
 
-    // CW refuses the automatic notch by name rather than cancelling the
-    // tone the operator is copying.
+    // NFM takes every one of them too, the manual notch at the offset's
+    // magnitude.
+    engine::VrxParams nfm = am;
+    nfm.demod = engine::Demod::Nfm;
+    nfm.notch_hz = 1'234;
+    const auto nfm_id = eng.add_vrx(nfm);
+    INFO(test::message_of(nfm_id));
+    REQUIRE(nfm_id.has_value());
+    status = eng.vrx_status(*nfm_id);
+    REQUIRE(status.has_value());
+    CHECK(same_noise(status->params, nfm));
+    REQUIRE(eng.remove_vrx(*nfm_id).has_value());
+
+    // CW at zero beat refuses the automatic notch by name: the guard that
+    // keeps it off the operator's tone has no pitch to sit on.
     engine::VrxParams cw = am;
     cw.demod = engine::Demod::Cw;
     cw.notch_hz = 0;
+    cw.cw_pitch = 0;
+    cw.notch_enabled = false;
     const auto refused = eng.add_vrx(cw);
     REQUIRE_FALSE(refused.has_value());
     INFO(refused.error().message);
     CHECK(refused.error().message.find("cw") != std::string::npos);
     CHECK(refused.error().message.find("automatic notch") != std::string::npos);
 
-    // And takes the rest.
-    cw.auto_notch_enabled = false;
+    // At a pitch it takes all of it, the automatic notch included.
+    cw.cw_pitch = 700;
+    cw.notch_enabled = true;
     const auto cw_id = eng.add_vrx(cw);
     INFO(test::message_of(cw_id));
     REQUIRE(cw_id.has_value());

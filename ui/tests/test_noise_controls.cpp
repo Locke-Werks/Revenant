@@ -52,7 +52,7 @@ TEST_CASE("each mode offers the stages the engine takes on it", "[ui][noise]")
     const Row rows[] = {
         {Demod::Am, true, true, true, true},     {Demod::Usb, true, true, true, true},
         {Demod::Lsb, true, true, true, true},    {Demod::Dsb, true, true, true, true},
-        {Demod::Cw, true, true, false, true},    {Demod::Nfm, true, false, false, true},
+        {Demod::Cw, true, true, true, true},     {Demod::Nfm, true, true, true, true},
         {Demod::Wfm, true, false, false, true},  {Demod::Raw, false, false, false, false},
         {Demod::P25p1, false, false, false, false},
         {Demod::Dstar, false, false, false, false},
@@ -79,11 +79,27 @@ TEST_CASE("a mode change keeps what the new mode takes and drops the rest", "[ui
     fit_noise_to_mode(params);
     CHECK(params.nb_enabled);
     CHECK(params.notch_enabled);
-    CHECK_FALSE(params.auto_notch_enabled);
+    CHECK(params.auto_notch_enabled);
     CHECK(params.nr_enabled);
+
+    // CW at zero beat has no pitch for the engine to guard, so the automatic
+    // notch goes off rather than taking the whole receiver into a refusal.
+    params = everything_on(Demod::Usb);
+    params.demod = Demod::Cw;
+    params.cw_pitch = 0;
+    fit_noise_to_mode(params);
+    CHECK_FALSE(params.auto_notch_enabled);
 
     params = everything_on(Demod::Usb);
     params.demod = Demod::Nfm;
+    fit_noise_to_mode(params);
+    CHECK(params.nb_enabled);
+    CHECK(params.notch_enabled);
+    CHECK(params.auto_notch_enabled);
+    CHECK(params.nr_enabled);
+
+    params = everything_on(Demod::Usb);
+    params.demod = Demod::Wfm;
     fit_noise_to_mode(params);
     CHECK(params.nb_enabled);
     CHECK_FALSE(params.notch_enabled);
@@ -139,9 +155,34 @@ TEST_CASE("a sideband change moves the notch to keep its audio frequency", "[ui]
 TEST_CASE("a stage toggles only where it is offered", "[ui][noise]")
 {
     VrxParams params;
-    params.demod = Demod::Cw;
+    params.demod = Demod::Wfm;
     CHECK_FALSE(toggle_noise_stage(params, NoiseStage::AutoNotch));
     CHECK_FALSE(params.auto_notch_enabled);
+    CHECK_FALSE(toggle_noise_stage(params, NoiseStage::Notch));
+    CHECK_FALSE(params.notch_enabled);
+
+    // CW takes the automatic notch at a pitch, and not at zero beat.
+    params.demod = Demod::Cw;
+    params.cw_pitch = 0;
+    CHECK_FALSE(toggle_noise_stage(params, NoiseStage::AutoNotch));
+    CHECK_FALSE(params.auto_notch_enabled);
+    params.cw_pitch = 700;
+    CHECK(toggle_noise_stage(params, NoiseStage::AutoNotch));
+    CHECK(params.auto_notch_enabled);
+    CHECK(toggle_noise_stage(params, NoiseStage::AutoNotch));
+    CHECK_FALSE(params.auto_notch_enabled);
+
+    // NFM takes both notches, the manual one at the offset's magnitude.
+    params = VrxParams{};
+    params.demod = Demod::Nfm;
+    params.notch_hz = -1'000;
+    CHECK(toggle_noise_stage(params, NoiseStage::Notch));
+    CHECK(params.notch_enabled);
+    CHECK(params.notch_hz == -1'000);
+    CHECK(toggle_noise_stage(params, NoiseStage::AutoNotch));
+    CHECK(params.auto_notch_enabled);
+    params = VrxParams{};
+    params.demod = Demod::Cw;
 
     CHECK(toggle_noise_stage(params, NoiseStage::Reduction));
     CHECK(params.nr_enabled);
@@ -183,15 +224,20 @@ TEST_CASE("the closed panel's line is empty until something is on", "[ui][noise]
 
     // A stage whose flag is set on a mode that does not offer it is not
     // running, so the line does not claim it.
-    params.demod = Demod::Nfm;
+    params.demod = Demod::Wfm;
     CHECK(noise_summary(params) == "blanker, NR 50%");
+
+    // NFM runs both notches, the manual one at the offset's magnitude.
+    params.demod = Demod::Nfm;
+    CHECK(noise_summary(params) == "blanker, notch 1.30 kHz, auto notch, NR 50%");
 }
 
 TEST_CASE("a greyed-out stage says why", "[ui][noise]")
 {
     CHECK(noise_stage_note(Demod::Usb, NoiseStage::AutoNotch).empty());
-    CHECK(std::string(noise_stage_note(Demod::Cw, NoiseStage::AutoNotch)).find("cw") !=
-          std::string::npos);
-    CHECK_FALSE(noise_stage_note(Demod::Nfm, NoiseStage::Notch).empty());
+    CHECK(noise_stage_note(Demod::Cw, NoiseStage::AutoNotch).empty());
+    CHECK(noise_stage_note(Demod::Nfm, NoiseStage::Notch).empty());
+    CHECK(noise_stage_note(Demod::Nfm, NoiseStage::AutoNotch).empty());
+    CHECK_FALSE(noise_stage_note(Demod::Wfm, NoiseStage::Notch).empty());
     CHECK_FALSE(noise_stage_note(Demod::Raw, NoiseStage::Blanker).empty());
 }

@@ -746,15 +746,16 @@ TEST_CASE("the noise fields cross the wire both ways and ride a retune", "[gpu][
     CHECK(local->params.nr_strength == changed.nr_strength);
 
     // A refusal reaches the client in the engine's words: the automatic
-    // notch on CW, where the steady tone is the signal.
-    rpc::VrxParams cw = changed;
-    cw.demod = rpc::Demod::Cw;
-    cw.bandwidth = 500;
-    cw.passband_low = 0;
-    cw.passband_high = 0;
-    cw.notch_hz = 0;
-    cw.auto_notch_enabled = true;
-    const auto refused = harness.client().add_vrx(cw);
+    // notch on the raw tap, which hands out complex baseband and no audio.
+    rpc::VrxParams raw = changed;
+    raw.demod = rpc::Demod::Raw;
+    raw.passband_low = 0;
+    raw.passband_high = 0;
+    raw.nb_enabled = false;
+    raw.notch_enabled = false;
+    raw.nr_enabled = false;
+    raw.auto_notch_enabled = true;
+    const auto refused = harness.client().add_vrx(raw);
     REQUIRE_FALSE(refused.has_value());
     INFO(refused.error().message);
     CHECK(refused.error().message.find("automatic notch") != std::string::npos);

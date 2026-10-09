@@ -43,9 +43,11 @@ const uint kPerLane = kTaps / kLanes;
 
 const uint kFlagNotch = 1u;
 const uint kFlagAle = 2u;
+const uint kFlagGuard = 4u;
 
 const uint kStatePosition = 4u;
-const uint kStateWeights = 8u;
+const uint kStateGuard = 8u;
+const uint kStateWeights = 12u;
 const uint kStateHistory = kStateWeights + kTaps;
 
 // Audio, one float per sample, read and rewritten in place.
@@ -70,6 +72,11 @@ layout(push_constant) uniform Params {
     float mu;
     float leak;
     float eps;
+    float gb0;
+    float gb1;
+    float gb2;
+    float ga1;
+    float ga2;
 } params;
 
 shared float history[kHistory];
@@ -97,6 +104,7 @@ void main() {
     const bool is_lane = lane < kLanes;
     const bool notch = (params.flags & kFlagNotch) != 0u;
     const bool ale = (params.flags & kFlagAle) != 0u;
+    const bool guard = ale && (params.flags & kFlagGuard) != 0u;
     const uint history_mask = kHistory - 1u;
 
     if (ale) {
@@ -116,6 +124,10 @@ void main() {
     float y1 = state.values[2];
     float y2 = state.values[3];
     uint position = uint(state.values[kStatePosition]);
+    float gx1 = state.values[kStateGuard + 0u];
+    float gx2 = state.values[kStateGuard + 1u];
+    float gy1 = state.values[kStateGuard + 2u];
+    float gy2 = state.values[kStateGuard + 3u];
 
     barrier();
 
@@ -173,6 +185,26 @@ void main() {
                 w[j] = kept + step;
             }
             out_value = e;
+            if (guard) {
+                // CW: the prediction less what it learned near the pitch is
+                // what comes off. The update above used the unguarded error,
+                // so the predictor adapts exactly as it does without it.
+                precise float g0 = params.gb0 * y;
+                precise float g1 = params.gb1 * gx1;
+                precise float g2 = params.gb2 * gx2;
+                precise float g3 = params.ga1 * gy1;
+                precise float g4 = params.ga2 * gy2;
+                precise float gacc = g0 + g1;
+                gacc = gacc + g2;
+                gacc = gacc - g3;
+                gacc = gacc - g4;
+                gx2 = gx1;
+                gx1 = y;
+                gy2 = gy1;
+                gy1 = gacc;
+                precise float guarded = v - gacc;
+                out_value = guarded;
+            }
 
             // Every lane has read this sample's history and its partial sums,
             // so lane 0 may now overwrite both for the next.
@@ -201,6 +233,10 @@ void main() {
         state.values[2] = y1;
         state.values[3] = y2;
         state.values[kStatePosition] = float(position & history_mask);
+        state.values[kStateGuard + 0u] = gx1;
+        state.values[kStateGuard + 1u] = gx2;
+        state.values[kStateGuard + 2u] = gy1;
+        state.values[kStateGuard + 3u] = gy2;
     }
     if (ale) {
         for (uint i = lane; i < kHistory; i += width) {

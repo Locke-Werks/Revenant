@@ -241,14 +241,27 @@ static_assert(sizeof(BlankerParams) == 7 * sizeof(std::uint32_t),
 // with S chosen so Fa / S is still 2.5 times that reach, and the same 128 taps
 // span S times as long. A USB receiver at 2.7 kHz gets S = 7 and resolves
 // about 54 Hz. The images the stride creates at multiples of Fa / S fall where
-// the passband put no audio, which is exactly why it is only offered on the
-// linear modes.
+// the passband put no audio. On CW the reach is taken in the audio, the
+// passband shifted up by the pitch, since that is where the fine stage puts
+// it.
 //
-// NOT ON CW. A CW operator is listening to a tone, which is the one thing an
-// adaptive line enhancer exists to remove, so on CW the automatic notch is
-// refused by name rather than left to cancel the signal. Not on the FM modes
-// either, whose audio is not band-limited by the passband the way the stride
-// needs.
+// NFM GETS NO STRIDE. A discriminator's audio is not band-limited by the
+// passband: its noise runs to half the audio rate, and a stride would fold
+// that noise onto the voice. So NFM runs S = 1 and the 375 Hz resolution that
+// comes with it, which is still enough to take out a heterodyne or a CTCSS
+// tone. WFM is not offered at all.
+//
+// THE CW GUARD. A CW operator is listening to a tone, which is the one thing
+// an adaptive line enhancer exists to remove. So on CW the predictor still
+// learns everything it can, but what it subtracts first passes through a
+// second notch section, the guard, centred on the pitch: whatever the
+// predictor learned within the guard of the pitch is left in the audio, and a
+// heterodyne outside it is cancelled as on any other mode. Filtering the
+// subtraction rather than the adaptation keeps the predictor's error, and so
+// its update, the plain normalized LMS above; a predictor that adapted on the
+// guarded output would grow its weights on the tone it may never remove. The
+// guard is kCwGuardDepthDb deep and twice max(notch width, kCwGuardMinHz)
+// wide, so it spans the notch width or 50 Hz either side of the pitch.
 //
 // THE SUMS ARE SPLIT OVER LANES, which is part of the arithmetic and not a
 // scheduling detail. The kernel runs kLanes invocations; lane l owns taps l,
@@ -272,24 +285,34 @@ struct LineConfig {
 
 inline constexpr std::uint32_t kLineNotch = 1U << 0;
 inline constexpr std::uint32_t kLineAle = 1U << 1;
+// The CW guard on the predictor's subtraction. Meaningful only with kLineAle.
+inline constexpr std::uint32_t kLineGuard = 1U << 2;
 inline constexpr std::uint32_t kMaxLineStride = 8;
+
+// The guard's narrowest half-width and its depth. 50 Hz either side covers a
+// keyed carrier's own sidebands at ordinary speeds; 40 dB leaves a learned
+// tone within 0.1 dB of where it was.
+inline constexpr double kCwGuardMinHz = 50.0;
+inline constexpr double kCwGuardDepthDb = 40.0;
 
 // The state buffer, in floats:
 //   [0, 4)                  the notch's x[n-1], x[n-2], y[n-1], y[n-2]
 //   [4]                     the history write position, an exact integer
-//   [8, 8 + taps)           the predictor's weights
-//   [8 + taps, + history)   the history ring
+//   [8, 12)                 the guard's x[n-1], x[n-2], y[n-1], y[n-2]
+//   [12, 12 + taps)         the predictor's weights
+//   [12 + taps, + history)  the history ring
 inline constexpr std::size_t kLineStatePosition = 4;
-inline constexpr std::size_t kLineStateWeights = 8;
+inline constexpr std::size_t kLineStateGuard = 8;
+inline constexpr std::size_t kLineStateWeights = 12;
 [[nodiscard]] constexpr std::size_t line_state_size(const LineConfig& config) {
     return kLineStateWeights + config.taps + config.history;
 }
 
-// Twelve packed words, the kernel's push constant block.
+// Seventeen packed words, the kernel's push constant block.
 struct LineParams {
     std::uint32_t count = 0;
 
-    // kLineNotch and kLineAle, either or both.
+    // kLineNotch and kLineAle, either or both, and kLineGuard with kLineAle.
     std::uint32_t flags = 0;
 
     std::uint32_t stride = 1;
@@ -307,10 +330,18 @@ struct LineParams {
     float mu = 0.0F;
     float leak = 1.0F;
     float eps = 1.0e-6F;
+
+    // The guard section, the same form as the notch's, run on the
+    // predictor's output before it is subtracted.
+    float gb0 = 1.0F;
+    float gb1 = 0.0F;
+    float gb2 = 0.0F;
+    float ga1 = 0.0F;
+    float ga2 = 0.0F;
 };
 
-static_assert(sizeof(LineParams) == 12 * sizeof(std::uint32_t),
-              "LineParams must be twelve packed 32-bit words to alias the kernel's push "
+static_assert(sizeof(LineParams) == 17 * sizeof(std::uint32_t),
+              "LineParams must be seventeen packed 32-bit words to alias the kernel's push "
               "constant block");
 
 // Twin of core/shaders/noise_line.comp. audio is processed in place, count
@@ -480,18 +511,22 @@ static_assert(sizeof(SpectralParams) == 10 * sizeof(std::uint32_t),
 // The blanker is offered on every mode that produces audio. The audio stages
 // run on mono audio only, which excludes a stereo WFM receiver: its two
 // channels are L and R, and a notch or a noise floor per channel would pull
-// the stereo image around. The manual notch needs a mode whose audio
-// frequency is a function of where a signal sits in the passband, which is
-// the five linear modes; the automatic notch is those less CW.
+// the stereo image around. Both notches are offered on the linear modes and
+// on NFM. On NFM a notch's audio frequency is the magnitude of its offset
+// from the centre, since a discriminator's audio has no frequency the
+// passband places; that lets the passband display carry the control on the
+// same axis. On CW the automatic notch runs with the guard above. WFM gets
+// neither: its audio runs to 15 kHz and beyond, its stereo case is declined
+// anyway, and nobody has asked for it.
 [[nodiscard]] bool blanker_offered(engine::Demod mode);
 [[nodiscard]] bool notch_offered(engine::Demod mode);
 [[nodiscard]] bool auto_notch_offered(engine::Demod mode);
 [[nodiscard]] bool noise_reduction_offered(engine::Demod mode);
 
 // The audio frequency a notch placed at passband_hz lands on: passband_hz for
-// USB, minus it for LSB, its magnitude for AM and DSB, and its sum with the
-// pitch for CW, whose fine stage mixes the carrier to the pitch. Empty for a
-// mode with no such mapping.
+// USB, minus it for LSB, its magnitude for AM, DSB and NFM, and its sum with
+// the pitch for CW, whose fine stage mixes the carrier to the pitch. Empty
+// for a mode with no such mapping.
 [[nodiscard]] std::optional<double> notch_audio_hz(engine::Demod mode, Hertz passband_hz,
                                                    Hertz cw_pitch);
 
