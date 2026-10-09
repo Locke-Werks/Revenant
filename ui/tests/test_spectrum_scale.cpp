@@ -553,25 +553,34 @@ TEST_CASE("smoothing flattens a noisy floor", "[scale][smooth]")
     std::mt19937 rng(7);
     std::normal_distribution<float> jitter(0.0F, 2.0F);
     std::vector<float> state;
-    double raw_var = 0.0;
-    double smooth_var = 0.0;
-    int n = 0;
+    std::vector<double> raw;
+    std::vector<double> smooth;
     for (int frame = 0; frame < 300; ++frame) {
         std::vector<float> cols(256);
         for (float& c : cols) {
             c = -100.0F + jitter(rng);
         }
-        const std::vector<float> raw = cols;
+        const std::vector<float> in = cols;
         smooth_trace(state, cols, frame == 0 ? 0.0 : kDt, kDecay, false);
         if (frame > 60) {
-            for (std::size_t i = 0; i < cols.size(); ++i) {
-                raw_var += (raw[i] + 100.0) * (raw[i] + 100.0);
-                smooth_var += (cols[i] + 100.0) * (cols[i] + 100.0);
-                ++n;
-            }
+            raw.insert(raw.end(), in.begin(), in.end());
+            smooth.insert(smooth.end(), cols.begin(), cols.end());
         }
     }
-    CHECK(smooth_var / n < 0.25 * (raw_var / n));
+    // Ripple about the trace's own level: a constant offset is not ripple.
+    const auto spread = [](const std::vector<double>& v) {
+        double mean = 0.0;
+        for (const double x : v) {
+            mean += x;
+        }
+        mean /= static_cast<double>(v.size());
+        double var = 0.0;
+        for (const double x : v) {
+            var += (x - mean) * (x - mean);
+        }
+        return var / static_cast<double>(v.size());
+    };
+    CHECK(spread(smooth) < 0.25 * spread(raw));
 }
 
 // Rejects a smoother that keeps running when switched off, and one that

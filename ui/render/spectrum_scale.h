@@ -382,7 +382,8 @@ struct PeakHold {
 // kSmoothSnapDb above both its own average and the span's median is taken as
 // it is, in the frame it arrives: noise cannot do that, since the median is
 // where the noise sits. Everything else, which is noise and the slow movement
-// of a steady signal, is averaged, rising four times faster than it falls.
+// of a steady signal, is averaged symmetrically: a faster rise than fall would
+// ride the noise's upper envelope, lifting the floor and keeping its ripple.
 //
 // The average is of power, not of decibels. The mean of a noise column's
 // decibels sits a couple of dB under its mean power, so averaging in dB would
@@ -393,7 +394,6 @@ struct PeakHold {
 // takes the last ripple out of the floor and never rounds a signal's skirt.
 inline constexpr float kSmoothSnapDb = 6.0F;
 inline constexpr float kSmoothBlurDb = 3.0F;
-inline constexpr double kSmoothAttackFraction = 0.25;
 inline constexpr double kDefaultSmoothDecaySeconds = 0.25;
 inline constexpr double kMaxSmoothDecaySeconds = 1.0;
 
@@ -432,9 +432,7 @@ inline void smooth_trace(std::vector<float>& state, std::span<float> columns, do
     if (replay) {
         dt_seconds = 0.0;
     }
-    const double fall = 1.0 - std::exp(-dt_seconds / decay_seconds);
-    const double rise =
-        1.0 - std::exp(-dt_seconds / (decay_seconds * kSmoothAttackFraction));
+    const double step = 1.0 - std::exp(-dt_seconds / decay_seconds);
     for (std::size_t i = 0; i < columns.size(); ++i) {
         const float x = columns[i];
         float& s = state[i];
@@ -442,7 +440,6 @@ inline void smooth_trace(std::vector<float>& state, std::span<float> columns, do
             s = x;
             continue;
         }
-        const double step = x > s ? rise : fall;
         const double held = std::pow(10.0, static_cast<double>(s) / 10.0);
         const double now = std::pow(10.0, static_cast<double>(x) / 10.0);
         s = static_cast<float>(10.0 * std::log10(held + (now - held) * step));
