@@ -1201,11 +1201,19 @@ void EngineLink::setSourceGainFraction(double fraction)
     // which would leave the Qt thread unable to say what it asked for.
     const double asked = gain_request_for_fraction(gain_stage_, fraction);
 
+    // Nothing to name yet, so nothing is posted and nothing flips: the
+    // supervisor would drop a nameless request and leave the flags lying.
+    if (gain_stage_.name.empty()) {
+        emit sourceGainChanged();
+        return;
+    }
+
     {
         const std::lock_guard<std::mutex> lock(source_mutex_);
         want_gain_ = true;
         want_gain_db_ = asked;
         want_gain_stage_ = gain_stage_.name;
+        want_gain_seq_ = ++gain_posted_seq_;
     }
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
@@ -1222,16 +1230,48 @@ void EngineLink::setSourceGainFraction(double fraction)
     // is the lie this whole pair of properties exists to avoid.
     gain_db_ = asked;
     gain_auto_ = false;
+    last_manual_db_ = asked;
+    has_last_manual_ = true;
     emit sourceGainChanged();
 }
 
 void EngineLink::setSourceGainAuto(bool on)
 {
+    if (gain_stage_.name.empty()) {
+        emit sourceGainChanged();
+        return;
+    }
+
+    // TAKING MANUAL BACK NAMES A GAIN. Manual mode alone leaves the tuner on
+    // whatever it last had and the engine forgetting what that was, so the row
+    // read "unset" and the operator had to drag the handle to learn anything.
+    // The last manual gain is the one they will expect back; failing that the
+    // reading on screen, failing that the middle of the stage.
+    double manual_db = 0.0;
+    if (!on) {
+        if (has_last_manual_) {
+            manual_db = last_manual_db_;
+        } else if (gain_known_) {
+            manual_db = gain_db_;
+        } else {
+            manual_db = gain_request_for_fraction(gain_stage_, 0.5);
+        }
+    }
+
     {
         const std::lock_guard<std::mutex> lock(source_mutex_);
         want_gain_auto_ = on;
         want_gain_auto_set_ = true;
         want_gain_stage_ = gain_stage_.name;
+        want_gain_seq_ = ++gain_posted_seq_;
+        if (!on) {
+            want_gain_ = true;
+            want_gain_db_ = manual_db;
+        } else {
+            // A gain still queued behind this would take manual back the moment
+            // auto was granted; see the ordering note in apply_source_gain.
+            want_gain_ = false;
+        }
     }
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
@@ -1246,6 +1286,10 @@ void EngineLink::setSourceGainAuto(bool on)
     // operator takes manual control back and gets an answer.
     if (on) {
         gain_known_ = false;
+    } else {
+        // The handle goes to the gain being asked for; the readout still waits
+        // for the device, as it does for a drag.
+        gain_db_ = manual_db;
     }
     emit sourceGainChanged();
 }
@@ -1260,10 +1304,12 @@ void EngineLink::apply_source_gain()
     double db = 0.0;
     bool auto_set = false;
     bool automatic = false;
+    std::uint64_t seq = 0;
     std::string stage;
     {
         const std::lock_guard<std::mutex> lock(source_mutex_);
         wanted = std::exchange(want_gain_, false);
+        seq = want_gain_seq_;
         db = want_gain_db_;
         auto_set = std::exchange(want_gain_auto_set_, false);
         automatic = want_gain_auto_;
@@ -1283,14 +1329,27 @@ void EngineLink::apply_source_gain()
     }
 
     // An empty name is a request posted before any descriptor arrived, which
-    // has nothing to name and nothing to set.
+    // has nothing to name and nothing to set. The setters refuse to post one,
+    // so this is a guard; the answer still crosses so the Qt thread drops
+    // anything it flipped early rather than showing a mode nobody applied.
     if (stage.empty()) {
+        {
+            const std::lock_guard<std::mutex> lock(source_mutex_);
+            handover_has_gain_ = true;
+            handover_gain_db_ = db;
+            handover_gain_auto_ = auto_set ? !automatic : false;
+            handover_gain_auto_decided_ = auto_set;
+            handover_gain_fault_ = QStringLiteral("no gain stage to set yet");
+            handover_gain_seq_ = seq;
+        }
+        QMetaObject::invokeMethod(this, [this] { adopt_gain(false); }, Qt::QueuedConnection);
         return;
     }
 
     QString fault;
     double granted = db;
     bool granted_known = false;
+    bool auto_failed = false;
 
     // AUTO FIRST WHEN BOTH ARE PENDING, because taking manual control back is
     // expressed as a gain change: set_gain puts the tuner into manual mode on
@@ -1300,6 +1359,7 @@ void EngineLink::apply_source_gain()
     if (auto_set) {
         if (auto applied = client_->set_source_gain_auto(stage, automatic); !applied) {
             fault = QString::fromStdString(applied.error().message);
+            auto_failed = true;
         } else if (automatic) {
             granted_known = false;
         }
@@ -1319,8 +1379,19 @@ void EngineLink::apply_source_gain()
         const std::lock_guard<std::mutex> lock(source_mutex_);
         handover_has_gain_ = true;
         handover_gain_db_ = granted;
-        handover_gain_auto_ = auto_set ? automatic : false;
+        // A gain applied after an auto-on took manual back (set_gain leaves
+        // the tuner in manual mode), so auto stands only when no gain
+        // followed it. A refused auto request leaves the mode where it was,
+        // which is the opposite of what the Qt thread flipped to.
+        if (auto_failed) {
+            handover_gain_auto_ = !automatic;
+            handover_gain_auto_decided_ = true;
+        } else {
+            handover_gain_auto_ = auto_set && automatic && !(wanted && granted_known);
+            handover_gain_auto_decided_ = auto_set || granted_known;
+        }
         handover_gain_fault_ = fault;
+        handover_gain_seq_ = seq;
     }
     QMetaObject::invokeMethod(this, [this, granted_known] { adopt_gain(granted_known); },
                               Qt::QueuedConnection);
@@ -1406,6 +1477,20 @@ void EngineLink::adopt_gain_stage()
         gain_auto_ = false;
         gain_db_ = gain_stage_.min_db;
         gain_fault_.clear();
+        has_last_manual_ = false;
+        // A request for the last stage says nothing about this one.
+        gain_answered_seq_ = gain_posted_seq_;
+    }
+
+    // WHILE A REQUEST IS IN FLIGHT THE DESCRIPTOR IS OLDER NEWS. One read
+    // before the operator turned auto off still says in_force_auto, and
+    // adopting it would re-tick auto over a manual request about to land.
+    // The answer to the request is what adopt_gain takes; a descriptor read
+    // with nothing outstanding, as after a reopen, is the device's own word
+    // and is taken.
+    if (gain_posted_seq_ != gain_answered_seq_) {
+        emit sourceGainChanged();
+        return;
     }
 
     // WHAT THE ENGINE SAYS THE STAGE IS ON, which is the device's own answer
@@ -1421,6 +1506,8 @@ void EngineLink::adopt_gain_stage()
         gain_db_ = *gain_stage_.in_force_db;
         gain_known_ = true;
         gain_fault_.clear();
+        last_manual_db_ = gain_db_;
+        has_last_manual_ = true;
     }
 
     emit sourceGainChanged();
@@ -1430,6 +1517,7 @@ void EngineLink::adopt_gain(bool granted_known)
 {
     double db = 0.0;
     bool automatic = false;
+    bool decided = false;
     QString fault;
     {
         const std::lock_guard<std::mutex> lock(source_mutex_);
@@ -1439,19 +1527,23 @@ void EngineLink::adopt_gain(bool granted_known)
         handover_has_gain_ = false;
         db = handover_gain_db_;
         automatic = handover_gain_auto_;
+        decided = std::exchange(handover_gain_auto_decided_, false);
+        gain_answered_seq_ = std::max(gain_answered_seq_, handover_gain_seq_);
         fault = handover_gain_fault_;
     }
 
     gain_fault_ = fault;
-    if (fault.isEmpty()) {
+    if (decided) {
         gain_auto_ = automatic;
-        if (granted_known) {
-            // THE HANDLE GOES WHERE THE DEVICE LANDED. On a stepped stage this
-            // is rarely what was asked, so this is the assignment that stops
-            // the slider showing a gain the tuner is not on.
-            gain_db_ = db;
-            gain_known_ = true;
-        }
+    }
+    if (granted_known) {
+        // THE HANDLE GOES WHERE THE DEVICE LANDED. On a stepped stage this
+        // is rarely what was asked, so this is the assignment that stops
+        // the slider showing a gain the tuner is not on.
+        gain_db_ = db;
+        gain_known_ = true;
+        last_manual_db_ = db;
+        has_last_manual_ = true;
     }
     emit sourceGainChanged();
 }

@@ -4371,6 +4371,20 @@ private:
     bool gain_auto_ = false;
     QString gain_fault_;
 
+    // Qt thread only. The last manual gain this source was on or was asked
+    // for, so turning auto off can hand the tuner a concrete number instead of
+    // leaving it in manual mode at a gain nobody named and the readout at
+    // "unset".
+    double last_manual_db_ = 0.0;
+    bool has_last_manual_ = false;
+
+    // Qt thread only. Numbers each gain request posted and the newest one the
+    // supervisor has answered. While they differ a request is in flight, and a
+    // descriptor read before it landed is older news than the request, so its
+    // in_force fields must not overwrite what the operator just chose.
+    std::uint64_t gain_posted_seq_ = 0;
+    std::uint64_t gain_answered_seq_ = 0;
+
     // Supervisor thread only. The epoch the gain stage was read for, so the
     // descriptor is fetched once per source rather than once per pass: it
     // touches no device, but it is still a round trip and the stage cannot
@@ -4396,6 +4410,7 @@ private:
     double want_gain_db_ = 0.0;
     bool want_gain_auto_ = false;
     bool want_gain_auto_set_ = false;
+    std::uint64_t want_gain_seq_ = 0;
 
     // The stage's name, copied under source_mutex_ when the request is posted.
     //
@@ -4410,6 +4425,11 @@ private:
     bool handover_has_gain_ = false;
     double handover_gain_db_ = 0.0;
     bool handover_gain_auto_ = false;
+    // Whether handover_gain_auto_ is a decided state to adopt even alongside a
+    // fault. A refused auto request reverts the flag the Qt thread flipped
+    // early; a refused manual gain says nothing about the mode.
+    bool handover_gain_auto_decided_ = false;
+    std::uint64_t handover_gain_seq_ = 0;
     QString handover_gain_fault_;
 
     // Set by refreshSources, openSource and closeSource, and by

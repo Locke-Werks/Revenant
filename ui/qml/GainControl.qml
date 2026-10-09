@@ -66,7 +66,10 @@ RowLayout {
         // and not off the distance between two of them.
         stepSize: engineLink.sourceGainStep
         snapMode: Slider.SnapAlways
-        enabled: gain.hasStage && !engineLink.sourceGainAuto && !gain.bypassed
+        // LIVE UNDER AUTO, so dragging it is how manual control is taken back:
+        // setSourceGainFraction clears auto as it posts the gain. Greying it
+        // out left the auto button as the only way out of the AGC.
+        enabled: gain.hasStage && !gain.bypassed
 
         // THE HANDLE FOLLOWS THE DEVICE, NOT THE POINTER. The binding is
         // restored whenever the link answers, so a step the tuner rounded to
@@ -114,10 +117,17 @@ RowLayout {
     // Offered only where the device will do it. Whether it should is the
     // operator's call: README.md has the measurement of what this dongle's
     // own AGC did to the detector's track list.
+    //
+    // A TOGGLE THAT ALWAYS SAYS "auto", lit while the AGC is on. The label
+    // used to flip to "manual", which read as the current mode rather than the
+    // action and left operators clicking it to turn auto on. checked is bound
+    // to the link and checkable stays off, so a click cannot break the binding
+    // and the light follows what the device was granted, not the click.
     RButton {
         visible: gain.hasStage && engineLink.sourceGainHasAuto && !gain.bypassed
         flat: true
-        text: engineLink.sourceGainAuto ? "manual" : "auto"
+        text: "auto"
+        checked: engineLink.sourceGainAuto
         ink: Theme.inkDim
         font.pixelSize: Theme.sizeSmall
         onClicked: engineLink.setSourceGainAuto(!engineLink.sourceGainAuto)
@@ -146,7 +156,7 @@ RowLayout {
         delay: 400
         text: !gain.hasStage ? gain.absence.sentence
               : engineLink.sourceGainAuto
-                ? "The device's own AGC is choosing the gain. Nothing on the wire says what it chose."
+                ? "The device's own AGC is choosing the gain. Nothing on the wire says what it chose. Drag to take manual control back."
               : engineLink.sourceGainKnown
                 ? "The step the tuner took, which is where the handle sits. Ticks are its steps."
               : "Nothing on the wire reports the source's gain until one is set from here."
