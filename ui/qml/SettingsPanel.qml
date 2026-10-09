@@ -35,6 +35,7 @@ ColumnLayout {
         marginRow.slider.value = engineLink.marginBar
         contrastRow.slider.value = ScaleSettings.waterfallContrast
         fitRow.slider.value = ScaleSettings.spectrumRangeFit
+        smoothSlider.value = ScaleSettings.spectrumSmoothing
     }
 
     Component.onCompleted: sync()
@@ -280,6 +281,64 @@ ColumnLayout {
         font.pixelSize: Theme.sizeSmall
         text: "At tight, the spectrum's noise floor sits on the bottom edge and its strongest "
               + "peak on the top edge."
+    }
+
+    // Release time for the spectrum trace. A signal still appears in the
+    // frame it arrives; this only sets how long noise is averaged over and
+    // how slowly a signal that left fades. See render/spectrum_scale.h.
+    RowLayout {
+        spacing: 8
+
+        Label {
+            text: "spectrum smoothing"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeBody
+            Layout.minimumWidth: 150
+        }
+
+        Label {
+            text: "off"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        RSlider {
+            id: smoothSlider
+            Layout.preferredWidth: 180
+            from: 0
+            to: 1
+            stepSize: 0.01
+            onMoved: ScaleSettings.spectrumSmoothing = value
+
+            Tip {
+                visible: parent.hovered
+                delay: 400
+                text: "Averages the noise so the floor reads flat. Signals still appear at "
+                      + "once; this is how slowly they fade after they go."
+            }
+        }
+
+        Label {
+            text: "slow"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        Readout {
+            widest: "1000 ms"
+            horizontalAlignment: Text.AlignLeft
+            text: smoothSlider.value > 0 ? Math.round(smoothSlider.value * 1000) + " ms" : "off"
+            color: Theme.ink
+        }
+    }
+
+    RCheckBox {
+        text: "also smooth the noise floor across frequency"
+        checked: ScaleSettings.spectrumFloorSmoothing
+        onToggled: {
+            ScaleSettings.spectrumFloorSmoothing = checked
+            checked = Qt.binding(() => ScaleSettings.spectrumFloorSmoothing)
+        }
     }
 
     Rule {}

@@ -1196,6 +1196,8 @@ void SpectrumItem::setMapPins(ScaleSettings* pins)
         connect(map_pins_, &ScaleSettings::pinsChanged, this, &SpectrumItem::takeFrame);
         connect(map_pins_, &ScaleSettings::spectrumRangeFitChanged, this,
                 &SpectrumItem::takeFrame);
+        connect(map_pins_, &ScaleSettings::spectrumSmoothingChanged, this,
+                &SpectrumItem::takeFrame);
     }
     emit mapPinsChanged();
     takeFrame();
@@ -1375,6 +1377,12 @@ void SpectrumItem::takeFrame()
     }
 
     reduce_peak(frame.power_db, columns_);
+
+    // Smoothed before the hold and the markers read the columns, so the floor
+    // label and the peak hold describe the trace the operator is looking at.
+    const bool replay = have_last_frame_ && frame.start == last_frame_start_;
+    smooth_trace(smooth_state_, columns_, sourceSecondsSinceLast(frame), smoothDecayInForce(),
+                 smoothFloorInForce(), replay);
 
     // The same frame again, which a pin moving or a resize does, has had no
     // time pass: it may still raise the hold, since the columns can differ

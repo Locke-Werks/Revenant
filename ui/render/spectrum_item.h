@@ -808,6 +808,20 @@ private:
     {
         return map_pins_ == nullptr ? 0.0F : static_cast<float>(map_pins_->spectrumRangeFit());
     }
+
+    [[nodiscard]] double smoothDecayInForce() const
+    {
+        return map_pins_ == nullptr ? kDefaultSmoothDecaySeconds
+                                    : map_pins_->spectrumSmoothing();
+    }
+
+    [[nodiscard]] bool smoothFloorInForce() const
+    {
+        return map_pins_ == nullptr || map_pins_->spectrumFloorSmoothing();
+    }
+
+    // The smoother's per-column averages between frames. See smooth_trace.
+    std::vector<float> smooth_state_;
     float headroom_db_ = 0.0F;
     std::size_t reduced_bins_ = 0;
     bool have_frame_ = false;

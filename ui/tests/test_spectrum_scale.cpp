@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cmath>
+#include <random>
 #include <vector>
 
 #include "render/spectrum_scale.h"
@@ -505,3 +506,91 @@ TEST_CASE("pins override the range fit", "[scale][fit]")
 }
 
 }  // namespace fit_cases
+
+// ---------------------------------------------------------------------------
+// Trace smoothing: flat floor, instant attack, timed release
+// ---------------------------------------------------------------------------
+
+namespace smooth_cases {
+
+using revenant::ui::smooth_trace;
+
+constexpr double kDt = 1.0 / 30.0;
+constexpr double kDecay = 0.25;
+
+// Rejects an attack with any lag: a carrier keyed up is drawn in the frame it
+// arrives, smoothing or not.
+TEST_CASE("a signal rising out of the noise is drawn in the same frame", "[scale][smooth]")
+{
+    std::vector<float> state;
+    std::vector<float> cols(64, -100.0F);
+    smooth_trace(state, cols, 0.0, kDecay, false);
+    std::vector<float> next(64, -100.0F);
+    next[10] = -40.0F;
+    smooth_trace(state, next, kDt, kDecay, false);
+    CHECK(next[10] == -40.0F);
+}
+
+// Rejects a release that snaps down, and one at the wrong rate.
+TEST_CASE("a signal that leaves fades with the decay time", "[scale][smooth]")
+{
+    std::vector<float> state;
+    std::vector<float> cols(64, -100.0F);
+    cols[10] = -40.0F;
+    smooth_trace(state, cols, 0.0, kDecay, false);
+    std::vector<float> next(64, -100.0F);
+    smooth_trace(state, next, kDecay, kDecay, false);
+    const double expected =
+        10.0 * std::log10(std::pow(10.0, -4.0) + (std::pow(10.0, -10.0) - std::pow(10.0, -4.0)) *
+                                                     (1.0 - std::exp(-1.0)));
+    CHECK_THAT(next[10], WithinAbs(expected, 0.01));
+    CHECK(next[10] > -100.0F);
+}
+
+// Rejects smoothing that does nothing to the floor: noise jitter shrinks.
+TEST_CASE("smoothing flattens a noisy floor", "[scale][smooth]")
+{
+    std::mt19937 rng(7);
+    std::normal_distribution<float> jitter(0.0F, 2.0F);
+    std::vector<float> state;
+    double raw_var = 0.0;
+    double smooth_var = 0.0;
+    int n = 0;
+    for (int frame = 0; frame < 300; ++frame) {
+        std::vector<float> cols(256);
+        for (float& c : cols) {
+            c = -100.0F + jitter(rng);
+        }
+        const std::vector<float> raw = cols;
+        smooth_trace(state, cols, frame == 0 ? 0.0 : kDt, kDecay, false);
+        if (frame > 60) {
+            for (std::size_t i = 0; i < cols.size(); ++i) {
+                raw_var += (raw[i] + 100.0) * (raw[i] + 100.0);
+                smooth_var += (cols[i] + 100.0) * (cols[i] + 100.0);
+                ++n;
+            }
+        }
+    }
+    CHECK(smooth_var / n < 0.25 * (raw_var / n));
+}
+
+// Rejects a smoother that keeps running when switched off, and one that
+// restarts on a replay of the same frame.
+TEST_CASE("smoothing off passes frames through, a replay keeps the averages", "[scale][smooth]")
+{
+    std::vector<float> state(4, -50.0F);
+    std::vector<float> cols{-90.0F, -90.0F, -90.0F, -90.0F};
+    smooth_trace(state, cols, kDt, 0.0, false);
+    CHECK(state.empty());
+    CHECK(cols[0] == -90.0F);
+
+    smooth_trace(state, cols, 0.0, kDecay, false);
+    std::vector<float> lower{-100.0F, -100.0F, -100.0F, -100.0F};
+    smooth_trace(state, lower, kDt, kDecay, false);
+    const float held = lower[0];
+    std::vector<float> again{-100.0F, -100.0F, -100.0F, -100.0F};
+    smooth_trace(state, again, 0.0, kDecay, false, true);
+    CHECK(again[0] == held);
+}
+
+}  // namespace smooth_cases

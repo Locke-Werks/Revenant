@@ -119,6 +119,12 @@ inline constexpr QLatin1StringView kScaleCeilingDb{"display/ceilingDb"};
 inline constexpr QLatin1StringView kWaterfallContrast{"display/waterfallContrast"};
 inline constexpr QLatin1StringView kSpectrumRangeFit{"display/spectrumRangeFit"};
 
+// The spectrum trace's smoothing: the release time in seconds, zero for off,
+// and whether the floor is also blurred across neighbouring columns. See
+// render/spectrum_scale.h, smooth_trace.
+inline constexpr QLatin1StringView kSpectrumSmoothing{"display/spectrumSmoothing"};
+inline constexpr QLatin1StringView kSpectrumFloorSmoothing{"display/spectrumFloorSmoothing"};
+
 // The bookmark list, as one JSON array in one value rather than a QSettings
 // array of groups.
 //

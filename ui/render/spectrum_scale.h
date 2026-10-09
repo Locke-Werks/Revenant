@@ -56,6 +56,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 #include "render/colour_map.h"
 
@@ -369,6 +370,94 @@ struct PeakHold {
         }
     }
     return most;
+}
+
+// ---------------------------------------------------------------------------
+// Trace smoothing: a flat floor without slowing a signal down
+// ---------------------------------------------------------------------------
+//
+// Time averaging is the only way to flatten the noise floor without a longer
+// transform, and plain averaging also smears a keyed carrier in over several
+// frames. So the average is asymmetric. A column that jumps more than
+// kSmoothSnapDb above both its own average and the span's median is taken as
+// it is, in the frame it arrives: noise cannot do that, since the median is
+// where the noise sits. Everything else, which is noise and the slow movement
+// of a steady signal, is averaged, rising four times faster than it falls.
+//
+// The average is of power, not of decibels. The mean of a noise column's
+// decibels sits a couple of dB under its mean power, so averaging in dB would
+// lower the floor as the smoothing went up and the floor label would move
+// with a display setting.
+//
+// The frequency blur afterwards touches only columns near the median, so it
+// takes the last ripple out of the floor and never rounds a signal's skirt.
+inline constexpr float kSmoothSnapDb = 6.0F;
+inline constexpr float kSmoothBlurDb = 3.0F;
+inline constexpr double kSmoothAttackFraction = 0.25;
+inline constexpr double kDefaultSmoothDecaySeconds = 0.25;
+inline constexpr double kMaxSmoothDecaySeconds = 1.0;
+
+// The median of the columns: where the noise sits when signals cover less
+// than half the span, which they do on any span worth smoothing.
+[[nodiscard]] inline float column_median(std::span<const float> columns)
+{
+    if (columns.empty()) {
+        return kSpectrumFloorDb;
+    }
+    std::vector<float> scratch(columns.begin(), columns.end());
+    const auto mid = scratch.begin() + static_cast<std::ptrdiff_t>(scratch.size() / 2);
+    std::nth_element(scratch.begin(), mid, scratch.end());
+    return *mid;
+}
+
+// One frame through the smoother. state holds the averages between frames;
+// columns is replaced by what is drawn. decay_seconds of zero or less is
+// smoothing off, and dt_seconds of zero or less, or a state of another width,
+// is a new start, the convention hold_peak uses. A replay is the same frame
+// drawn again, which a pin moving or a resize does: no time has passed, so
+// the averages are drawn as they stand rather than restarted.
+inline void smooth_trace(std::vector<float>& state, std::span<float> columns, double dt_seconds,
+                         double decay_seconds, bool blur_floor, bool replay = false)
+{
+    if (!(decay_seconds > 0.0)) {
+        state.clear();
+        return;
+    }
+    if (state.size() != columns.size() || (!replay && !(dt_seconds > 0.0))) {
+        state.assign(columns.begin(), columns.end());
+        return;
+    }
+
+    const float median = column_median(columns);
+    if (replay) {
+        dt_seconds = 0.0;
+    }
+    const double fall = 1.0 - std::exp(-dt_seconds / decay_seconds);
+    const double rise =
+        1.0 - std::exp(-dt_seconds / (decay_seconds * kSmoothAttackFraction));
+    for (std::size_t i = 0; i < columns.size(); ++i) {
+        const float x = columns[i];
+        float& s = state[i];
+        if (x > s + kSmoothSnapDb && x > median + kSmoothSnapDb) {
+            s = x;
+            continue;
+        }
+        const double step = x > s ? rise : fall;
+        const double held = std::pow(10.0, static_cast<double>(s) / 10.0);
+        const double now = std::pow(10.0, static_cast<double>(x) / 10.0);
+        s = static_cast<float>(10.0 * std::log10(held + (now - held) * step));
+    }
+
+    std::copy(state.begin(), state.end(), columns.begin());
+    if (!blur_floor || columns.size() < 3) {
+        return;
+    }
+    const float edge = median + kSmoothBlurDb;
+    for (std::size_t i = 1; i + 1 < columns.size(); ++i) {
+        if (state[i - 1] < edge && state[i] < edge && state[i + 1] < edge) {
+            columns[i] = 0.25F * state[i - 1] + 0.5F * state[i] + 0.25F * state[i + 1];
+        }
+    }
 }
 
 // How far above the held peak the top of the map goes. See the margin above.

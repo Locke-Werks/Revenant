@@ -40,6 +40,10 @@ class ScaleSettings : public QObject {
                    NOTIFY waterfallContrastChanged)
     Q_PROPERTY(double spectrumRangeFit READ spectrumRangeFit WRITE setSpectrumRangeFit
                    NOTIFY spectrumRangeFitChanged)
+    Q_PROPERTY(double spectrumSmoothing READ spectrumSmoothing WRITE setSpectrumSmoothing
+                   NOTIFY spectrumSmoothingChanged)
+    Q_PROPERTY(bool spectrumFloorSmoothing READ spectrumFloorSmoothing
+                   WRITE setSpectrumFloorSmoothing NOTIFY spectrumSmoothingChanged)
 
 public:
     explicit ScaleSettings(QObject* parent = nullptr) : QObject(parent)
@@ -51,10 +55,36 @@ public:
         pins_.ceiling_db = store.value(settings::kScaleCeilingDb, 0.0).toFloat();
         waterfall_contrast_ = clamp_contrast(store.value(settings::kWaterfallContrast, 0.0).toDouble());
         spectrum_range_fit_ = clamp_fit(store.value(settings::kSpectrumRangeFit, 0.0).toDouble());
+        spectrum_smoothing_ = clamp_smoothing(
+            store.value(settings::kSpectrumSmoothing, kDefaultSmoothDecaySeconds).toDouble());
+        spectrum_floor_smoothing_ = store.value(settings::kSpectrumFloorSmoothing, true).toBool();
     }
 
     [[nodiscard]] double waterfallContrast() const { return waterfall_contrast_; }
     [[nodiscard]] double spectrumRangeFit() const { return spectrum_range_fit_; }
+    [[nodiscard]] double spectrumSmoothing() const { return spectrum_smoothing_; }
+    [[nodiscard]] bool spectrumFloorSmoothing() const { return spectrum_floor_smoothing_; }
+
+    void setSpectrumSmoothing(double seconds)
+    {
+        seconds = clamp_smoothing(seconds);
+        if (seconds == spectrum_smoothing_) {
+            return;
+        }
+        spectrum_smoothing_ = seconds;
+        QSettings().setValue(settings::kSpectrumSmoothing, seconds);
+        emit spectrumSmoothingChanged();
+    }
+
+    void setSpectrumFloorSmoothing(bool on)
+    {
+        if (on == spectrum_floor_smoothing_) {
+            return;
+        }
+        spectrum_floor_smoothing_ = on;
+        QSettings().setValue(settings::kSpectrumFloorSmoothing, on);
+        emit spectrumSmoothingChanged();
+    }
 
     void setWaterfallContrast(double value)
     {
@@ -130,6 +160,7 @@ signals:
     void pinsChanged();
     void waterfallContrastChanged();
     void spectrumRangeFitChanged();
+    void spectrumSmoothingChanged();
 
 private:
     // Written as it happens, like the volume: a pin is one event an operator
@@ -159,9 +190,16 @@ private:
                            : 0.0;
     }
 
+    [[nodiscard]] static double clamp_smoothing(double seconds)
+    {
+        return seconds > 0.0 ? std::min(seconds, kMaxSmoothDecaySeconds) : 0.0;
+    }
+
     ScalePins pins_;
     double waterfall_contrast_ = 0.0;
     double spectrum_range_fit_ = 0.0;
+    double spectrum_smoothing_ = kDefaultSmoothDecaySeconds;
+    bool spectrum_floor_smoothing_ = true;
 };
 
 }  // namespace revenant::ui
