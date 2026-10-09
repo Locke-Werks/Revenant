@@ -677,6 +677,27 @@ void EngineLink::spawn_dv_receivers()
         return;
     }
 
+    // First hand back what an earlier pass opened on a control channel or a
+    // trunk's voice channel, while the detection still read plain "P25". Not
+    // one in the pane: the operator is looking at it, and a strip vanishing
+    // from under the cursor is worse than a spare receiver.
+    std::erase_if(auto_dv_spawned_keys_,
+                  [this](std::uint64_t key) { return rack_.find(key) == nullptr; });
+    std::vector<DvSpawned> spawned;
+    for (const std::uint64_t key : auto_dv_spawned_keys_) {
+        if (key == pane_key_) {
+            continue;
+        }
+        if (const HeldView* view = held_view(key); view != nullptr) {
+            spawned.push_back(DvSpawned{key, static_cast<double>(view->absolute_hz)});
+        }
+    }
+    const std::vector<std::uint64_t> retire = plan_dv_retirements(shown_.detections, spawned);
+    for (const std::uint64_t key : retire) {
+        std::erase(auto_dv_spawned_keys_, key);
+        removeRackReceiver(key);
+    }
+
     // Every receiver's centre, the pane's from the record its tune kept and the
     // held ones' from their views, which exist from the moment one is asked for.
     // So a receiver spawned last pass and not yet answered by the engine still
@@ -706,6 +727,7 @@ void EngineLink::spawn_dv_receivers()
         rpc::VrxParams params;
         params.demod = spawn.demod;
         add_held_receiver(*key, spawn.centre_hz, params);
+        auto_dv_spawned_keys_.push_back(*key);
     }
 
     for (const DvSpawn& spawn : plan.no_room) {

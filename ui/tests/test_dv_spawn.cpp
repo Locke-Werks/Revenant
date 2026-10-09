@@ -130,6 +130,96 @@ TEST_CASE("only a verified digital voice label spawns")
     CHECK(plan.open.front().centre_hz == 851'300'000.0);
 }
 
+namespace {
+
+// A P25 track as core/detect/label.cpp reports a refinement: the confirmed
+// steps, then the leading unconfirmed one when it has support.
+[[nodiscard]] rpc::Detection p25(std::int64_t hz, const std::string& name,
+                                 const std::string& next = {})
+{
+    rpc::Detection d = dv(hz, name);
+    d.label.path = {{"NFM", 0.9, true}, {"4FSK", 0.9, true}, {"P25", 0.9, true}};
+    if (name == "P25 control") {
+        d.label.path.push_back({"control", 0.8, true});
+    } else if (name == "P25 voice") {
+        d.label.path.push_back({"voice", 0.8, true});
+    }
+    d.label.confirmed_depth = static_cast<std::uint32_t>(d.label.path.size());
+    if (!next.empty()) {
+        d.label.path.push_back({next, 0.4, false});
+    }
+    return d;
+}
+
+}  // namespace
+
+TEST_CASE("a P25 control channel gets no receiver, named or leaning")
+{
+    // Rejects a rule that waits for the bracket to say "P25 control" while the
+    // plain "P25" of the first probes opens a receiver on a TSBK carrier.
+    const std::vector<rpc::Detection> seen{p25(853'050'100, "P25 control"),
+                                           p25(852'000'000, "P25", "control")};
+    CHECK(plan_dv_spawns(seen, {}, 64).open.empty());
+}
+
+TEST_CASE("plain P25 with no lean, or leaning to voice, still spawns when no trunk is on the span")
+{
+    // Rejects holding every conventional P25 channel until its census is in.
+    const std::vector<rpc::Detection> seen{p25(852'000'000, "P25"),
+                                           p25(852'500'000, "P25", "voice"),
+                                           p25(853'000'000, "P25 voice")};
+    CHECK(plan_dv_spawns(seen, {}, 64).open.size() == 3);
+}
+
+TEST_CASE("P25 voice beside a control channel is left to the trunk tracker")
+{
+    // Rejects a held receiver on a trunked voice channel doubling the call the
+    // tracker already plays. Other protocols on the span are untouched.
+    const std::vector<rpc::Detection> seen{p25(853'050'100, "P25 control"),
+                                           p25(852'312'500, "P25 voice"),
+                                           p25(852'712'500, "P25"), dv(441'000'000, "DMR")};
+    const auto plan = plan_dv_spawns(seen, {}, 64);
+    REQUIRE(plan.open.size() == 1);
+    CHECK(plan.open.front().protocol == "DMR");
+}
+
+TEST_CASE("a leaning control channel does not stand conventional P25 down")
+{
+    // Rejects treating a lean as proof of a trunk for the whole span.
+    const std::vector<rpc::Detection> seen{p25(853'050'100, "P25", "control"),
+                                           p25(852'312'500, "P25 voice")};
+    const auto plan = plan_dv_spawns(seen, {}, 64);
+    REQUIRE(plan.open.size() == 1);
+    CHECK(plan.open.front().centre_hz == 852'312'500.0);
+}
+
+TEST_CASE("a receiver opened on what turned out to be a trunk's channel is handed back")
+{
+    using revenant::ui::DvSpawned;
+    using revenant::ui::plan_dv_retirements;
+    const std::vector<rpc::Detection> seen{p25(853'050'100, "P25 control"),
+                                           p25(852'312'500, "P25 voice"), dv(441'000'000, "DMR")};
+    const std::vector<DvSpawned> spawned{{1, 853'050'000.0},  // control, a little off
+                                         {2, 852'312'500.0},  // trunk voice
+                                         {3, 441'000'000.0},  // DMR, kept
+                                         {4, 851'000'000.0}}; // nothing there now, kept
+    const auto retire = plan_dv_retirements(seen, spawned);
+    REQUIRE(retire.size() == 2);
+    CHECK(retire[0] == 1);
+    CHECK(retire[1] == 2);
+}
+
+TEST_CASE("a quiet or merged control channel retires nothing")
+{
+    // Rejects acting on a track the detector no longer stands behind.
+    using revenant::ui::DvSpawned;
+    rpc::Detection merged = p25(853'050'100, "P25 control");
+    merged.state = rpc::TrackState::Merged;
+    const std::vector<rpc::Detection> seen{merged, p25(852'312'500, "P25 voice")};
+    const std::vector<DvSpawned> spawned{{1, 853'050'100.0}, {2, 852'312'500.0}};
+    CHECK(revenant::ui::plan_dv_retirements(seen, spawned).empty());
+}
+
 TEST_CASE("a full rack reports what it could not open, strongest first")
 {
     const std::vector<rpc::Detection> seen{dv(851'000'000, "P25", 10.0),

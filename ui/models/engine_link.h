@@ -3932,6 +3932,11 @@ private:
     std::vector<double> auto_dv_dismissed_hz_;
     std::vector<double> auto_dv_noted_hz_;
 
+    // The rack keys autoDv opened, so a later pass can hand back the ones
+    // that turn out to sit on a trunk's channels; models/dv_spawn.h. Only
+    // these, never a receiver the operator placed.
+    std::vector<std::uint64_t> auto_dv_spawned_keys_;
+
     [[nodiscard]] HeldView* held_view(std::uint64_t key);
     [[nodiscard]] const HeldView* held_view(std::uint64_t key) const;
 
