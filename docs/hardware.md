@@ -2,7 +2,7 @@
 
 Two receivers are being designed in house as reference hardware for Revenant,
 the way a radio vendor pairs its hardware with its own software. Neither
-exists yet: both are at the architecture and preliminary parts-list stage.
+exists yet: both are at the architecture stage.
 Nothing in Revenant depends on them, and every radio on the [roadmap](roadmap.md)
 keeps its place.
 
@@ -41,7 +41,6 @@ The one to build first. Everything learned on it carries over to Wraith-X.
 | On-card logic | Artix-7 class FPGA: data movement and the overload loop only |
 | Host link | PCIe Gen2 x4 |
 | Ring buffer | 1 GB DDR3, about 2 s of both channels |
-| Parts estimate | About $850 at 100 units |
 
 Linearization, impulse excision and comb subtraction run in Revenant on the
 GPU, which sees every raw sample anyway. The two-tone linearization model is
@@ -49,7 +48,7 @@ measured at the bench and stored on the card for Revenant to load.
 
 ## Wraith-X
 
-The full design, with cost deliberately set aside.
+The full design.
 
 | | |
 | --- | --- |
@@ -63,12 +62,3 @@ The full design, with cost deliberately set aside.
 
 Over USB4, Tier A goes to the host raw and Tier B is channelized on the card,
 because four raw streams do not fit the tunnel.
-
-## Open questions
-
-- Tuner supply for Wraith's VHF/UHF tier, and a second source before layout.
-- Whether Wraith's second ADC is worth its cost and board area.
-- Card or external box: a box keeps the receiver away from GPU noise.
-- The bench calibration rig, and the coefficient format the card stores and
-  Revenant loads.
-- Replacing the parts estimates with distributor quotes.

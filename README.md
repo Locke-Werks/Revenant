@@ -37,7 +37,7 @@ Two receivers are being designed in house as reference radios for Revenant:
 
 - **Wraith**, two coherent 16-bit channels sampling DC to about 55 MHz
   directly, a tuner tier to 1.7 GHz, real preselection and a hardware overload
-  loop, at about $850 in parts. The one being built first.
+  loop. The one being built first.
 - **Wraith-X**, the full design: two coherent channels from DC to 6 GHz, direct
   sampling to 200 MHz and a superheterodyne above it, every raw sample to the
   GPU over PCIe.
@@ -89,9 +89,11 @@ rather than the adjectives.
 ## Quick start
 
 ```
-revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20"     --vrx 98.1M:wfm:200k --play --record fm.wav
+revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20" \
+    --vrx 98.1M:wfm:200k --play --record fm.wav
 
-revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20"     --spectrum --detect
+revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20" \
+    --spectrum --detect
 ```
 
 The first plays and records broadcast FM; the second draws the span as a
