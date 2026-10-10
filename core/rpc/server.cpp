@@ -1367,6 +1367,8 @@ public:
     [[nodiscard]] bool transcription_available() const { return transcriber_ != nullptr; }
     void set_transcription(bool on);
     void write_transcription_status(schema::TranscriptionStatus::Builder out) const;
+    // setPluginReceivers. Loop thread.
+    void set_plugin_receivers(bool allowed);
     [[nodiscard]] Status set_vrx_transcribe(engine::VrxId vrx, TranscribeChoice choice);
     [[nodiscard]] TranscribeChoice transcribe_choice(engine::VrxId vrx) const;
     [[nodiscard]] bool transcribing(engine::VrxId vrx) const {
@@ -1725,6 +1727,9 @@ private:
     };
     const plugin::EnginePluginSet* engine_plugins_ = nullptr;
     std::vector<PluginSlot> plugins_;
+
+    // setPluginReceivers. Loop thread.
+    bool plugin_receivers_allowed_ = true;
     std::function<void(std::string_view)> plugin_log_;
 
     // Commands from every plugin, in arrival order, for the loop to run.
@@ -3083,6 +3088,11 @@ public:
         if (auto set = owner_.engine().set_impulse_excision(context.getParams().getOn()); !set) {
             return to_exception(set.error());
         }
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> setPluginReceivers(SetPluginReceiversContext context) override {
+        owner_.set_plugin_receivers(context.getParams().getAllowed());
         return kj::READY_NOW;
     }
 
@@ -7357,11 +7367,30 @@ Status ServerImpl::plugin_owns(std::size_t plugin, std::uint32_t vrx) const {
     return {};
 }
 
+void ServerImpl::set_plugin_receivers(bool allowed) {
+    plugin_receivers_allowed_ = allowed;
+    if (allowed) {
+        return;
+    }
+    for (const engine::VrxId id : engine_.vrx_ids()) {
+        const std::uint64_t session = owner_of(id).session;
+        const bool plugins =
+            std::any_of(plugins_.begin(), plugins_.end(),
+                        [session](const PluginSlot& slot) { return slot.session == session; });
+        if (plugins && engine_.remove_vrx(id)) {
+            after_vrx_removed(id, "plugin receivers were switched off for the client's auto DV");
+        }
+    }
+}
+
 Expected<std::uint32_t> ServerImpl::plugin_add_vrx(std::size_t plugin,
                                                    const plugin::AddVrxCommand& command) {
     auto demod = engine::demod_from_name(command.demod);
     if (!demod) {
         return std::unexpected(demod.error());
+    }
+    if (!plugin_receivers_allowed_) {
+        return fail("plugin receivers are switched off while the client's auto DV is on");
     }
     engine::VrxParams params;
     params.demod = *demod;

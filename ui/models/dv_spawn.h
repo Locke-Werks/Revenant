@@ -33,23 +33,21 @@
 // centre is the same transmitter measured again. Two detections in one pass
 // inside that distance of each other get one receiver, the stronger's.
 //
-// AND OF 2026-10-08: "autodv should ignore control channels and doesn't track
-// trunked systems." A P25 control channel carries TSBKs and no voice, and a
-// trunked system's voice channels belong to the trunk tracker,
-// plugins/p25trunk, which opens a receiver on each grant and closes it when
-// the call ends. This rule stays out of both:
+// AND OF 2026-10-08: "autodv should ignore control channels." A P25 control
+// channel carries TSBKs and no voice:
 //   - a detection core/detect/refine.h has named "P25 control", or a P25
 //     whose next step it leans to is "control", gets no receiver. That second
 //     clause matters because the bracket reads plain "P25" for the first
 //     probes, and a receiver opened then was never taken back;
-//   - while a P25 control channel is on the span, the P25 voice channels on it
-//     are taken to be its own and left to the tracker. A receiver held here on
-//     one would play the same call twice beside the tracker's, and be parked
-//     on a channel the system reassigns at the next grant;
-//   - a receiver this rule opened that a later pass finds on either of those
-//     is handed back by plan_dv_retirements, so the early misreading heals.
-// All of it from the detector's own reading of the TSBK and voice census, not
-// from a frequency list.
+//   - a receiver this rule opened that a later pass finds on one is handed
+//     back by plan_dv_retirements, so the early misreading heals.
+// All of it from the detector's own reading of the TSBK census, not from a
+// frequency list.
+//
+// AND OF 2026-10-10: "It should ignore trunking when it's enabled and just
+// spawn vrx's for every detected voice channel that pops up." A trunked
+// system's voice channels are spawned like any other; a receiver the trunk
+// tracker already holds on one covers it, so the call is not doubled.
 //
 // NOT HERE: what a spawned receiver is called, its audio, its decoder. The
 // caller opens a held receiver in the mode above. P25 plays decoded voice in
@@ -161,36 +159,10 @@ inline constexpr std::array<DvProtocol, 6> kDvProtocols = {{
     return confirmed < path.size() && !path[confirmed].confirmed && path[confirmed].name == "control";
 }
 
-// P25 that may be voice: the plain label, whose role is not known yet, or one
-// confirmed as a voice channel.
-[[nodiscard]] inline bool is_p25_voice_or_unknown(const rpc::Detection& detection)
-{
-    return (detection.label.name == "P25" || detection.label.name == "P25 voice") &&
-           !is_p25_control(detection);
-}
-
-// Whether a confirmed control channel is on the span, which is what makes the
-// P25 voice beside it the trunk tracker's. Only a confirmed one: a lean is
-// enough to keep a receiver off one channel, and not enough to stand every
-// conventional P25 channel on the span down.
-[[nodiscard]] inline bool trunk_on_span(std::span<const rpc::Detection> detections)
-{
-    return std::any_of(detections.begin(), detections.end(), [](const rpc::Detection& d) {
-        return is_current_track(d) && d.label.name == "P25 control";
-    });
-}
-
-// What this rule leaves alone even though it is digital voice: a control
-// channel always, and P25 voice while a trunk is on the span.
-[[nodiscard]] inline bool is_trunk_owned(const rpc::Detection& detection, bool trunk)
-{
-    return is_p25_control(detection) || (trunk && is_p25_voice_or_unknown(detection));
-}
-
-[[nodiscard]] inline bool is_spawnable_dv(const rpc::Detection& detection, bool trunk = false)
+[[nodiscard]] inline bool is_spawnable_dv(const rpc::Detection& detection)
 {
     return is_current_track(detection) && dv_spawn_demod(detection).has_value() &&
-           !is_trunk_owned(detection, trunk);
+           !is_p25_control(detection);
 }
 
 // One receiver to open, or one there was no room for.
@@ -215,10 +187,9 @@ struct DvSpawnPlan {
                                                 std::span<const double> covered_hz,
                                                 std::size_t room)
 {
-    const bool trunk = trunk_on_span(detections);
     std::vector<const rpc::Detection*> wanted;
     for (const rpc::Detection& detection : detections) {
-        if (is_spawnable_dv(detection, trunk)) {
+        if (is_spawnable_dv(detection)) {
             wanted.push_back(&detection);
         }
     }
@@ -258,17 +229,16 @@ struct DvSpawned {
     double centre_hz = 0.0;
 };
 
-// The receivers this rule opened that now sit on something it leaves alone,
-// to be removed. Only its own: a receiver the operator placed on a control
-// channel is theirs, and a tracker's is the tracker's. A receiver is handed
-// back only on a current detection that says so; one whose detection has
-// gone quiet keeps its place, as the 2026-10-02 rule wants.
+// The receivers this rule opened that now sit on a control channel, to be
+// removed. Only its own: a receiver the operator placed on a control channel
+// is theirs. A receiver is handed back only on a current detection that says
+// so; one whose detection has gone quiet keeps its place, as the 2026-10-02
+// rule wants.
 //
 // The distance is P25's half channel, since every case here is P25.
 [[nodiscard]] inline std::vector<std::uint64_t>
 plan_dv_retirements(std::span<const rpc::Detection> detections, std::span<const DvSpawned> spawned)
 {
-    const bool trunk = trunk_on_span(detections);
     const double tolerance = find_dv_protocol("P25")->tolerance_hz;
     std::vector<std::uint64_t> retire;
     for (const DvSpawned& receiver : spawned) {
@@ -277,7 +247,7 @@ plan_dv_retirements(std::span<const rpc::Detection> detections, std::span<const 
                 return is_current_track(d) &&
                        std::abs(static_cast<double>(d.center_hz) - receiver.centre_hz) <=
                            tolerance &&
-                       is_trunk_owned(d, trunk);
+                       is_p25_control(d);
             });
         if (owned) {
             retire.push_back(receiver.key);

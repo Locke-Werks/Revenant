@@ -293,6 +293,18 @@ void EngineLink::apply_impulse_excision()
     (void)client_->set_impulse_excision(excision_wanted_.load(std::memory_order_acquire));
 }
 
+void EngineLink::apply_plugin_receivers()
+{
+    if (client_ == nullptr ||
+        !plugin_receivers_pending_.exchange(false, std::memory_order_acq_rel)) {
+        return;
+    }
+    // Refused only by an engine older than the call, which has no way to
+    // hold the tracker back; auto DV still runs, beside it.
+    (void)client_->set_plugin_receivers(
+        plugin_receivers_allowed_.load(std::memory_order_acquire));
+}
+
 void EngineLink::supervise()
 {
     int pass = 0;
@@ -315,6 +327,7 @@ void EngineLink::supervise()
             apply_calibration();
             apply_source_pace();
             apply_impulse_excision();
+            apply_plugin_receivers();
 
             // Then the receiver work. A drag posts a request and wakes this
             // loop immediately rather than waiting out the poll interval,
@@ -454,6 +467,7 @@ void EngineLink::supervise()
             apply_calibration();
             apply_source_pace();
             apply_impulse_excision();
+            apply_plugin_receivers();
 
             apply_receiver_request();
 
@@ -772,6 +786,12 @@ bool EngineLink::attempt_connect()
     // comes up at its default.
     if (excision_set_.load(std::memory_order_acquire)) {
         excision_pending_.store(true, std::memory_order_release);
+    }
+
+    // And auto DV's hold on plugin receivers, which a restarted engine has
+    // forgotten. Only when held: an engine allows them by default.
+    if (!plugin_receivers_allowed_.load(std::memory_order_acquire)) {
+        plugin_receivers_pending_.store(true, std::memory_order_release);
     }
 
     // An engine built with no spectrum stage is the default and is what a

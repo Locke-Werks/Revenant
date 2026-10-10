@@ -162,7 +162,7 @@ TEST_CASE("a P25 control channel gets no receiver, named or leaning")
     CHECK(plan_dv_spawns(seen, {}, 64).open.empty());
 }
 
-TEST_CASE("plain P25 with no lean, or leaning to voice, still spawns when no trunk is on the span")
+TEST_CASE("plain P25 with no lean, or leaning to voice, spawns")
 {
     // Rejects holding every conventional P25 channel until its census is in.
     const std::vector<rpc::Detection> seen{p25(852'000'000, "P25"),
@@ -171,42 +171,37 @@ TEST_CASE("plain P25 with no lean, or leaning to voice, still spawns when no tru
     CHECK(plan_dv_spawns(seen, {}, 64).open.size() == 3);
 }
 
-TEST_CASE("P25 voice beside a control channel is left to the trunk tracker")
+TEST_CASE("P25 voice beside a control channel spawns like any other")
 {
-    // Rejects a held receiver on a trunked voice channel doubling the call the
-    // tracker already plays. Other protocols on the span are untouched.
+    // Rejects deferring a trunk's voice channels to the tracker: auto DV
+    // ignores trunking and opens a receiver on every voice channel it sees.
     const std::vector<rpc::Detection> seen{p25(853'050'100, "P25 control"),
                                            p25(852'312'500, "P25 voice"),
                                            p25(852'712'500, "P25"), dv(441'000'000, "DMR")};
-    const auto plan = plan_dv_spawns(seen, {}, 64);
-    REQUIRE(plan.open.size() == 1);
-    CHECK(plan.open.front().protocol == "DMR");
+    CHECK(plan_dv_spawns(seen, {}, 64).open.size() == 3);
 }
 
-TEST_CASE("a leaning control channel does not stand conventional P25 down")
+TEST_CASE("a trunk voice channel the tracker already holds is not doubled")
 {
-    // Rejects treating a lean as proof of a trunk for the whole span.
-    const std::vector<rpc::Detection> seen{p25(853'050'100, "P25", "control"),
+    const std::vector<rpc::Detection> seen{p25(853'050'100, "P25 control"),
                                            p25(852'312'500, "P25 voice")};
-    const auto plan = plan_dv_spawns(seen, {}, 64);
-    REQUIRE(plan.open.size() == 1);
-    CHECK(plan.open.front().centre_hz == 852'312'500.0);
+    const std::vector<double> covered{852'312'400.0};
+    CHECK(plan_dv_spawns(seen, covered, 64).open.empty());
 }
 
-TEST_CASE("a receiver opened on what turned out to be a trunk's channel is handed back")
+TEST_CASE("a receiver opened on what turned out to be a control channel is handed back")
 {
     using revenant::ui::DvSpawned;
     using revenant::ui::plan_dv_retirements;
     const std::vector<rpc::Detection> seen{p25(853'050'100, "P25 control"),
                                            p25(852'312'500, "P25 voice"), dv(441'000'000, "DMR")};
     const std::vector<DvSpawned> spawned{{1, 853'050'000.0},  // control, a little off
-                                         {2, 852'312'500.0},  // trunk voice
+                                         {2, 852'312'500.0},  // trunk voice, kept
                                          {3, 441'000'000.0},  // DMR, kept
                                          {4, 851'000'000.0}}; // nothing there now, kept
     const auto retire = plan_dv_retirements(seen, spawned);
-    REQUIRE(retire.size() == 2);
+    REQUIRE(retire.size() == 1);
     CHECK(retire[0] == 1);
-    CHECK(retire[1] == 2);
 }
 
 TEST_CASE("a quiet or merged control channel retires nothing")

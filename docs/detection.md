@@ -3110,12 +3110,19 @@ M17) and allowed to drive a receiver, which means `core/identify` verified
 that protocol's frame sync on it, at a frequency no receiver of any mode
 already covers within half the protocol's channel. The mode is the one a click
 on the track would set. Two such tracks inside that distance get one receiver,
-on the stronger. Since 2026-10-08 it leaves trunked P25 alone: no receiver on
-a track the refinement names "P25 control" or a plain "P25" whose next step
-leans to "control", and none on P25 voice while a confirmed control channel is
-on the span, since those calls are `plugins/p25trunk`'s to follow. A receiver
-the switch opened that a later pass finds on either is removed; that is the
-only removal it makes. One removed by hand stays removed until the switch is
+on the stronger. It opens no receiver on a track the refinement names "P25
+control" or a plain "P25" whose next step leans to "control", since a control
+channel carries no voice. A receiver the switch opened that a later pass finds
+on one is removed; that is the only removal it makes.
+
+Auto DV and the trunk tracker, `plugins/p25trunk`, are one or the other, so
+they never open two receivers on one call. Since 2026-10-10 turning the
+switch on tells the engine plugins may not open receivers (`setPluginReceivers`
+in `core/rpc/revenant.capnp`): the tracker's receivers close at once and it
+opens no more, though it still decodes the control channel and logs grants.
+Auto DV then opens a receiver on every trunked voice channel it detects, the
+same as a conventional one. Turning the switch off gives the tracker its
+receivers back. One removed by hand stays removed until the switch is
 turned on again, and the switch is not remembered across a restart.
 `ui/models/dv_spawn.h` has the rule. The rack's limit went from eight
 receivers to 64 on 2026-10-02, so that every such signal on the span can have
@@ -3123,7 +3130,9 @@ one.
 
 WHAT THE PARAGRAPH ABOVE USED TO SAY: "The switch never removes a receiver".
 True until 2026-10-08, when receivers it had opened on a control channel or a
-trunk's voice channel became the exception.
+trunk's voice channel became the exception. Until 2026-10-10 it also left P25
+voice alone while a confirmed control channel was on the span, deferring to the
+tracker.
 
 WHAT THIS PARAGRAPH USED TO SAY: "Since 2026-10-02 the rack header's "auto
 P25" switch, while it is on, opens a held `p25p1` receiver, heard, on every

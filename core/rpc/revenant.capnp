@@ -3670,6 +3670,15 @@ interface Session {
     # by default. The choice carries across a change of source and is
     # accepted with no source open; SourceStats reports what it is doing.
     setImpulseExcision @35 (on :Bool) -> ();
+
+    # Whether engine plugins may open receivers, added on 2026-10-10 so the
+    # client's auto DV and the P25 trunk tracker are one or the other and
+    # never both on one channel. Refused, every receiver a plugin holds is
+    # removed at once, which tells the plugin through its own removed events,
+    # and every addVrx a plugin asks for after is refused until it is allowed
+    # again. The plugins keep running and keep their decoded subscriptions,
+    # so a tracker still logs grants. ENGINE-WIDE and allowed by default.
+    setPluginReceivers @36 (allowed :Bool) -> ();
 }
 
 # What one loaded plugin can decode, as it declared itself through

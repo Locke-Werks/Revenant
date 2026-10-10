@@ -1411,6 +1411,7 @@ public:
                                                      double min_margin) override;
     [[nodiscard]] Status set_detection_threshold(double threshold_db) override;
     [[nodiscard]] Status set_impulse_excision(bool on) override;
+    [[nodiscard]] Status set_plugin_receivers(bool allowed) override;
 
     [[nodiscard]] Status subscribe_spectrum(std::uint32_t every_nth,
                                             FrameCallback callback) override;
@@ -2119,6 +2120,14 @@ Status ClientImpl::set_impulse_excision(bool on) {
     return on_loop("set_impulse_excision", [on](LoopState& state) {
         auto request = state.session.setImpulseExcisionRequest();
         request.setOn(on);
+        return request.send().ignoreResult();
+    });
+}
+
+Status ClientImpl::set_plugin_receivers(bool allowed) {
+    return on_loop("set_plugin_receivers", [allowed](LoopState& state) {
+        auto request = state.session.setPluginReceiversRequest();
+        request.setAllowed(allowed);
         return request.send().ignoreResult();
     });
 }

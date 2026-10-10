@@ -4239,6 +4239,7 @@ private:
 
     // Supervisor thread. Sends the excision switch when one is pending.
     void apply_impulse_excision();
+    void apply_plugin_receivers();
 
     // ---- the recording's pace --------------------------------------------
     std::mutex pace_mutex_;
@@ -5081,6 +5082,12 @@ private:
     std::atomic<bool> excision_wanted_{true};
     std::atomic<bool> excision_set_{false};
     std::atomic<bool> excision_pending_{false};
+
+    // Auto DV and the P25 trunk tracker are one or the other: while auto DV
+    // is on the engine is told plugins may not open receivers. What is
+    // wanted, and whether a send is owed.
+    std::atomic<bool> plugin_receivers_allowed_{true};
+    std::atomic<bool> plugin_receivers_pending_{false};
 
     bool transcription_wanted_ = false;
     bool transcription_set_ = false;

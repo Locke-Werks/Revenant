@@ -666,6 +666,16 @@ void EngineLink::setAutoDv(bool on)
     auto_dv_noted_hz_.clear();
     emit autoDvChanged();
 
+    // Either auto DV or the trunk tracker, never both on one channel: on, the
+    // engine closes the tracker's receivers and opens no more until it is off.
+    plugin_receivers_allowed_.store(!on, std::memory_order_release);
+    plugin_receivers_pending_.store(true, std::memory_order_release);
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+
     // At once rather than at the next detection pass, so the switch answers
     // with the digital voice already on the span.
     spawn_dv_receivers();
@@ -677,8 +687,8 @@ void EngineLink::spawn_dv_receivers()
         return;
     }
 
-    // First hand back what an earlier pass opened on a control channel or a
-    // trunk's voice channel, while the detection still read plain "P25". Not
+    // First hand back what an earlier pass opened on a control channel, while
+    // the detection still read plain "P25". Not
     // one in the pane: the operator is looking at it, and a strip vanishing
     // from under the cursor is worse than a spare receiver.
     std::erase_if(auto_dv_spawned_keys_,

@@ -350,6 +350,11 @@ public:
     // SourceStats carries whether it is on and what it has removed.
     [[nodiscard]] virtual Status set_impulse_excision(bool on) = 0;
 
+    // Whether engine plugins may open receivers, engine-wide and allowed by
+    // default. Refusing removes every receiver a plugin holds. The client's
+    // auto DV refuses it so it and the P25 trunk tracker never share a channel.
+    [[nodiscard]] virtual Status set_plugin_receivers(bool allowed) = 0;
+
     // Invoked on the event loop thread. See THREADING above.
     using FrameCallback = std::function<void(const SpectrumFrame&)>;
 
