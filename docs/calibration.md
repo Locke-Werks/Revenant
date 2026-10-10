@@ -153,6 +153,12 @@ measured: about 41 ms at the default block, against time constants of 0.1 s
 and 1 s. Neither kernel runs while both halves are off, and switching the stage
 on from off starts the estimate afresh.
 
+The span-wide impulse excision runs between this stage and the channelizer,
+so the order on the ring is convert, correction, excision, channelizer. The
+correction goes first because a DC offset is a constant added to an impulse
+too, and taking it out first means the excision measures what the antenna
+delivered. docs/noise.md, "Span-wide impulse excision", has the stage.
+
 ## Where it is kept
 
 The engine keeps it, keyed by backend and serial, `rtlsdr:00000001`. The

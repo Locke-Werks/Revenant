@@ -346,6 +346,10 @@ public:
     // wrong one.
     [[nodiscard]] virtual Status set_detection_threshold(double threshold_db) = 0;
 
+    // The span-wide impulse excision, engine-wide and on by default.
+    // SourceStats carries whether it is on and what it has removed.
+    [[nodiscard]] virtual Status set_impulse_excision(bool on) = 0;
+
     // Invoked on the event loop thread. See THREADING above.
     using FrameCallback = std::function<void(const SpectrumFrame&)>;
 

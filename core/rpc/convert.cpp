@@ -542,6 +542,11 @@ void write_source_stats(schema::SourceStats::Builder out, const source::SourceSt
     // fields on source::SourceStats.
     out.setVrxRetuneRefusals(conditions.vrx_retune_refusals);
     out.setFrameStalls(conditions.frame_stalls);
+    out.setImpulseExcision(conditions.impulse_excision.on);
+    out.setExcisionExamined(conditions.impulse_excision.samples_examined);
+    out.setExcisedSamples(conditions.impulse_excision.samples_excised);
+    out.setExcisionEvents(conditions.impulse_excision.events);
+    out.setExcisionSpared(conditions.impulse_excision.spared);
     out.setDirectSampling(static_cast<schema::DirectSamplingMode>(in.direct_sampling));
 }
 

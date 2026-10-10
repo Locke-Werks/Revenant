@@ -532,6 +532,11 @@ static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
     // call of their own.
     out.vrx_retune_refusals = in.getVrxRetuneRefusals();
     out.frame_stalls = in.getFrameStalls();
+    out.impulse_excision = in.getImpulseExcision();
+    out.excision_examined = in.getExcisionExamined();
+    out.excised_samples = in.getExcisedSamples();
+    out.excision_events = in.getExcisionEvents();
+    out.excision_spared = in.getExcisionSpared();
     out.direct_sampling = read_direct_sampling(in.getDirectSampling());
     return out;
 }
@@ -1405,6 +1410,7 @@ public:
     [[nodiscard]] Expected<DetectionList> detections(double min_confidence,
                                                      double min_margin) override;
     [[nodiscard]] Status set_detection_threshold(double threshold_db) override;
+    [[nodiscard]] Status set_impulse_excision(bool on) override;
 
     [[nodiscard]] Status subscribe_spectrum(std::uint32_t every_nth,
                                             FrameCallback callback) override;
@@ -2105,6 +2111,14 @@ Status ClientImpl::set_detection_threshold(double threshold_db) {
     return on_loop("set_detection_threshold", [threshold_db](LoopState& state) {
         auto request = state.session.setDetectionThresholdRequest();
         request.setThresholdDb(threshold_db);
+        return request.send().ignoreResult();
+    });
+}
+
+Status ClientImpl::set_impulse_excision(bool on) {
+    return on_loop("set_impulse_excision", [on](LoopState& state) {
+        auto request = state.session.setImpulseExcisionRequest();
+        request.setOn(on);
         return request.send().ignoreResult();
     });
 }

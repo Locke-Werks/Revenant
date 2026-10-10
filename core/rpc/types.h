@@ -436,6 +436,14 @@ struct SourceStats {
     // scene.
     std::uint64_t frame_stalls = 0;
 
+    // The span-wide impulse excision's switch and counts since the source
+    // opened. See the schema.
+    bool impulse_excision = false;
+    std::uint64_t excision_examined = 0;
+    std::uint64_t excised_samples = 0;
+    std::uint64_t excision_events = 0;
+    std::uint64_t excision_spared = 0;
+
     // The ADC branch in force now, never Auto. See the schema.
     DirectSamplingMode direct_sampling = DirectSamplingMode::Off;
 };

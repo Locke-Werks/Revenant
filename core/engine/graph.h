@@ -670,6 +670,13 @@ public:
     void set_front_end_correction(bool dc_removal, bool iq_correction);
     [[nodiscard]] FrontEndCorrectionStatus front_end_correction() const;
 
+    // Switches the span-wide impulse excision, core/dsp/impulse_excision.h.
+    // An atomic the recording thread reads at the next block; switching it
+    // on restarts the stage, which then waits a reference window before it
+    // excises anything.
+    void set_impulse_excision(bool on);
+    [[nodiscard]] ImpulseExcisionStatus impulse_excision() const;
+
     // --- the sample path, the source thread only ----------------------------
 
     // The source's BlockSink. Blocks as backpressure against a Demand source

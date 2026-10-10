@@ -306,6 +306,14 @@ struct EngineConfig {
     // %LOCALAPPDATA%\Revenant\calibration.txt. core/source/calibration.h has
     // the format and why the engine rather than the client keeps it.
     std::string calibration_path;
+
+    // The span-wide impulse excision, core/dsp/impulse_excision.h. ON BY
+    // DEFAULT, which is the owner's call: a capture with no impulses in it
+    // comes through unchanged, and one with them stops painting them across
+    // every bin of the waterfall and every receiver. Engine::
+    // set_impulse_excision changes it while the engine runs, and the choice
+    // carries across a change of source.
+    bool impulse_excision = true;
 };
 
 // The widest receiver a grid is expected to be able to carry, anywhere on it.
@@ -682,6 +690,28 @@ struct FrontEndCorrectionStatus {
     // them can come from consecutive blocks. That is a display's worth of
     // tearing and nothing acts on these numbers but a person.
     dsp::FrontEndEstimate estimate{};
+};
+
+// What the span-wide impulse excision is doing.
+//
+// The stage is core/shaders/impulse_excise.comp, run on each block after the
+// front-end correction and before the channelizer, so the spectrum, the
+// waterfall, the detector and every receiver see the cleaned stream.
+// core/dsp/impulse_excision.h has the design. Counts are cumulative from the
+// source's open; a reader takes two and subtracts.
+struct ImpulseExcisionStatus {
+    bool on = false;
+
+    // Samples the stage has finished, excised or not.
+    std::uint64_t samples_examined = 0;
+
+    // Samples replaced by zero, and the impulses they belonged to.
+    std::uint64_t samples_excised = 0;
+    std::uint64_t events = 0;
+
+    // Runs that stood over the threshold and were longer than the widest
+    // impulse, so were left alone as signals.
+    std::uint64_t spared = 0;
 };
 
 // A device's calibration as the engine holds it, and what the engine has
@@ -1419,6 +1449,10 @@ struct GraphConditions {
     // wait there is the graph falling behind and overrun_events is the next
     // thing to move.
     std::uint64_t frame_stalls = 0;
+
+    // The span-wide impulse excision's switch and counts, on this message
+    // for the reason the two above are: the wire already polls it.
+    ImpulseExcisionStatus impulse_excision{};
 };
 
 // Cumulative host time and throughput, for measuring contention rather than
@@ -1860,6 +1894,15 @@ public:
     [[nodiscard]] virtual Expected<CalibrationState> set_calibration(
         const source::DeviceCalibration& settings);
 
+    // Switches the span-wide impulse excision for this source and every one
+    // opened after it. Not refused with no source open: the choice is the
+    // engine's, and the next graph is built with it. What it is doing rides
+    // on graph_conditions().
+    //
+    // Virtual with a refusal rather than pure, for the reason submit_probe
+    // is: an Engine written before the stage existed has none and says so.
+    [[nodiscard]] virtual Status set_impulse_excision(bool on);
+
 protected:
     Engine() = default;
 
@@ -1916,6 +1959,11 @@ inline Expected<double> Engine::set_source_pace(double) {
 inline Expected<CalibrationState> Engine::set_calibration(const source::DeviceCalibration&) {
     return fail("this engine keeps no calibration: it was written before "
                 "core/source/calibration.h existed");
+}
+
+inline Status Engine::set_impulse_excision(bool) {
+    return fail("this engine has no impulse excision: it was written before "
+                "core/dsp/impulse_excision.h existed");
 }
 
 inline void Engine::drop_audio_fanouts() {

@@ -1,0 +1,198 @@
+// Span-wide impulse excision, on the device ring in place, after the
+// front-end correction and before the channelizer.
+//
+// core/dsp/impulse_excision.h states the design, the figures, why it excises
+// with zeros and why it lags. Four passes selected by kPass, the way
+// noise_blank.comp selects two:
+//
+//   segment    power[s] = sum of |x|^2 over segment s, in sample order.
+//   reference  level[s] = median of power over the K segments ending one
+//              before s, or 0 when the window reaches before the restart.
+//   flag       flags[i] = 1 when |x[i]|^2 * S > T * level[seg(i)].
+//   apply      a flag marks [f - lead, f + hang]; a sample in a marked run
+//              no longer than kMaxWidth is replaced by zero, and what was
+//              removed is written beside it.
+//
+// No state is carried between dispatches except the rings, and each ring is
+// a pure function of the raw stream since the last restart: every pass reads
+// raw samples, because core/dsp/impulse_excision.h's cursor only lets apply
+// clean a sample once its segment has been summed and its flag written.
+//
+// The CPU twins are reference_excise_* in
+// core/dsp/impulse_excision_reference.cpp, bit-identical: the same squares
+// and sums under `precise`, the same insertion sort, whose comparisons are
+// exact, and the same integer scans.
+//
+// IN PLACE THROUGH TWO BINDINGS, for the reason iq_correct.comp gives: the
+// engine binds the ring as both Source and Destination, the apply pass reads
+// and writes only its own slot of either, and the conformance test can hand
+// it two buffers.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+layout(constant_id = 1) const uint kPass = 0u;
+layout(constant_id = 2) const uint kSegLog2 = 6u;
+layout(constant_id = 3) const uint kSegments = 32u;
+layout(constant_id = 4) const uint kMaxWidth = 400u;
+layout(constant_id = 5) const uint kHang = 2u;
+layout(constant_id = 6) const uint kLead = 2u;
+
+const uint kPassSegment = 0u;
+const uint kPassReference = 1u;
+const uint kPassFlag = 2u;
+
+// dsp::kMaxExciseSegments, the private array the median sorts.
+const uint kMaxSegments = 64u;
+
+layout(std430, binding = 0) readonly buffer Source {
+    vec2 samples[];
+} src;
+
+layout(std430, binding = 1) buffer Segments {
+    float power[];
+} seg;
+
+layout(std430, binding = 2) buffer Reference {
+    float level[];
+} ref;
+
+layout(std430, binding = 3) buffer Flags {
+    uint values[];
+} flags;
+
+layout(std430, binding = 4) writeonly buffer Destination {
+    vec2 samples[];
+} dst;
+
+layout(std430, binding = 5) writeonly buffer Removed {
+    vec2 samples[];
+} removed;
+
+layout(std430, binding = 6) buffer Counters {
+    uint values[];
+} counters;
+
+// dsp::ExcisionParams.
+layout(push_constant) uniform Params {
+    uint ring_mask;
+    uint first;
+    uint count;
+    uint seg_mask;
+    uint flag_mask;
+    uint removed_mask;
+    int history;
+    float threshold;
+} params;
+
+// A flag from before the restart is a previous run's and does not count.
+// uint(rel) wraps a negative offset modulo 2^32 and the mask brings it back,
+// which is right because the flag ring divides 2^32.
+bool flag_at(int rel) {
+    if (rel + params.history < 0) {
+        return false;
+    }
+    return flags.values[(params.first + uint(rel)) & params.flag_mask] != 0u;
+}
+
+bool marked(int rel) {
+    for (uint m = 0u; m <= kHang + kLead; ++m) {
+        if (flag_at(rel - int(kHang) + int(m))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void main() {
+    const uint j = gl_GlobalInvocationID.x;
+    if (j >= params.count) {
+        return;
+    }
+
+    if (kPass == kPassSegment) {
+        const uint base = (params.first + (j << kSegLog2)) & params.ring_mask;
+        precise float sum = 0.0;
+        for (uint m = 0u; m < (1u << kSegLog2); ++m) {
+            const vec2 s = src.samples[(base + m) & params.ring_mask];
+            precise float q = s.x * s.x + s.y * s.y;
+            sum = sum + q;
+        }
+        seg.power[(base >> kSegLog2) & params.seg_mask] = sum;
+        return;
+    }
+
+    if (kPass == kPassReference) {
+        const uint base = (params.first + (j << kSegLog2)) & params.ring_mask;
+        const uint slot = base >> kSegLog2;
+        const int span = int(1u << kSegLog2);
+        const int rel = int(j) * span;
+        if (rel - int(kSegments + 1u) * span + params.history < 0) {
+            ref.level[slot & params.seg_mask] = 0.0;
+            return;
+        }
+        float v[kMaxSegments];
+        for (uint m = 0u; m < kSegments; ++m) {
+            v[m] = seg.power[(slot - 1u - kSegments + m) & params.seg_mask];
+        }
+        for (uint a = 1u; a < kSegments; ++a) {
+            const float x = v[a];
+            uint b = a;
+            while (b > 0u && v[b - 1u] > x) {
+                v[b] = v[b - 1u];
+                b = b - 1u;
+            }
+            v[b] = x;
+        }
+        ref.level[slot & params.seg_mask] = v[kSegments / 2u];
+        return;
+    }
+
+    if (kPass == kPassFlag) {
+        const uint slot = (params.first + j) & params.ring_mask;
+        const vec2 s = src.samples[slot];
+        precise float p = s.x * s.x + s.y * s.y;
+        const float level = ref.level[(slot >> kSegLog2) & params.seg_mask];
+        precise float lhs = p * float(1u << kSegLog2);
+        precise float rhs = params.threshold * level;
+        flags.values[(params.first + j) & params.flag_mask] =
+            (level > 0.0 && lhs > rhs) ? 1u : 0u;
+        return;
+    }
+
+    // Apply. Negative zero on whichever side carries nothing, so cleaned plus
+    // removed is the raw sample to the bit; core/dsp/impulse_excision.h has
+    // the argument.
+    const vec2 nothing = vec2(uintBitsToFloat(0x80000000u));
+    const int rel = int(j);
+    const uint slot = (params.first + j) & params.ring_mask;
+    const vec2 x = src.samples[slot];
+
+    bool excise = false;
+    if (marked(rel)) {
+        uint left = 0u;
+        for (uint k = 1u; k <= kMaxWidth; ++k) {
+            if (!marked(rel - int(k))) {
+                break;
+            }
+            left = left + 1u;
+        }
+        uint right = 0u;
+        for (uint k = 1u; k <= kMaxWidth; ++k) {
+            if (!marked(rel + int(k))) {
+                break;
+            }
+            right = right + 1u;
+        }
+        excise = left + right + 1u <= kMaxWidth;
+        if (left == 0u) {
+            atomicAdd(counters.values[excise ? 1u : 2u], 1u);
+        }
+    }
+    if (excise) {
+        atomicAdd(counters.values[0], 1u);
+    }
+    dst.samples[slot] = excise ? nothing : x;
+    removed.samples[(params.first + j) & params.removed_mask] = excise ? x : nothing;
+}

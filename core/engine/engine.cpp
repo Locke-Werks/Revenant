@@ -146,6 +146,7 @@ public:
         }
         config_ = config;
         pace_.store(config.pace, std::memory_order_release);
+        impulse_excision_.store(config.impulse_excision, std::memory_order_release);
 
         gpu::Context::Options options;
         options.device_index = config.gpu_index;
@@ -502,6 +503,7 @@ public:
 
         graph_->set_front_end_correction(stored.settings.dc_removal,
                                          stored.settings.iq_correction);
+        graph_->set_impulse_excision(impulse_excision_.load(std::memory_order_acquire));
 
         source_ = std::move(source);
         capabilities_ = source_->capabilities();
@@ -1438,7 +1440,17 @@ public:
         const GraphStats stats = graph_->stats();
         out.vrx_retune_refusals = stats.vrx_retune_refusals;
         out.frame_stalls = stats.frame_stalls;
+        out.impulse_excision = graph_->impulse_excision();
         return out;
+    }
+
+    [[nodiscard]] Status set_impulse_excision(bool on) override {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        impulse_excision_.store(on, std::memory_order_release);
+        if (graph_ != nullptr) {
+            graph_->set_impulse_excision(on);
+        }
+        return {};
     }
 
     [[nodiscard]] EngineLoad load() const override {
@@ -1580,6 +1592,10 @@ private:
     }
 
     EngineConfig config_{};
+
+    // The excision switch outlives a graph, so a choice made between sources
+    // or before the first one is the one the next graph is built with.
+    std::atomic<bool> impulse_excision_{true};
     EngineInfo info_{};
     std::string clamp_note_;
 

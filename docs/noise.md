@@ -21,6 +21,11 @@ wraps and across dispatch boundaries of awkward lengths for the two that
 carry state, and `tests/engine/test_engine_noise.cpp` is where every figure
 below comes from.
 
+One stage is not per receiver: the span-wide impulse excision runs on the
+whole capture ahead of the channelizer and is on by default. It has its own
+section, "Span-wide impulse excision", near the end, and the rest of this
+page up to it does not apply to it.
+
 ## What each stage is offered on
 
 | Mode | Blanker | Notch | Automatic notch | Noise reduction |
@@ -257,6 +262,107 @@ voice's band the voice-to-impulse ratio goes from 0.0 dB to 30.4 dB. The same
 twin over the clean tap cut the voice's band by 71 dB, which is to say it
 found nothing to cut.
 
+## Span-wide impulse excision
+
+One stage on the whole capture rather than on a receiver: it runs on the
+device ring in place, after the front-end correction and before the
+channelizer, so the spectrum, the waterfall, the detector and every receiver
+see the same cleaned stream. On by default. `EngineConfig::impulse_excision`,
+`Engine::set_impulse_excision`, `setImpulseExcision` on the wire, the
+"remove impulse noise across the span" checkbox in the settings window and
+`--no-excision` on revenant-cli all reach the same switch.
+
+| Piece | Where |
+| --- | --- |
+| design, figures, cursor | `core/dsp/impulse_excision.h` |
+| kernel, four passes | `core/shaders/impulse_excise.comp` |
+| twins | `reference_excise_segment`, `_reference`, `_flag`, `_apply` in `core/dsp/impulse_excision_reference.cpp` |
+| engine | `plan_impulse_excision` and `record_impulse_excision` in `core/engine/graph.cpp` |
+| tests | `tests/reference/test_impulse_excision.cpp` |
+
+Why a second blanker: the receiver blanker above only helps the receiver that
+switched it on, and works after the prototype filter has smeared each impulse
+over 34 channel samples. Ignition and switching noise is wideband, so one
+impulse lights every bin of the waterfall and lifts the detector's floor
+across the span. At the source rate it is a handful of samples, and cutting it
+there costs a handful of samples once, for every consumer.
+
+How it decides, in four passes of one kernel:
+
+1. Segment: the power of each S-sample segment, S a power of two, aligned to
+   the absolute sample index.
+2. Reference: the median of the K = 32 segment powers ending one segment
+   before this one.
+3. Flag: a sample whose power times S is more than T times its segment's
+   reference.
+4. Apply: a flag marks the hang after it and the lead before it. A run of
+   marked samples no longer than the maximum width is an impulse and is
+   replaced by zero. A longer run is a signal and is left exactly as it was.
+
+The reference is a median, and that is what keeps the stage off real
+signals. A mean reference rises with a burst's power times its length, so a
+burst stops standing out after W / T samples and its first W / T samples look
+like an impulse and would be cut. The median does not move until a burst
+covers half the window, which the design keeps at four maximum widths or
+more, so a burst is flagged for its whole length, exceeds the maximum width,
+and is spared. A strong continuous carrier is in every segment, so it is in
+the reference, and a constant envelope never stands 15 dB above itself.
+
+| Figure | Value | Why |
+| --- | --- | --- |
+| threshold | 15 dB | noise alone passes 15 dB over its mean with probability 2e-14: about once a month at 20 MS/s, where 12 dB would be 2.6 times a second |
+| maximum width | 20 us | wideband impulses are well under 10 us; real bursts are carried by transmissions far longer |
+| hang, lead | 0.1 us, at least 2 samples | the device's anti-alias filter spreads an impulse over a few samples |
+| segment S | the power of two at or above a quarter of the maximum width, at least 16 | K S / 2 is then at least four maximum widths |
+| segments K | 32 | |
+
+At 2.4 MS/s that is a 48-sample maximum width, 16-sample segments and a
+512-sample reference window; at 20 MS/s, 400 samples, 128 and 4096.
+
+### Zero, not a taper
+
+An excised sample becomes zero and keeps its index; nothing is shifted,
+because the sample index is time. Zero was chosen over a raised-cosine taper
+because a taper keeps w(n) of the impulse on its shoulders, and that residue
+is broadband, which is the thing the stage exists to remove. The gate's own
+splatter is small at these widths: zeroing 5 samples of a 65536-sample block
+takes 5/65536 of a carrier's energy, 39 dB under it, and spreads that over
+most of the span. The behaviour test keeps a tone's power within 0.004 dB
+with 40 impulses excised around it.
+
+### Raw plus removed
+
+The apply pass writes what it removed into a ring of its own beside the
+cleaned sample, so cleaned + removed equals raw bit for bit. The side that
+carries nothing carries negative zero, because -0 + x is x for every float,
+where +0 + -0 would be +0 and lose a raw negative zero. Nothing ships the
+removed ring to a client yet; a tap that does is a copy out of a buffer that
+is already right. What does ship is counted: samples examined, samples
+excised, events, and long bursts spared, on `SourceStats` over the wire and
+on `GraphConditions` in the engine, and printed by revenant-cli at the end of
+a run.
+
+### The lag
+
+A sample's run length needs the flags up to the maximum width plus the lead
+ahead of it, so the stage finishes samples that far behind the newest, and
+the channelizer reads only what it has finished: at least 50 samples at 2.4 MS/s and
+402 at 20 MS/s, plus up to one segment, about 20 us against a block of several milliseconds.
+The last lag's worth of a finite capture is never channelized. Switching the
+stage on, or a gap in the stream, restarts it, and it excises nothing until a
+full reference window of the new run has passed.
+
+### Measured
+
+Through the twins, which the kernel matches bit for bit on the RTX 4090 at
+workgroup widths 1, 32, 64 and 256 across a ring wrap:
+
+| Case | Result |
+| --- | --- |
+| 40 impulses of 1 to 4 samples on noise and a tone, 2.4 MS/s | 40 events, 260 samples excised, none spared; largest magnitude left near an impulse 0.13 against the tone's 0.1; tone power changed by -0.004 dB; cleaned + removed == raw on every sample |
+| carrier 40 dB over the noise | nothing excised |
+| bursts 30 dB up, 144 and 53 samples long against a 48-sample maximum | both bit-identical to the input, 2 spared |
+
 ## What is not done
 
 - The blanker blanks and does not interpolate across what it removes.
@@ -269,5 +375,8 @@ found nothing to cut.
 - Neither notch has been measured through the engine on NFM or CW. The
   figures above are the USB receiver's, and the CW guard's are the twin's on
   two synthetic tones.
+- The span-wide excision has not been run on an on-air capture with real
+  ignition noise; its figures are the synthetic cases in its section.
+- Nothing ships the excision's removed component to a client.
 - Nothing here has been listened to on air. Every figure is the synthetic
   voice above, and a voice is not a harmonic series with three formants.

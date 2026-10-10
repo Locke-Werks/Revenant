@@ -850,6 +850,17 @@ struct SourceStats {
     # why it is here on the polled message rather than on SourceDescriptor.
     # off on every source that has no direct sampling.
     directSampling @11 :DirectSamplingMode;
+
+    # The span-wide impulse excision, docs/noise.md "Span-wide impulse
+    # excision": whether it is on, and its counts since the source opened.
+    # Examined is every sample the stage finished; excised the ones replaced
+    # by zero, in excisionEvents impulses; spared the runs over the threshold
+    # that were too long to be impulses and were left alone as signals.
+    impulseExcision @12 :Bool;
+    excisionExamined @13 :UInt64;
+    excisedSamples @14 :UInt64;
+    excisionEvents @15 :UInt64;
+    excisionSpared @16 :UInt64;
 }
 
 struct VrxParams {
@@ -3653,6 +3664,12 @@ interface Session {
     # subscribeTranscripts does.
     subscribeVrxEvents @34 (receiver :VrxEventReceiver)
         -> (subscription :VrxEventSubscription);
+
+    # Switches the span-wide impulse excision. ENGINE-WIDE, like
+    # setTranscription: one stage on the one capture every session sees. On
+    # by default. The choice carries across a change of source and is
+    # accepted with no source open; SourceStats reports what it is doing.
+    setImpulseExcision @35 (on :Bool) -> ();
 }
 
 # What one loaded plugin can decode, as it declared itself through

@@ -73,6 +73,11 @@ namespace revenant::gpu::shaders {
 [[nodiscard]] std::span<const std::uint32_t> iq_moments();
 [[nodiscard]] std::span<const std::uint32_t> iq_correct();
 
+// Span-wide impulse excision on the ring, in place, between the front-end
+// correction and the channelizer: four passes selected by a specialization
+// constant. Twins in core/dsp/impulse_excision.h.
+[[nodiscard]] std::span<const std::uint32_t> impulse_excise();
+
 // The three noise mitigation kernels, each off by default on a receiver.
 // Twins in core/dsp/noise_reference.h: reference_blank_detect and
 // reference_blank_apply, reference_line, reference_spectral.

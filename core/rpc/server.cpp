@@ -3079,6 +3079,13 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> setImpulseExcision(SetImpulseExcisionContext context) override {
+        if (auto set = owner_.engine().set_impulse_excision(context.getParams().getOn()); !set) {
+            return to_exception(set.error());
+        }
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> transcriptionStatus(TranscriptionStatusContext context) override {
         owner_.write_transcription_status(context.getResults().initStatus());
         return kj::READY_NOW;

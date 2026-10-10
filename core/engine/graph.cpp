@@ -118,6 +118,7 @@
 #include <utility>
 
 #include "core/dsp/convert.h"
+#include "core/dsp/impulse_excision.h"
 #include "core/dsp/pfb_branch_reference.h"
 #include "core/dsp/pfb_fft_reference.h"
 #include "core/dsp/spectrum_levels_reference.h"
@@ -866,6 +867,13 @@ struct Graph::Impl {
         VkDescriptorSet moments_set = VK_NULL_HANDLE;
         VkDescriptorSet correct_set = VK_NULL_HANDLE;
         std::uint32_t moments_count = 0;
+
+        // The impulse excision's counters for this frame's apply pass, read
+        // by the recording thread when it next takes this slot, as the
+        // moments are. excise_counted is false when no apply pass ran.
+        gpu::Buffer excise_counters;
+        VkDescriptorSet excise_set = VK_NULL_HANDLE;
+        bool excise_counted = false;
     };
 
     const gpu::Context* context = nullptr;
@@ -930,6 +938,27 @@ struct Graph::Impl {
     std::atomic<double> fe_sin_phase{0.0};
     std::atomic<std::uint64_t> fe_samples{0};
     std::atomic<std::uint64_t> fe_blocks{0};
+
+    // The span-wide impulse excision, core/dsp/impulse_excision.h. Four
+    // pipelines of one kernel and their side rings, built with the coarse
+    // chain whether or not the stage is on, so the switch is an atomic.
+    std::array<gpu::ComputePipeline, 4> excise_pipelines;
+    gpu::Buffer excise_power;
+    gpu::Buffer excise_level;
+    gpu::Buffer excise_flags;
+    gpu::Buffer excise_removed;
+
+    // Recording thread only.
+    dsp::ExcisionCursor excise_cursor;
+    bool excise_was_on = false;
+
+    // On unless the engine says otherwise; Engine::open_source sets it from
+    // EngineConfig::impulse_excision before the first block.
+    std::atomic<bool> impulse_excision{true};
+    std::atomic<std::uint64_t> excise_examined{0};
+    std::atomic<std::uint64_t> excise_samples{0};
+    std::atomic<std::uint64_t> excise_events{0};
+    std::atomic<std::uint64_t> excise_spared{0};
 
     // A second specialization of core/shaders/spectrum.comp, at one channel
     // and the passband's own transform size.
@@ -1206,6 +1235,95 @@ struct Graph::Impl {
                         std::as_bytes(std::span<const dsp::IqCorrectParams>(&correct, 1)),
                         group_count(count, geometry.local_size_x));
         dispatches.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Recording thread. Folds the counters a slot's previous apply pass left
+    // into the totals, and clears them for this frame's.
+    void read_excision_counters(Frame& frame) {
+        if (!frame.excise_counted) {
+            return;
+        }
+        frame.excise_counted = false;
+        std::array<std::uint32_t, dsp::kExciseCounters> counts{};
+        if (!frame.excise_counters.read(std::as_writable_bytes(std::span(counts)))) {
+            // Pinned memory that cannot be read loses one block's counts and
+            // nothing else; the samples were excised all the same.
+            return;
+        }
+        excise_samples.fetch_add(counts[dsp::kExciseCounterSamples], std::memory_order_relaxed);
+        excise_events.fetch_add(counts[dsp::kExciseCounterEvents], std::memory_order_relaxed);
+        excise_spared.fetch_add(counts[dsp::kExciseCounterSpared], std::memory_order_relaxed);
+        const std::array<std::uint32_t, dsp::kExciseCounters> zeros{};
+        if (!frame.excise_counters.write(std::as_bytes(std::span(zeros)))) {
+            // Left uncleared, the next read would count these again; stop
+            // counting this slot rather than report a number twice.
+            frame.excise_counted = false;
+        }
+    }
+
+    // Recording thread. Plans the impulse excision over the block about to be
+    // written and returns how far the channelizer may read: the stage's
+    // finished samples while it is on, the published end while it is off.
+    // Planned before the dispatch count is worked out, because the count
+    // depends on it, and recorded after the correction by
+    // record_impulse_excision. core/dsp/impulse_excision.h has the design
+    // and the lag.
+    dsp::SampleIndex plan_impulse_excision(dsp::SampleIndex start, std::uint32_t count,
+                                           dsp::SampleIndex published_end,
+                                           std::optional<dsp::ExcisionPlan>& plan) {
+        plan.reset();
+        const bool on = impulse_excision.load(std::memory_order_acquire);
+        if (!on) {
+            excise_was_on = false;
+            return published_end;
+        }
+        if (!excise_was_on) {
+            // Whatever the flag ring holds is from before the stage was off,
+            // so it waits for a fresh reference window.
+            excise_cursor.reset();
+        }
+        excise_was_on = true;
+        if (count == 0) {
+            return std::min(published_end, excise_cursor.cleaned_end());
+        }
+        plan = excise_cursor.plan(start, count);
+        return std::min(published_end, plan->cleaned_end);
+    }
+
+    void record_impulse_excision(Frame& frame, const dsp::ExcisionPlan& plan) {
+        const dsp::ExcisionParams* passes[] = {&plan.segment, &plan.reference, &plan.flag,
+                                               &plan.apply};
+
+        // The convert, the copy and the correction all wrote the block.
+        record_barrier(frame.commands,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+        bool first = true;
+        for (std::uint32_t pass = 0; pass < 4; ++pass) {
+            const dsp::ExcisionParams& params = *passes[pass];
+            if (params.count == 0) {
+                continue;
+            }
+            if (!first) {
+                // Each pass reads what the one before it wrote.
+                record_barrier(frame.commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+            }
+            first = false;
+            record_dispatch(frame.commands, excise_pipelines[pass], frame.excise_set,
+                            std::as_bytes(std::span<const dsp::ExcisionParams>(&params, 1)),
+                            group_count(params.count, geometry.local_size_x));
+            dispatches.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (plan.apply.count > 0) {
+            frame.excise_counted = true;
+            readbacks.fetch_add(1, std::memory_order_relaxed);
+            excise_examined.fetch_add(plan.apply.count, std::memory_order_relaxed);
+        }
     }
 
     void push_control(ControlOp* op) {
@@ -2604,14 +2722,15 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
     //
     // The buffer count is the sum of the seven kernels' bindings: convert 2,
     // branch 3, transform 3, spectrum 4, levels 2, and the front-end
-    // correction's moments 2 and correct 2.
+    // correction's moments 2 and correct 2, and the impulse excision's 7 in
+    // one set its four pipelines share.
     VkDescriptorPoolSize pool_size{};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pool_size.descriptorCount = config.frames_in_flight * 18;
+    pool_size.descriptorCount = config.frames_in_flight * 25;
 
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = config.frames_in_flight * 7;
+    pool_info.maxSets = config.frames_in_flight * 8;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = &pool_size;
 
@@ -3042,6 +3161,55 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
             0.0F);
     }
 
+    // The impulse excision: one kernel, four specializations, and its side
+    // rings, sized for the largest block from every frame in flight.
+    {
+        const dsp::ExcisionConfig design = dsp::design_excision(impl.config.source_rate);
+        const auto ring_mask = static_cast<std::uint32_t>(impl.ring->geometry().capacity_mask);
+        auto rings = dsp::size_excision_rings(design, impl.geometry.block_samples,
+                                              impl.config.frames_in_flight, ring_mask);
+        if (!rings) {
+            return std::unexpected(with_context(rings.error(), "Graph::prepare excision rings"));
+        }
+        for (std::uint32_t pass = 0; pass < 4; ++pass) {
+            const std::uint32_t constants[] = {pass,            design.seg_log2,
+                                               design.segments, design.max_width,
+                                               design.hang,     design.lead};
+            gpu::ComputePipeline::Options options;
+            options.spirv = gpu::shaders::impulse_excise();
+            options.storage_buffer_count = 7;
+            options.local_size_x = impl.geometry.local_size_x;
+            options.push_constant_bytes = sizeof(dsp::ExcisionParams);
+            options.grid_constants = constants;
+            auto pipeline = gpu::ComputePipeline::create(context, options);
+            if (!pipeline) {
+                return std::unexpected(
+                    with_context(pipeline.error(), "Graph::prepare impulse excision"));
+            }
+            impl.excise_pipelines[pass] = std::move(*pipeline);
+        }
+
+        const VkDeviceSize segs = static_cast<VkDeviceSize>(rings->seg_mask) + 1U;
+        auto power = make_device_buffer(segs * sizeof(float));
+        auto level = make_device_buffer(segs * sizeof(float));
+        auto flags = make_device_buffer((static_cast<VkDeviceSize>(rings->flag_mask) + 1U) *
+                                        sizeof(std::uint32_t));
+        auto removed = make_device_buffer(
+            (static_cast<VkDeviceSize>(rings->removed_mask) + 1U) * kComplexBytes);
+        for (auto* made : {&power, &level, &flags, &removed}) {
+            if (!*made) {
+                return std::unexpected(
+                    with_context(made->error(), "Graph::prepare excision rings"));
+            }
+        }
+        impl.excise_power = std::move(*power);
+        impl.excise_level = std::move(*level);
+        impl.excise_flags = std::move(*flags);
+        impl.excise_removed = std::move(*removed);
+        impl.excise_cursor = dsp::ExcisionCursor(
+            design, ring_mask, *rings, dsp::excision_threshold(dsp::kExciseDefaultThresholdDb));
+    }
+
     impl.coarse_builds.fetch_add(1, std::memory_order_relaxed);
 
     // --- one frame's worth of everything, times frames_in_flight ------------
@@ -3144,7 +3312,25 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
             frame.moments = std::move(*moments);
         }
 
-        VkDescriptorSetLayout layouts[7]{};
+        {
+            const VkDeviceSize counter_bytes =
+                static_cast<VkDeviceSize>(dsp::kExciseCounters) * sizeof(std::uint32_t);
+            auto counters = gpu::Buffer::create(context, counter_bytes, kReadbackUsage,
+                                                gpu::MemoryKind::Readback);
+            if (!counters) {
+                return std::unexpected(
+                    with_context(counters.error(), "Graph::prepare excision counters"));
+            }
+            frame.excise_counters = std::move(*counters);
+            const std::array<std::uint32_t, dsp::kExciseCounters> zeros{};
+            if (auto zeroed = frame.excise_counters.write(std::as_bytes(std::span(zeros)));
+                !zeroed) {
+                return std::unexpected(
+                    with_context(zeroed.error(), "Graph::prepare excision counters"));
+            }
+        }
+
+        VkDescriptorSetLayout layouts[8]{};
         std::uint32_t set_count = 0;
         if (impl.has_convert) {
             layouts[set_count++] = impl.convert_pipeline.descriptor_layout();
@@ -3157,6 +3343,7 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         }
         layouts[set_count++] = impl.iq_moments_pipeline.descriptor_layout();
         layouts[set_count++] = impl.iq_correct_pipeline.descriptor_layout();
+        layouts[set_count++] = impl.excise_pipelines[0].descriptor_layout();
 
         VkDescriptorSetAllocateInfo set_alloc{};
         set_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -3164,7 +3351,7 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         set_alloc.descriptorSetCount = set_count;
         set_alloc.pSetLayouts = layouts;
 
-        VkDescriptorSet sets[7]{};
+        VkDescriptorSet sets[8]{};
         result = vkAllocateDescriptorSets(device, &set_alloc, sets);
         if (result != VK_SUCCESS) {
             return fail(std::format("vkAllocateDescriptorSets failed for frame {} ({})", i,
@@ -3230,6 +3417,20 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
             const VkBuffer bound[] = {impl.ring->buffer(), impl.ring->buffer()};
             if (auto wrote = write_storage_set(device, frame.correct_set, bound); !wrote) {
                 return std::unexpected(with_context(wrote.error(), "Graph::prepare correct set"));
+            }
+        }
+
+        // One set for the excision's four pipelines. Their layouts are
+        // identical, so a set allocated against one is compatible with all
+        // four. The ring twice again, as the source and the destination.
+        frame.excise_set = sets[next++];
+        {
+            const VkBuffer bound[] = {impl.ring->buffer(),        impl.excise_power.handle(),
+                                      impl.excise_level.handle(), impl.excise_flags.handle(),
+                                      impl.ring->buffer(),        impl.excise_removed.handle(),
+                                      frame.excise_counters.handle()};
+            if (auto wrote = write_storage_set(device, frame.excise_set, bound); !wrote) {
+                return std::unexpected(with_context(wrote.error(), "Graph::prepare excision set"));
             }
         }
     }
@@ -3888,6 +4089,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
     // block left behind. The wait above is what makes the read safe: the slot
     // is only handed out once the completion thread has retired its frame.
     impl.read_front_end_moments(frame);
+    impl.read_excision_counters(frame);
 
     // The one host pass over the samples, into pinned memory the convert
     // kernel reads directly. Partitioned across the pool because at 20 MS/s
@@ -3956,9 +4158,16 @@ Status Graph::on_block(const source::SourceBlock& block) {
         impl.samples_dropped.fetch_add(skipped, std::memory_order_relaxed);
     }
 
+    // The impulse excision lags the newest sample, and the channelizer reads
+    // only what it has finished. Planned here, recorded after the correction.
+    std::optional<dsp::ExcisionPlan> excision;
+    const dsp::SampleIndex channel_limit = impl.plan_impulse_excision(
+        block.stamp.start, static_cast<std::uint32_t>(block.sample_count), published_end,
+        excision);
+
     std::uint32_t block_count = 0;
-    if (published_end > first_block * decimation) {
-        const dsp::SampleIndex last = (published_end - 1) / decimation;
+    if (channel_limit > first_block * decimation) {
+        const dsp::SampleIndex last = (channel_limit - 1) / decimation;
         if (last >= first_block) {
             const dsp::SampleIndex available = last - first_block + 1;
             block_count = static_cast<std::uint32_t>(
@@ -4062,6 +4271,9 @@ Status Graph::on_block(const source::SourceBlock& block) {
 
     impl.record_front_end_correction(frame, destination,
                                      static_cast<std::uint32_t>(block.sample_count));
+    if (excision.has_value()) {
+        impl.record_impulse_excision(frame, *excision);
+    }
 
     if (block_count > 0) {
         record_barrier(frame.commands,
@@ -4398,6 +4610,21 @@ void Graph::set_front_end_correction(bool dc_removal, bool iq_correction) {
     auto& impl = *impl_;
     impl.dc_removal.store(dc_removal, std::memory_order_release);
     impl.iq_correction.store(iq_correction, std::memory_order_release);
+}
+
+void Graph::set_impulse_excision(bool on) {
+    impl_->impulse_excision.store(on, std::memory_order_release);
+}
+
+ImpulseExcisionStatus Graph::impulse_excision() const {
+    const auto& impl = *impl_;
+    ImpulseExcisionStatus out;
+    out.on = impl.impulse_excision.load(std::memory_order_acquire);
+    out.samples_examined = impl.excise_examined.load(std::memory_order_relaxed);
+    out.samples_excised = impl.excise_samples.load(std::memory_order_relaxed);
+    out.events = impl.excise_events.load(std::memory_order_relaxed);
+    out.spared = impl.excise_spared.load(std::memory_order_relaxed);
+    return out;
 }
 
 FrontEndCorrectionStatus Graph::front_end_correction() const {

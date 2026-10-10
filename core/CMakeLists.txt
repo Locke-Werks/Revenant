@@ -141,6 +141,7 @@ add_library(revenant_core STATIC
     dsp/denormal_mode.cpp
     dsp/front_end_correction.cpp
     dsp/front_end_correction_reference.cpp
+    dsp/impulse_excision_reference.cpp
     dsp/noise_reference.cpp
     dsp/pfb_branch_reference.cpp
     dsp/pfb_design.cpp
@@ -234,6 +235,7 @@ revenant_add_shaders(revenant_core
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vrx_carrier.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/iq_moments.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/iq_correct.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/impulse_excise.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/noise_blank.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/noise_line.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/noise_spectral.comp"

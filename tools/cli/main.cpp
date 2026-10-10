@@ -441,6 +441,9 @@ struct Options {
     // resolution it needs, which is HF: EngineConfig::channels_yield_to_source.
     bool channels_given = false;
 
+    // EngineConfig::impulse_excision. On unless --no-excision.
+    bool excision = true;
+
     SampleRate audio_rate = 48'000;
     int gpu = -1;
 
@@ -809,6 +812,10 @@ void print_usage()
         "                      is the default without --play and is what makes an\n"
         "                      hour of capture take a minute. A live radio sets its\n"
         "                      own rate and ignores both of these.\n"
+        "  --no-excision       Leave impulse noise in the capture. The span-wide\n"
+        "                      excision is on by default and cuts impulses out of\n"
+        "                      the whole span before the channelizer; see\n"
+        "                      docs/noise.md.\n"
         "  --channels <n>      Channelizer channel count, default 64 above 30 MHz and\n"
         "                      the engine's own choice below it. Zero lets the engine\n"
         "                      size the grid from the source everywhere: a 2 MS/s\n"
@@ -1259,6 +1266,11 @@ void print_usage()
 
         if (arg == "--realtime") {
             options.pace = 1.0;
+            continue;
+        }
+
+        if (arg == "--no-excision") {
+            options.excision = false;
             continue;
         }
 
@@ -3276,6 +3288,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     config.channels = options.channels;
     config.channels_yield_to_source = !options.channels_given;
     config.audio_rate = options.audio_rate;
+    config.impulse_excision = options.excision;
 
     // Chosen before the engine is created, because the spectrum stage is part
     // of the coarse chain and is built once when the source is opened.
@@ -4830,6 +4843,15 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         std::println("  LOST            {} samples in {} overruns, last at index {}",
                      source_stats.samples_lost, source_stats.overrun_events,
                      source_stats.last_loss_index);
+    }
+    // Not a loss, so it does not set any_counter: excised samples are the
+    // stage doing its job. Printed because the count is the audit.
+    if (const engine::ImpulseExcisionStatus excision = eng.graph_conditions().impulse_excision;
+        excision.on && excision.samples_examined != 0) {
+        std::println("  EXCISED         {} samples in {} impulses of {} examined, {} long "
+                     "burst{} left alone",
+                     excision.samples_excised, excision.events, excision.samples_examined,
+                     excision.spared, excision.spared == 1 ? "" : "s");
     }
     if (waterfall != nullptr && waterfall->dropped() != 0) {
         any_counter = true;
