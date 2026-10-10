@@ -63,10 +63,10 @@
 //
 // The whole of what the source delivers, per the owner's correction of
 // 2026-09-23: not the focused receiver's passband, and not a fallback that
-// depends on whether a receiver is open. The span spectrum has no zoom, so
-// the frame and the pane are the same width today; the search is written
-// against the frame so that a zoom added later does not quietly narrow it to
-// what is on screen.
+// depends on whether a receiver is open. The search is written against the
+// frame, so the view zoom added on 2026-10-09 (models/span_view.h) does not
+// narrow it to what is on screen; a peak outside a narrowed view keeps its
+// plate at the pane's edge.
 //
 // The largest bin of each frame is the right answer for one frame and an
 // unreadable one for a sequence. Two carriers within a decibel of each other

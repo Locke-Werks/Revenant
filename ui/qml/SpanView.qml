@@ -126,6 +126,49 @@ ColumnLayout {
             onNudged: (steps) => ScaleSettings.nudgeCeiling(steps)
         }
 
+        // THE VIEW'S ZOOM, beside the ceiling plate so it covers neither the
+        // detection labels across the top nor the level scale at the right.
+        // The same three things as Ctrl+wheel, Ctrl+Alt+Up, Ctrl+Alt+Down and
+        // Ctrl+Home; models/span_view.h has the rules. "full" is the way out
+        // of a band the menu zoomed to, and is lit while the view is narrow.
+        Row {
+            anchors.left: ceilingPin.right
+            anchors.leftMargin: 6
+            anchors.verticalCenter: ceilingPin.verticalCenter
+            spacing: 2
+            visible: span.drawing
+
+            RButton {
+                flat: true
+                implicitHeight: 20
+                text: "−"
+                enabled: engineLink.viewZoomed
+                onClicked: engineLink.zoomView(1 / KeyMap.zoomStep, 0.5)
+                Tip { visible: parent.hovered; text: "Zoom out (" + KeyMap.keysText("view.zoom_out") + ", or Ctrl+wheel)" }
+            }
+            RButton {
+                flat: true
+                implicitHeight: 20
+                text: "+"
+                onClicked: engineLink.zoomView(KeyMap.zoomStep, 0.5)
+                Tip { visible: parent.hovered; text: "Zoom in (" + KeyMap.keysText("view.zoom_in") + ", or Ctrl+wheel over the pointer). Shift+wheel moves a zoomed view." }
+            }
+            RButton {
+                flat: true
+                implicitHeight: 20
+                text: "full"
+                checked: engineLink.viewZoomed
+                enabled: engineLink.viewZoomed
+                onClicked: engineLink.fullSpan()
+                Tip {
+                    visible: parent.hovered
+                    text: (engineLink.viewHoldsBand
+                           ? "Showing the band picked from the menu. "
+                           : "") + "Show the full span (" + KeyMap.keysText("view.full") + ")"
+                }
+            }
+        }
+
         PinPlate {
             anchors.left: parent.left
             anchors.bottom: parent.bottom

@@ -82,7 +82,7 @@ ColumnLayout {
             text: "+ add"
             ink: Theme.inkDim
             enabled: engineLink.sourceOpen && !engineLink.rackFull
-            onClicked: engineLink.addReceiver((engineLink.spanLowHz + engineLink.spanHighHz) / 2, "")
+            onClicked: engineLink.addReceiver((engineLink.viewLowHz + engineLink.viewHighHz) / 2, "")
 
             Tip {
                 visible: parent.hovered

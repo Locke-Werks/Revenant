@@ -101,6 +101,12 @@ constexpr int kRateTickMs = 250;
 
 EngineLink::EngineLink(QObject* parent) : QObject(parent)
 {
+    // The view follows the span before any display hears the span moved:
+    // connected first, so this slot runs ahead of the render items' and they
+    // read a view that already matches. models/view_link.cpp.
+    connect(this, &EngineLink::connectionChanged, this, &EngineLink::follow_span_for_view);
+    connect(this, &EngineLink::receiverChanged, this, &EngineLink::check_receiver_in_view);
+
     // WHAT THE OPERATOR LEFT SET LAST TIME.
     //
     // Read in the constructor, which runs on the Qt thread before start()
@@ -181,6 +187,14 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
     }
     transcription_view_ = transcription_view(TranscriptionFacts{});
 
+    // The impulse excision switch, by the same rule: sent on connecting only
+    // once the operator has set it, so the engine's own default otherwise.
+    if (store.contains(settings::kImpulseExcision)) {
+        excision_wanted_.store(store.value(settings::kImpulseExcision, true).toBool(),
+                               std::memory_order_release);
+        excision_set_.store(true, std::memory_order_release);
+    }
+
     // Every rack change is a chance that a receiver's engine id moved under
     // a choice, which is what the per-receiver reconcile is about. Compared
     // before anything is posted; see post_transcribe_wants.
@@ -250,6 +264,35 @@ void EngineLink::start(const QString& address, std::uint16_t port, std::uint32_t
     supervisor_ = std::thread([this] { supervise(); });
 }
 
+void EngineLink::setImpulseExcision(bool on)
+{
+    if (excision_set_.load(std::memory_order_acquire) &&
+        excision_wanted_.load(std::memory_order_acquire) == on) {
+        return;
+    }
+    excision_wanted_.store(on, std::memory_order_release);
+    excision_set_.store(true, std::memory_order_release);
+    QSettings().setValue(settings::kImpulseExcision, on);
+    excision_pending_.store(true, std::memory_order_release);
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+    emit impulseExcisionChanged();
+}
+
+void EngineLink::apply_impulse_excision()
+{
+    if (client_ == nullptr || !excision_pending_.exchange(false, std::memory_order_acq_rel)) {
+        return;
+    }
+    // A refusal comes from an engine older than the call, which has no
+    // excision to switch; there is nothing to retry and nothing to report
+    // beyond the checkbox, which shows what was asked.
+    (void)client_->set_impulse_excision(excision_wanted_.load(std::memory_order_acquire));
+}
+
 void EngineLink::supervise()
 {
     int pass = 0;
@@ -271,6 +314,7 @@ void EngineLink::supervise()
             apply_source_tune();
             apply_calibration();
             apply_source_pace();
+            apply_impulse_excision();
 
             // Then the receiver work. A drag posts a request and wakes this
             // loop immediately rather than waiting out the poll interval,
@@ -409,6 +453,7 @@ void EngineLink::supervise()
             apply_source_gain();
             apply_calibration();
             apply_source_pace();
+            apply_impulse_excision();
 
             apply_receiver_request();
 
@@ -721,6 +766,12 @@ bool EngineLink::attempt_connect()
         requested_threshold_db_.store(remembered_threshold_db_.load(std::memory_order_acquire),
                                       std::memory_order_release);
         threshold_pending_.store(true, std::memory_order_release);
+    }
+
+    // The excision switch, again, for the same reason: a restarted engine
+    // comes up at its default.
+    if (excision_set_.load(std::memory_order_acquire)) {
+        excision_pending_.store(true, std::memory_order_release);
     }
 
     // An engine built with no spectrum stage is the default and is what a

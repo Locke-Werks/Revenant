@@ -174,6 +174,13 @@ inline constexpr QLatin1StringView kLastSource{"engine/lastSource"};
 // See models/transcribe_link.cpp.
 inline constexpr QLatin1StringView kTranscription{"speech/transcribe"};
 
+// The engine's span-wide impulse excision, on or off. Engine-wide like the
+// speech switch, and on by default in the engine, so a window that has never
+// been told anything sends nothing and the engine's default stands. Written
+// only when the operator moves the checkbox; re-sent on every connection once
+// it has been. See EngineLink::setImpulseExcision.
+inline constexpr QLatin1StringView kImpulseExcision{"radio/impulseExcision"};
+
 // The last ten recordings opened from the picker, newest first, as one JSON
 // array for the reason kBookmarks is one. Each entry is the path and the
 // centre, rate and format boxes as they were typed, so a recording that

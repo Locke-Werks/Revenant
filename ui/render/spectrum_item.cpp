@@ -519,8 +519,8 @@ void build_detection_boxes(const EngineLink& link, double width_px,
     // be the second derivation, and the two would agree in the middle of the
     // span and part company at the ends, which is the failure that looks
     // correct wherever anybody thinks to check it.
-    const double low_hz = link.spanLowHz();
-    const double high_hz = link.spanHighHz();
+    const double low_hz = link.viewLowHz();
+    const double high_hz = link.viewHighHz();
     const double span_hz = high_hz - low_hz;
     if (!(span_hz > 0.0)) {
         return;
@@ -814,7 +814,7 @@ std::vector<PlacedReceiverMarker> build_receiver_markers(const EngineLink& link,
         // preferred and why there is a fallback at all.
         PlacedReceiverMarker placed;
         placed.marker =
-            plan_receiver_marker(one.band, link.spanLowHz(), link.spanHighHz(), width_px);
+            plan_receiver_marker(one.band, link.viewLowHz(), link.viewHighHz(), width_px);
         placed.slot = one.slot;
         placed.focused = one.focused;
         if (placed.marker.visible) {
@@ -1170,6 +1170,18 @@ void SpectrumItem::setLink(EngineLink* link)
         // of them and for every held receiver's news as well, so that is the
         // one connection. Connecting all three drew every pane change twice.
         connect(link_, &EngineLink::rackChanged, this, &SpectrumItem::takeReceiver);
+
+        // The view narrowed or moved: the same frame redrawn over the new
+        // bins, the markers restarted because bin n of the view is now
+        // another frequency, and the headroom moved with bins per column.
+        connect(link_, &EngineLink::viewChanged, this, [this] {
+            forgetMarkers();
+            recomputeHeadroom(deviceColumns());
+            takeFrame();
+            rebuildOverlay();
+            emit markersChanged();
+            update();
+        });
     }
     have_frame_ = false;
     boxes_.clear();
@@ -1308,7 +1320,11 @@ void SpectrumItem::recomputeHeadroom(int columns)
 {
     const std::size_t wanted = static_cast<std::size_t>(std::max(columns, 1));
     const std::size_t bins_per_column =
-        reduced_bins_ == 0 ? 1 : std::max<std::size_t>(1, reduced_bins_ / wanted);
+        reduced_bins_ == 0
+            ? 1
+            : std::max<std::size_t>(
+                  1, (link_ == nullptr ? reduced_bins_ : link_->viewBins(reduced_bins_).count()) /
+                         wanted);
     headroom_db_ = peak_reduction_headroom_db(bins_per_column);
     emit endsChanged();
 }
@@ -1376,7 +1392,12 @@ void SpectrumItem::takeFrame()
         resizeColumns(static_cast<int>(wanted), frame.power_db.size());
     }
 
-    reduce_peak(frame.power_db, columns_);
+    // Only the bins the view covers, so a narrowed view spreads fewer bins
+    // across the same columns. models/span_view.h.
+    const ViewBins drawn = link_->viewBins(frame.power_db.size());
+    const std::span<const float> shown =
+        std::span<const float>(frame.power_db).subspan(drawn.first, drawn.count());
+    reduce_peak(shown, columns_);
 
     // Smoothed before the hold and the markers read the columns, so the floor
     // label and the peak hold describe the trace the operator is looking at.
@@ -1458,12 +1479,19 @@ void SpectrumItem::takeMarkers(const rpc::SpectrumFrame& frame)
     // the whole source, at the frame's resolution rather than the window's,
     // so the frequency on the plate is a bin's and not a pixel's.
     noise_ = track_noise_floor(noise_, columns_, dt_seconds);
+    //
+    // The search stays the whole frame's when the view is narrowed, which is
+    // what models/span_markers.h asks of a zoom; only where it is drawn
+    // follows the view, and a peak outside the view sits off the pane.
     peak_ = track_span_peak(peak_, frame.power_db, dt_seconds);
     if (peak_.valid && peak_.bins > 0) {
         // Through the one hertz mapping the axis is drawn from, at the bin's
         // centre. See build_detection_boxes.
-        peak_fraction_ = (peak_.bin + 0.5) / static_cast<double>(peak_.bins);
-        peak_hz_ = link_->frequencyAtFraction(peak_fraction_);
+        peak_hz_ =
+            link_->frequencyAtFraction((peak_.bin + 0.5) / static_cast<double>(peak_.bins));
+        const double view_low = link_->viewLowHz();
+        const double view_span = link_->viewHighHz() - view_low;
+        peak_fraction_ = view_span > 0.0 ? (peak_hz_ - view_low) / view_span : 0.0;
     }
     notifyQml(NotifyMarkers);
 }
@@ -1612,7 +1640,7 @@ void SpectrumItem::mousePressEvent(QMouseEvent* event)
     // were placed with. It goes out with every click, because whether the
     // click landed inside another receiver's band is decided on it.
     const double fraction = width() > 0.0 ? x / width() : 0.0;
-    const double hz = link_ == nullptr ? 0.0 : link_->frequencyAtFraction(fraction);
+    const double hz = link_ == nullptr ? 0.0 : link_->viewFrequencyAtFraction(fraction);
 
     const ClickResult hit = detection_clicked(boxes_, x, click_cycle_);
     if (hit.id != 0) {
@@ -1647,7 +1675,7 @@ void SpectrumItem::mouseDoubleClickEvent(QMouseEvent* event)
     // request for the next box down.
     const double x = event->position().x();
     const double fraction = width() > 0.0 ? x / width() : 0.0;
-    const double hz = link_ == nullptr ? 0.0 : link_->frequencyAtFraction(fraction);
+    const double hz = link_ == nullptr ? 0.0 : link_->viewFrequencyAtFraction(fraction);
     const std::uint64_t id = detection_at(boxes_, x);
     const auto found = std::find_if(boxes_.begin(), boxes_.end(),
                                     [id](const DetectionBox& box) { return box.id == id; });
@@ -1665,6 +1693,28 @@ void SpectrumItem::wheelEvent(QWheelEvent* event)
     const double eighths = scroll_tune_eighths(event->angleDelta().x(), event->angleDelta().y());
     if (eighths == 0.0) {
         event->ignore();
+        return;
+    }
+
+    // Ctrl zooms about the pointer and Shift pans, both on the view and on
+    // any source, since neither touches the radio. The plain wheel stays the
+    // front end's. Shift is read before the axis is, because Qt on Windows
+    // turns a Shift+wheel into a horizontal delta, which scroll_tune_eighths
+    // already folds into the same sign.
+    if (link_ != nullptr && (event->modifiers() & Qt::ControlModifier) != 0) {
+        // Away from the operator zooms in, whatever direction the wheel
+        // tunes in, which is what every zoomable picture does.
+        const QPoint raw = event->angleDelta();
+        const double notches =
+            static_cast<double>(raw.y() != 0 ? raw.y() : raw.x()) / kWheelNotchEighths;
+        const double pointer = width() > 0.0 ? event->position().x() / width() : 0.5;
+        link_->zoomView(std::pow(kZoomStep, notches), pointer);
+        event->accept();
+        return;
+    }
+    if (link_ != nullptr && (event->modifiers() & Qt::ShiftModifier) != 0) {
+        link_->panView(kPanStep * eighths / kWheelNotchEighths);
+        event->accept();
         return;
     }
 
@@ -1837,6 +1887,7 @@ void BandBarItem::setLink(EngineLink* link)
         // span actually moved.
         connect(link_, &EngineLink::frameChanged, this, &BandBarItem::takeSpan);
         connect(link_, &EngineLink::connectionChanged, this, &BandBarItem::takeSpan);
+        connect(link_, &EngineLink::viewChanged, this, &BandBarItem::takeSpan);
     }
     rebuild();
     emit linkChanged();
@@ -1878,8 +1929,8 @@ void BandBarItem::geometryChange(const QRectF& newGeometry, const QRectF& oldGeo
 
 void BandBarItem::takeSpan()
 {
-    const double low = link_ == nullptr ? 0.0 : link_->spanLowHz();
-    const double high = link_ == nullptr ? 0.0 : link_->spanHighHz();
+    const double low = link_ == nullptr ? 0.0 : link_->viewLowHz();
+    const double high = link_ == nullptr ? 0.0 : link_->viewHighHz();
     if (low != laid_low_hz_ || high != laid_high_hz_) {
         rebuild();
     }
@@ -1887,8 +1938,8 @@ void BandBarItem::takeSpan()
 
 void BandBarItem::rebuild()
 {
-    const double low = link_ == nullptr ? 0.0 : link_->spanLowHz();
-    const double high = link_ == nullptr ? 0.0 : link_->spanHighHz();
+    const double low = link_ == nullptr ? 0.0 : link_->viewLowHz();
+    const double high = link_ == nullptr ? 0.0 : link_->viewHighHz();
     laid_low_hz_ = low;
     laid_high_hz_ = high;
     laid_width_ = width();

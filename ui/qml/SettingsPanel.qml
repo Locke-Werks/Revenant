@@ -387,6 +387,22 @@ ColumnLayout {
 
     Rule {}
 
+    SectionTitle { text: "radio" }
+
+    // Engine-wide: cuts impulse noise out of the whole span before the
+    // channelizer. Remembered and re-sent on each connection;
+    // models/settings.h, kImpulseExcision.
+    RCheckBox {
+        text: "remove impulse noise across the span"
+        checked: engineLink.impulseExcision
+        onToggled: {
+            engineLink.impulseExcision = checked
+            checked = Qt.binding(() => engineLink.impulseExcision)
+        }
+    }
+
+    Rule {}
+
     SectionTitle { text: "speech" }
 
     // The same engine-wide switch as the top bar's speech button, here so the

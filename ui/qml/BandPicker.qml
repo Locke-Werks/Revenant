@@ -3,12 +3,17 @@
 // The table is models/band_plan.h, with the regulations it was taken from and
 // cases in ui/tests. A click puts the front end at the band's centre, which
 // the table chooses as the part of the band worth landing on rather than the
-// middle of the allocation.
+// middle of the allocation, moved only as far as keeps the whole band in the
+// span.
 //
 // A band the open device cannot be put on is greyed rather than hidden, so
 // the menu is the same list on every radio and says which parts of it this
 // one reaches. On a source that cannot retune every row is grey, and the
 // tuning row says why beside the dial.
+//
+// A click puts the band on screen: when it fits the span the spectrum and
+// waterfall narrow to it, and when it does not the band's low edge goes to
+// the left of the span. EngineLink::pickBand.
 //
 // The table runs to several hundred rows, most of them channels, so channels
 // fold under one entry per parent (CB channels, FRS/GMRS channels) that opens
@@ -86,7 +91,10 @@ RowLayout {
     }
 
     function tuneTo(band) {
-        engineLink.tuneSourceHz(band.centre)
+        // Tunes and, when the band fits the span, narrows the view to it.
+        // models/span_view.h has the rule; Ctrl+Home or the span's full
+        // button puts the whole span back.
+        engineLink.pickBand(band.low, band.high, band.centre)
         menu.close()
     }
 

@@ -148,6 +148,15 @@ void EngineLink::takeScrollTune(double angle_delta_eighths)
         return;
     }
 
+    // A band view is held in hertz and would stand still while the wheel
+    // walks the radio under it, so the picture would not move until the band
+    // fell off the span. The wheel is the operator steering, so the view
+    // becomes theirs, in fractions, and slides with the tune like the whole
+    // span does. models/view_link.cpp.
+    if (view_mode_ == ViewMode::Band) {
+        set_view(view_, band_view_armed_ ? ViewMode::Manual : ViewMode::Full);
+    }
+
     ScrollTuneRequest request;
     request.angle_delta_eighths = angle_delta_eighths;
 
@@ -155,7 +164,8 @@ void EngineLink::takeScrollTune(double angle_delta_eighths)
     // and every overlay are placed from. The step per notch is a fraction of
     // what is on screen, so it has to come off the same two numbers or a notch
     // would mean something other than what it looks like it means.
-    request.span_hz = spanHighHz() - spanLowHz();
+    // Since the view can narrow, that is the view and not the capture span.
+    request.span_hz = viewHighHz() - viewLowHz();
 
     // Where the radio landed and not where it was last asked to go. A device
     // with a tuning step rounds, so adding the step to the request would

@@ -175,6 +175,7 @@
 #include "models/receiver_rack.h"
 #include "models/receiver_scroll.h"
 #include "models/scroll_tune.h"
+#include "models/span_view.h"
 #include "models/front_end_note.h"
 #include "models/gain_control.h"
 #include "models/source_pacing.h"
@@ -577,6 +578,17 @@ class EngineLink : public QObject {
     // arithmetic is shaped the way it is.
     Q_PROPERTY(double spanLowHz READ spanLowHz NOTIFY connectionChanged)
     Q_PROPERTY(double spanHighHz READ spanHighHz NOTIFY connectionChanged)
+
+    // The part of the span the spectrum and the waterfall draw, which is the
+    // whole span until the band menu or the zoom controls narrow it. See
+    // models/span_view.h and models/view_link.cpp. spanLowHz and spanHighHz
+    // stay the capture span: what is captured and what is on screen are
+    // different questions, and the bookmark, receiver and recall rules ask
+    // the first.
+    Q_PROPERTY(bool viewZoomed READ viewZoomed NOTIFY viewChanged)
+    Q_PROPERTY(bool viewHoldsBand READ viewHoldsBand NOTIFY viewChanged)
+    Q_PROPERTY(double viewLowHz READ viewLowHz NOTIFY viewChanged)
+    Q_PROPERTY(double viewHighHz READ viewHighHz NOTIFY viewChanged)
 
     // ------------------------------------------------------------------
     // Tuning the front end
@@ -1706,6 +1718,12 @@ class EngineLink : public QObject {
     Q_PROPERTY(QString transcriptionDetail READ transcriptionDetail NOTIFY transcriptionChanged)
     Q_PROPERTY(QString transcriptionTone READ transcriptionTone NOTIFY transcriptionChanged)
 
+    // The engine's span-wide impulse excision, as the operator set it. On
+    // until told otherwise, which is the engine's own default. Remembered
+    // under kImpulseExcision and re-sent on every connection once set.
+    Q_PROPERTY(bool impulseExcision READ impulseExcision WRITE setImpulseExcision NOTIFY
+                   impulseExcisionChanged)
+
     // The focused receiver's choice as the engine reports it on the
     // receiver's status, "auto", "on" or "off", and whether the engine is
     // transcribing it now. The segmented control binds the first and moves
@@ -1793,6 +1811,38 @@ public:
 
     [[nodiscard]] double spanLowHz() const { return frequencyAtFraction(0.0); }
     [[nodiscard]] double spanHighHz() const { return frequencyAtFraction(1.0); }
+
+    // ------------------------------------------------------------------
+    // The view: the part of the span on screen. models/view_link.cpp.
+    // ------------------------------------------------------------------
+
+    // frequencyAtFraction for a fraction across the VIEW rather than the
+    // span, through the view's whole-bin edges so the trace and the axis
+    // agree. Every display mapping between pixels and hertz goes through
+    // this or viewLowHz/viewHighHz, which are it at 0 and 1.
+    [[nodiscard]] Q_INVOKABLE double viewFrequencyAtFraction(double fraction) const;
+    [[nodiscard]] double viewLowHz() const { return viewFrequencyAtFraction(0.0); }
+    [[nodiscard]] double viewHighHz() const { return viewFrequencyAtFraction(1.0); }
+    [[nodiscard]] bool viewZoomed() const { return !view_.full(); }
+    [[nodiscard]] bool viewHoldsBand() const { return view_mode_ == ViewMode::Band; }
+
+    // The bins of a frame of `bins` the view covers, which the displays
+    // reduce instead of the whole frame.
+    [[nodiscard]] ViewBins viewBins(std::size_t bins) const { return view_bins(view_, bins); }
+
+    // A band picked from the menu or the palette: retunes the front end and,
+    // when the band fits the span, narrows the view to it. The view holds
+    // until the band leaves the span, the receiver is tuned outside it, or
+    // the operator zooms, pans or goes back to the full span.
+    Q_INVOKABLE void pickBand(double low_hz, double high_hz, double centre_hz);
+
+    // Zoom by factor (above one narrows) about pointer, a fraction across
+    // the view; pan by delta view widths; back to the whole span. A zoom or a
+    // pan is the operator taking the view over, so a band view stops being
+    // one and no longer releases on its own.
+    Q_INVOKABLE void zoomView(double factor, double pointer);
+    Q_INVOKABLE void panView(double delta);
+    Q_INVOKABLE void fullSpan();
 
     // ------------------------------------------------------------------
     // Tuning the front end, and whether it is keeping up. Both are
@@ -2884,6 +2934,12 @@ public:
     // smoke run, and hands it to the supervisor.
     Q_INVOKABLE void toggleTranscription();
 
+    [[nodiscard]] bool impulseExcision() const
+    {
+        return excision_wanted_.load(std::memory_order_acquire);
+    }
+    void setImpulseExcision(bool on);
+
     // The focused receiver's choice, by name. A name that is not one of the
     // three is ignored rather than read as auto.
     Q_INVOKABLE void setReceiverTranscribe(const QString& choice);
@@ -2926,6 +2982,9 @@ signals:
     // engine may be on another frequency, and a row drawn under the old span
     // would put a signal where it never was.
     void connectionChanged();
+
+    // The view narrowed, widened or moved. models/view_link.cpp.
+    void viewChanged();
 
     // engineStarting, engineStartFailed or engineStartText moved. Its own
     // signal and not connectionChanged, which the render items read as a new
@@ -3088,6 +3147,8 @@ signals:
 
     // The switch, its status, or whether the engine offers it moved.
     void transcriptionChanged();
+
+    void impulseExcisionChanged();
 
     // New entries are on captionFeed(). The decode log has its own rows.
     void transcriptsArrived();
@@ -3556,6 +3617,21 @@ private:
     // long the radio has had to recover from the last retune, and a wall clock
     // stepping backwards under a scrolling operator would release the whole
     // backlog at once.
+    // The view. Qt thread only. A band view is held in hertz, because the
+    // front end is still on its way to the band when it is picked and the
+    // span fractions it will occupy are only known once the retune lands;
+    // a manual view is held in span fractions, so it rides a retune the way
+    // the picture does.
+    enum class ViewMode { Full, Band, Manual };
+    SpanWindow view_;
+    ViewMode view_mode_ = ViewMode::Full;
+    double band_view_low_hz_ = 0.0;
+    double band_view_high_hz_ = 0.0;
+    bool band_view_armed_ = false;
+    void set_view(SpanWindow view, ViewMode mode);
+    void follow_span_for_view();
+    void check_receiver_in_view();
+
     ScrollTuneState scroll_tune_;
     QElapsedTimer scroll_clock_;
     QTimer scroll_flush_;
@@ -4160,6 +4236,9 @@ private:
     // the engine's answer. See pace_link.cpp.
     void apply_source_pace();
     void adopt_source_pace();
+
+    // Supervisor thread. Sends the excision switch when one is pending.
+    void apply_impulse_excision();
 
     // ---- the recording's pace --------------------------------------------
     std::mutex pace_mutex_;
@@ -4997,6 +5076,12 @@ private:
     // Qt thread only. The operator's switch, whether it has ever been set
     // (which is what decides whether a connection is sent it), whether this
     // run remembers it, and each rack entry's choice by rack key.
+    // The excision switch: what the operator wants, whether it was ever set
+    // (only then is it sent on connecting), and whether a send is owed.
+    std::atomic<bool> excision_wanted_{true};
+    std::atomic<bool> excision_set_{false};
+    std::atomic<bool> excision_pending_{false};
+
     bool transcription_wanted_ = false;
     bool transcription_set_ = false;
     bool remember_transcription_ = true;

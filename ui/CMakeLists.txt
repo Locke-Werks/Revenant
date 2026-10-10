@@ -244,6 +244,8 @@ qt_add_executable(revenant_ui
     models/recording_status.h
     models/source_link.cpp
     models/transcribe_link.cpp
+    models/view_link.cpp
+    models/span_view.h
     models/transcription.h
     models/window_raise.h
     render/box_history.h
@@ -721,6 +723,7 @@ if(REVENANT_UI_TESTS)
             tests/test_source_choice.cpp
             tests/test_source_pacing.cpp
             tests/test_span_markers.cpp
+            tests/test_span_view.cpp
             tests/test_spectrum_scale.cpp
             tests/test_waterfall_scale.cpp
             tests/test_squelch_control.cpp

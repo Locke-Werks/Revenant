@@ -73,14 +73,19 @@ Item {
             commands.topBar.tuneDial.edit()
         },
         "tune.band": (index) => {
-            engineLink.tuneSourceHz(UiRules.bands()[Number(index)].centre)
+            const band = UiRules.bands()[Number(index)]
+            engineLink.pickBand(band.low, band.high, band.centre)
         },
+        "view.zoom": (sign) => engineLink.zoomView(Number(sign) > 0 ? KeyMap.zoomStep
+                                                                    : 1 / KeyMap.zoomStep, 0.5),
+        "view.pan": (sign) => engineLink.panView(Number(sign) * KeyMap.panStep),
+        "view.full": () => engineLink.fullSpan(),
         "palette.bands": () => commands.openPalette("bands"),
         "receiver.add": () => {
-            engineLink.addReceiver((engineLink.spanLowHz + engineLink.spanHighHz) / 2, "")
+            engineLink.addReceiver((engineLink.viewLowHz + engineLink.viewHighHz) / 2, "")
         },
         "receiver.centre": () => {
-            engineLink.tuneReceiver((engineLink.spanLowHz + engineLink.spanHighHz) / 2, "")
+            engineLink.tuneReceiver((engineLink.viewLowHz + engineLink.viewHighHz) / 2, "")
         },
         "receiver.next": (step) => engineLink.focusNextReceiver(Number(step)),
         "receiver.solo": () => engineLink.toggleReceiverSolo(engineLink.focusedKey),

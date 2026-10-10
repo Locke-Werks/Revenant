@@ -27,6 +27,7 @@
 #include "models/key_actions.h"
 #include "models/key_steps.h"
 #include "models/palette_match.h"
+#include "models/span_view.h"
 
 namespace revenant::ui {
 
@@ -54,12 +55,18 @@ class KeyMap : public QObject {
 
     Q_PROPERTY(int defaultTuningDigit READ defaultTuningDigit CONSTANT)
     Q_PROPERTY(int filterStepHz READ filterStepHz CONSTANT)
+    // One zoom key's factor and one pan key's fraction of the view, the same
+    // as one Ctrl or Shift wheel notch. models/span_view.h.
+    Q_PROPERTY(double zoomStep READ zoomStep CONSTANT)
+    Q_PROPERTY(double panStep READ panStep CONSTANT)
 
 public:
     explicit KeyMap(QObject* parent = nullptr) : QObject(parent), entries_(palette_entries()) {}
 
     [[nodiscard]] int defaultTuningDigit() const { return kDefaultTuningDigit; }
     [[nodiscard]] int filterStepHz() const { return kFilterWidenStepHz; }
+    [[nodiscard]] double zoomStep() const { return kZoomStep; }
+    [[nodiscard]] double panStep() const { return kPanStep; }
 
     // The window's actions that have a key, each a map of id, keys (a list
     // of sequences for Shortcut.sequences), handler and argument.

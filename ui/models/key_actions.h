@@ -259,6 +259,23 @@ inline constexpr std::array kKeyActions{
     KeyAction{"scale.ceiling", "pin or unpin the spectrum ceiling", "display", "colour map scale lock top",
               {"Ctrl+]", ""}, KeyContext::Window, kNeedsSpectrum, "scale.pin", "ceiling"},
 
+    // The span view: the part of the span the spectrum and the waterfall
+    // draw. Ctrl+Alt with the arrows because the arrows alone, and with Ctrl
+    // or Shift, are the filter display's, and Alt alone is the tuning
+    // dial's; Ctrl+Home for the whole span because Home alone is the
+    // filter's default. Ctrl+wheel and Shift+wheel
+    // over either display do the same as these. models/span_view.h.
+    KeyAction{"view.zoom_in", "zoom the span in", "display", "magnify narrow closer view band",
+              {"Ctrl+Alt+Up", ""}, KeyContext::Window, kNeedsSpectrum, "view.zoom", "1"},
+    KeyAction{"view.zoom_out", "zoom the span out", "display", "wider view",
+              {"Ctrl+Alt+Down", ""}, KeyContext::Window, kNeedsSpectrum, "view.zoom", "-1"},
+    KeyAction{"view.pan_up", "move the zoomed view up", "display", "pan scroll right view",
+              {"Ctrl+Alt+Right", ""}, KeyContext::Window, kNeedsSpectrum, "view.pan", "1"},
+    KeyAction{"view.pan_down", "move the zoomed view down", "display", "pan scroll left view",
+              {"Ctrl+Alt+Left", ""}, KeyContext::Window, kNeedsSpectrum, "view.pan", "-1"},
+    KeyAction{"view.full", "show the full span", "display", "unzoom zoom out reset whole capture view",
+              {"Ctrl+Home", ""}, KeyContext::Window, kNeedsSpectrum, "view.full", ""},
+
     // The detector's threshold in the control row, which used to be a panel
     // this key opened.
     KeyAction{"detector.keys", "put the arrow keys on the detection threshold", "display",

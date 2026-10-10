@@ -177,6 +177,19 @@ void WaterfallItem::setLink(EngineLink* link)
 
         connect(link_, &EngineLink::transcriptsArrived, this, &WaterfallItem::takeTranscripts);
 
+        // The view narrowed or moved. followAxis slides the history for a
+        // pan by whole pixels and clears it for a change of hertz per pixel,
+        // which is the same rule a retune follows.
+        connect(link_, &EngineLink::viewChanged, this, [this] {
+            const int wide = std::max(history_.width(), 1);
+            headroom_db_ = peak_reduction_headroom_db(std::max<std::size_t>(
+                1, link_->viewBins(reduced_bins_).count() / static_cast<std::size_t>(wide)));
+            followAxis();
+            rebuildOverlay();
+            layoutCaptions();
+            update();
+        });
+
         // What the feed already holds was said before this item was looking,
         // on rows it does not have.
         caption_feed_seen_ =
@@ -433,7 +446,10 @@ void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
     clearCaptions();
 
     const std::size_t bins_per_column =
-        bins == 0 ? 1 : std::max<std::size_t>(1, bins / static_cast<std::size_t>(wide));
+        bins == 0 ? 1
+                  : std::max<std::size_t>(
+                        1, (link_ == nullptr ? bins : link_->viewBins(bins).count()) /
+                               static_cast<std::size_t>(wide));
     headroom_db_ = peak_reduction_headroom_db(bins_per_column);
     emit endsChanged();
 }
@@ -567,8 +583,8 @@ void WaterfallItem::layoutCaptions()
     geometry.width_px = width();
     geometry.height_px = height();
     geometry.tall = tall;
-    geometry.span_low_hz = link_->spanLowHz();
-    geometry.span_high_hz = link_->spanHighHz();
+    geometry.span_low_hz = link_->viewLowHz();
+    geometry.span_high_hz = link_->viewHighHz();
     geometry.pad_px = kCaptionPadPx;
     geometry.line_height_px = caption_line_height_;
     placed_captions_ = captions_.layout(span_at, geometry);
@@ -595,7 +611,7 @@ void WaterfallItem::followAxis()
         return;
     }
     const HistoryShift plan =
-        plan_history_shift(axis_, link_->spanLowHz(), link_->spanHighHz(), history_.width());
+        plan_history_shift(axis_, link_->viewLowHz(), link_->viewHighHz(), history_.width());
     if (plan.reset) {
         if (plan.beyond) {
             // Tuned a whole span or more away. Nothing stored is on screen any
@@ -709,7 +725,7 @@ void WaterfallItem::recordDetections()
     if (link_ == nullptr || !link_->connected()) {
         return;
     }
-    const double span_hz = link_->spanHighHz() - link_->spanLowHz();
+    const double span_hz = link_->viewHighHz() - link_->viewLowHz();
     if (!(span_hz > 0.0) || width() <= 0.0) {
         return;
     }
@@ -893,8 +909,8 @@ void WaterfallItem::rebuildOverlay()
     // the span's axis now so that a retune moves it with the pixels. A live
     // track is its own newest segment, so it is drawn once.
     drawn_.clear();
-    const double low_hz = link_ == nullptr ? 0.0 : link_->spanLowHz();
-    const double span_hz = link_ == nullptr ? 0.0 : link_->spanHighHz() - low_hz;
+    const double low_hz = link_ == nullptr ? 0.0 : link_->viewLowHz();
+    const double span_hz = link_ == nullptr ? 0.0 : link_->viewHighHz() - low_hz;
     const int tall = history_.height();
     if (span_hz > 0.0 && tall > 0 && filled_rows_ > 0) {
         const double w = width();
@@ -1019,7 +1035,12 @@ void WaterfallItem::takeFrame()
     // the stored rows and the new one agree about where every hertz is.
     followAxis();
 
-    reduce_peak(frame.power_db, columns_);
+    // Only the bins the view covers, so a narrowed view spreads fewer bins
+    // across the same columns. models/span_view.h.
+    const ViewBins drawn = link_->viewBins(frame.power_db.size());
+    const std::span<const float> shown =
+        std::span<const float>(frame.power_db).subspan(drawn.first, drawn.count());
+    reduce_peak(shown, columns_);
 
     // The row goes in as levels, replacing the oldest row's in the count.
     std::uint16_t* codes =
@@ -1150,7 +1171,7 @@ void WaterfallItem::mousePressEvent(QMouseEvent* event)
     // ClickCycle in render/spectrum_item.h.
     const double x = event->position().x();
     const double fraction = width() > 0.0 ? x / width() : 0.0;
-    const double hz = link_ == nullptr ? 0.0 : link_->frequencyAtFraction(fraction);
+    const double hz = link_ == nullptr ? 0.0 : link_->viewFrequencyAtFraction(fraction);
 
     const ClickResult hit = detection_clicked(boxes_, x, click_cycle_);
     if (hit.id != 0) {
@@ -1188,7 +1209,7 @@ void WaterfallItem::mouseDoubleClickEvent(QMouseEvent* event)
     // request for the next box down.
     const double x = event->position().x();
     const double fraction = width() > 0.0 ? x / width() : 0.0;
-    const double hz = link_ == nullptr ? 0.0 : link_->frequencyAtFraction(fraction);
+    const double hz = link_ == nullptr ? 0.0 : link_->viewFrequencyAtFraction(fraction);
     const std::uint64_t id = detection_at(boxes_, x);
     const auto found = std::find_if(boxes_.begin(), boxes_.end(),
                                     [id](const DetectionBox& box) { return box.id == id; });
@@ -1206,6 +1227,28 @@ void WaterfallItem::wheelEvent(QWheelEvent* event)
     const double eighths = scroll_tune_eighths(event->angleDelta().x(), event->angleDelta().y());
     if (eighths == 0.0) {
         event->ignore();
+        return;
+    }
+
+    // Ctrl zooms about the pointer and Shift pans, both on the view and on
+    // any source, since neither touches the radio. The plain wheel stays the
+    // front end's. Shift is read before the axis is, because Qt on Windows
+    // turns a Shift+wheel into a horizontal delta, which scroll_tune_eighths
+    // already folds into the same sign.
+    if (link_ != nullptr && (event->modifiers() & Qt::ControlModifier) != 0) {
+        // Away from the operator zooms in, whatever direction the wheel
+        // tunes in, which is what every zoomable picture does.
+        const QPoint raw = event->angleDelta();
+        const double notches =
+            static_cast<double>(raw.y() != 0 ? raw.y() : raw.x()) / kWheelNotchEighths;
+        const double pointer = width() > 0.0 ? event->position().x() / width() : 0.5;
+        link_->zoomView(std::pow(kZoomStep, notches), pointer);
+        event->accept();
+        return;
+    }
+    if (link_ != nullptr && (event->modifiers() & Qt::ShiftModifier) != 0) {
+        link_->panView(kPanStep * eighths / kWheelNotchEighths);
+        event->accept();
         return;
     }
 

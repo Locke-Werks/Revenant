@@ -261,6 +261,11 @@ receiver limit from eight to 64".
 | speech | turn speech to text on or off | `Ctrl+Shift+T` |
 | display | pin or unpin the spectrum floor | `Ctrl+[` |
 | display | pin or unpin the spectrum ceiling | `Ctrl+]` |
+| display | zoom the span in | `Ctrl+Alt+Up` |
+| display | zoom the span out | `Ctrl+Alt+Down` |
+| display | move the zoomed view up | `Ctrl+Alt+Right` |
+| display | move the zoomed view down | `Ctrl+Alt+Left` |
+| display | show the full span | `Ctrl+Home` |
 | display | put the arrow keys on the detection threshold | `Ctrl+Shift+D` |
 | panels | open the radio picker | `Ctrl+O` |
 | panels | open the frequency manager | `Ctrl+B` |
@@ -1110,6 +1115,50 @@ arrows to move the selection, up and down to widen and narrow symmetrically,
 Home for the mode's default and Escape to cancel a drag. Shift is a hundred
 hertz and control is one. They are the filter display's rows of the key
 table under "Keys" above, and that table is where they are changed.
+
+## Zooming the span, and picking a band
+
+The spectrum, the waterfall, the band bar and the ruler draw one view: the
+whole capture span, or a part of it. `EngineLink` holds it
+(`ui/models/view_link.cpp`) and `ui/models/span_view.h` is the arithmetic,
+with cases in `ui/tests/test_span_view.cpp`. `spanLowHz` and `spanHighHz`
+stay the capture span, which is what recall, receiver placement and the
+retune rules ask about; `viewLowHz`, `viewHighHz` and
+`viewFrequencyAtFraction` are what every pixel-to-hertz mapping on the
+displays uses, click-to-tune and the detection boxes included.
+
+Picking a band from the band menu or the palette:
+
+- If the band plus 5% each side fits the span, the front end goes to the
+  table's landing frequency, moved only as far as keeps the whole band in
+  the span, and the view narrows to the band and its margin once the retune
+  lands. No DC offset: the tune path never avoided DC.
+- If it does not fit, the band's low edge goes 2% of the span in from the
+  left and the whole span stays on screen.
+
+A band view lets go, back to the full span, when a retune moves the band
+off the span or the receiver is tuned outside it. Zooming, panning or the
+plain wheel's tune makes the view the operator's instead: it then stays
+until they change it, and rides a retune in span fractions.
+
+Ctrl+wheel over either display zooms about the pointer, Shift+wheel pans a
+zoomed view, and the plain wheel still tunes. The keys are in the table
+above (`Ctrl+Alt+Up`, `Ctrl+Alt+Down`, `Ctrl+Alt+Left`, `Ctrl+Alt+Right`,
+`Ctrl+Home` for the full span), and the spectrum carries `−`, `+` and `full`
+beside the ceiling plate. The view is clamped to the span and to at least
+32 bins. A change of zoom clears the waterfall's history, the same rule a
+change of hertz per pixel has always followed; a pan by whole pixels slides
+it.
+
+It is a display zoom. The engine computes the same FFT over the whole span,
+and the view draws fewer of its bins across the same columns; past one bin
+per column the trace steps rather than gaining detail. At 2.4 MS/s and 65536
+bins that is 36.6 Hz per bin, so 40 m on a 1600 px pane is about 6 bins per
+column and still above that limit. True extra resolution needs the engine:
+a zoom FFT over the view (shift, decimate, transform) as a new spectrum
+stage with its own RPC subscription carrying its frequency range, which the
+client would draw in place of the span frame's bins while zoomed. That is
+core work and is not started.
 
 ## Scroll, and what each axis means
 

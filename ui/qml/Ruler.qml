@@ -35,17 +35,23 @@ Item {
     // The edges, read with the properties that move them so the bindings
     // below follow a retune and a reconnect. frequencyAtFraction is a method,
     // and QML cannot see inside a C++ call to know what it depends on.
+    //
+    // The VIEW's edges, not the span's: the ruler sits under the displays
+    // and says what they draw, which is the part of the span the band menu
+    // or the zoom left on screen. viewLowHz and viewHighHz notify on every
+    // retune as well as on a zoom (models/view_link.cpp); the other
+    // arguments are kept as a belt for a reconnect.
     readonly property bool live: engineLink.connected && engineLink.bins > 0
-    readonly property double lowHz: live ? edge(0.0, engineLink.sourceCenterHz,
+    readonly property double lowHz: live ? edge(0.0, engineLink.viewLowHz, engineLink.sourceCenterHz,
                                                 engineLink.tuneGrantedHz, engineLink.sourceEpoch) : 0
-    readonly property double highHz: live ? edge(1.0, engineLink.sourceCenterHz,
+    readonly property double highHz: live ? edge(1.0, engineLink.viewHighHz, engineLink.sourceCenterHz,
                                                  engineLink.tuneGrantedHz, engineLink.sourceEpoch) : 0
 
-    // The last three arguments are unused and are there to be read: a
+    // The last four arguments are unused and are there to be read: a
     // binding that calls this re-evaluates when any of them changes, which
-    // is every event that moves the span under the displays.
-    function edge(fraction, centre, granted, epoch) {
-        return engineLink.frequencyAtFraction(fraction)
+    // is every event that moves the span or the view under the displays.
+    function edge(fraction, view, centre, granted, epoch) {
+        return engineLink.viewFrequencyAtFraction(fraction)
     }
 
     readonly property var ticks: UiRules.rulerTicks(lowHz, highHz, width,
@@ -165,9 +171,9 @@ Item {
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         onClicked: (mouse) => ruler.picked(
-                       engineLink.frequencyAtFraction(mouse.x / Math.max(1, ruler.width)))
+                       engineLink.viewFrequencyAtFraction(mouse.x / Math.max(1, ruler.width)))
         onDoubleClicked: (mouse) => ruler.added(
-                             engineLink.frequencyAtFraction(mouse.x / Math.max(1, ruler.width)))
+                             engineLink.viewFrequencyAtFraction(mouse.x / Math.max(1, ruler.width)))
 
         // The click rule, where the click is made. See UiRules.spanClickHint.
         Tip {
