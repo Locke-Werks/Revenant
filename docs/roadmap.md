@@ -25,6 +25,13 @@ sampling for HF, plus the synthetic and file sources.
 | 7 | The long tail: USRP B2xx, LimeSDR, bladeRF, Airspy HF+ | Small user bases each, one bridge covers them | SoapySDR in a separate process | Medium |
 
 
+Reference radios, designed in house. [hardware.md](hardware.md) has the design.
+
+| # | Radio | Design | State |
+| --- | --- | --- | --- |
+| W1 | Wraith | Two coherent 16-bit channels, DC to 55 MHz direct plus a tuner tier to 1.7 GHz | Design |
+| W2 | Wraith-X | Two coherent channels, DC to 6 GHz, direct sampling to 200 MHz plus a superheterodyne | Design |
+
 KrakenSDR runs as five single RTL-SDR channels already; coherent direction
 finding waits for multi-radio work after M5. Fobos SDR waits on reports of
 its imaging problems being resolved.

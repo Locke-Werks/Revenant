@@ -25,7 +25,7 @@ Revenant moves the whole chain onto the GPU and leaves the samples there.
 
 ## Roadmap
 
-<img src="assets/roadmap.webp" alt="Revenant roadmap: M0 to M3 done, M4 rolling capture and search in progress, M5 device support next, then multi-radio. M5 device order: 1 HackRF, 2 SDRplay, 3 rtl_tcp and SpyServer, 4 Airspy and HydraSDR, 5 RX888 MkII, 6 Pluto and AD936x, 7 SoapySDR for the long tail.">
+<img src="assets/roadmap.webp" alt="Revenant roadmap: M0 to M3 done, M4 rolling capture and search in progress, M5 device support next, then multi-radio. M5 device order: 1 HackRF, 2 SDRplay, 3 rtl_tcp and SpyServer, 4 Airspy and HydraSDR, 5 RX888 MkII, 6 Pluto and AD936x, 7 SoapySDR for the long tail. Reference radios in design: Wraith, two coherent 16-bit channels DC to 55 MHz plus a tuner to 1.7 GHz, and Wraith-X, two coherent channels DC to 6 GHz.">
 
 M0 to M3 are done, M4 (rolling capture and search) is in progress, and M5 adds
 radios beyond the RTL-SDR. [docs/roadmap.md](docs/roadmap.md) has the table and
