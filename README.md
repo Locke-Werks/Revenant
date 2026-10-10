@@ -27,42 +27,23 @@ Revenant moves the whole chain onto the GPU and leaves the samples there.
 
 <img src="assets/roadmap.webp" alt="Revenant roadmap: M0 to M3 done, M4 rolling capture and search in progress, M5 device support next, then multi-radio. M5 device order: 1 HackRF, 2 SDRplay, 3 rtl_tcp and SpyServer, 4 Airspy and HydraSDR, 5 RX888 MkII, 6 Pluto and AD936x, 7 SoapySDR for the long tail.">
 
-<details>
-<summary>The same roadmap as text, with the reasons for the order</summary>
+M0 to M3 are done, M4 (rolling capture and search) is in progress, and M5 adds
+radios beyond the RTL-SDR. [docs/roadmap.md](docs/roadmap.md) has the table and
+the reasons for the device order.
 
-| Milestone | What it delivers | State |
-| --- | --- | --- |
-| M0 | The device path: open the RTL-SDR, read its descriptors, find the bulk endpoint that carries IQ | Done |
-| M1 | The engine: the GPU channelizer, receivers, demodulators and the wideband detector, with fifty receivers on one 20 MHz grid faster than realtime | Done |
-| M2 | The graphical client, a separate process over Cap'n Proto, drawing the spectrum and waterfall at monitor refresh within its frame budget | Done, 2026-09-27 |
-| M3 | The first public release, v0.1.0: a signed installer, with the corresponding sources on the same release page | Done, 2026-09-27 |
-| M4 | Rolling capture of the band, and search over what it stored. This is the reason the design exists | In progress |
-| M5 | Device support beyond the RTL-SDR, in the order below | Next |
-| After M5 | More than one radio at a time, and the modes `docs/modes.md` lists as not done | Not ordered |
+## Reference hardware
 
-M5 device order. Ordered by how many people own the radio against how much work it is.
-Today Revenant runs the RTL-SDR family through librtlsdr, including direct
-sampling for HF, plus the synthetic and file sources.
+Two receivers are being designed in house as reference radios for Revenant:
 
-| # | Radio | Why here | Approach | Work |
-| --- | --- | --- | --- | --- |
-| 1 | HackRF One and Pro | Large install base, small documented protocol, BSD-3 host library | Link libhackrf, receive only | Low |
-| 2 | SDRplay RSP1B, RSPdx-R2, RSPduo | Among the most widely owned receivers; no open driver exists for current models | Load the SDRplay API at runtime if the user installed it; never shipped | Medium |
-| 3 | rtl_tcp and SpyServer clients | Remote RTL-SDR and Airspy servers that already exist in large numbers | Network clients written from the protocols | Low |
-| 4 | Airspy R2 and Mini, HydraSDR RFOne | Established 12-bit receivers that share one USB protocol | Own driver on the BSD protocol code, IQ conversion on the GPU | Medium |
-| 5 | RX888 MkII | 16-bit direct sampling of 0 to 64 MHz, the radio this design is built for | Own USB 3 streaming and firmware loader | High |
-| 6 | ADALM-Pluto and AD936x Zynq boards | One backend covers the family; transport limits full-band use | Link libiio | Medium |
-| 7 | The long tail: USRP B2xx, LimeSDR, bladeRF, Airspy HF+ | Small user bases each, one bridge covers them | SoapySDR in a separate process | Medium |
+- **Wraith**, two coherent 16-bit channels sampling DC to about 55 MHz
+  directly, a tuner tier to 1.7 GHz, real preselection and a hardware overload
+  loop, at about $850 in parts. The one being built first.
+- **Wraith-X**, the full design: two coherent channels from DC to 6 GHz, direct
+  sampling to 200 MHz and a superheterodyne above it, every raw sample to the
+  GPU over PCIe.
 
-</details>
-
-KrakenSDR runs as five single RTL-SDR channels already; coherent direction
-finding waits for multi-radio work after M5. Fobos SDR waits on reports of
-its imaging problems being resolved.
-
-The order is a plan, not a gate. Send a radio and it gets built for, wherever
-it sits in the list. Open an
-[issue](https://github.com/Locke-Werks/Revenant/issues) to arrange it.
+Both are at the architecture stage. [docs/hardware.md](docs/hardware.md) has the
+design.
 
 ## What it is
 
@@ -102,231 +83,22 @@ and went away, every transmission matching a shape. The question moves from
 when".
 
 Those are the design's reasons for existing. None of them is a benchmark. What
-has been measured is below, with the numbers rather than the adjectives.
+has been measured is in [docs/status.md](docs/status.md), with the numbers
+rather than the adjectives.
 
-## Status
-
-M1, M2 and M3 are done: v0.1.0, the first public release, shipped on
-2026-09-27, and the release page has every one since. M4, the rolling
-capture, is in progress.
-There are two things to run: a command line, and a Qt client that reaches a
-running engine over a socket.
+## Quick start
 
 ```
-revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20" \
-    --vrx 98.1M:wfm:200k --play --record fm.wav
+revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20"     --vrx 98.1M:wfm:200k --play --record fm.wav
 
-revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20" \
-    --spectrum --detect
+revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20"     --spectrum --detect
 ```
 
-That path is real and measured: bytes from the dongle cross the bus once as
-native unsigned 8-bit pairs, are widened by a compute kernel, channelized on
-the GPU, tapped by a receiver that mixes and filters and demodulates on the
-device, and only the finished audio comes back. Five seconds of 98.1 MHz
-broadcast FM through it recorded with every drop counter at zero, checked by
-measuring the 19 kHz stereo pilot against its own neighbourhood rather than by
-listening: 1037x on the station against 2.86x on an empty channel.
-
-`gain=20` is written out because it matters and because it is the default
-rather than in spite of it. The default used to be `gain=auto`, the tuner's
-own AGC, which maximises the level at its output and is therefore set by the
-loudest thing anywhere in 2.4 MHz. Measured on air on 2026-09-20 at 95.1 MHz
-in an ordinary suburban FM environment, that put three intermodulation
-products in the detector's track list at confidence 1.00; `gain=20` improved
-the measured SNR of KKFM at 98.1 MHz by 5.7 dB and removed all three. Twenty
-is the one figure that has been measured, in one place on one band, so it is
-a starting point and not a right answer: a quiet band wants more and a
-stronger environment wants less. What tells you it has become wrong is the
-front end line described below. `gain=auto` is still there if you ask for it.
-
-The second command draws the whole 2.4 MHz as a waterfall in the terminal and
-lists what it finds in it. Under the track list it says when the noise floor
-across the whole span is following the strongest signal on it, and how fast:
-about one decibel per decibel is a gain control moving, and faster than that
-is a front end being driven past its linear range, at which point some of the
-tracks in the list are products of the others. `core/detect/front_end.h` is
-the measurement and is explicit about what it cannot tell apart. The Qt client
-carries the same line under its tuning controls. Both ends of the colour map track the band on their own,
-from percentiles measured on the device rather than from extremes, expanding
-in a frame or two and contracting over thirty seconds. `--spectrum-floor` and
-`--spectrum-ceiling` hold either end still, which is what comparing two
-captures needs.
-
-`revenant-engine` is the same core left running with a Cap'n Proto session on
-the front of it, and `revenant-ui` is the client. Spectrum and waterfall are
-scene graph nodes rather than rasterised images, the newest waterfall row is
-at the top, and the detector's tracks are drawn over both: a frequency marker
-that fades on the spectrum, a rectangle bounded by the rows the signal was
-actually in on the waterfall, and a click tunes a receiver to one.
-
-The client picks the radio too. It lists what the engine can see, says why an
-unavailable backend is unavailable rather than hiding it, offers only the
-controls the device describes, and opens it. Changing radio costs the receivers
-and the waterfall history and nothing else: the engine closes the source, builds
-a grid against the new one and serves the same session, and
-`EngineInfo::sourceEpoch` is what tells the client its sample indices have
-started again. The process does not restart, which is what it used to take.
-
-What exists: the Vulkan context and allocator, the shader build, the polyphase
-channelizer, eight demodulators and a raw complex tap, four digital voice
-modes that hand their decoder filtered complex baseband, the per-receiver fine
-stage, audio egress to WAV and to the sound card, a synthetic wideband source,
-a file source that reads 8, 16, 24 and 32-bit IQ, the 24-bit WAV the HF
-recordings arrived as among them, and converts each on the GPU, an
-RTL-SDR backend, the full-span spectrum with a waterfall in the terminal,
-auto-scaling measured on the device, the per-receiver passband spectrum drawn
-from a display tap beside each receiver, the wideband detector, the RDS and
-RBDS decoder, the Cap'n Proto session that carries all of it to another
-process, the Qt client that draws it and plays its audio, and the conformance
-suite that diffs every GPU kernel against a scalar twin and demands identical
-bits. A few of those tests skip without an RTL-SDR plugged in. `ui/` is a
-separate CMake project with a suite of its own, and CI configures, builds and
-runs both trees. The counts move with nearly every commit, so they are dated
-rather than kept current: on 2026-09-23 `ctest -N` listed 841 tests in the
-engine tree and 334 in `ui/`.
-
-Sixteen decoders run on a live receiver, in the engine, from
-`revenant-cli --decode` and over the wire through `Session.subscribeDecoded`:
-P25 Phase 1, D-STAR, TETRA, DMR and M17 on complex baseband, and RTTY, SITOR-B,
-NAVTEX, PSK31, PSK63, QPSK31, CW, AX.25 with APRS, POCSAG, AIS and VHF DSC on
-receiver audio. P25 Phase 1 reads the trunking control channel as well as
-voice channels: a receiver on a control channel reports the site's grants,
-identifier updates and status broadcasts, with grant channels resolved to
-frequencies, and every voice LDU publishes its Link Control and encryption
-sync. AX.25 decodes FX.25 codeblocks and IL2P packets as well as plain HDLC
-frames. RDS runs beside them on every wfm receiver that asks, read from a
-companion receiver on the same tuning so the station stays stereo, and reports
-programme type names, TMC and emergency warning groups as well as the text.
-Each is written from its specification and checked by a round trip through a
-transmitter written from the same clauses; `docs/modes.md` says where each one
-stops, and [docs/sensitivity.md](docs/sensitivity.md) has what each needs in
-white noise, read off a committed curve, rather than a copy of that table
-here. A P25 receiver's audio is its IMBE voice, since 2026-09-23: the wire
-carries it at 8000 S/s through `Session.subscribeAudio`, silent between calls
-and through an encrypted one, and the client plays it in the receiver's mix.
-D-STAR and DMR voice go to a vocoder plugin, since 2026-10-02: a D-STAR
-receiver hands each 72-bit voice frame and a DMR receiver each of a burst's
-three 72-bit vocoder frames to the first loaded plugin that serves the mode or
-its codec, and with no plugin loaded the audio is silence rather than a
-refusal. No plugin ships with Revenant; "AMBE, and why you will not find it
-here" below says why. TETRA voice is not decoded.
-
-The client has had its first design pass. The main window is the span, a
-frequency ruler between the spectrum and the waterfall, and a top bar with a
-per-digit frequency dial and a band menu backed by a cited band table. The
-receivers sit in a rack, docked in the main window by default and able to pop
-out into a window of their own: up to 64 receivers, each with a strip, a level,
-a gain, mute and solo, their audio mixed, and the focused one's dial, mode,
-fine-tuning display, AFT, auto filter, RDS and a decode log of what its
-decoders report. A DV slider beside the output lifts digital voice by up to
-30 dB ahead of the limiter, and an "auto DV" switch in the rack header opens a
-held receiver on every P25, DMR, D-STAR, TETRA or M17 signal the detector
-verifies on a frequency no receiver covers. The radio panel lists the vocoder plugins the engine loaded,
-what each serves and why any was refused. Every action has a key, one table
-decides them all, and a command palette on Ctrl+K lists every action and
-band. `docs/ui-spectrum.md` has each of those and what it measured.
-
-Speech to text, since 2026-10-03. One switch, "speech" in the top bar or
-Ctrl+Shift+T, has the engine transcribe every receiver that makes speech: P25
-by call, D-STAR and DMR by call when a vocoder plugin gives them a voice, and
-analogue modes by squelch, or by a level detector where the squelch is open.
-WFM is left out unless a receiver is chosen in, and each receiver can be set
-to auto, on or off. The recogniser is whisper.cpp on the engine's own GPU
-through Vulkan, with its 1.6 GB model downloaded the first time the switch
-goes on. The text lands on the span waterfall beside the transmission it came
-from, pinned to the rows the speech was on, and in the decode log. On the RTX
-4090 it transcribes a 5 s clip in 80 ms, and beside a P25 receiver and four
-nfm receivers it lost nothing; `docs/rpc.md`, "Speech to text", has those
-measurements and the one that costs, which is a GPU-bound engine's headroom,
-halved while Whisper runs flat out.
-
-A receiver belongs to the session that made it, and goes when that session
-ends unless it was added with `keep`, which is what a headless recorder asks
-for. `revenant-engine` listens on port 17690 by default, which is where
-`revenant-ui` looks, and binds it exclusively. The engine also places probe
-receivers of its own on detections, to name a signal's family; they are
-internal, nothing on the wire can add or see one, and `docs/detection.md` has
-what they get right and wrong.
-
-What does not. Nothing stores the band: `core/capture` holds a placeholder and
-no code, so there is no rolling capture, and search over stored captures, the
-reason the design exists, has nothing to search yet. The engine runs one radio
-at a time. Nothing saves a set of receivers across a restart; that one is in
-`docs/rpc.md` with what it would take and what the gap costs meanwhile. TETRA
-voice is not decoded, and D-STAR and DMR voice is silent without a vocoder
-plugin. Speech to text hears English only. RDS2's three extra
-subcarriers are not implemented, and RDS-TMC is recognised, counted and kept
-raw but not decoded into events and locations, because the field positions are
-in clauses of ISO 14819-1 nobody here has read; `docs/modes.md` has both.
-
-A client logs in with a pre-shared token before it holds anything at all, and
-still binds loopback by default: the wire is plaintext, so a token crossing a
-network is readable and replayable, and off loopback still means a tunnel.
-`docs/rpc.md` has where the token lives and how to pass it.
-
-### What has been measured
-
-Fifty receivers on one 20 MHz grid run at 3.28x realtime with every overrun
-counter at zero. The claim a channelizer exists to make is that the coarse
-chain does not care how many receivers hang off it, and it holds: 10.0
-microseconds at zero receivers and 10.2 at a hundred. What is not free is the
-per-receiver fine stage, linear at about 18 microseconds each, which dominates
-above a handful. The FFT stage reaches 68.1% of VkFFT's 790 GB/s on the grid
-the engine actually runs, and 60.2% at its worst size.
-
-The conformance suite is bit-exact, not close, and the RTX 4090 stays that
-way under 3.7 million dispatches of deliberate abuse.
-
-**The integrated Radeon in a Ryzen 9 7950X is not supported and not tested.**
-Its driver computes a wrong spectrum frame about once in 1,900 dispatches, and
-far more often when several dispatches share a command buffer, which is what
-the engine records; the kernel's arithmetic is exact on the RTX 4090 over the
-same work. That was measured as a driver concurrency fault and not identified
-further, and on 2026-09-22 the device was dropped from CI rather than chased.
-`docs/fft.md` keeps the measurements as history, and `tools/gpustress` is
-still the instrument if a new driver is worth a second look.
-
-### Known shortfalls
-
-What a release does not do is the "What does not" paragraph under Status, and
-what each decoder does not do is `docs/modes.md`. One known shortfall arrived
-with v0.1.0 and was still open at v0.1.6: with the receivers popped out into
-their own window, that window misses 1.32% of refreshes at full load, over the
-one in a hundred the budget allows. Docked in the main window, the default,
-they are within it.
-
-**M2 in detail.** The graphical client. It runs as its own process and
-reaches the engine over a Cap'n Proto service, because the engine is headless
-by design and because it has to be: the engine is built against the static C
-runtime and ships as one self-contained signed binary, and Qt is not.
-`docs/rpc.md` has the reasoning and the alternatives that were rejected.
-
-Measured against what M2 was set to deliver: the QML shell exists, and so do
-AM, FM and SSB demodulation and audio out. It asked for one receiver and the
-client holds 64; it held eight when M2 closed. M2 asks for the spectrum and waterfall at monitor refresh
-and closes when the render pipeline holds its frame budget at full target
-load. That is now measured. On 2026-09-23 it was first not met: at 120 Hz with
-both windows open, 20.9% of the main window's frames missed a refresh (p95
-16.5 ms, p99 23.3 ms against 8.3), while drawing a frame took about half a
-millisecond. The cause was Qt's threaded loop holding the one GUI thread
-through each window's vsync wait in turn. The receiver window now presents
-without waiting and is drawn after each main-window frame, and with both
-windows kept in front the main window missed 0.4% and 1.0% of refreshes in two
-60 s runs against 16.9% before, about what it misses alone. An undisturbed
-300 s run on an idle machine then gave 154 of 36106 main-window frames over
-budget, 0.43%, and 233 of 36045 in the receiver window, 0.65%, with the engine
-at 1.000x realtime: under one in a hundred. The display is the streamed
-virtual one, which is the display M2 is measured on.
-
-The receivers have docked in the main window by default since 2026-09-23, and
-M2 closed on that layout on 2026-09-27: 16 of 7314 frames over budget, 0.22%,
-at full load with the engine at 0.999x realtime, and the main window with the
-receivers popped out 128 of 36089, 0.35%, over 300 s. The popped-out receiver
-window is not within budget: 473 of 35758, 1.32%, against 0.65% on
-2026-09-23. It had regressed to 5.42% and two fixes brought it back that far;
-what is left is open, and `docs/ui-spectrum.md`, "Frame budget", has the
-numbers, the command and what is still open.
+The first plays and records broadcast FM; the second draws the span as a
+waterfall in the terminal and lists what the detector finds. Most people want
+the Qt client instead, which the installer puts in the Start Menu.
+[docs/status.md](docs/status.md) has what works today, what does not, and what
+has been measured.
 
 ## Requirements
 
@@ -335,8 +107,8 @@ Windows 11, x64.
 A GPU with Vulkan 1.3 or newer. The one device tested is an NVIDIA RTX 4090,
 which is what development and CI run against. Other Vulkan 1.3 devices may
 work and are not tested. The integrated Radeon in a Ryzen 9 7950X is not
-supported: its driver corrupts the spectrum kernel, as "What has been
-measured" above says.
+supported: its driver corrupts the spectrum kernel, as
+[docs/status.md](docs/status.md) says.
 
 An SDR device, optionally: an RTL-SDR v3 works today, through librtlsdr. The
 synthetic wideband source and the file source need no hardware at all and are
@@ -388,171 +160,48 @@ saying what each one is.
 point the suite at a particular GPU, and two traps involving a Strawberry Perl
 installation that have each cost an afternoon.
 
-## GPU conformance
-
-Every compute kernel is diffed against a CPU reference implementation whose
-floating-point behaviour is pinned, on the RTX 4090 in the CI machine, on every
-push. The reference is compiled with contraction disabled so that it gives the
-same answer regardless of which host compiler built it. A referee that moves
-cannot referee anything.
-
-CI runs on a self-hosted Windows workstation, because a hosted runner has no
-discrete GPU and therefore cannot execute the one suite this project's
-correctness argument depends on.
-
-| Vendor | Coverage |
-| --- | --- |
-| NVIDIA | RTX 4090, discrete, Vulkan 1.4.351. Every push. |
-| AMD | **No coverage.** The Radeon integrated graphics in the CI machine's Ryzen 9 7950X is not supported and was dropped from CI on 2026-09-22, and there is no discrete AMD card. |
-| Intel | **No coverage.** There is no Intel GPU in the machine and one cannot be added to it. |
-
-The AMD and Intel gaps are real and are recorded rather than papered over. One
-of the three target vendors gets genuine driver coverage on every commit. AMD
-and Intel get none, and a kernel that behaves differently on either would not
-be caught until somebody runs it on one. A discrete AMD card and an Intel
-device in the conformance machine are the fix, and until that happens this
-table is the honest statement of what is verified.
-
-macOS through MoltenVK is out of scope until there is something to render.
-
-## Clean room, and its one exception
-
-Decoders and device backends are written from published specifications and
-datasheets, with every constant carrying a citation to the document it came
-from. That discipline is the default and it has not changed.
-
-It is a default rather than an absolute, and the RTL-SDR is why. The RTL2832U
-datasheet specifies the USB transport in full and specifies no raw IQ mode at
-all: the mode that makes the chip a receiver was found by sniffing in 2012 and
-exists as one GPL library's expression of it, so there was nothing to write
-from. Revenant links librtlsdr and is GPL-3.0-or-later as a result. Every
-copyleft dependency is recorded with what it is used for and why the
-specification route was rejected.
-
-The rule that survives intact is the one about laundering: do not read an
-implementation and then present the result as written from a specification.
-Copy it or link it and say which. Provenance that cannot be traced to a
-document is worthless whatever the licence permits.
-
-[docs/clean-room.md](docs/clean-room.md) is the full position, the exception
-table and the disclosure log.
-
-## AMBE, and why you will not find it here
-
-AMBE and AMBE+2 are Digital Voice Systems, Inc.'s proprietary voice codecs,
-and they are the largest single obstacle in this project.
-
-There is no published specification. Not a restricted one, not an expensive
-one, none. The clean room rule above asks only that a document exist, and for
-AMBE+2 no document does, so there is nothing to write from and no amount of
-care or citation produces a lawful implementation. A licence would not fix
-it. GPL-3.0 section 7 forbids conveying a work under further restrictions,
-and a proprietary codec licence is nothing but further restrictions, so it
-cannot ship inside Revenant at any price, including zero.
-
-What is left is a dongle. To hear a voice signal, on a machine already
-running a polyphase channelizer and an FFT across twenty megahertz in real
-time, you buy a chip from DVSI and plug it into a USB port, because the
-arithmetic is a secret.
-
-The comparison is what makes it galling. IMBE, the OLDER codec from the same
-company, is published in TIA-102.BABA and its patents have expired, so P25
-Phase 1 voice decodes here in software with nothing bought and nothing
-plugged in. TETRA's ACELP is specified in ETSI EN 300 395-2 and ETSI gives it
-away. Codec 2 is open and at these bit rates it is not worse. Every
-narrowband voice codec somebody wrote down works fine. The one nobody wrote
-down is the one in DMR, D-STAR, P25 Phase 2, NXDN, dPMR, Yaesu Fusion,
-Iridium, Inmarsat, Thuraya, ACeS and most of the mobile satellite industry,
-and it is there because it reached the standards bodies early rather than
-because it sounds good. It does not sound good.
-
-So the line this program draws is the one the documents draw. Identification
-and protocol decoding work everywhere, because framing travels in the clear
-and framing is where most of the useful information lives. Voice works where
-the codec was published. Where it was not, Revenant will speak to a hardware
-vocoder if you own one, and will otherwise tell you precisely what it is
-hearing and decline to guess.
-
-The way in is a vocoder plugin: a DLL in a `vocoders` folder beside
-`revenant-engine.exe`, written against `core/decode/vocoder_abi.h`, which is
-plain C, names no codec and is the whole contract. The engine loads what it
-finds at startup and the client's radio panel says what loaded, what each
-plugin serves, and why any was refused. D-STAR and DMR voice reach a plugin
-today. None ships here, for the reasons above.
-
-The patents on this will expire and it will still not be implementable,
-because the problem was never the patents. My contempt for the arrangement
-will comfortably outlast them.
-
 ## Documentation
+
+Using it:
+
+- [docs/status.md](docs/status.md), what works, what does not, and what has been measured
+- [docs/roadmap.md](docs/roadmap.md), milestones and the order radios will be supported in
+- [docs/hardware.md](docs/hardware.md), the Wraith and Wraith-X reference radios
+- [docs/ui-spectrum.md](docs/ui-spectrum.md), the client: windows, keys, receiver rack,
+  spectrum and waterfall scaling, AFT, the auto filter, the decode log and captions
+- [docs/modes.md](docs/modes.md), every mode, what each needs and which are out of reach
+- [docs/sensitivity.md](docs/sensitivity.md), each decoder's sensitivity in white noise
+- [docs/detection.md](docs/detection.md), wideband detection, click-to-tune and auto DV
+- [docs/noise.md](docs/noise.md), the impulse blanker, notches and noise reduction
+- [docs/calibration.md](docs/calibration.md), frequency correction, DC removal and I/Q correction
+- [docs/plugins.md](docs/plugins.md), engine plugins, including the P25 trunk tracker
+- [docs/ambe.md](docs/ambe.md), why DMR and D-STAR voice need a vocoder plugin
+- [docs/recordings.md](docs/recordings.md), the IQ recordings the engine reads
+
+How it is built:
 
 - [docs/building.md](docs/building.md), prerequisites, presets and device selection
 - [docs/conventions.md](docs/conventions.md), the rules the code follows and why
-- [docs/clean-room.md](docs/clean-room.md), the licensing position
-- [docs/snr-convention.md](docs/snr-convention.md), how SNR is reported and why it
-  matters that everyone means the same thing by it
-- [docs/calibration.md](docs/calibration.md), frequency correction, DC removal
-  and I/Q correction, where each runs and where it is kept
-- [docs/noise.md](docs/noise.md), the impulse blanker, notches and noise
-  reduction on each receiver
-- [docs/sensitivity.md](docs/sensitivity.md), each decoder's sensitivity in white
-  noise, read off its committed curve, and what each figure does not cover
-- [docs/fft.md](docs/fft.md), why the FFT is written here rather than taken from
-  a library, with the measurements that decided it
-- [docs/ci.md](docs/ci.md), why the GPU jobs are self-hosted, what the matrix covers and
-  what it does not
-- [docs/modes.md](docs/modes.md), every mode Revenant will implement, what each one
-  needs and which are out of reach
-- [docs/rpc.md](docs/rpc.md), why the client is a second process, what crosses
-  the wire and what does not, and speech to text in the engine
-- [docs/ui-spectrum.md](docs/ui-spectrum.md), the client: its windows, keys and
-  receiver rack, how the spectrum and waterfall scale themselves, why the
-  fine-tuning display transforms a different stream, AFT, the auto filter,
-  the decode log and the speech captions
-- [docs/detection.md](docs/detection.md), wideband detection and click-to-tune, and
-  why the detection spectrum is built per channel rather than across the span
-- [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md), what the RTL2832U
-  datasheet does and does not specify, and why that settled the licence
-- [docs/rds-first-decode.md](docs/rds-first-decode.md), the first decode of a
-  signal nobody here generated, what it establishes and why it is not yet a test
-- [docs/recordings.md](docs/recordings.md), the real IQ on the development
-  machine, how the engine reads it and what it is not yet good for
-- [docs/packaging.md](docs/packaging.md), the installer that carries both
-  programs and what goes into it
-- [CONTRIBUTING.md](CONTRIBUTING.md), how to contribute and the provenance rules
-- [CLA.md](CLA.md), the contributor agreement and why it exists
+- [docs/rpc.md](docs/rpc.md), why the client is a second process, the wire, and speech to text
+- [docs/fft.md](docs/fft.md), why the FFT is written here, with the measurements
+- [docs/gpu-conformance.md](docs/gpu-conformance.md), the GPU-against-CPU suite and vendor coverage
+- [docs/ci.md](docs/ci.md), why the GPU jobs are self-hosted and what the matrix covers
+- [docs/snr-convention.md](docs/snr-convention.md), how SNR is reported
+- [docs/packaging.md](docs/packaging.md), the installer and what goes into it
+
+Licensing and provenance:
+
+- [docs/clean-room.md](docs/clean-room.md), the clean-room policy and its one exception
+- [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md), why the RTL-SDR settled the licence
+- [docs/license.md](docs/license.md), how the project came to be GPL-3.0
+- [docs/rds-first-decode.md](docs/rds-first-decode.md), the first decode of an off-air signal
+- [CONTRIBUTING.md](CONTRIBUTING.md) and [CLA.md](CLA.md), contributing and the contributor agreement
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
-
-This was all rights reserved, held open on the reasoning that the choice
-between permissive, copyleft, dual and source-available is made once and was
-better made later. Getting a radio working settled it. librtlsdr is the only
-practical path to an RTL2832U, it is GPL-2.0-or-later, and the clean-room
-route was measured and found blocked: the datasheet specifies the transport
-and contains no raw IQ mode at all, because that mode was discovered by
-sniffing in 2012 and exists as one project's expression of it. The evidence
-is in [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md).
-
-The version is GPL-3.0 rather than 2.0 because librtlsdr is "or later", and
-that matters more than it looks: GPL-2.0-only cannot be combined with
-LGPL-3.0, which is Qt6, so a 2.0-only dependency would have killed the user
-interface along with the licence question.
-
-Relicensing is not publishing, and the two happened at different times here.
-Copyleft obligations attach to distribution, so a repository whose binaries
-stay on their author's machines owes nothing to anyone; the duty to offer
-corresponding source begins when a binary is handed to someone else. Binaries
-have been handed out since v0.1.0 on 2026-09-27, and every release page
-carries the corresponding source beside the installer:
-`Revenant-<version>-corresponding-source.zip` for Revenant, libusb and
-librtlsdr, and the Qt and FFmpeg source archives the client is built from,
-listed in `SOURCES-client.txt`. The release obligations are in
-[docs/clean-room.md](docs/clean-room.md).
-
-Clean-room is still the default everywhere it is affordable, which is
-everywhere a specification is published. The policy, the exceptions and the
-reasoning are in [docs/clean-room.md](docs/clean-room.md).
+GPL-3.0-or-later, because librtlsdr is the only practical path to an RTL2832U
+and it is GPL-2.0-or-later. See [LICENSE](LICENSE) and
+[docs/license.md](docs/license.md). Every release page carries the
+corresponding source beside the installer.
 
 Copyright (c) 2026 Locke Werks.
