@@ -18,6 +18,7 @@
 
 #include <algorithm>
 
+#include <QColor>
 #include <QObject>
 #include <QSettings>
 #include <QtQmlIntegration>
@@ -130,6 +131,22 @@ public:
     [[nodiscard]] bool ceilingPinned() const { return pins_.ceiling_pinned; }
     [[nodiscard]] double ceilingDb() const { return pins_.ceiling_db; }
     [[nodiscard]] const ScalePins& pins() const { return pins_; }
+
+    // For the curve drawn in the settings panel: where x on the map, 0 to 1,
+    // lands under the contrast and pivot in force, and the waterfall's colour
+    // at a point of the map.
+    Q_INVOKABLE double curveAt(double x) const
+    {
+        return apply_curve(curve_for(static_cast<float>(waterfall_contrast_),
+                                     static_cast<float>(waterfall_pivot_)),
+                           static_cast<float>(x));
+    }
+
+    Q_INVOKABLE QColor paletteAt(double x) const
+    {
+        const colour_map::Srgb8 c = colour_map::colour_at(static_cast<float>(x));
+        return QColor(c.r, c.g, c.b);
+    }
 
     // Pins an end where it is drawn now, so the picture does not jump.
     Q_INVOKABLE void pinFloor(double drawn_db)
