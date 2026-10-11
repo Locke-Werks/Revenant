@@ -192,6 +192,173 @@ ColumnLayout {
         lines: 3
     }
 
+    // THE RTL-SDR FRONT END. Every switch here reopens the source with one
+    // URI key changed, so each costs what a direct sampling switch costs.
+    // models/front_end.h has the rules and why the bias tee is never
+    // remembered.
+    ColumnLayout {
+        id: frontEnd
+
+        property bool expanded: false
+        property bool confirmBias: false
+        readonly property var state: engineLink.frontEnd
+
+        Layout.fillWidth: true
+        spacing: 4
+        visible: engineLink.connected && engineLink.sourceOpen && frontEnd.state.available
+
+        function bandwidthText(hz) {
+            return hz > 0 ? (hz >= 1e6 ? (hz / 1e6) + " MHz" : (hz / 1e3) + " kHz") : "auto"
+        }
+
+        function gainMode() {
+            if (frontEnd.state.digitalAgc)
+                return 2
+            return engineLink.sourceGainAuto ? 1 : 0
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            RButton {
+                flat: true
+                ink: Theme.inkDim
+                text: (frontEnd.expanded ? "▾ " : "▸ ") + "front end"
+                onClicked: frontEnd.expanded = !frontEnd.expanded
+            }
+
+            Label {
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
+                text: (frontEnd.state.biasTee ? "BIAS TEE ON  ·  " : "")
+                      + "bandwidth " + frontEnd.bandwidthText(frontEnd.state.bandwidthHz)
+                      + "  ·  " + ["manual gain", "tuner AGC", "manual + RTL AGC"][frontEnd.gainMode()]
+                      + (frontEnd.state.offsetTuning ? "  ·  offset tuning" : "")
+                color: frontEnd.state.biasTee ? Theme.inkWarn : Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+                elide: Text.ElideRight
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: frontEnd.expanded
+
+            Label {
+                text: "gain loop"
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
+
+            RComboBox {
+                Layout.preferredWidth: 170
+                font.pixelSize: Theme.sizeBody
+                model: ["manual", "tuner AGC", "manual + RTL AGC"]
+                currentIndex: frontEnd.gainMode()
+                onActivated: (i) => engineLink.setGainMode(["manual", "tuner", "digital"][i])
+
+                Tip {
+                    visible: parent.hovered
+                    delay: 400
+                    text: "Tuner AGC is the R820T's own loop, set by the loudest thing in the "
+                          + "span. RTL AGC is a digital gain after the ADC: it adds no signal "
+                          + "and costs dynamic range, so leave it off for weak signals."
+                }
+            }
+
+            Label {
+                text: "bandwidth"
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
+
+            RComboBox {
+                Layout.preferredWidth: 110
+                font.pixelSize: Theme.sizeBody
+                model: engineLink.tunerBandwidths.map((hz) => frontEnd.bandwidthText(hz))
+                currentIndex: Math.max(0, engineLink.tunerBandwidths.indexOf(frontEnd.state.bandwidthHz))
+                onActivated: (i) => engineLink.setFrontEnd("bandwidthHz", engineLink.tunerBandwidths[i])
+
+                Tip {
+                    visible: parent.hovered
+                    delay: 400
+                    text: "The tuner's IF filter. Auto follows the sample rate. Narrower rejects "
+                          + "strong signals outside the span before they reach the ADC, at the "
+                          + "cost of the span's edges."
+                }
+            }
+
+            RCheckBox {
+                visible: frontEnd.state.offsetAvailable
+                text: "offset tuning"
+                checked: frontEnd.state.offsetTuning
+                onToggled: {
+                    engineLink.setFrontEnd("offsetTuning", checked)
+                    checked = Qt.binding(function() { return frontEnd.state.offsetTuning })
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+        }
+
+        // THE BIAS TEE ASKS TWICE TO GO ON AND ONCE TO GO OFF. On is 4.5 V on
+        // the antenna port, which a DC short at the other end of the coax
+        // does not survive well. It is never remembered, so a new session
+        // starts with it off whatever the last one did.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: frontEnd.expanded
+
+            RCheckBox {
+                text: "bias tee (4.5 V on the antenna port)"
+                checked: frontEnd.state.biasTee
+                onToggled: {
+                    if (checked) {
+                        frontEnd.confirmBias = true
+                    } else {
+                        frontEnd.confirmBias = false
+                        engineLink.setFrontEnd("biasTee", false)
+                    }
+                    checked = Qt.binding(function() { return frontEnd.state.biasTee })
+                }
+            }
+
+            Label {
+                visible: frontEnd.confirmBias
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
+                text: "Only with an LNA or active antenna that wants power. A passive antenna, "
+                      + "splitter or anything with a DC short will be loaded."
+                color: Theme.inkWarn
+                font.pixelSize: Theme.sizeSmall
+                wrapMode: Text.WordWrap
+            }
+
+            RButton {
+                visible: frontEnd.confirmBias
+                text: "power it"
+                font.pixelSize: Theme.sizeBody
+                onClicked: {
+                    frontEnd.confirmBias = false
+                    engineLink.setFrontEnd("biasTee", true)
+                }
+            }
+
+            RButton {
+                visible: frontEnd.confirmBias
+                flat: true
+                text: "cancel"
+                font.pixelSize: Theme.sizeBody
+                onClicked: frontEnd.confirmBias = false
+            }
+
+            Item { Layout.fillWidth: true; visible: !frontEnd.confirmBias }
+        }
+    }
+
     // THE DEVICE'S CALIBRATION, BEHIND AN EXPANSION. Set once per dongle and
     // then left alone, so it is one quiet line until asked for. The engine
     // keeps it by the device's serial and restores it on open; every rule
@@ -610,7 +777,11 @@ ColumnLayout {
                 Label {
                     Layout.minimumWidth: 0
                     Layout.fillWidth: true
-                    text: sourceEntry.modelData.displayName
+                    text: (sourceEntry.modelData.label.length > 0
+                           ? sourceEntry.modelData.label + "  ·  " : "")
+                          + sourceEntry.modelData.displayName
+                          + (sourceEntry.modelData.serial.length > 0
+                             ? "  ·  serial " + sourceEntry.modelData.serial : "")
                           + (sourceEntry.modelData.length.length > 0
                              ? "  ·  " + sourceEntry.modelData.length : "")
                     // AN UNAVAILABLE BACKEND IS SHOWN AND NOT HIDDEN. A
@@ -659,6 +830,90 @@ ColumnLayout {
                 color: Theme.inkWarn
                 font.pixelSize: Theme.sizeBody
                 wrapMode: Text.WordWrap
+            }
+        }
+
+        // THE PICKED DONGLE'S NAME AND SERIAL. A name is kept on this machine
+        // by serial; a serial is written into the dongle's own EEPROM, which
+        // is what lets two identical dongles be told apart anywhere. Writing
+        // needs the source closed, because the engine holds the USB interface.
+        RowLayout {
+            id: identity
+
+            readonly property var row: sourceRow.picked
+
+            Layout.fillWidth: true
+            spacing: 8
+            visible: !!identity.row && identity.row.backend === "rtlsdr"
+
+            Label {
+                text: "name"
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
+
+            RTextField {
+                id: labelField
+
+                Layout.preferredWidth: 140
+                font.pixelSize: Theme.sizeBody
+                placeholderText: "e.g. HF dongle"
+                text: identity.row ? identity.row.label : ""
+                enabled: !!identity.row && identity.row.serial.length > 0
+                selectByMouse: true
+                onAccepted: engineLink.setRadioLabel(identity.row.serial, text)
+            }
+
+            RButton {
+                text: "name it"
+                font.pixelSize: Theme.sizeBody
+                enabled: labelField.enabled
+                onClicked: engineLink.setRadioLabel(identity.row.serial, labelField.text)
+            }
+
+            Label {
+                text: "serial"
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
+
+            RTextField {
+                id: serialField
+
+                Layout.preferredWidth: 110
+                font.pixelSize: Theme.sizeBody
+                placeholderText: identity.row ? identity.row.serial : ""
+                selectByMouse: true
+            }
+
+            RButton {
+                text: "write to dongle"
+                font.pixelSize: Theme.sizeBody
+                enabled: !engineLink.sourceOpen && !engineLink.serialWriteBusy
+                         && serialField.text.length > 0
+                         && engineLink.serialProblem(serialField.text) === ""
+                onClicked: engineLink.writeRadioSerial(sourceRow.chosen, serialField.text)
+
+                Tip {
+                    visible: parent.hovered
+                    delay: 400
+                    text: engineLink.sourceOpen
+                          ? "Close the source first: the engine holds the dongle."
+                          : "Writes the serial into the dongle's EEPROM. Unplug and replug it "
+                            + "afterwards. Stock dongles all ship as 00000001, which is why "
+                            + "two of them cannot be told apart."
+                }
+            }
+
+            Label {
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
+                text: serialField.text.length > 0 && engineLink.serialProblem(serialField.text) !== ""
+                      ? engineLink.serialProblem(serialField.text)
+                      : engineLink.serialWriteText
+                color: Theme.inkWarn
+                font.pixelSize: Theme.sizeSmall
+                elide: Text.ElideRight
             }
         }
 

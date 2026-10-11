@@ -233,8 +233,10 @@ qt_add_executable(revenant_ui
     models/receiver_placement_store.h
     models/receiver_rack.h
     models/open_source_link.cpp
+    models/front_end_link.cpp
     models/pace_link.cpp
     models/radio_memory.h
+    models/front_end.h
     models/radio_memory_link.cpp
     models/recent_recordings.h
     models/recording_header.h
@@ -701,6 +703,7 @@ if(REVENANT_UI_TESTS)
             tests/test_mode_choice.cpp
             tests/test_noise_controls.cpp
             tests/test_palette_match.cpp
+            tests/test_front_end.cpp
             tests/test_frequency_dial.cpp
             tests/test_frequency_entry.cpp
             tests/test_gain_control.cpp

@@ -41,6 +41,7 @@
 #include "core/rpc/client.h"
 #include "models/detector_scope.h"
 #include "models/frequency_entry.h"
+#include "models/front_end.h"
 #include "models/source_choice.h"
 #include "models/wire_seam.h"
 
@@ -625,6 +626,15 @@ namespace {
     out.insert(QStringLiteral("unavailable"), QString::fromStdString(source.unavailable));
     out.insert(QStringLiteral("available"), source.available());
 
+    // The serial, and the name the operator gave this dongle, so two identical
+    // dongles can be told apart in the list. models/front_end.h.
+    out.insert(QStringLiteral("serial"), QString::fromStdString(source.serial));
+    const std::string label_key = radio_label_key(source.serial);
+    out.insert(QStringLiteral("label"),
+               label_key.empty()
+                   ? QString()
+                   : QSettings().value(QString::fromStdString(label_key)).toString());
+
     QStringList notes;
     notes.reserve(static_cast<qsizetype>(source.notes.size()));
     for (const std::string& note : source.notes) {
@@ -821,7 +831,28 @@ QString EngineLink::composeSourceUri(int index, const QString& center, const QSt
             choice.direct_sampling = direct_sampling_choice(stored.toStdString());
         }
     }
-    return QString::fromStdString(compose_source_uri(source, choice));
+    std::string composed = compose_source_uri(source, choice);
+
+    // The remembered front-end switches, all but the bias tee, which is asked
+    // for every time. models/front_end.h.
+    if (source.backend == "rtlsdr") {
+        const std::string radio = descriptor_calibration_key(source);
+        if (!radio.empty()) {
+            const std::string id = radio_settings_id(radio);
+            const QSettings store;
+            FrontEnd remembered;
+            remembered.digital_agc =
+                store.value(QString::fromStdString(front_end_key(id, "digitalAgc")), false).toBool();
+            remembered.offset_tuning =
+                store.value(QString::fromStdString(front_end_key(id, "offsetTuning")), false)
+                    .toBool();
+            remembered.bandwidth_hz =
+                store.value(QString::fromStdString(front_end_key(id, "tunerBandwidth")), 0U)
+                    .toUInt();
+            composed = with_front_end(composed, remembered, source.offset_tuning_available);
+        }
+    }
+    return QString::fromStdString(composed);
 }
 
 void EngineLink::setDirectSampling(const QString& mode)

@@ -661,6 +661,12 @@ class EngineLink : public QObject {
     // and is read off the SourceStats poll that already runs.
     Q_PROPERTY(QString sourceDirectBranch READ sourceDirectBranch NOTIFY openedSourceChanged)
 
+    // See setFrontEnd.
+    Q_PROPERTY(QVariantMap frontEnd READ frontEnd NOTIFY openedSourceChanged)
+    Q_PROPERTY(QVariantList tunerBandwidths READ tunerBandwidths CONSTANT)
+    Q_PROPERTY(QString serialWriteText READ serialWriteText NOTIFY serialWriteChanged)
+    Q_PROPERTY(bool serialWriteBusy READ serialWriteBusy NOTIFY serialWriteChanged)
+
     // THE OPEN SOURCE'S GAIN STAGE, and whether there is one to draw.
     //
     // Off Session.sourceDescriptor, which describes the source that is already
@@ -2115,6 +2121,34 @@ public:
     // a source that does not have the feature and for a mode it is already in.
     Q_INVOKABLE void setDirectSampling(const QString& mode);
 
+    // THE RTL-SDR'S FRONT-END SWITCHES. models/front_end.h has the rules and
+    // why each is a reopen. frontEnd is what the open source's URI says is in
+    // force: available (an RTL-SDR is open), biasTee, digitalAgc,
+    // offsetTuning, offsetAvailable and bandwidthHz. Implemented in
+    // front_end_link.cpp.
+    //
+    // setFrontEnd takes "biasTee", "digitalAgc", "offsetTuning" or
+    // "bandwidthHz" and reopens the source with that one key changed, at the
+    // centre it is on now. Each but the bias tee is remembered for the radio.
+    Q_INVOKABLE void setFrontEnd(const QString& field, const QVariant& value);
+
+    // The gain loop as one choice: "manual", "tuner" (the tuner's own AGC) or
+    // "digital" (a manual tuner gain with the RTL2832U's digital AGC after
+    // it). Manual and tuner switch live; anything into or out of digital is a
+    // reopen with agc= changed.
+    Q_INVOKABLE void setGainMode(const QString& mode);
+
+    // The operator's name for the dongle with this serial, kept on this
+    // machine. Empty text clears it.
+    Q_INVOKABLE void setRadioLabel(const QString& serial, const QString& label);
+
+    // Writes a new serial into the EEPROM of the dongle in row `index`
+    // through revenant-rtl-serial, which sits beside this executable. Refused
+    // while a source is open, because the engine holds the USB interface.
+    // serialWriteText carries progress and the tool's answer.
+    Q_INVOKABLE void writeRadioSerial(int index, const QString& serial);
+    [[nodiscard]] Q_INVOKABLE QString serialProblem(const QString& serial) const;
+
     // What the last open or close said when it refused, and empty otherwise.
     // Kept apart from errorText for the reason detectionFault and tuneFault
     // are: that field belongs to the connection, and a refused open on a
@@ -3156,7 +3190,14 @@ signals:
     // The open source's description or the delivered count moved.
     void openedSourceChanged();
 
+    void serialWriteChanged();
+
 public:
+    [[nodiscard]] QVariantMap frontEnd() const;
+    [[nodiscard]] QVariantList tunerBandwidths() const;
+    [[nodiscard]] QString serialWriteText() const { return serial_write_text_; }
+    [[nodiscard]] bool serialWriteBusy() const { return serial_write_busy_; }
+
     [[nodiscard]] QVariantMap openedSource() const { return open_source_; }
     [[nodiscard]] qulonglong sourceSamplesDelivered() const { return samples_delivered_; }
     [[nodiscard]] QString sourceDirectBranch() const { return direct_branch_; }
@@ -4367,6 +4408,11 @@ private:
     // Qt thread only: what the properties above hand out.
     QVariantList sources_;
     std::vector<rpc::SourceDescriptor> source_rows_;
+
+    // ---- front-end switches and the serial writer: front_end_link.cpp ------
+    void reopenWith(std::string uri);
+    QString serial_write_text_;
+    bool serial_write_busy_ = false;
     QString source_fault_;
     bool sources_busy_ = false;
 

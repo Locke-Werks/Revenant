@@ -77,6 +77,7 @@ void EngineLink::poll_open_source(std::uint64_t epoch)
         map.insert(QStringLiteral("directSampling"),
                    QString::fromLatin1(rpc::direct_sampling_mode_name(open.direct_sampling)));
         map.insert(QStringLiteral("upconverter"), open.upconverter);
+        map.insert(QStringLiteral("offsetTuningAvailable"), open.offset_tuning_available);
         map.insert(QStringLiteral("serial"), QString::fromStdString(open.serial));
         map.insert(QStringLiteral("epoch"), static_cast<qulonglong>(epoch));
     }
