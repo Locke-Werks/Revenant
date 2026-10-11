@@ -300,6 +300,15 @@ if ($Only -in @("both", "engine")) {
     }
     Copy-Item -LiteralPath $engineExe -Destination (Join-Path $outDir "revenant-engine.exe") -Force
 
+    # Beside the engine because it links the same librtlsdr and takes the same
+    # machine-wide lock: it is how a second identical dongle gets a serial of
+    # its own.
+    $serialExe = Join-Path $engineDir "tools/rtl-serial/revenant-rtl-serial.exe"
+    if (-not (Test-Path -LiteralPath $serialExe)) {
+        throw "revenant-rtl-serial.exe is not at $serialExe. It builds with the engine."
+    }
+    Copy-Item -LiteralPath $serialExe -Destination (Join-Path $outDir "revenant-rtl-serial.exe") -Force
+
     # The engine plugins plugins/CMakeLists.txt builds, in the folder the
     # engine scans beside itself. No settings file ships: p25trunk with none
     # follows whichever p25p1 receiver a client opens on a control channel.

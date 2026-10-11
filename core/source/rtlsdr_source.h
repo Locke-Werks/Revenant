@@ -139,6 +139,10 @@ struct RtlSdrSourceConfig {
     // the device is already in would turn the default into an error on the
     // most common dongle in the world.
     bool offset_tuning = false;
+
+    // The tuner's IF filter, `bw=` in hertz. Zero is librtlsdr's automatic
+    // choice, which follows the sample rate.
+    std::uint32_t tuner_bandwidth_hz = 0;
 };
 
 // One attached dongle, as enumeration sees it.

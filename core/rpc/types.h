@@ -343,6 +343,7 @@ struct SourceDescriptor {
     bool direct_sampling_available = false;
     DirectSamplingMode direct_sampling = DirectSamplingMode::Off;
     bool upconverter = false;
+    bool offset_tuning_available = false;
 };
 
 // What an operator sets per device. See the schema's CalibrationSettings.

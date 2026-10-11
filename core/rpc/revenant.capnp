@@ -649,6 +649,12 @@ struct SourceDescriptor {
     # through its own upconverter on the tuner path, so auto never selects a
     # branch on one, and tuneRanges reaches down to 500 kHz under off and auto.
     upconverter @18 :Bool;
+
+    # Whether the tuner takes offset tuning, which is the `offset=` key of an
+    # rtlsdr URI. Only a zero-IF tuner such as the E4000 has a DC spike to
+    # move; the R820T family refuses the call, so a client offers the switch
+    # only when this is true.
+    offsetTuningAvailable @19 :Bool;
 }
 
 # How an RTL-SDR's ADC is fed. See core/source/direct_sampling.h.

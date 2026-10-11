@@ -481,6 +481,7 @@ static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
     out.direct_sampling_available = in.getDirectSamplingAvailable();
     out.direct_sampling = read_direct_sampling(in.getDirectSampling());
     out.upconverter = in.getUpconverter();
+    out.offset_tuning_available = in.getOffsetTuningAvailable();
     return out;
 }
 

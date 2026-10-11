@@ -564,6 +564,11 @@ struct UsbStrings {
     caps.direct_sampling_available = true;
     caps.direct_sampling_mode = config.direct;
     caps.upconverter = upconverter;
+
+    // librtlsdr refuses offset tuning on the R820T and R828D, which are not
+    // zero-IF and have no DC spike to move.
+    caps.offset_tuning_available =
+        tuner != RTLSDR_TUNER_R820T && tuner != RTLSDR_TUNER_R828D && tuner != RTLSDR_TUNER_UNKNOWN;
     caps.tune_ranges = direct_sampling_ranges(config.direct, tuner_ranges_for(tuner), upconverter);
 
     if (upconverter) {
@@ -2050,6 +2055,18 @@ struct Applied {
         rc != 0) {
         return fail(std::format("the device refused {} S/s: rtlsdr_set_sample_rate returned {}",
                                 config.rate, rc_text(rc)),
+                    rc);
+    }
+
+    // After the rate, because librtlsdr re-derives the tuner's filter from
+    // the rate whenever the rate is set. Zero is the library's own automatic
+    // choice, which follows the rate; a number narrows the tuner's IF filter
+    // so strong signals outside the captured span are rejected before the ADC
+    // rather than aliased into it.
+    if (const int rc = rtlsdr_set_tuner_bandwidth(device, config.tuner_bandwidth_hz); rc != 0) {
+        return fail(std::format("the tuner refused a bandwidth of {} Hz: "
+                                "rtlsdr_set_tuner_bandwidth returned {}",
+                                config.tuner_bandwidth_hz, rc_text(rc)),
                     rc);
     }
 

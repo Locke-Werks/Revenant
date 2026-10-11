@@ -346,6 +346,9 @@ struct SourceCapabilities {
     // ADC branch. Auto stays on the tuner path there.
     bool upconverter = false;
 
+    // Whether the tuner takes offset tuning. The R820T family refuses it.
+    bool offset_tuning_available = false;
+
     FlowControl flow = FlowControl::Demand;
 
     bool seekable = false;

@@ -440,6 +440,7 @@ void write_source_descriptor(schema::SourceDescriptor::Builder out,
     out.setDirectSamplingAvailable(in.direct_sampling_available);
     out.setDirectSampling(static_cast<schema::DirectSamplingMode>(in.direct_sampling_mode));
     out.setUpconverter(in.upconverter);
+    out.setOffsetTuningAvailable(in.offset_tuning_available);
 }
 
 source::DeviceCalibration read_calibration_settings(schema::CalibrationSettings::Reader in) {

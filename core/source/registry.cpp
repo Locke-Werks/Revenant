@@ -939,6 +939,10 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     if (!offset) {
         return std::unexpected(offset.error());
     }
+    auto bandwidth = query->frequency("bw", 0);
+    if (!bandwidth) {
+        return std::unexpected(bandwidth.error());
+    }
 
     const bool freq_given = query->present("freq");
     const bool ppm_given = query->present("ppm");
@@ -1007,6 +1011,15 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     config.digital_agc = *agc;
     config.bias_tee = *bias;
     config.offset_tuning = *offset;
+
+    // The R820T2's IF filter tops out near 8 MHz; nothing a dongle captures
+    // wants more, and a value that does not fit 32 bits is a typo.
+    if (*bandwidth < 0 || *bandwidth > 10'000'000) {
+        return fail(std::format("bw={} Hz is outside 0 to 10 MHz. bw is the tuner's IF filter; "
+                                "0 or leaving it off lets librtlsdr follow the sample rate.",
+                                *bandwidth));
+    }
+    config.tuner_bandwidth_hz = static_cast<std::uint32_t>(*bandwidth);
 
     const auto direct_mode = parse_direct_sampling(*direct);
     if (!direct_mode) {
