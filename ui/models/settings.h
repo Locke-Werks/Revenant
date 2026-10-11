@@ -117,6 +117,8 @@ inline constexpr QLatin1StringView kScaleCeilingDb{"display/ceilingDb"};
 // the picture and not about any one front end. See render/spectrum_scale.h,
 // blend_ends.
 inline constexpr QLatin1StringView kWaterfallContrast{"display/waterfallContrast"};
+// Where the waterfall contrast's S turns, past 100%: a fraction of the map.
+inline constexpr QLatin1StringView kWaterfallPivot{"display/waterfallPivot"};
 inline constexpr QLatin1StringView kSpectrumRangeFit{"display/spectrumRangeFit"};
 
 // The spectrum trace's smoothing: the release time in seconds, zero for off,

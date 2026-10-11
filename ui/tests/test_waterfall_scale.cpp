@@ -265,20 +265,33 @@ TEST_CASE("pins override the contrast", "[waterfall-scale][fit]")
     CHECK(levels.ends(both, 1.0F).ceiling_db == -50.0F);
 }
 
-// Rejects a contrast that stops at tight: past it the noise goes to black and
-// the top comes down to halfway between the noise and the strong level.
-TEST_CASE("contrast 2 puts the noise on the floor and halves the range", "[waterfall-scale][fit]")
+// Past 1 the ends hold at tight and the contrast goes into the S instead.
+TEST_CASE("contrast past 1 keeps the tight ends", "[waterfall-scale][fit]")
 {
     const auto levels = settled(-115.0F, -100.0F, -60.0F);
-    const auto ends = levels.ends(ScalePins{}, 2.0F);
-    CHECK_THAT(ends.floor_db, WithinAbs(-100.0, 1e-4));
-    CHECK_THAT(ends.ceiling_db, WithinAbs(-80.0, 1e-4));
     const auto at1 = levels.ends(ScalePins{}, 1.0F);
-    const auto mid = levels.ends(ScalePins{}, 1.5F);
-    CHECK_THAT(mid.floor_db, WithinAbs((at1.floor_db + ends.floor_db) / 2.0F, 1e-4));
-    CHECK_THAT(mid.ceiling_db, WithinAbs((at1.ceiling_db + ends.ceiling_db) / 2.0F, 1e-4));
-    const ScalePins floor = set_floor_pin(ScalePins{}, -130.0F);
-    CHECK(levels.ends(floor, 2.0F).floor_db == -130.0F);
+    const auto at2 = levels.ends(ScalePins{}, 2.0F);
+    CHECK(at2.floor_db == at1.floor_db);
+    CHECK(at2.ceiling_db == at1.ceiling_db);
+}
+
+// Rejects a curve that is not an S about the pivot.
+TEST_CASE("the contrast curve darkens below the pivot and lifts above it",
+          "[waterfall-scale][fit]")
+{
+    CHECK(revenant::ui::apply_curve(revenant::ui::curve_for(1.0F, 0.25F), 0.1F) == 0.1F);
+    const auto curve = revenant::ui::curve_for(2.0F, 0.25F);
+    CHECK_THAT(revenant::ui::apply_curve(curve, 0.25F), WithinAbs(0.25, 1e-6));
+    CHECK(revenant::ui::apply_curve(curve, 0.15F) < 0.15F);
+    CHECK(revenant::ui::apply_curve(curve, 0.35F) > 0.35F);
+    CHECK(revenant::ui::apply_curve(curve, 0.0F) == 0.0F);
+    CHECK_THAT(revenant::ui::apply_curve(curve, 1.0F), WithinAbs(1.0, 1e-6));
+    float last = -1.0F;
+    for (int i = 0; i <= 100; ++i) {
+        const float y = revenant::ui::apply_curve(curve, static_cast<float>(i) / 100.0F);
+        CHECK(y >= last);
+        last = y;
+    }
 }
 
 // Rejects the minimum as the weak level: one null pixel would set black.

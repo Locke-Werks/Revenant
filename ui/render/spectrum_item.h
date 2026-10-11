@@ -74,6 +74,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include <QColor>
@@ -870,6 +871,16 @@ private:
     // The largest drawn column, held so the top of the plot stays above it.
     // See hold_peak in render/spectrum_scale.h.
     PeakHold display_peak_;
+
+    // How far the zoomed view's noise and strong levels sit from the whole
+    // span's, added to the engine's whole-span ends so the auto-scale fits
+    // what is on screen. Zero when the view is the whole span.
+    void trackViewOffsets(std::span<const float> whole, std::span<const float> shown,
+                          double seconds);
+    float view_floor_offset_db_ = 0.0F;
+    float view_ceiling_offset_db_ = 0.0F;
+    bool view_offsets_valid_ = false;
+    std::vector<float> percentile_scratch_;
 
     // What an engine frame changes for QML, held and sent at most once a
     // refresh. Frames arrive at about 258 a second at full load, and emitting

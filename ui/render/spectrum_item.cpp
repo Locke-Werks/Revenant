@@ -1175,6 +1175,7 @@ void SpectrumItem::setLink(EngineLink* link)
         // bins, the markers restarted because bin n of the view is now
         // another frequency, and the headroom moved with bins per column.
         connect(link_, &EngineLink::viewChanged, this, [this] {
+            view_offsets_valid_ = false;
             forgetMarkers();
             recomputeHeadroom(deviceColumns());
             takeFrame();
@@ -1316,6 +1317,47 @@ void SpectrumItem::resizeColumns(int columns, std::size_t bins)
     recomputeHeadroom(columns);
 }
 
+void SpectrumItem::trackViewOffsets(std::span<const float> whole, std::span<const float> shown,
+                                    double seconds)
+{
+    if (shown.size() >= whole.size() || shown.empty()) {
+        view_floor_offset_db_ = 0.0F;
+        view_ceiling_offset_db_ = 0.0F;
+        view_offsets_valid_ = false;
+        return;
+    }
+    // The engine measures its ends over every bin. Rather than redo its
+    // outlier rejection and smoothing for the view, measure the same two
+    // percentiles over both the whole frame and the view here and carry the
+    // difference, so the engine's ends move by exactly how much quieter or
+    // louder the zoomed part is. The quarter is the noise, for the reason
+    // render/waterfall_scale.h gives; the thousandth is the strong level.
+    const auto at = [this](std::span<const float> bins, double fraction) {
+        percentile_scratch_.assign(bins.begin(), bins.end());
+        const auto rank = static_cast<std::size_t>(
+            fraction * static_cast<double>(percentile_scratch_.size() - 1));
+        std::nth_element(percentile_scratch_.begin(),
+                         percentile_scratch_.begin() + static_cast<std::ptrdiff_t>(rank),
+                         percentile_scratch_.end());
+        return percentile_scratch_[rank];
+    };
+    const float floor_target = at(shown, 0.25) - at(whole, 0.25);
+    const float ceiling_target = at(shown, 0.999) - at(whole, 0.999);
+    if (!view_offsets_valid_) {
+        view_floor_offset_db_ = floor_target;
+        view_ceiling_offset_db_ = ceiling_target;
+        view_offsets_valid_ = true;
+        return;
+    }
+    // A second either way: the percentiles of a narrow view are a small
+    // sample and jump frame to frame, and the engine's own ends already
+    // carry the attack and decay a signal arriving needs.
+    constexpr double kViewOffsetSeconds = 1.0;
+    const auto step = static_cast<float>(1.0 - std::exp(-std::max(seconds, 0.0) / kViewOffsetSeconds));
+    view_floor_offset_db_ += (floor_target - view_floor_offset_db_) * step;
+    view_ceiling_offset_db_ += (ceiling_target - view_ceiling_offset_db_) * step;
+}
+
 void SpectrumItem::recomputeHeadroom(int columns)
 {
     const std::size_t wanted = static_cast<std::size_t>(std::max(columns, 1));
@@ -1416,8 +1458,10 @@ void SpectrumItem::takeFrame()
     } else {
         display_peak_ = hold_peak(display_peak_, frame_max, sourceSecondsSinceLast(frame));
     }
-    ends_ = resolve_ends_fit(frame.floor_db, frame.ceiling_db, headroom_db_, display_peak_,
-                             pinsInForce(), rangeFitInForce());
+    trackViewOffsets(frame.power_db, shown, sourceSecondsSinceLast(frame));
+    ends_ = resolve_ends_fit(frame.floor_db + view_floor_offset_db_,
+                             frame.ceiling_db + view_ceiling_offset_db_, headroom_db_,
+                             display_peak_, pinsInForce(), rangeFitInForce());
     have_frame_ = true;
 
     // The detection list has not changed, but the clock the fade is measured

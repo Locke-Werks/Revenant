@@ -24,6 +24,7 @@
 
 #include "models/settings.h"
 #include "render/spectrum_scale.h"
+#include "render/waterfall_scale.h"
 
 namespace revenant::ui {
 
@@ -38,6 +39,8 @@ class ScaleSettings : public QObject {
     Q_PROPERTY(double ceilingDb READ ceilingDb NOTIFY pinsChanged)
     Q_PROPERTY(double waterfallContrast READ waterfallContrast WRITE setWaterfallContrast
                    NOTIFY waterfallContrastChanged)
+    Q_PROPERTY(double waterfallPivot READ waterfallPivot WRITE setWaterfallPivot
+                   NOTIFY waterfallPivotChanged)
     Q_PROPERTY(double spectrumRangeFit READ spectrumRangeFit WRITE setSpectrumRangeFit
                    NOTIFY spectrumRangeFitChanged)
     Q_PROPERTY(double spectrumSmoothing READ spectrumSmoothing WRITE setSpectrumSmoothing
@@ -54,6 +57,8 @@ public:
         pins_.ceiling_pinned = store.value(settings::kScaleCeilingPinned, false).toBool();
         pins_.ceiling_db = store.value(settings::kScaleCeilingDb, 0.0).toFloat();
         waterfall_contrast_ = clamp_contrast(store.value(settings::kWaterfallContrast, 0.0).toDouble());
+        waterfall_pivot_ = clamp_pivot(
+            store.value(settings::kWaterfallPivot, kDefaultCurvePivot).toDouble());
         spectrum_range_fit_ = clamp_fit(store.value(settings::kSpectrumRangeFit, 0.0).toDouble());
         spectrum_smoothing_ = clamp_smoothing(
             store.value(settings::kSpectrumSmoothing, kDefaultSmoothDecaySeconds).toDouble());
@@ -61,6 +66,7 @@ public:
     }
 
     [[nodiscard]] double waterfallContrast() const { return waterfall_contrast_; }
+    [[nodiscard]] double waterfallPivot() const { return waterfall_pivot_; }
     [[nodiscard]] double spectrumRangeFit() const { return spectrum_range_fit_; }
     [[nodiscard]] double spectrumSmoothing() const { return spectrum_smoothing_; }
     [[nodiscard]] bool spectrumFloorSmoothing() const { return spectrum_floor_smoothing_; }
@@ -95,6 +101,17 @@ public:
         waterfall_contrast_ = value;
         QSettings().setValue(settings::kWaterfallContrast, value);
         emit waterfallContrastChanged();
+    }
+
+    void setWaterfallPivot(double value)
+    {
+        value = clamp_pivot(value);
+        if (value == waterfall_pivot_) {
+            return;
+        }
+        waterfall_pivot_ = value;
+        QSettings().setValue(settings::kWaterfallPivot, value);
+        emit waterfallPivotChanged();
     }
 
     void setSpectrumRangeFit(double value)
@@ -159,6 +176,7 @@ public:
 signals:
     void pinsChanged();
     void waterfallContrastChanged();
+    void waterfallPivotChanged();
     void spectrumRangeFitChanged();
     void spectrumSmoothingChanged();
 
@@ -190,6 +208,13 @@ private:
                            : 0.0;
     }
 
+    [[nodiscard]] static double clamp_pivot(double value)
+    {
+        return value == value ? std::clamp(value, static_cast<double>(kMinCurvePivot),
+                                           static_cast<double>(kMaxCurvePivot))
+                              : static_cast<double>(kDefaultCurvePivot);
+    }
+
     [[nodiscard]] static double clamp_smoothing(double seconds)
     {
         return seconds > 0.0 ? std::min(seconds, kMaxSmoothDecaySeconds) : 0.0;
@@ -197,6 +222,7 @@ private:
 
     ScalePins pins_;
     double waterfall_contrast_ = 0.0;
+    double waterfall_pivot_ = kDefaultCurvePivot;
     double spectrum_range_fit_ = 0.0;
     double spectrum_smoothing_ = kDefaultSmoothDecaySeconds;
     bool spectrum_floor_smoothing_ = true;

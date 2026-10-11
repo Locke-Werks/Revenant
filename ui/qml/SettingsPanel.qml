@@ -34,6 +34,7 @@ ColumnLayout {
         heldRow.slider.value = engineLink.confidenceBar
         marginRow.slider.value = engineLink.marginBar
         contrastRow.slider.value = ScaleSettings.waterfallContrast
+        pivotRow.slider.value = ScaleSettings.waterfallPivot
         fitRow.slider.value = ScaleSettings.spectrumRangeFit
         smoothSlider.value = ScaleSettings.spectrumSmoothing
     }
@@ -210,6 +211,10 @@ ColumnLayout {
         required property string tip
         property alias slider: fitSlider
         property real maximum: 1
+        property real minimum: 0
+        property string lowLabel: "padded"
+        property string highLabel: "tight"
+        property bool percent: true
         signal moved(real value)
 
         spacing: 8
@@ -222,7 +227,7 @@ ColumnLayout {
         }
 
         Label {
-            text: "padded"
+            text: fit.lowLabel
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
         }
@@ -230,7 +235,7 @@ ColumnLayout {
         RSlider {
             id: fitSlider
             Layout.preferredWidth: 180
-            from: 0
+            from: fit.minimum
             to: fit.maximum
             stepSize: 0.01
             onMoved: fit.moved(value)
@@ -243,7 +248,7 @@ ColumnLayout {
         }
 
         Label {
-            text: "tight"
+            text: fit.highLabel
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
         }
@@ -261,9 +266,22 @@ ColumnLayout {
         label: "waterfall contrast"
         maximum: 2
         tip: "Padded is the usual look. 100% spreads the weakest to the strongest level in the "
-             + "waterfall's history across the whole colour map. Past that the noise goes black "
-             + "and strong signals saturate, so weak ones stand out. Pins still win."
+             + "waterfall's history across the whole colour map. Past that the map bends into an "
+             + "S about the pivot: below it goes darker, above it brighter, so the noise sinks "
+             + "and weak signals lift. Pins still win."
         onMoved: (value) => ScaleSettings.waterfallContrast = value
+    }
+
+    FitRow {
+        id: pivotRow
+        label: "contrast pivot"
+        minimum: 0.05
+        maximum: 0.95
+        lowLabel: "low"
+        highLabel: "high"
+        tip: "Where the S turns, as a height on the colour map. Levels below it go darker and "
+             + "above it brighter. Set it just above the noise. Only acts past 100% contrast."
+        onMoved: (value) => ScaleSettings.waterfallPivot = value
     }
 
     FitRow {

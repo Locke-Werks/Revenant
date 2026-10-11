@@ -106,14 +106,66 @@ using PackedPalette = std::array<std::uint32_t, colour_map::kTableSize>;
     return built;
 }
 
+// The contrast past 1 as a colourist's S: an amount and a pivot, the pivot a
+// fraction of the map from its bottom. Below the pivot the map is pushed down
+// by a power curve, above it pushed up by the mirror of the same curve, so
+// the two meet at the pivot with a slope of 1 + 3 x amount. Amount 0 is the
+// straight line. A pivot just above where the noise sits on the tight map
+// is what sends the noise darker and a weak signal brighter.
+struct ContrastCurve {
+    float amount = 0.0F;
+    float pivot = 0.25F;
+};
+
+inline constexpr float kMinCurvePivot = 0.05F;
+inline constexpr float kMaxCurvePivot = 0.95F;
+inline constexpr float kDefaultCurvePivot = 0.25F;
+inline constexpr float kCurveSlopePerAmount = 3.0F;
+
+[[nodiscard]] inline ContrastCurve curve_for(float contrast, float pivot)
+{
+    return ContrastCurve{std::clamp(contrast - 1.0F, 0.0F, 1.0F),
+                         std::clamp(pivot, kMinCurvePivot, kMaxCurvePivot)};
+}
+
+// Where a point x of the map, 0 to 1, lands under the curve.
+[[nodiscard]] inline float apply_curve(const ContrastCurve& curve, float x)
+{
+    x = std::clamp(x, 0.0F, 1.0F);
+    if (!(curve.amount > 0.0F)) {
+        return x;
+    }
+    const float g = 1.0F + kCurveSlopePerAmount * curve.amount;
+    const float p = curve.pivot;
+    if (x < p) {
+        return p * std::pow(x / p, g);
+    }
+    return 1.0F - (1.0F - p) * std::pow((1.0F - x) / (1.0F - p), g);
+}
+
+[[nodiscard]] inline bool operator==(const ContrastCurve& a, const ContrastCurve& b)
+{
+    return a.amount == b.amount && a.pivot == b.pivot;
+}
+
 // Codes to palette indices for one pair of ends, set up once per pair so the
 // per-pixel work is a subtract, a multiply and a clamp.
 class CodeColourer {
 public:
-    explicit CodeColourer(const MapEnds& ends)
+    explicit CodeColourer(const MapEnds& ends, const ContrastCurve& curve = {})
         : palette_(packed_palette()),
           background_(pack_rgbx(colour_map::kBottom))
     {
+        // The curve is folded into a palette of its own, so the per-pixel
+        // work is the same with it as without.
+        if (curve.amount > 0.0F) {
+            const auto last = static_cast<float>(colour_map::kTableSize - 1);
+            for (std::size_t i = 0; i < curved_.size(); ++i) {
+                const float y = apply_curve(curve, static_cast<float>(i) / last);
+                curved_[i] = palette_[static_cast<std::size_t>(y * last + 0.5F)];
+            }
+            lookup_ = &curved_;
+        }
         const float span = std::max(ends.span_db(), 1e-3F);
         const auto top = static_cast<float>(colour_map::kTableSize - 1);
         floor_code_ = (ends.floor_db - kLevelCodeFloorDb) * kLevelCodesPerDb + 1.0F;
@@ -128,8 +180,12 @@ public:
         }
         const float at = std::clamp((static_cast<float>(code) - floor_code_) * scale_ + 0.5F,
                                     0.0F, top_);
-        return palette_[static_cast<std::size_t>(at)];
+        return (*lookup_)[static_cast<std::size_t>(at)];
     }
+
+    // Holds a pointer into itself when curved.
+    CodeColourer(const CodeColourer&) = delete;
+    CodeColourer& operator=(const CodeColourer&) = delete;
 
     void row(const std::uint16_t* codes, std::uint32_t* pixels, int count) const
     {
@@ -140,6 +196,8 @@ public:
 
 private:
     const PackedPalette& palette_;
+    PackedPalette curved_{};
+    const PackedPalette* lookup_ = &palette_;
     std::uint32_t background_;
     float floor_code_ = 0.0F;
     float scale_ = 0.0F;
@@ -303,13 +361,11 @@ public:
     // Contrast 0 is place_ends as it always was; 1 puts the weak level on the
     // map's bottom and the strong level on its top. See blend_ends.
     //
-    // 1 to 2 goes on to the hot ends: the noise on the bottom edge and the top
-    // halfway from the noise to the strong level. Past 1 is the owner's
-    // request of 2026-10-08 for more: 0 to 1 alone barely moved the picture,
-    // because the weak level sits only a few dB under the noise, which is
-    // about where place_ends already puts the floor, so the only change was
-    // the ceiling. The hot ends black out the noise and saturate the strongest
-    // signals, which is what lets a weak one stand out.
+    // Past 1 the ends stay at tight and the contrast goes into the curve
+    // instead, ContrastCurve below. The owner's request of 2026-10-10: the
+    // linear hot ends this replaced clipped both ends of the map, where an S
+    // about a pivot darkens the noise and lifts the weak signals just above
+    // it without throwing away the strong ones' gradation.
     [[nodiscard]] MapEnds ends(const ScalePins& pins, float contrast = 0.0F) const
     {
         const MapEnds padded = place_ends(noise_db_, strong_db_, pins);
@@ -317,15 +373,8 @@ public:
             return padded;
         }
         const MapEnds tight = tight_ends(weak_db_, strong_db_, kWaterfallTightGuardDb, pins);
-        if (!(contrast > 1.0F)) {
-            return blend_ends(padded, tight, contrast);
-        }
-        const float hot_top = noise_db_ + kHotTopFraction * std::max(strong_db_ - noise_db_, 0.0F);
-        return blend_ends(tight, tight_ends(noise_db_, hot_top, kWaterfallTightGuardDb, pins),
-                          contrast - 1.0F);
+        return blend_ends(padded, tight, std::min(contrast, 1.0F));
     }
-
-    static constexpr float kHotTopFraction = 0.5F;
 
 private:
     [[nodiscard]] static float follow(float now, float target, double dt, bool expanding)

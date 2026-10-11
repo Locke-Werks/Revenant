@@ -230,6 +230,8 @@ void WaterfallItem::setMapPins(ScaleSettings* pins)
         // so it recolours everything at once rather than easing tile by tile.
         connect(map_pins_, &ScaleSettings::waterfallContrastChanged, this,
                 &WaterfallItem::onPinsChanged);
+        connect(map_pins_, &ScaleSettings::waterfallPivotChanged, this,
+                &WaterfallItem::onPinsChanged);
     }
     onPinsChanged();
     emit mapPinsChanged();
@@ -672,7 +674,7 @@ void WaterfallItem::recolourTile(std::size_t tile)
         codes_.size() != static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall)) {
         return;
     }
-    const CodeColourer colour(ends_);
+    const CodeColourer colour(ends_, curveInForce());
     const int first = static_cast<int>(tile) * kTileRows;
     const int last = std::min(first + kTileRows, tall);
     for (int row = first; row < last; ++row) {
@@ -1077,7 +1079,7 @@ void WaterfallItem::takeFrame()
     if (ends_distance_db(tile_ends_[tile], ends_) > kRecolourToleranceDb) {
         recolourTile(tile);
     } else {
-        CodeColourer(tile_ends_[tile])
+        CodeColourer(tile_ends_[tile], curveInForce())
             .row(codes, reinterpret_cast<std::uint32_t*>(history_.scanLine(write_row_)), wide);
     }
 

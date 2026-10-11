@@ -417,6 +417,16 @@ private:
         return map_pins_ == nullptr ? 0.0F
                                     : static_cast<float>(map_pins_->waterfallContrast());
     }
+
+    // The S past contrast 1; see ContrastCurve. Read per tile recoloured, so
+    // a tile is always coloured through the curve in force when it was.
+    [[nodiscard]] ContrastCurve curveInForce() const
+    {
+        return map_pins_ == nullptr
+                   ? ContrastCurve{}
+                   : curve_for(static_cast<float>(map_pins_->waterfallContrast()),
+                               static_cast<float>(map_pins_->waterfallPivot()));
+    }
     float headroom_db_ = 0.0F;
     std::size_t reduced_bins_ = 0;
 
