@@ -294,6 +294,8 @@ qt_add_qml_module(revenant_ui
         qml/RecordingStrip.qml
         qml/DetectionControls.qml
         qml/SettingsPanel.qml
+        qml/ContrastCurve.qml
+        qml/PivotStrip.qml
         qml/SpanView.qml
         qml/Ruler.qml
         qml/BandPicker.qml

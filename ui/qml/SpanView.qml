@@ -451,7 +451,7 @@ ColumnLayout {
 
             anchors.right: parent.right
             anchors.top: parent.top
-            anchors.rightMargin: 6
+            anchors.rightMargin: 24
             anchors.topMargin: 6
             visible: waterfall.hoveredCaption !== 0 && captionText.text.length > 0
             width: Math.min(captionText.implicitWidth, 460) + 16
@@ -473,6 +473,15 @@ ColumnLayout {
                 font.family: Theme.monoFont
                 font.pixelSize: Theme.sizeSmall
             }
+        }
+
+        // The contrast pivot, live, on the right edge. Above the caption
+        // card, which moves left to clear it.
+        PivotStrip {
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            z: 3
         }
 
         link: engineLink
