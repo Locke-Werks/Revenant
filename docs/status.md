@@ -2,7 +2,8 @@
 
 M1, M2 and M3 are done: v0.1.0, the first public release, shipped on
 2026-09-27, and the release page has every one since. M4, the rolling
-capture, is in progress.
+capture, is in progress: recording, retention, search and replay work from
+the command line.
 There are two things to run: a command line, and a Qt client that reaches a
 running engine over a socket.
 
@@ -142,9 +143,15 @@ receivers of its own on detections, to name a signal's family; they are
 internal, nothing on the wire can add or see one, and `docs/detection.md` has
 what they get right and wrong.
 
-What does not. Nothing stores the band: `core/capture` holds a placeholder and
-no code, so there is no rolling capture, and search over stored captures, the
-reason the design exists, has nothing to search yet. The engine runs one radio
+The band can be stored. `--capture` on either tool writes everything the radio
+delivers to disk as SigMF segments in its own sample format, keeps a bounded
+window of them, and files the detector's tracks into each segment's metadata;
+`revenant-capture` lists, searches, indexes and extracts what was kept, and a
+`capture://` URI replays any stretch of it through the same graph. The client
+does not browse a capture yet. [capture.md](capture.md) has the details and the
+measurements.
+
+What does not. The engine runs one radio
 at a time. Nothing saves a set of receivers across a restart; that one is in
 `docs/rpc.md` with what it would take and what the gap costs meanwhile. TETRA
 voice is not decoded, and D-STAR and DMR voice is silent without a vocoder
