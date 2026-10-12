@@ -340,6 +340,18 @@ public:
             }
         }
 
+        // After the resolution widening and not before: a receiver the caller
+        // named that is then refused is a run that does nothing, where a
+        // coarser spectrum is a run that works with wider bins. See
+        // EngineConfig::carry_receiver_hz.
+        if (config_.channels_yield_to_source && config_.carry_receiver_hz > 0 &&
+            grid.channels != 0) {
+            const std::uint32_t carries = channel_count_for(rate, config_.carry_receiver_hz);
+            if (carries < grid.channels) {
+                grid.channels = carries;
+            }
+        }
+
         if (!std::has_single_bit(grid.channels)) {
             return fail(std::format("channels is {} and the channelizer needs a power of two",
                                     grid.channels));

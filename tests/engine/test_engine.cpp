@@ -862,6 +862,52 @@ TEST_CASE("an engine given no channel count sizes the grid against the source",
     CHECK(placement->granted_high - placement->granted_low == 200'000);
 }
 
+TEST_CASE("a default channel count gives way to the receiver the caller will place",
+          "[gpu][engine][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    // revenant-cli's shape: 64 as a default, and a WFM receiver named on the
+    // same command line. The README's quick start was refused on exactly
+    // this with "--channels 8 carries it".
+    const auto open_with = [](std::uint32_t channels, bool yield, dsp::Hertz carry) {
+        engine::EngineConfig config = default_config();
+        config.channels = channels;
+        config.channels_yield_to_source = yield;
+        config.carry_receiver_hz = carry;
+        auto created = engine::Engine::create(config);
+        REQUIRE(created.has_value());
+        REQUIRE((**created).open_source(tone_uri(300'000, 200'000)).has_value());
+        return std::move(*created);
+    };
+
+    {
+        auto eng = open_with(64, true, 200'000);
+        const engine::EngineInfo& info = eng->info();
+        CHECK(info.grid.channels == engine::channel_count_for(kSourceRate, 200'000));
+
+        engine::VrxParams wide;
+        wide.center = 300'000;
+        wide.demod = engine::Demod::Wfm;
+        wide.passband_low = -100'000;
+        wide.passband_high = 100'000;
+        auto placement = engine::place(info.grid, info.source_rate, wide);
+        INFO(test::message_of(placement));
+        REQUIRE(placement.has_value());
+        CHECK_FALSE(placement->bandwidth_clamped);
+    }
+
+    // No receiver named: a detection run keeps the 64 docs/detection.md's
+    // VHF tables were measured on.
+    CHECK(open_with(64, true, 0)->info().grid.channels == 64);
+
+    // A count the operator named is honoured, and the refusal at placement
+    // is what tells them.
+    CHECK(open_with(64, false, 200'000)->info().grid.channels == 64);
+
+    // Coarsens and never refines: a narrow receiver leaves the default alone.
+    CHECK(open_with(64, true, 10'000)->info().grid.channels == 64);
+}
+
 // ---------------------------------------------------------------------------
 // Retuning the front end, and the pacing measurement
 // ---------------------------------------------------------------------------
