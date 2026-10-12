@@ -12,32 +12,34 @@
 // it, exactly as for a file.
 //
 // WHAT ONE REPLAY COVERS. A run: consecutive segments of one stream_epoch at
-// one centre frequency, one sample rate and one format, starting with the
-// segment that holds `from` and ending at `to` or at the newest segment of the
-// run when the source was opened. The stream's own sample indices are kept,
-// so every block's stamp is the index it had when it was captured and its
-// wall clock is exact rather than re-derived.
+// one sample rate and one format, starting with the segment that holds `from`
+// and ending at `to` or at the newest segment of the run when the source was
+// opened. The stream's own sample indices are kept, so every block's stamp is
+// the index it had when it was captured and its wall clock is exact rather
+// than re-derived.
+//
+// A RETUNE INSIDE A RUN IS FOLLOWED. Every block carries the centre of the
+// segment it came from in SourceBlock::center, and the engine re-places its
+// receivers on the first block whose centre moved, the same work
+// Engine::set_source_center does for a live radio, landing at that sample.
+// So a capture of somebody scanning around plays as one replay, and center()
+// answers with the centre of the block last delivered rather than the one at
+// open.
 //
 // A GAP INSIDE A RUN is two segments whose indices do not meet: samples the
 // writer lost. The first block after it carries dropped_before equal to the
 // samples missing and a stamp that has jumped by the same amount, which is
 // what a live radio's overrun looks like to the engine, so a replay of a lossy
 // capture is a faithful replay of the loss rather than a splice that pretends
-// the stream was whole.
+// the stream was whole. A gap and a retune together are both on that block.
 //
-// THE REPLAY STOPS AT A RETUNE, A RATE CHANGE OR A NEW EPOCH. The format
-// closes a segment on each, and the engine cannot follow any of them from a
-// source: EngineInfo::source_center is read from Source::center() once at
-// open and moved only by Engine::set_source_center, SourceBlock carries no
-// centre at all, and every receiver's frequency is an offset from that
-// constant. A source that changed center() mid-stream would have the engine
-// keep demodulating at the old frequency with every label on the waterfall
-// wrong and nothing failing. A new epoch is worse: its indices start again,
-// and a stamp that goes backwards is something no consumer here expects. So
-// a run ends at the first such boundary and the capability notes say where
-// and why; the next run is another open with from= at its start. Following a
-// retune properly needs a centre on SourceBlock and the graph re-placing its
-// receivers on it, which is engine work this source should not fake.
+// THE REPLAY STOPS AT A RATE CHANGE, A FORMAT CHANGE OR A NEW EPOCH. The rate
+// and format fix the engine's grid and convert pipeline at open, so following
+// either is a rebuild of the graph rather than a re-placement on it. A new
+// epoch is worse: its indices start again, and a stamp that goes backwards is
+// something no consumer here expects. So a run ends at the first such
+// boundary and the capability notes say where and why; the next run is
+// another open with from= at its start.
 //
 // Seeking is by sample index within the epoch, the same indices the stamps
 // carry. A seek into a gap lands on the first sample after it, and is a seek,

@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <mutex>
 #include <fstream>
 #include <memory>
 #include <cstdlib>
@@ -40,6 +41,7 @@
 #include "core/engine/open_built_source.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
+#include "tests/capture/catalog_fixture.h"
 #include "tests/engine/movable_centre.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
@@ -267,4 +269,87 @@ TEST_CASE("an engine without a capture reports none and drops annotations",
     REQUIRE(eng.run().has_value());
     eng.close_capture();
     CHECK_FALSE(eng.capture_stats().has_value());
+}
+
+TEST_CASE("a capture replay follows a retune between segments at the sample it was made",
+          "[gpu][engine][capture]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // A marine channel, then NOAA weather: further apart than the span, so a
+    // receiver on the first cannot come along and is removed, which is the
+    // retune's work visibly landing.
+    constexpr dsp::Hertz kMarine = 156'800'000;
+    constexpr dsp::Hertz kWeather = 162'550'000;
+    constexpr dsp::SampleRate kReplayRate = 2'048'000;
+    constexpr std::uint64_t kSegment = 1u << 19;
+
+    test::CaptureRoot root;
+    test::SegmentSpec first;
+    first.rate = kReplayRate;
+    first.center = kMarine;
+    first.sample_count = kSegment;
+    test::write_segment(root.path(), first);
+    test::SegmentSpec second = first;
+    second.first_index = kSegment;
+    second.center = kWeather;
+    test::write_segment(root.path(), second);
+
+    engine::EngineConfig config;
+    config.channels = 64;
+    config.ring_seconds = 0.5;
+    config.gpu_index = -1;
+    config.spectrum_transform = 2048;
+    auto created = engine::Engine::create(config);
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    auto opened = eng.open_source("capture:///" + root.utf8() + "?pace=max");
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+    REQUIRE(eng.info().source_center == kMarine);
+    REQUIRE(eng.source_capabilities().length_samples == 2 * kSegment);
+
+    engine::VrxParams params;
+    params.center = 100'000;
+    params.demod = engine::Demod::Nfm;
+    params.squelch_dbfs = -300.0;
+    auto added = eng.add_vrx(params);
+    INFO(test::message_of(added));
+    REQUIRE(added.has_value());
+
+    std::mutex lock;
+    dsp::SampleIndex last_frame_end = 0;
+    REQUIRE(eng.set_spectrum_sink([&](const engine::SpectrumFrame& frame) -> Status {
+                   const std::scoped_lock guard(lock);
+                   last_frame_end = std::max(last_frame_end, frame.start + frame.count);
+                   return {};
+               })
+                .has_value());
+
+    const Status ran = eng.run();
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+
+    // The whole of both segments, not the first alone.
+    CHECK(eng.source_stats().samples_delivered == 2 * kSegment);
+    {
+        const std::scoped_lock guard(lock);
+        CHECK(last_frame_end > kSegment);
+    }
+
+    CHECK(eng.info().source_center == kWeather);
+    const std::vector<engine::SourceRetune> followed = eng.take_followed_retunes();
+    REQUIRE(followed.size() == 1);
+    CHECK(followed[0].center == kWeather);
+    CHECK(followed[0].at == kSegment);
+    REQUIRE(followed[0].removed.size() == 1);
+    CHECK(followed[0].removed[0].id == *added);
+    CHECK(followed[0].removed[0].cause == engine::RetuneCause::OutsideSpan);
+    CHECK(followed[0].removed[0].frequency == kMarine + 100'000);
+    CHECK_FALSE(eng.vrx_status(*added).has_value());
+
+    // Taken once.
+    CHECK(eng.take_followed_retunes().empty());
 }

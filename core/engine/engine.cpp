@@ -540,6 +540,11 @@ public:
         // not consume an epoch. Nothing depends on them being consecutive, but
         // a gap would be a stream nobody could ever produce a sample for.
         ++info_.source_epoch;
+        {
+            // A new stream's retunes are its own.
+            const std::scoped_lock held(followed_lock_);
+            followed_.clear();
+        }
 
         // The source's own pace when it has one, a file opened with pace=,
         // and the configured one when it has none.
@@ -783,7 +788,7 @@ public:
         // layer's own would replace all three with a category.
         // Read BEFORE the tune, because it is what every receiver's absolute
         // frequency is measured against and the line below overwrites it.
-        const dsp::Hertz was = info_.source_center;
+        const dsp::Hertz was = std::atomic_ref(info_.source_center).load();
 
         // Bracket the tune in stream indices for the capture. See
         // capture_center_for: no sample at or past `after` can predate the
@@ -795,8 +800,9 @@ public:
         }
         const dsp::SampleIndex after = source_->stats().write_index;
 
-        // The one piece of engine state a retune moves.
-        info_.source_center = *landed;
+        // The one piece of engine state a retune moves. Through atomic_ref
+        // because a replay moves it from the delivery thread too.
+        std::atomic_ref(info_.source_center).store(*landed);
         publish_capture_retune(*landed, before, after);
 
         // A comb found at the old centre is somewhere else at the new one, or
@@ -849,8 +855,18 @@ public:
         // goes for a re-place the graph refuses because the new place needs a
         // different filter; the note on that branch below says how it is
         // reached.
+        SourceRetune out = rebase_receivers(was, *landed);
+        return out;
+    }
+
+    // Everything a centre change does to the graph's receivers and the
+    // probes, shared by set_source_center on the control thread and
+    // follow_block_center on the delivery thread, so a replay's retune
+    // and an operator's cannot come to differ. The argument for each
+    // step is on set_source_center.
+    [[nodiscard]] SourceRetune rebase_receivers(dsp::Hertz was, dsp::Hertz landed) {
         SourceRetune out;
-        out.center = *landed;
+        out.center = landed;
 
         // Probes are not carried along or removed: every one still collecting
         // is ended, because the baseband it has so far came from the old
@@ -862,7 +878,7 @@ public:
         }
 
         if (graph_ != nullptr) {
-            const dsp::Hertz moved = *landed - was;
+            const dsp::Hertz moved = landed - was;
             const dsp::Hertz half_span = static_cast<dsp::Hertz>(info_.source_rate / 2);
 
             for (const VrxId id : graph_->vrx_ids()) {
@@ -887,14 +903,14 @@ public:
                     reason = std::format(
                         "the front end was retuned to {} Hz, which leaves this receiver's centre "
                         "at {} Hz outside the span, so the engine removed it",
-                        *landed, frequency);
+                        landed, frequency);
                 } else if (auto placement = place(info_.grid, info_.source_rate, repinned);
                            !placement) {
                     cause = RetuneCause::Unplaceable;
                     reason = std::format(
                         "the front end was retuned to {} Hz and the receiver at {} Hz could not "
                         "be placed on the grid from there, so the engine removed it: {}",
-                        *landed, frequency, placement.error().message);
+                        landed, frequency, placement.error().message);
                 } else if (auto held = graph_->set_vrx_params(id, repinned, *placement); !held) {
                     // THE REFUSAL THAT USED TO BE DISCARDED. Re-queued even
                     // when the offset did not change, which is the epoch bump
@@ -939,7 +955,7 @@ public:
                         "the front end was retuned to {} Hz, which puts the receiver at {} Hz in "
                         "a different place in its channel and so needs a different filter: {}. "
                         "The engine removed it rather than leave it {} Hz from where it was put",
-                        *landed, frequency, held.error().message, moved);
+                        landed, frequency, held.error().message, moved);
                 }
 
                 if (reason.empty()) {
@@ -1355,7 +1371,10 @@ public:
         options.pace = pace_.load(std::memory_order_acquire);
 
         Graph* graph = graph_.get();
-        source::BlockSink sink = [graph](const source::SourceBlock& block) {
+        followed_device_center_ = corrected_ != nullptr ? corrected_->device_center()
+                                                        : source_->center();
+        source::BlockSink sink = [this, graph](const source::SourceBlock& block) {
+            follow_block_center(block);
             return graph->on_block(block);
         };
         if (config_.capture) {
@@ -1368,6 +1387,7 @@ public:
             // never blocks and never fails the stream.
             capture::SegmentWriter* writer = writer_.get();
             sink = [this, graph, writer](const source::SourceBlock& block) {
+                follow_block_center(block);
                 writer->consume(block, capture_center_for(block));
                 return graph->on_block(block);
             };
@@ -1498,6 +1518,59 @@ public:
         writer->stop();
         const std::scoped_lock held(capture_lock_);
         last_capture_stats_ = writer->stats();
+    }
+
+    // A retune the stream carried, applied before the graph sees the block
+    // that carries it. Delivery thread only.
+    //
+    // HERE AND NOT AS A QUEUED CONTROL CALL, because here is the one place
+    // that knows which block is first at the new centre. The graph's control
+    // operations are queued lock-free and drained at the top of on_block, so
+    // the re-placements rebase_receivers queues land on this very block and
+    // not one earlier or later: a receiver hears the old centre up to the
+    // last sample taken there and the new one from the first.
+    //
+    // A live radio never gets past the first test, its blocks carrying no
+    // centre, which keeps this one compare per block for every source but a
+    // replay.
+    void follow_block_center(const source::SourceBlock& block) {
+        if (block.center == 0 || block.center == followed_device_center_) {
+            return;
+        }
+        followed_device_center_ = block.center;
+
+        // The block is on the device's scale, as center() is underneath the
+        // correction, so the label goes through the same conversion
+        // CorrectedSource::center does.
+        const dsp::Hertz landed =
+            corrected_ != nullptr
+                ? source::device_to_true(block.center, corrected_->correction_ppb())
+                : block.center;
+        const dsp::Hertz was = std::atomic_ref(info_.source_center).load();
+        if (landed == was) {
+            return;
+        }
+        std::atomic_ref(info_.source_center).store(landed);
+
+        // Before and after are both this block: the samples say exactly where
+        // the centre moved, so there is no window for capture_center_for to
+        // resolve and the writer closes its segment here.
+        const dsp::SampleIndex at = block.stamp.start;
+        publish_capture_retune(landed, at, at);
+
+        if (graph_ != nullptr) {
+            graph_->note_source_retune();
+        }
+        SourceRetune out = rebase_receivers(was, landed);
+        out.at = at;
+
+        const std::scoped_lock held(followed_lock_);
+        followed_.push_back(std::move(out));
+    }
+
+    [[nodiscard]] std::vector<SourceRetune> take_followed_retunes() override {
+        const std::scoped_lock held(followed_lock_);
+        return std::exchange(followed_, {});
     }
 
     // A retune for the delivery thread to apply at the right block. The
@@ -1870,6 +1943,14 @@ private:
     mutable std::mutex capture_lock_;
     std::unique_ptr<capture::SegmentWriter> writer_;
     std::optional<capture::WriterStats> last_capture_stats_;
+
+    // The device-scale centre the last block carried, or the source's at
+    // start. The delivery thread's alone once a stream runs.
+    dsp::Hertz followed_device_center_ = 0;
+
+    // What follow_block_center did, kept for take_followed_retunes.
+    std::mutex followed_lock_;
+    std::vector<SourceRetune> followed_;
 
     // capture_center_ is the delivery thread's alone once a stream runs.
     std::atomic<dsp::Hertz> capture_center_{0};

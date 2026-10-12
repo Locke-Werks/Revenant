@@ -694,6 +694,11 @@ struct SourceRetune {
     // In the order vrx_ids listed them. Empty when every receiver came
     // along.
     std::vector<RetuneRemoval> removed;
+
+    // The first sample at the new centre, for a retune the stream carried
+    // (Engine::take_followed_retunes). Zero from set_source_center, whose
+    // landing index is the capture's business and not the caller's.
+    dsp::SampleIndex at = 0;
 };
 
 // What the front-end correction stage is doing.
@@ -1721,6 +1726,20 @@ public:
     // what to do instead, which is to reopen the URI, and a generic refusal
     // here would replace advice with a category.
     [[nodiscard]] virtual Expected<SourceRetune> set_source_center(dsp::Hertz center) = 0;
+
+    // Retunes the stream itself made since the last call, oldest first.
+    //
+    // A replay retunes wherever the recording did, which no caller asked
+    // for, so there is no call to answer with a SourceRetune. The engine
+    // applies each one on the delivery thread at the first block carrying the
+    // new SourceBlock::center, which is the same work set_source_center does
+    // (EngineInfo::source_center, every receiver re-placed or removed, the
+    // probes ended, the span's comb and detection averaging restarted) landing
+    // at exactly that sample rather than whenever a control thread got there.
+    // What it cannot do is the half above the engine, the detector's tracks
+    // and the removed receivers' subscriptions, so it keeps the answers here
+    // for whoever holds those. A live radio never adds to this list.
+    [[nodiscard]] virtual std::vector<SourceRetune> take_followed_retunes() { return {}; }
 
     // The front end's gain, by the stage's own name, answering with the value
     // the device took.

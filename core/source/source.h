@@ -52,6 +52,18 @@ struct SourceBlock {
     // sequence jump knows it missed a whole block delivery, which is a
     // different fault from samples being lost inside the device.
     std::uint64_t sequence = 0;
+
+    // The centre these samples were taken at, on the device's own crystal
+    // scale as center() reports it before any correction. Zero means the
+    // block says nothing and the engine keeps the centre it has.
+    //
+    // A live radio leaves it at zero: its centre moves only when the engine
+    // calls tune(), so the engine already knows. A replay is the other case.
+    // Its centre moves wherever the recording retuned, with nobody calling
+    // anything, and a block is the only place that can say so at the exact
+    // sample it happened. The engine re-places its receivers on the first
+    // block whose centre differs, exactly as Engine::set_source_center would.
+    dsp::Hertz center = 0;
 };
 
 // Returning an error stops the stream, and the error is handed back through

@@ -165,6 +165,7 @@ struct RunSegment {
     std::string data_path;
     dsp::SampleIndex first = 0;
     dsp::SampleIndex end = 0;
+    dsp::Hertz center = 0;
 };
 
 // Everything open() settles from the catalog, so describe and open cannot
@@ -265,21 +266,23 @@ struct Run {
     const CatalogSegment* last = nullptr;
     std::uint64_t gaps = 0;
     std::uint64_t lost = 0;
+    std::uint64_t retunes = 0;
     for (const CatalogSegment* segment : epoch) {
         if (config.to_given && segment->info.start_ns() >= config.to_ns) {
             break;
         }
         if (last != nullptr) {
-            const bool same = segment->info.center == run.center &&
-                              segment->info.rate == run.rate &&
+            // The centre is not on this list: every block carries its own,
+            // and the engine re-places its receivers where it moves.
+            const bool same = segment->info.rate == run.rate &&
                               segment->info.format == run.format &&
                               segment->info.epoch_anchor_ns == run.anchor_ns &&
                               segment->info.first_index >= last->info.end_index();
             if (!same) {
                 notes.push_back(std::format(
-                    "replay stops at index {}: {}. The engine cannot follow a retune, a rate or "
-                    "format change or a new stream from a source mid-stream; open the capture "
-                    "again with from= at that segment to continue.",
+                    "replay stops at index {}: {}. The engine follows a retune but not a rate or "
+                    "format change or a new stream mid-stream; open the capture again with from= "
+                    "at that segment to continue.",
                     last->info.end_index(), describe_change(last->info, *segment)));
                 break;
             }
@@ -288,8 +291,11 @@ struct Run {
                 lost += segment->info.first_index - last->info.end_index();
             }
         }
+        if (last != nullptr && segment->info.center != last->info.center) {
+            ++retunes;
+        }
         run.segments.push_back(RunSegment{segment->data_path, segment->info.first_index,
-                                          segment->info.end_index()});
+                                          segment->info.end_index(), segment->info.center});
         last = segment;
     }
 
@@ -326,6 +332,11 @@ struct Run {
         notes.push_back(std::format("the run has {} gap{} totalling {} lost samples, each "
                                     "reported as dropped_before on the block after it",
                                     gaps, gaps == 1 ? "" : "s", lost));
+    }
+    if (retunes > 0) {
+        notes.push_back(std::format("the run retunes {} time{}, each carried as the centre of the "
+                                    "first block after it",
+                                    retunes, retunes == 1 ? "" : "s"));
     }
     notes.push_back(std::format("stream_epoch {:016x}, {} segment{}, indices {} to {}",
                                 run.stream_epoch, run.segments.size(),
@@ -366,6 +377,7 @@ public:
         }
         position_ = run_.start_index;
         write_index_.store(position_, std::memory_order_relaxed);
+        center_.store(run_.segments[segment_for(position_)].center, std::memory_order_relaxed);
     }
 
     ~CaptureSource() override
@@ -386,7 +398,13 @@ public:
             "samples were written. Open the capture at a time it was tuned there instead.",
             center));
     }
-    [[nodiscard]] dsp::Hertz center() const override { return run_.center; }
+    // Where the block just delivered was taken, so a caller reading this
+    // after the replay crossed a retune gets the centre it is hearing now
+    // rather than the one at open.
+    [[nodiscard]] dsp::Hertz center() const override
+    {
+        return center_.load(std::memory_order_acquire);
+    }
 
     [[nodiscard]] Expected<dsp::SampleRate> set_sample_rate(dsp::SampleRate rate) override
     {
@@ -545,6 +563,7 @@ private:
     std::atomic<std::uint64_t> blocks_delivered_{0};
     std::atomic<std::uint64_t> samples_delivered_{0};
     std::atomic<dsp::SampleIndex> write_index_{0};
+    std::atomic<dsp::Hertz> center_{0};
 };
 
 Status CaptureSource::seek(dsp::SampleIndex index)
@@ -562,6 +581,7 @@ Status CaptureSource::seek(dsp::SampleIndex index)
     }
     position_ = index;
     write_index_.store(index, std::memory_order_relaxed);
+    center_.store(run_.segments[segment_for(index)].center, std::memory_order_release);
     return {};
 }
 
@@ -725,6 +745,7 @@ void CaptureSource::run()
         block.bytes = std::span<const std::byte>(buffer_.data(), want_bytes);
         block.dropped_before = dropped;
         block.sequence = sequence;
+        block.center = segment.center;
 
         for (bool changed = true; changed;) {
             changed = false;
@@ -758,6 +779,7 @@ void CaptureSource::run()
         blocks_delivered_.fetch_add(1, std::memory_order_relaxed);
         samples_delivered_.fetch_add(want, std::memory_order_relaxed);
         write_index_.store(position_, std::memory_order_relaxed);
+        center_.store(segment.center, std::memory_order_release);
     }
 
     running_.store(false, std::memory_order_release);
