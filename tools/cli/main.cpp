@@ -4821,8 +4821,9 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                      written.segments_deleted,
                      static_cast<double>(written.retained_bytes) / (1024.0 * 1024.0));
         if (detector != nullptr) {
-            std::println("  annotations     {} sent, {} arrived after their segment closed",
-                         capture_annotations, written.annotations_discarded);
+            std::println("  annotations     {} sent, {} filed into closed segments, {} lost",
+                         capture_annotations, written.annotations_merged_late,
+                         written.annotations_discarded);
         }
         if (!written.last_error.empty()) {
             std::println("  stopped writing {}", written.last_error);

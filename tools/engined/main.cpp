@@ -1637,7 +1637,7 @@ void print_engine_block(const engine::Engine& eng)
         // The last stream's writer, for the same reason the sample counts
         // above are the last source's.
         std::println("capture    {} segments, {:.1f} MiB written under {}; {} blocks dropped, "
-                     "{} segments deleted, {} annotations too late",
+                     "{} segments deleted, {} annotations lost",
                      written->segments_written,
                      static_cast<double>(written->bytes_written) / (1024.0 * 1024.0),
                      options.capture_root, written->blocks_dropped, written->segments_deleted,
