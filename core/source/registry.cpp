@@ -31,6 +31,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/capture/capture_source.h"
+#include "core/capture/catalog.h"
 #include "core/source/file_source.h"
 #include "core/source/rtlsdr_source.h"
 #include "core/source/synthetic_source.h"
@@ -73,12 +75,14 @@ struct Backend {
     std::string_view default_name;
 };
 
-constexpr std::array<Backend, 3> kBackends{
+constexpr std::array<Backend, 4> kBackends{
     Backend{"synthetic", "a synthesised wideband scene", Listing::Constant, "synthetic:wideband",
             "Synthetic wideband scene"},
     Backend{"rtlsdr", "an RTL-SDR dongle on USB", Listing::Probed, "", ""},
     Backend{"file", "a recorded IQ file: raw, SigMF, or WAV with an auxi chunk", Listing::Named,
             "", ""},
+    Backend{"capture", "a rolling capture root, replayed from a wall-clock time",
+            Listing::Named, "", ""},
 };
 
 [[nodiscard]] std::string known_schemes()
@@ -210,7 +214,7 @@ struct ParsedUri {
     }
     std::string body = std::move(*decoded_path);
 
-    if (parsed.scheme == "file") {
+    if (parsed.scheme == "file" || parsed.scheme == "capture") {
         const std::string host = lowercased(authority);
         if (host.empty() || host == "localhost") {
             // file:///C:/captures/x.cf32 arrives here as "/C:/captures/x.cf32".
@@ -681,6 +685,79 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     return config;
 }
 
+// capture://<root>?from=&to=&pace=&name=. The root takes the file scheme's
+// path rules, drive letter and UNC share included, because it is a directory
+// on the same filesystems. from and to take an ISO 8601 UTC time or epoch
+// nanoseconds; capture/catalog.h has the parser and why a zoneless time is
+// refused.
+[[nodiscard]] Expected<capture::CaptureSourceConfig> capture_config_of(const ParsedUri& uri)
+{
+    if (uri.body.empty()) {
+        return fail("a capture URI needs a root: capture:///D:/revenant/capture?from="
+                    "2026-10-12T14:00:00Z");
+    }
+
+    auto query = Query::parse(uri.query);
+    if (!query) {
+        return std::unexpected(query.error());
+    }
+    auto from_text = query->text("from", "");
+    if (!from_text) {
+        return std::unexpected(from_text.error());
+    }
+    auto to_text = query->text("to", "");
+    if (!to_text) {
+        return std::unexpected(to_text.error());
+    }
+    auto pace_text = query->text("pace", "");
+    if (!pace_text) {
+        return std::unexpected(pace_text.error());
+    }
+    auto name = query->text("name", "");
+    if (!name) {
+        return std::unexpected(name.error());
+    }
+
+    const bool from_given = query->present("from");
+    const bool to_given = query->present("to");
+    const bool pace_given = query->present("pace");
+
+    if (auto clean = query->reject_unknown("capture"); !clean) {
+        return std::unexpected(clean.error());
+    }
+
+    capture::CaptureSourceConfig config;
+    config.uri = uri.original;
+    config.root = uri.body;
+    config.display_name = std::move(*name);
+
+    if (from_given) {
+        auto from = capture::parse_capture_instant(*from_text);
+        if (!from) {
+            return std::unexpected(with_context(from.error(), "from="));
+        }
+        config.from_given = true;
+        config.from_ns = *from;
+    }
+    if (to_given) {
+        auto to = capture::parse_capture_instant(*to_text);
+        if (!to) {
+            return std::unexpected(with_context(to.error(), "to="));
+        }
+        config.to_given = true;
+        config.to_ns = *to;
+    }
+    if (pace_given) {
+        auto pace = pace_from_text(*pace_text);
+        if (!pace) {
+            return std::unexpected(pace.error());
+        }
+        config.pace_given = true;
+        config.pace = *pace;
+    }
+    return config;
+}
+
 [[nodiscard]] std::vector<std::string> split_commas(std::string_view text)
 {
     std::vector<std::string> out;
@@ -1077,6 +1154,18 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
         return caps;
     }
 
+    if (parsed->scheme == "capture") {
+        auto config = capture_config_of(*parsed);
+        if (!config) {
+            return std::unexpected(with_context(config.error(), std::string(uri)));
+        }
+        auto caps = capture::describe_capture_source(*config);
+        if (!caps) {
+            return std::unexpected(with_context(caps.error(), std::string(uri)));
+        }
+        return caps;
+    }
+
     return fail(std::format("'{}' is not a source scheme this build knows. Known schemes are {}.",
                             parsed->scheme, known_schemes()));
 }
@@ -1238,6 +1327,18 @@ Expected<std::unique_ptr<Source>> open_source(std::string_view uri)
             return std::unexpected(with_context(config.error(), std::string(uri)));
         }
         auto opened = open_rtlsdr_source(*config);
+        if (!opened) {
+            return std::unexpected(with_context(opened.error(), std::string(uri)));
+        }
+        return opened;
+    }
+
+    if (parsed->scheme == "capture") {
+        auto config = capture_config_of(*parsed);
+        if (!config) {
+            return std::unexpected(with_context(config.error(), std::string(uri)));
+        }
+        auto opened = capture::open_capture_source(*config);
         if (!opened) {
             return std::unexpected(with_context(opened.error(), std::string(uri)));
         }

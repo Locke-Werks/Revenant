@@ -91,6 +91,8 @@ endif()
 revenant_apply_warnings(revenant_device_lock)
 
 add_library(revenant_core STATIC
+    capture/capture_source.cpp
+    capture/catalog.cpp
     characterise/catalogue.cpp
     characterise/characterise.cpp
     characterise/cyclostationary.cpp
@@ -187,6 +189,7 @@ add_library(revenant_core STATIC
     source/clock_model.cpp
     source/corrected_source.cpp
     source/file_source.cpp
+    source/json.cpp
     source/registry.cpp
     source/rtlsdr_source.cpp
     source/synthetic_source.cpp
