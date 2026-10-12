@@ -22,10 +22,21 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/capture/capture_source.h"
 #include "core/capture/format.h"
 #include "core/capture/writer.h"
 #include "core/source/file_source.h"
 #include "core/source/registry.h"
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -483,3 +494,136 @@ TEST_CASE("A written segment replays through the file source sample for sample",
     CHECK(got == expected);
     CHECK(anchor == kAnchor);
 }
+
+namespace {
+
+// Ages every segment written at kAnchor past a one day limit, so the next
+// close deletes all of them.
+[[nodiscard]] capture::WriterConfig ageing_config(const fs::path& root, std::uint64_t epoch)
+{
+    auto config = config_for(root);
+    config.stream_epoch = epoch;
+    config.max_segment_bytes = kBlock * 2;
+    config.retention_max_age_ns = 86'400'000'000'000;
+    config.now_ns = [] { return kAnchor + 10 * 86'400'000'000'000; };
+    return config;
+}
+
+}  // namespace
+
+TEST_CASE("The ring deletes a segment under a replay that keeps reading it to the end",
+          "[capture][writer][retention]")
+{
+    const Scratch scratch("ring_replay");
+    {
+        auto config = config_for(scratch.root());
+        config.max_segment_bytes = kBlock * 2;
+        capture::SegmentWriter writer(config);
+        REQUIRE(writer.start().has_value());
+        Feeder feeder{writer, {}};
+        for (dsp::SampleIndex at = 0; at < 3 * kBlock; at += kBlock) {
+            feeder.feed(at, 433'920'000);
+        }
+        writer.stop();
+    }
+    const auto before = list_segments(scratch.root());
+    REQUIRE(before.size() == 3);
+    const fs::path oldest = before.front().data;
+
+    capture::CaptureSourceConfig source_config;
+    source_config.uri = "capture://ring";
+    source_config.root = scratch.root().string();
+    auto source = capture::open_capture_source(source_config);
+    REQUIRE(source);
+
+    // The ring runs inside the first delivery, when the replay has the oldest
+    // segment open and has read only the first block of it.
+    capture::WriterStats ring;
+    bool ran = false;
+    std::vector<std::byte> first_segment;
+    source::StreamOptions options;
+    options.block_samples = 128;
+    auto started = (*source)->start(options, [&](const source::SourceBlock& block) {
+        if (!ran) {
+            ran = true;
+            capture::SegmentWriter writer(ageing_config(scratch.root(), 0x5678));
+            REQUIRE(writer.start().has_value());
+            Feeder feeder{writer, {}};
+            feeder.feed(0, 433'920'000);
+            writer.stop();
+            ring = writer.stats();
+        }
+        if (block.stamp.start < kBlock) {
+            first_segment.insert(first_segment.end(), block.bytes.begin(), block.bytes.end());
+        }
+        return Status{};
+    });
+    REQUIRE(started);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while ((*source)->running() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    static_cast<void>((*source)->stop());
+
+    REQUIRE(ran);
+    CHECK(ring.delete_failures == 0);
+    CHECK(ring.pending_deletes == 0);
+    CHECK(ring.segments_deleted >= 3);
+    CHECK(!fs::exists(oldest));
+    CHECK(first_segment == block_bytes(0, kBlock));
+}
+
+#if defined(_WIN32)
+TEST_CASE("A refused ring delete is counted and kept pending until the next close retries it",
+          "[capture][writer][retention]")
+{
+    const Scratch scratch("ring_retry");
+    {
+        auto config = config_for(scratch.root());
+        config.max_segment_bytes = kBlock * 2;
+        capture::SegmentWriter writer(config);
+        REQUIRE(writer.start().has_value());
+        Feeder feeder{writer, {}};
+        feeder.feed(0, 433'920'000);
+        writer.stop();
+    }
+    const auto before = list_segments(scratch.root());
+    REQUIRE(before.size() == 1);
+    const fs::path data = before.front().data;
+    const fs::path meta = before.front().meta;
+
+    // What _wfopen does: share read and write, not delete.
+    HANDLE held = CreateFileW(data.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(held != INVALID_HANDLE_VALUE);
+
+    capture::SegmentWriter writer(ageing_config(scratch.root(), 0x5678));
+    REQUIRE(writer.start().has_value());
+    Feeder feeder{writer, {}};
+    // A retune closes the first segment, which runs the ring over the held one.
+    feeder.feed(0, 433'920'000);
+    feeder.feed(kBlock, 144'390'000);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (writer.stats().delete_failures == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto refused = writer.stats();
+    CHECK(refused.delete_failures == 1);
+    CHECK(refused.pending_deletes == 1);
+    // The meta went first, so what is left reads as an orphan, not a problem.
+    CHECK(!fs::exists(meta));
+    CHECK(fs::exists(data));
+    // The refused pair's bytes are not counted as deleted.
+    CHECK(refused.retained_bytes >= fs::file_size(data));
+
+    CloseHandle(held);
+    feeder.feed(2 * kBlock, 433'920'000);
+    writer.stop();
+
+    const auto retried = writer.stats();
+    CHECK(retried.delete_failures == 1);
+    CHECK(retried.pending_deletes == 0);
+    CHECK(!fs::exists(data));
+    CHECK(retried.segments_deleted == 4);
+}
+#endif

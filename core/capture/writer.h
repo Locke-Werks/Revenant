@@ -125,6 +125,12 @@ struct WriterStats {
     // Blocks discarded because writing had stopped on an error.
     std::uint64_t blocks_unwritten = 0;
     std::uint64_t segments_deleted = 0;
+    // Ring deletes the filesystem refused, usually because a reader holds the
+    // file without sharing delete. Each one stays on the pending list, is
+    // retried at every later close, and moves to segments_deleted only once
+    // both files are actually gone.
+    std::uint64_t delete_failures = 0;
+    std::uint64_t pending_deletes = 0;
     std::uint64_t annotations_discarded = 0;
     std::uint64_t retained_bytes = 0;
     // Empty while healthy. Once set, the writer has stopped writing and stays
@@ -250,6 +256,8 @@ private:
     void open_segment(const Item& item, std::uint64_t dropped_before);
     void close_segment(std::string_view reason);
     void apply_retention();
+    [[nodiscard]] bool remove_pair(const RetainedSegment& segment);
+    void retry_pending_deletes();
     void index_existing();
     void fail_writing(std::string message);
     [[nodiscard]] std::int64_t now() const;
@@ -273,6 +281,9 @@ private:
     // Writer thread only.
     std::unique_ptr<OpenSegment> open_;
     std::vector<RetainedSegment> retained_;
+    // Pairs the ring chose to delete and could not. Their bytes are still on
+    // disk, so they still count against the budget and in retained_bytes.
+    std::vector<RetainedSegment> pending_delete_;
     bool have_last_ = false;
     dsp::SampleIndex last_end_ = 0;
 

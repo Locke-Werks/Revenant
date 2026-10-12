@@ -628,10 +628,14 @@ Status SegmentWriter::start()
         config_.stream_epoch = draw_epoch();
     }
     index_existing();
+    // A restart re-indexes from disk, which already sees any pair a refused
+    // delete left behind.
+    pending_delete_.clear();
     have_last_ = false;
 
     std::lock_guard lock(mutex_);
     stats_.retained_bytes = 0;
+    stats_.pending_deletes = 0;
     for (const RetainedSegment& segment : retained_) {
         stats_.retained_bytes += segment.bytes;
     }
@@ -1028,15 +1032,65 @@ void SegmentWriter::index_existing()
     std::ranges::sort(retained_, {}, &RetainedSegment::order_key);
 }
 
+bool SegmentWriter::remove_pair(const RetainedSegment& segment)
+{
+    // Meta first: if the data then refuses to go, what is left is a data file
+    // with no meta, which the catalog reports as orphaned and never offers
+    // for replay. The other order would leave a meta naming missing data,
+    // which the catalog has to call a problem.
+    std::error_code ec;
+    fs::remove(segment.meta, ec);
+    if (ec && fs::exists(segment.meta)) {
+        return false;
+    }
+    ec.clear();
+    fs::remove(segment.data, ec);
+    if (ec && fs::exists(segment.data)) {
+        return false;
+    }
+    const fs::path dir = segment.data.parent_path();
+    ec.clear();
+    if (fs::is_empty(dir, ec) && !ec) {
+        fs::remove(dir, ec);
+    }
+    return true;
+}
+
+void SegmentWriter::retry_pending_deletes()
+{
+    std::uint64_t freed = 0;
+    std::uint64_t done = 0;
+    std::erase_if(pending_delete_, [&](const RetainedSegment& segment) {
+        if (!remove_pair(segment)) {
+            return false;
+        }
+        freed += segment.bytes;
+        ++done;
+        return true;
+    });
+    std::lock_guard lock(mutex_);
+    stats_.segments_deleted += done;
+    stats_.retained_bytes -= std::min(stats_.retained_bytes, freed);
+    stats_.pending_deletes = pending_delete_.size();
+}
+
 void SegmentWriter::apply_retention()
 {
+    if (!pending_delete_.empty()) {
+        retry_pending_deletes();
+    }
     if (config_.retention_bytes == 0 && config_.retention_max_age_ns <= 0) {
         return;
     }
     std::ranges::sort(retained_, {}, &RetainedSegment::order_key);
 
+    // A pair still waiting on a refused delete occupies disk, so it counts
+    // against the budget; the ring takes the next oldest to make up for it.
     std::uint64_t total = 0;
     for (const RetainedSegment& segment : retained_) {
+        total += segment.bytes;
+    }
+    for (const RetainedSegment& segment : pending_delete_) {
         total += segment.bytes;
     }
     if (open_) {
@@ -1044,34 +1098,37 @@ void SegmentWriter::apply_retention()
     }
     const std::int64_t now_ns = now();
 
-    std::size_t removed = 0;
-    std::uint64_t removed_bytes = 0;
-    while (removed < retained_.size()) {
-        const RetainedSegment& oldest = retained_[removed];
+    std::size_t taken = 0;
+    std::uint64_t deleted = 0;
+    std::uint64_t deleted_bytes = 0;
+    std::uint64_t refused = 0;
+    while (taken < retained_.size()) {
+        RetainedSegment& oldest = retained_[taken];
         const bool over_budget = config_.retention_bytes != 0 && total > config_.retention_bytes;
         const bool too_old = config_.retention_max_age_ns > 0 &&
                              now_ns - oldest.start_ns > config_.retention_max_age_ns;
         if (!over_budget && !too_old) {
             break;
         }
-        std::error_code ec;
-        fs::remove(oldest.data, ec);
-        fs::remove(oldest.meta, ec);
-        const fs::path dir = oldest.data.parent_path();
-        if (fs::is_empty(dir, ec) && !ec) {
-            fs::remove(dir, ec);
+        if (remove_pair(oldest)) {
+            total -= std::min(total, oldest.bytes);
+            deleted_bytes += oldest.bytes;
+            ++deleted;
+        } else {
+            ++refused;
+            pending_delete_.push_back(std::move(oldest));
         }
-        total -= std::min(total, oldest.bytes);
-        removed_bytes += oldest.bytes;
-        ++removed;
+        ++taken;
     }
-    if (removed == 0) {
+    if (taken == 0) {
         return;
     }
-    retained_.erase(retained_.begin(), retained_.begin() + static_cast<std::ptrdiff_t>(removed));
+    retained_.erase(retained_.begin(), retained_.begin() + static_cast<std::ptrdiff_t>(taken));
     std::lock_guard lock(mutex_);
-    stats_.segments_deleted += removed;
-    stats_.retained_bytes -= std::min(stats_.retained_bytes, removed_bytes);
+    stats_.segments_deleted += deleted;
+    stats_.delete_failures += refused;
+    stats_.pending_deletes = pending_delete_.size();
+    stats_.retained_bytes -= std::min(stats_.retained_bytes, deleted_bytes);
 }
 
 }  // namespace revenant::capture

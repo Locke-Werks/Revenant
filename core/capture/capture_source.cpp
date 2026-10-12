@@ -34,6 +34,18 @@
 #include "core/capture/catalog.h"
 #include "core/thread_role.h"
 
+#if defined(_MSC_VER)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#endif
+
 namespace revenant::capture {
 namespace {
 
@@ -66,14 +78,31 @@ using FilePtr = std::unique_ptr<std::FILE, FileCloser>;
 {
     std::FILE* raw = nullptr;
 #if defined(_MSC_VER)
+    // _wfopen does not share delete, so a replay of the oldest segment would
+    // stop the writer's ring from removing it, the reverse of POSIX where an
+    // unlink under an open reader just works. Sharing delete gives Windows the
+    // POSIX behaviour: the name goes, this handle keeps reading to the end.
     const std::filesystem::path path(
         std::u8string_view(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
-    const errno_t error = _wfopen_s(&raw, path.c_str(), L"rb");
-    if (error != 0 || raw == nullptr) {
+    const HANDLE handle = CreateFileW(
+        path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
         return fail(std::format("could not open segment '{}' for reading. The ring may have "
                                 "removed it since the capture was opened.",
                                 utf8),
-                    error);
+                    static_cast<int>(GetLastError()));
+    }
+    const int fd = _open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_RDONLY | _O_BINARY);
+    if (fd == -1) {
+        CloseHandle(handle);
+        return fail(std::format("could not open segment '{}' for reading.", utf8));
+    }
+    // From here the descriptor owns the handle, and fclose releases both.
+    raw = _fdopen(fd, "rb");
+    if (raw == nullptr) {
+        _close(fd);
+        return fail(std::format("could not open segment '{}' for reading.", utf8));
     }
 #else
     raw = std::fopen(utf8.c_str(), "rb");
