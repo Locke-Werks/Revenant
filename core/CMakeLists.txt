@@ -260,3 +260,11 @@ add_subdirectory(transcribe)
 
 # The wire. Two libraries, and the comment in rpc/CMakeLists.txt says why.
 add_subdirectory(rpc)
+
+# The rolling capture. Added with target_sources rather than in the list above
+# so each capture file is its own line at the end and the files arriving
+# alongside it do not contend for one spot in the list. The recorder version
+# is the one compile definition writer.cpp needs, for core:recorder.
+target_sources(revenant_core PRIVATE capture/writer.cpp)
+set_source_files_properties(capture/writer.cpp PROPERTIES
+    COMPILE_DEFINITIONS "REVENANT_CAPTURE_RECORDER_VERSION=\"${REVENANT_VERSION}\"")
