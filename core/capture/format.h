@@ -93,6 +93,13 @@ inline constexpr std::string_view kExtensionVersion = "1.0.0";
 //                             "size", "stop", "recovered".
 //   revenant:gain_db          number, optional. The gain in force, when the
 //                             source reports one.
+//   revenant:indexed          array, optional. One object per offline pass
+//                             that has run over the segment, keyed by
+//                             generator: {"generator": string, "at": ISO 8601
+//                             UTC, "settings": string}. Written whether or
+//                             not the pass found anything, since a quiet
+//                             segment leaves no annotation to say it was
+//                             looked at. A rerun replaces its own entry.
 //
 // One core:captures entry, sample_start 0, with core:frequency and
 // core:datetime (ISO 8601 UTC, the wall clock of the first sample).

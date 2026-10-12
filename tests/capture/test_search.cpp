@@ -360,8 +360,11 @@ TEST_CASE("a meta with no annotations gets an array and keeps the rest", "[captu
     CHECK_FALSE(std::filesystem::exists(path.string() + ".tmp"));
 
     const std::string text = read_text(path);
-    CHECK(text.starts_with("{\n    \"global\": {\"core:datatype\": \"cu8\", \"x:y\": 1.50},\n"
-                           "    \"captures\": []"));
+    // The pass is stamped into global after its last member; everything
+    // around the stamp is as it was.
+    CHECK(text.starts_with("{\n    \"global\": {\"core:datatype\": \"cu8\", \"x:y\": 1.50,\n"
+                           "        \"revenant:indexed\": ["));
+    CHECK(text.find("]\n    },\n    \"captures\": []") != std::string::npos);
     // Not a number, so not written.
     CHECK(text.find("revenant:snr_db") == std::string::npos);
     CHECK(text.find("\"core:label\": \"signal\"") != std::string::npos);
@@ -377,6 +380,86 @@ TEST_CASE("a meta with no annotations gets an array and keeps the rest", "[captu
     read = capture::read_annotations(path.string());
     REQUIRE(read.has_value());
     CHECK(read->empty());
+}
+
+TEST_CASE("a pass that finds nothing is still recorded as having run", "[capture][merge]") {
+    const capture::IndexStamp first{"revenant-index", "2026-10-12T10:00:00.000Z", "channels=64"};
+    auto merged = capture::merge_annotations(kMeta, {}, capture::kIndexGenerator, first);
+    INFO(message_of(merged));
+    REQUIRE(merged.has_value());
+
+    // Only global's tail changed: the text up to its last member and from
+    // its close onwards is byte for byte the original, bar the annotations
+    // array the pass owns.
+    constexpr std::string_view kLastValueEnd = "é\"]}";
+    const std::size_t last_end = kMeta.find(kLastValueEnd) + kLastValueEnd.size();
+    REQUIRE(last_end > kLastValueEnd.size());
+    CHECK(merged->substr(0, last_end) == kMeta.substr(0, last_end));
+    const std::size_t captures = kMeta.find("\"captures\"");
+    const std::size_t annotations = kMeta.find("\"annotations\"");
+    const std::string_view between = kMeta.substr(captures, annotations - captures);
+    CHECK(merged->find(between) != std::string::npos);
+    CHECK(merged->find(R"("core:freq_lower_edge": 1.0e8)") != std::string::npos);
+
+    const std::filesystem::path path = test::unique_temp_path("revenant_search_stamp", ".sigmf-meta");
+    TempFiles files;
+    files.paths.push_back(path);
+    write_text(path, *merged);
+
+    auto stamps = capture::read_index_stamps(path.string());
+    INFO(message_of(stamps));
+    REQUIRE(stamps.has_value());
+    REQUIRE(stamps->size() == 1);
+    CHECK((*stamps)[0].generator == "revenant-index");
+    CHECK((*stamps)[0].at == "2026-10-12T10:00:00.000Z");
+    CHECK((*stamps)[0].settings == "channels=64");
+
+    // The old index entry is gone and nothing replaced it, yet the segment
+    // reads as indexed, which is the point.
+    auto read = capture::read_annotations(path.string());
+    REQUIRE(read.has_value());
+    CHECK(std::ranges::none_of(*read, [](const capture::StoredAnnotation& a) {
+        return a.generator == capture::kIndexGenerator;
+    }));
+    CHECK(capture::indexed_by(*stamps, *read));
+    CHECK_FALSE(capture::indexed_by({}, *read));
+
+    // Another generator's stamp is kept verbatim; a rerun replaces its own.
+    auto other = capture::merge_annotations(*merged, {}, "someone-else",
+                                            capture::IndexStamp{"someone-else", "t", "s"});
+    REQUIRE(other.has_value());
+    const capture::IndexStamp second{"revenant-index", "2026-10-13T00:00:00.000Z", "channels=32"};
+    auto again = capture::merge_annotations(*other, {}, capture::kIndexGenerator, second);
+    REQUIRE(again.has_value());
+    write_text(path, *again);
+    stamps = capture::read_index_stamps(path.string());
+    REQUIRE(stamps.has_value());
+    REQUIRE(stamps->size() == 2);
+    CHECK((*stamps)[0].generator == "someone-else");
+    CHECK((*stamps)[1].generator == "revenant-index");
+    CHECK((*stamps)[1].settings == "channels=32");
+
+    // And the merge is still idempotent with a stamp in hand.
+    auto twice = capture::merge_annotations(*again, {}, capture::kIndexGenerator, second);
+    REQUIRE(twice.has_value());
+    CHECK(*twice == *again);
+}
+
+TEST_CASE("write_annotations stamps the pass even when it found nothing", "[capture][merge]") {
+    const std::filesystem::path path = test::unique_temp_path("revenant_search_quiet", ".sigmf-meta");
+    TempFiles files;
+    files.paths.push_back(path);
+    write_text(path, kMeta);
+
+    REQUIRE(capture::write_annotations(path.string(), {}, capture::kIndexGenerator, "pace=0")
+                .has_value());
+    auto stamps = capture::read_index_stamps(path.string());
+    INFO(message_of(stamps));
+    REQUIRE(stamps.has_value());
+    REQUIRE(stamps->size() == 1);
+    CHECK((*stamps)[0].settings == "pace=0");
+    CHECK((*stamps)[0].at.ends_with("Z"));
+    CHECK((*stamps)[0].at.size() == std::string_view("2026-10-12T10:00:00.000Z").size());
 }
 
 TEST_CASE("a malformed meta is refused and left untouched", "[capture][merge]") {

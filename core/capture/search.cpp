@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
@@ -447,6 +448,137 @@ struct Document {
     return std::optional<Span>();
 }
 
+[[nodiscard]] Expected<std::optional<Span>> member_named(
+    const Scanner& scanner, std::span<const std::pair<Span, Span>> members, std::string_view name)
+{
+    for (const auto& [key, value] : members) {
+        auto text = scanner.string(key);
+        if (!text) {
+            return std::unexpected(text.error());
+        }
+        if (*text == name) {
+            return std::optional<Span>(value);
+        }
+    }
+    return std::optional<Span>();
+}
+
+constexpr std::string_view kIndexedKey = "revenant:indexed";
+
+// Where global and its revenant:indexed array sit, and what the array holds,
+// each entry beside its own text so a merge can keep it verbatim.
+struct StampLayout {
+    Span global;
+    std::vector<std::pair<Span, Span>> global_members;
+    std::optional<Span> array;
+    std::vector<std::pair<IndexStamp, Span>> entries;
+};
+
+[[nodiscard]] Expected<StampLayout> stamps_of(const Scanner& scanner, const Document& document)
+{
+    auto global = member_named(scanner, document.members, "global");
+    if (!global) {
+        return std::unexpected(global.error());
+    }
+    if (!global->has_value() || scanner.raw(**global).front() != '{') {
+        return fail("the meta file has no global object to record the index pass in");
+    }
+    StampLayout out;
+    out.global = **global;
+    auto members = scanner.members(out.global);
+    if (!members) {
+        return std::unexpected(members.error());
+    }
+    out.global_members = std::move(*members);
+    auto array = member_named(scanner, out.global_members, kIndexedKey);
+    if (!array) {
+        return std::unexpected(array.error());
+    }
+    if (!array->has_value()) {
+        return out;
+    }
+    if (scanner.raw(**array).front() != '[') {
+        return fail(std::format("{} is not an array", kIndexedKey));
+    }
+    out.array = **array;
+    auto elements = scanner.elements(**array);
+    if (!elements) {
+        return std::unexpected(elements.error());
+    }
+    for (std::size_t i = 0; i < elements->size(); ++i) {
+        const Span entry = (*elements)[i];
+        auto fields = scanner.members(entry);
+        if (!fields) {
+            return std::unexpected(
+                with_context(fields.error(), std::format("{} entry {}", kIndexedKey, i)));
+        }
+        IndexStamp stamp;
+        bool have_generator = false;
+        for (const auto& [key_span, value_span] : *fields) {
+            auto key = scanner.string(key_span);
+            if (!key) {
+                return std::unexpected(key.error());
+            }
+            std::string* into = nullptr;
+            if (*key == "generator") {
+                into = &stamp.generator;
+                have_generator = true;
+            } else if (*key == "at") {
+                into = &stamp.at;
+            } else if (*key == "settings") {
+                into = &stamp.settings;
+            }
+            if (into == nullptr) {
+                continue;
+            }
+            auto text = scanner.string(value_span);
+            if (!text) {
+                return std::unexpected(with_context(
+                    text.error(), std::format("{} entry {} {}", kIndexedKey, i, *key)));
+            }
+            *into = std::move(*text);
+        }
+        if (!have_generator) {
+            return fail(std::format("{} entry {} has no generator", kIndexedKey, i));
+        }
+        out.entries.emplace_back(std::move(stamp), entry);
+    }
+    return out;
+}
+
+[[nodiscard]] std::string serialise(const IndexStamp& stamp)
+{
+    return std::format("{{\"generator\": {}, \"at\": {}, \"settings\": {}}}",
+                       escaped(stamp.generator), escaped(stamp.at), escaped(stamp.settings));
+}
+
+[[nodiscard]] std::string iso_now()
+{
+    using namespace std::chrono;
+    const auto now = floor<milliseconds>(system_clock::now());
+    return std::format("{:%Y-%m-%dT%H:%M:%S}Z", now);
+}
+
+// A span of the original text and what replaces it. Insertions are edits
+// whose span covers only the whitespace they displace.
+struct Edit {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    std::string text;
+};
+
+// Where a new last member of the object goes: after its last member, before
+// the whitespace that precedes the close, so nothing already there moves.
+[[nodiscard]] std::size_t insertion_point(std::string_view text, Span object)
+{
+    std::size_t at = object.end - 1;
+    while (at > object.begin && (text[at - 1] == ' ' || text[at - 1] == '\t' ||
+                                 text[at - 1] == '\n' || text[at - 1] == '\r')) {
+        --at;
+    }
+    return at;
+}
+
 [[nodiscard]] Expected<StoredAnnotation> annotation_of(const Scanner& scanner, Span entry,
                                                        std::size_t index)
 {
@@ -622,7 +754,8 @@ Expected<std::vector<StoredAnnotation>> read_annotations(const std::string& meta
 
 Expected<std::string> merge_annotations(std::string_view meta_text,
                                         std::span<const Annotation> annotations,
-                                        std::string_view generator)
+                                        std::string_view generator,
+                                        const std::optional<IndexStamp>& stamp)
 {
     const Scanner scanner(meta_text);
     auto document = top_level(scanner, meta_text);
@@ -667,40 +800,103 @@ Expected<std::string> merge_annotations(std::string_view meta_text,
     }
     body += merged.empty() ? "]" : "\n    ]";
 
-    std::string out;
-    out.reserve(meta_text.size() + body.size());
+    std::vector<Edit> edits;
     if (array->has_value()) {
-        const Span span = **array;
-        out.append(meta_text.substr(0, span.begin));
-        out += body;
-        out.append(meta_text.substr(span.end));
-        return out;
+        edits.push_back({(*array)->begin, (*array)->end, std::move(body)});
+    } else {
+        // No annotations key yet: one goes in as the last member.
+        const std::size_t close = document->object.end - 1;
+        edits.push_back({insertion_point(meta_text, document->object), close,
+                         std::string(document->members.empty() ? "\n    " : ",\n    ") +
+                             "\"annotations\": " + body + "\n"});
     }
 
-    // No annotations key yet: one goes in as the last member, after whatever
-    // the last member was, so nothing that is there moves.
-    const std::size_t close = document->object.end - 1;
-    std::size_t insert_at = close;
-    while (insert_at > document->object.begin &&
-           (meta_text[insert_at - 1] == ' ' || meta_text[insert_at - 1] == '\t' ||
-            meta_text[insert_at - 1] == '\n' || meta_text[insert_at - 1] == '\r')) {
-        --insert_at;
+    if (stamp.has_value()) {
+        auto layout = stamps_of(scanner, *document);
+        if (!layout) {
+            return std::unexpected(layout.error());
+        }
+        std::string list = "[";
+        bool first = true;
+        const auto add = [&](std::string_view entry) {
+            list += first ? "\n            " : ",\n            ";
+            list += entry;
+            first = false;
+        };
+        for (const auto& [kept, span] : layout->entries) {
+            if (kept.generator != stamp->generator) {
+                add(scanner.raw(span));
+            }
+        }
+        add(serialise(*stamp));
+        list += "\n        ]";
+        if (layout->array.has_value()) {
+            edits.push_back({layout->array->begin, layout->array->end, std::move(list)});
+        } else {
+            edits.push_back({insertion_point(meta_text, layout->global), layout->global.end - 1,
+                             std::string(layout->global_members.empty() ? "\n        "
+                                                                        : ",\n        ") +
+                                 std::format("\"{}\": ", kIndexedKey) + list + "\n    "});
+        }
     }
-    out.append(meta_text.substr(0, insert_at));
-    out += document->members.empty() ? "\n    " : ",\n    ";
-    out += "\"annotations\": " + body + "\n";
-    out.append(meta_text.substr(close));
+
+    // Global and annotations are separate top-level members, so the edits
+    // never overlap and apply in order of position.
+    std::ranges::sort(edits, {}, &Edit::begin);
+    std::string out;
+    out.reserve(meta_text.size() + 1024);
+    std::size_t cursor = 0;
+    for (const Edit& edit : edits) {
+        out.append(meta_text.substr(cursor, edit.begin - cursor));
+        out += edit.text;
+        cursor = edit.end;
+    }
+    out.append(meta_text.substr(cursor));
     return out;
 }
 
-Status write_annotations(const std::string& meta_path, std::span<const Annotation> annotations,
-                         std::string_view generator)
+Expected<std::vector<IndexStamp>> read_index_stamps(const std::string& meta_path)
 {
     auto text = read_file(meta_path);
     if (!text) {
         return std::unexpected(text.error());
     }
-    auto merged = merge_annotations(*text, annotations, generator);
+    const Scanner scanner(*text);
+    auto document = top_level(scanner, *text);
+    if (!document) {
+        return std::unexpected(with_context(document.error(), meta_path));
+    }
+    auto layout = stamps_of(scanner, *document);
+    if (!layout) {
+        return std::unexpected(with_context(layout.error(), meta_path));
+    }
+    std::vector<IndexStamp> out;
+    out.reserve(layout->entries.size());
+    for (auto& [stamp, span] : layout->entries) {
+        out.push_back(std::move(stamp));
+    }
+    return out;
+}
+
+bool indexed_by(std::span<const IndexStamp> stamps, std::span<const StoredAnnotation> annotations,
+                std::string_view generator)
+{
+    return std::ranges::any_of(stamps,
+                               [&](const IndexStamp& s) { return s.generator == generator; }) ||
+           std::ranges::any_of(annotations, [&](const StoredAnnotation& a) {
+               return a.generator == generator;
+           });
+}
+
+Status write_annotations(const std::string& meta_path, std::span<const Annotation> annotations,
+                         std::string_view generator, std::string_view settings)
+{
+    auto text = read_file(meta_path);
+    if (!text) {
+        return std::unexpected(text.error());
+    }
+    const IndexStamp stamp{std::string(generator), iso_now(), std::string(settings)};
+    auto merged = merge_annotations(*text, annotations, generator, stamp);
     if (!merged) {
         return std::unexpected(with_context(merged.error(), meta_path));
     }

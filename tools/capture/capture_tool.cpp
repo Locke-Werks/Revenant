@@ -407,7 +407,12 @@ struct Range {
             env.out(std::format("skipped {}: {}", segment.meta_path, annotations.error().message));
             continue;
         }
-        out.push_back({segment.data_path, segment.info, std::move(*annotations)});
+        auto stamps = capture::read_index_stamps(segment.meta_path);
+        if (!stamps) {
+            env.out(std::format("skipped {}: {}", segment.meta_path, stamps.error().message));
+            continue;
+        }
+        out.push_back({segment.data_path, segment.info, std::move(*annotations), std::move(*stamps)});
     }
     return out;
 }
@@ -542,11 +547,14 @@ struct Range {
     env.out(std::format("{} hit{} in {} segment{}", hits.size(), hits.size() == 1 ? "" : "s",
                         indexed.size(), indexed.size() == 1 ? "" : "s"));
 
-    const auto unannotated = static_cast<std::size_t>(std::ranges::count_if(
-        indexed, [](const capture::IndexedSegment& s) { return s.annotations.empty(); }));
+    // A segment the index pass already found quiet is an answer, not a gap.
+    const auto unannotated = static_cast<std::size_t>(
+        std::ranges::count_if(indexed, [](const capture::IndexedSegment& s) {
+            return s.annotations.empty() && s.stamps.empty();
+        }));
     if (hits.empty() && unannotated > 0) {
-        env.out(std::format("{} of them carry no annotations at all; revenant-capture index {} "
-                            "runs the detector over them.",
+        env.out(std::format("{} of them carry no annotations and were never indexed; "
+                            "revenant-capture index {} runs the detector over them.",
                             unannotated, args->root));
     }
     return {};
@@ -664,6 +672,17 @@ struct Range {
 // index
 // ---------------------------------------------------------------------------
 
+// What a later pass needs to judge whether rerunning would see the segment
+// differently. The device is left out: it changes the speed, not the result.
+[[nodiscard]] std::string index_settings(const capture::IndexOptions& options)
+{
+    return std::format("channels={} transform={} probes={} pace={} threshold_db={} "
+                       "confidence={} average_s={}",
+                       options.channels, options.spectrum_transform, options.probes, options.pace,
+                       options.detector.detection_threshold_db,
+                       options.detector.confidence_threshold, options.detector.average_seconds);
+}
+
 [[nodiscard]] Status run_index(std::span<const std::string> rest, const Environment& env)
 {
     auto args = parse_arguments("index", rest, {"--from", "--to", "--gpu"}, {"--force"});
@@ -692,6 +711,7 @@ struct Range {
     }
     const std::vector<CatalogSegment> segments = segments_in(*catalog, *range);
     const bool force = args->has("--force");
+    const std::string settings = index_settings(options);
 
     std::size_t indexed = 0;
     std::size_t skipped = 0;
@@ -704,13 +724,13 @@ struct Range {
             ++failed;
             continue;
         }
-        // A segment the index found nothing in carries no revenant-index
-        // entry and is indexed again next time. Cheap next to recording it,
-        // and a marker entry would be an annotation that is not a signal.
-        const bool done = std::ranges::any_of(*existing, [](const capture::StoredAnnotation& a) {
-            return a.generator == capture::kIndexGenerator;
-        });
-        if (done && !force) {
+        auto stamps = capture::read_index_stamps(segment.meta_path);
+        if (!stamps) {
+            env.out(std::format("{}: {}", name, stamps.error().message));
+            ++failed;
+            continue;
+        }
+        if (capture::indexed_by(*stamps, *existing) && !force) {
             ++skipped;
             continue;
         }
@@ -721,7 +741,8 @@ struct Range {
             ++failed;
             continue;
         }
-        if (auto written = capture::write_annotations(segment.meta_path, result->annotations);
+        if (auto written = capture::write_annotations(segment.meta_path, result->annotations,
+                                                     capture::kIndexGenerator, settings);
             !written) {
             env.out(std::format("{}: {}", name, written.error().message));
             ++failed;
@@ -1050,8 +1071,8 @@ std::string usage()
            "      A bar per bucket (default 1m): occupied, captured and quiet, or not\n"
            "      captured at all.\n"
            "  revenant-capture index <root> [--from T] [--to T] [--force] [--gpu N]\n"
-           "      Runs the detector over closed segments that have no revenant-index\n"
-           "      annotations yet, or over all of them with --force. Needs the GPU;\n"
+           "      Runs the detector over closed segments no index pass has run\n"
+           "      over yet, or over all of them with --force. Needs the GPU;\n"
            "      REVENANT_GPU_INDEX picks it unless --gpu does.\n"
            "  revenant-capture extract <root> --from T --to T --out DIR\n"
            "      Copies the whole segments overlapping the range into DIR.\n"

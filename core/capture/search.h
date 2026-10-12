@@ -50,6 +50,19 @@ struct StoredAnnotation {
     std::uint64_t track_id = 0;
 };
 
+// One revenant:indexed entry: a pass that ran over the segment, whether or not
+// it found anything. Annotations alone cannot say a segment was indexed,
+// because a pass over a quiet segment leaves none, and without this record a
+// quiet segment is indistinguishable from one nobody looked at.
+struct IndexStamp {
+    std::string generator;
+    // ISO 8601 UTC, when the pass wrote its result.
+    std::string at;
+    // Free text naming the settings the pass ran with, so a later pass can
+    // tell whether it would see the segment any differently.
+    std::string settings;
+};
+
 // One closed segment and what is known about it, the unit every query reads.
 struct IndexedSegment {
     // The .sigmf-data file. Carried into every hit so a caller can open the
@@ -57,7 +70,14 @@ struct IndexedSegment {
     std::string data_path;
     SegmentInfo info;
     std::vector<StoredAnnotation> annotations;
+    std::vector<IndexStamp> stamps;
 };
+
+// True when a pass under `generator` is recorded, by its stamp or, for a meta
+// written before stamps existed, by an annotation it left.
+[[nodiscard]] bool indexed_by(std::span<const IndexStamp> stamps,
+                              std::span<const StoredAnnotation> annotations,
+                              std::string_view generator = kIndexGenerator);
 
 // Reads core:annotations out of a .sigmf-meta file. An entry missing
 // core:sample_start is refused, since an annotation with no position in the
@@ -66,10 +86,19 @@ struct IndexedSegment {
 [[nodiscard]] Expected<std::vector<StoredAnnotation>> read_annotations(
     const std::string& meta_path);
 
+// Reads global revenant:indexed. A file without it reads as none; an entry
+// with no generator is refused, since it cannot say which pass it records.
+[[nodiscard]] Expected<std::vector<IndexStamp>> read_index_stamps(const std::string& meta_path);
+
 // Replaces every entry whose core:generator is `generator` with `annotations`,
 // written under that generator, and leaves the rest of the file alone: every
 // other top-level key, every entry from another generator, byte for byte.
 // The merged array is ordered by core:sample_start, as SigMF asks.
+//
+// Also records the pass in global revenant:indexed, replacing any earlier
+// stamp from the same generator, and does so for an empty `annotations` too:
+// that is the case the stamp exists for. `settings` goes into the stamp as
+// given. Every other global key is left byte for byte.
 //
 // Written to a temporary file beside the meta and renamed over it, so a
 // reader never sees half a file and a crash mid-write leaves the old one.
@@ -79,13 +108,15 @@ struct IndexedSegment {
 // live detector wrote.
 [[nodiscard]] Status write_annotations(const std::string& meta_path,
                                        std::span<const Annotation> annotations,
-                                       std::string_view generator = kIndexGenerator);
+                                       std::string_view generator = kIndexGenerator,
+                                       std::string_view settings = {});
 
 // The same merge on text in memory, for a caller that holds the meta already
-// and for tests.
-[[nodiscard]] Expected<std::string> merge_annotations(std::string_view meta_text,
-                                                      std::span<const Annotation> annotations,
-                                                      std::string_view generator);
+// and for tests. Without a stamp the global object is not touched; with one,
+// the stamp's generator should match `generator`.
+[[nodiscard]] Expected<std::string> merge_annotations(
+    std::string_view meta_text, std::span<const Annotation> annotations,
+    std::string_view generator, const std::optional<IndexStamp>& stamp = std::nullopt);
 
 // Every field is a filter, and an unset one passes everything.
 //

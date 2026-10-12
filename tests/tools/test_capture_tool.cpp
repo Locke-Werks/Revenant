@@ -326,4 +326,11 @@ TEST_CASE("index runs the detector over each segment and writes it back",
     REQUIRE(index.ok);
     CHECK(contains(index.text, "4 indexed"));
     CHECK(contains(index.text, "x realtime"));
+
+    // Every segment is recorded as indexed, including any the pass found
+    // quiet, so a second run without --force has nothing to do.
+    const Run again = run({"index", root});
+    INFO(again.error << "\n" << again.text);
+    REQUIRE(again.ok);
+    CHECK(contains(again.text, "0 indexed, 4 already indexed"));
 }
