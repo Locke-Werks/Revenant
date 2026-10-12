@@ -32,6 +32,7 @@ struct Delivered {
     std::size_t count = 0;
     std::uint64_t dropped = 0;
     std::int64_t wall_ns = 0;
+    std::int64_t center = 0;
     std::vector<std::byte> bytes;
 };
 
@@ -49,6 +50,7 @@ std::vector<Delivered> play(revenant::source::Source& source,
         d.count = block.sample_count;
         d.dropped = block.dropped_before;
         d.wall_ns = block.stamp.wall_clock_ns();
+        d.center = block.center;
         d.bytes.assign(block.bytes.begin(), block.bytes.end());
         blocks.push_back(std::move(d));
         return revenant::Status{};
@@ -200,7 +202,7 @@ TEST_CASE("from= and to= select the samples between them", "[capture][replay]")
     CHECK(samples == 750 - 251);
 }
 
-TEST_CASE("replay stops at a retune and says so", "[capture][replay]")
+TEST_CASE("replay carries a retune as the centre of the block after it", "[capture][replay]")
 {
     CaptureRoot root;
     SegmentSpec a;
@@ -214,10 +216,11 @@ TEST_CASE("replay stops at a retune and says so", "[capture][replay]")
 
     auto source = open_capture_source(config_for(root));
     REQUIRE(source);
-    CHECK((*source)->capabilities().length_samples == 200);
+    CHECK((*source)->capabilities().length_samples == 400);
+    CHECK((*source)->center() == a.center);
     bool noted = false;
     for (const std::string& note : (*source)->capabilities().notes) {
-        noted = noted || note.find("retunes") != std::string::npos;
+        noted = noted || note.find("retunes 1 time") != std::string::npos;
     }
     CHECK(noted);
 
@@ -225,8 +228,34 @@ TEST_CASE("replay stops at a retune and says so", "[capture][replay]")
     std::uint64_t samples = 0;
     for (const Delivered& d : blocks) {
         samples += d.count;
+        // Blocks never straddle a segment, so each is wholly at one centre.
+        CHECK(d.center == (d.start < 200 ? a.center : b.center));
+        CHECK(d.dropped == 0);
     }
-    CHECK(samples == 200);
+    CHECK(samples == 400);
+    CHECK((*source)->center() == b.center);
+}
+
+TEST_CASE("replay stops at a rate change and says so", "[capture][replay]")
+{
+    CaptureRoot root;
+    SegmentSpec a;
+    a.sample_count = 200;
+    write_segment(root.path(), a);
+    SegmentSpec b;
+    b.first_index = 200;
+    b.sample_count = 200;
+    b.rate = a.rate * 2;
+    write_segment(root.path(), b);
+
+    auto source = open_capture_source(config_for(root));
+    REQUIRE(source);
+    CHECK((*source)->capabilities().length_samples == 200);
+    bool noted = false;
+    for (const std::string& note : (*source)->capabilities().notes) {
+        noted = noted || note.find("sample rate changes") != std::string::npos;
+    }
+    CHECK(noted);
 }
 
 TEST_CASE("a capture URI opens through the registry and refuses an unknown key",
