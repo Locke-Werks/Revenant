@@ -327,6 +327,7 @@
 #include <kj/memory.h>
 #include <kj/string.h>
 
+#include "core/capture/track_annotations.h"
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
 #include "core/detect/tier_two.h"
@@ -1528,6 +1529,12 @@ public:
     // transmitter it was and its decoders are left alone.
     void forget_detector();
 
+    // Hands every track the detector still holds to the engine's capture as
+    // ended. Called BEFORE anything that closes the open segment, a retune, a
+    // recalibration or a close, because the writer discards an annotation
+    // whose segment has already closed, and those tracks all belong to it.
+    void flush_capture_annotations();
+
     // Builds one, attaches its sink and records it. Split out because both
     // entry points above reach it and both have already asked the engine
     // for the receiver's status, which this needs and must not ask twice:
@@ -1809,6 +1816,14 @@ private:
     // on_frame". See THE SIGID LANE below.
     std::optional<detect::TierTwo> tier_two_;       // detect_lock_
     dsp::SampleIndex tier_two_decision_ = 0;        // detect_lock_
+
+    // Turns tracks that end into capture annotations, built and dropped with
+    // the detector and fed once per decision on the sigid lane. Only as live
+    // as the detector is: the detector is built on a client's first
+    // detections call, so a server nobody has asked for detections annotates
+    // nothing. On an engine without EngineConfig::capture the engine drops
+    // what this sends.
+    std::optional<capture::TrackAnnotator> annotator_;  // detect_lock_
 
     // The front end's verdict, and the decision it was last taken at.
     //
@@ -2495,8 +2510,18 @@ public:
     }
 
     kj::Promise<void> sourceStats(SourceStatsContext context) override {
-        write_source_stats(context.getResults().initStats(), owner_.engine().source_stats(),
-                           owner_.front_end(), owner_.engine().graph_conditions());
+        auto out = context.getResults().initStats();
+        write_source_stats(out, owner_.engine().source_stats(), owner_.front_end(),
+                           owner_.engine().graph_conditions());
+        if (const auto capture = owner_.engine().capture_stats(); capture.has_value()) {
+            out.setCaptureOn(true);
+            out.setCaptureSegmentsWritten(capture->segments_written);
+            out.setCaptureBytesWritten(capture->bytes_written);
+            out.setCaptureBlocksDropped(capture->blocks_dropped);
+            out.setCaptureSegmentsDeleted(capture->segments_deleted);
+            out.setCaptureRetainedBytes(capture->retained_bytes);
+            out.setCaptureLastError(capture->last_error.c_str());
+        }
         return kj::READY_NOW;
     }
 
@@ -2935,6 +2960,7 @@ public:
             read_calibration_settings(context.getParams().getSettings());
 
         auto before = owner_.engine().calibration();
+        owner_.flush_capture_annotations();
         auto state = owner_.engine().set_calibration(wanted);
         if (!state) {
             return to_exception(state.error());
@@ -3545,6 +3571,10 @@ Status ServerImpl::ensure_detector() {
         return std::unexpected(with_context(made.error(), "building the wideband detector"));
     }
     detector_ = std::move(*made);
+    annotator_.emplace([this](dsp::SampleIndex start, const capture::Annotation& annotation,
+                              std::uint64_t track_id) {
+        engine_.add_capture_annotation(start, annotation, track_id);
+    });
 
     // Only on an engine with probe receivers: TierTwo::step asks the pool its
     // size and would submit nothing to an engine without one, but building it
@@ -3554,6 +3584,7 @@ Status ServerImpl::ensure_detector() {
             detect::TierTwoConfig{.source_rate = info.source_rate});
         if (!tier_two) {
             detector_.reset();
+            annotator_.reset();
             return std::unexpected(with_context(tier_two.error(), "building tier two"));
         }
         tier_two_ = std::move(*tier_two);
@@ -4421,6 +4452,13 @@ void ServerImpl::forget_across_retune() {
     }
 }
 
+void ServerImpl::flush_capture_annotations() {
+    std::scoped_lock held(detect_lock_);
+    if (annotator_.has_value()) {
+        annotator_->finish();
+    }
+}
+
 void ServerImpl::forget_detector() {
     {
         std::scoped_lock held(detect_lock_);
@@ -4431,6 +4469,7 @@ void ServerImpl::forget_detector() {
         // stops one already offered from reaching the next detector.
         detecting_.store(false, std::memory_order_relaxed);
         detector_.reset();
+        annotator_.reset();
         tier_two_.reset();
         tier_two_decision_ = 0;
 
@@ -4637,6 +4676,10 @@ void ServerImpl::sigid_consume(const DetectSlot& slot) {
         }
         if (decided != published_decision_) {
             published_decision_ = decided;
+            if (annotator_.has_value()) {
+                annotator_->observe(detector_->tracks(),
+                                    detector_->config().confidence_threshold);
+            }
             publish_detections_locked();
         }
     }
@@ -6262,6 +6305,7 @@ void ServerImpl::release_source_state(kj::StringPtr reason) {
         std::scoped_lock held(detect_lock_);
         detecting_.store(false, std::memory_order_relaxed);
         detector_.reset();
+        annotator_.reset();
         tier_two_.reset();
         tier_two_decision_ = 0;
         detector_fault_.clear();
@@ -6313,6 +6357,7 @@ Status ServerImpl::open_source(std::string_view uri) {
 }
 
 Status ServerImpl::close_source() {
+    flush_capture_annotations();
     release_source_state("the engine's source was closed, so this stream has ended");
     if (auto closed = engine_.close_source(); !closed) {
         return closed;
@@ -7154,6 +7199,7 @@ Status ServerImpl::after_vrx_retuned(engine::VrxId vrx, const engine::VrxParams&
 
 Expected<engine::SourceRetune> ServerImpl::retune_source(std::int64_t wanted,
                                                          std::vector<std::string>& reasons) {
+    flush_capture_annotations();
     auto landed = engine_.set_source_center(wanted);
     if (!landed) {
         return std::unexpected(landed.error());
@@ -7778,7 +7824,13 @@ void ServerImpl::stop() {
     {
         std::scoped_lock held(detect_lock_);
         detecting_.store(false, std::memory_order_relaxed);
+        // The engine's run() has ended or is ending, and it leaves the last
+        // segment open until close_capture, so these still land.
+        if (annotator_.has_value()) {
+            annotator_->finish();
+        }
         detector_.reset();
+        annotator_.reset();
         tier_two_.reset();
         tier_two_decision_ = 0;
         front_end_.reset();

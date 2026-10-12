@@ -67,6 +67,8 @@
 #include "core/dsp/spectrum_levels_reference.h"
 #include "core/decode/rds_bits.h"
 #include "core/decode/rds_groups.h"
+#include "core/capture/limits.h"
+#include "core/capture/track_annotations.h"
 #include "core/characterise/characterise.h"
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
@@ -97,6 +99,7 @@ using revenant::Status;
 using revenant::fail;
 using revenant::with_context;
 
+namespace capture = revenant::capture;
 namespace characterise = revenant::characterise;
 namespace decode = revenant::decode;
 namespace detect = revenant::detect;
@@ -446,6 +449,13 @@ struct Options {
 
     // EngineConfig::comb_cancel. On unless --no-comb.
     bool comb = true;
+
+    // EngineConfig::capture. Empty root writes nothing; the limits are
+    // WriterConfig's own defaults until a flag says otherwise.
+    std::string capture_root;
+    std::optional<capture::SegmentLimit> capture_segment;
+    std::uint64_t capture_retain = 0;
+    double capture_max_age = 0.0;
 
     SampleRate audio_rate = 48'000;
     int gpu = -1;
@@ -804,6 +814,21 @@ void print_usage()
         "                      by being detected repeatedly and loses it while it is held\n"
         "                      through a gap, so it approaches 1 without reaching it and a\n"
         "                      bar of exactly 1 would list nothing at all.\n"
+        "\n"
+        "Capture:\n"
+        "  --capture <dir>     Keep the raw stream as rolling SigMF segments under dir,\n"
+        "                      one directory per UTC day. With --detect, every track\n"
+        "                      that cleared the confidence bar is annotated onto the\n"
+        "                      segment it was heard in. See core/capture/format.h.\n"
+        "  --capture-segment <size|secs>\n"
+        "                      Close a segment past this size, default 256M, or past\n"
+        "                      this many seconds when it ends in s, such as 60s. A\n"
+        "                      retune or a lost sample closes one regardless.\n"
+        "  --capture-retain <size>\n"
+        "                      Delete the oldest segments to stay under this, such as\n"
+        "                      50G. Default keeps everything.\n"
+        "  --capture-max-age <age>\n"
+        "                      Delete segments older than this, such as 24h or 7d.\n"
         "\n"
         "Run:\n"
         "  --duration <sec>    Stop after this many seconds of source time. Accepts a\n"
@@ -1287,6 +1312,39 @@ void print_usage()
             continue;
         }
 
+        if (arg == "--capture" || arg == "--capture-segment" || arg == "--capture-retain" ||
+            arg == "--capture-max-age") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            if (arg == "--capture") {
+                if (text->empty()) {
+                    return fail("--capture takes a directory to write segments under");
+                }
+                options.capture_root = std::string(*text);
+            } else if (arg == "--capture-segment") {
+                auto limit = capture::parse_segment_limit(*text, arg);
+                if (!limit) {
+                    return std::unexpected(limit.error());
+                }
+                options.capture_segment = *limit;
+            } else if (arg == "--capture-retain") {
+                auto bytes = capture::parse_capture_size(*text, arg);
+                if (!bytes) {
+                    return std::unexpected(bytes.error());
+                }
+                options.capture_retain = *bytes;
+            } else {
+                auto seconds = capture::parse_capture_duration(*text, arg);
+                if (!seconds) {
+                    return std::unexpected(seconds.error());
+                }
+                options.capture_max_age = *seconds;
+            }
+            continue;
+        }
+
         if (arg == "--volume" || arg == "--duration") {
             auto text = value_of(i, arg, inline_value, has_inline);
             if (!text) {
@@ -1389,6 +1447,12 @@ void print_usage()
                 arg));
         }
         options.uri = std::string(arg);
+    }
+
+    if (options.capture_root.empty() &&
+        (options.capture_segment || options.capture_retain != 0 || options.capture_max_age != 0.0)) {
+        return fail("--capture-segment, --capture-retain and --capture-max-age shape a capture, "
+                    "and there is none without --capture <dir>");
     }
 
     return options;
@@ -2116,6 +2180,10 @@ public:
 
         published_ = decided;
         decisions_.fetch_add(1, std::memory_order_relaxed);
+
+        if (annotator_.has_value()) {
+            annotator_->observe(detector_->tracks(), detector_->config().confidence_threshold);
+        }
         const detect::FrontEndObservation front_end = front_end_.observation();
 
         // Tier two, here and nowhere else, because the pool wants one thread
@@ -2266,6 +2334,27 @@ public:
         return tier_two_errors_.load(std::memory_order_relaxed);
     }
 
+    // Annotate every track that ends onto the engine's capture. Before the
+    // engine runs only, because publish() reads the annotator unlocked.
+    void annotate_into(engine::Engine& eng)
+    {
+        annotator_.emplace([&eng](dsp::SampleIndex start, const capture::Annotation& annotation,
+                                  std::uint64_t track_id) {
+            eng.add_capture_annotation(start, annotation, track_id);
+        });
+    }
+
+    // Hands the tracks still alive to the capture and says how many
+    // annotations went out in all. After the engine has stopped only.
+    [[nodiscard]] std::uint64_t finish_annotations()
+    {
+        if (!annotator_.has_value()) {
+            return 0;
+        }
+        annotator_->finish();
+        return annotator_->sent();
+    }
+
     // The live tracks at the end of the run, with everything tier two left
     // on them. After the engine has stopped only.
     [[nodiscard]] std::span<const detect::Track> final_tracks() const
@@ -2374,6 +2463,7 @@ private:
     detect::FrontEndMonitor front_end_;
     std::optional<detect::LineGrouper> grouper_;
     std::optional<detect::TierTwo> tier_two_;
+    std::optional<capture::TrackAnnotator> annotator_;
     engine::Engine* probes_ = nullptr;
     std::atomic<std::uint64_t> tier_two_errors_{0};
     std::unique_ptr<engine::SpscRing<Snapshot>> ring_;
@@ -3328,6 +3418,19 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
 
     // Before the engine is created, because the pool is built with the graph.
     config.probe_receivers = options.detect ? options.detect_probes : 0;
+
+    if (!options.capture_root.empty()) {
+        engine::EngineConfig::Capture capture_config;
+        capture_config.root = options.capture_root;
+        if (options.capture_segment) {
+            capture_config.max_segment_bytes = options.capture_segment->bytes;
+            capture_config.max_segment_seconds = options.capture_segment->seconds;
+        }
+        capture_config.retention_bytes = options.capture_retain;
+        capture_config.retention_max_age_ns =
+            static_cast<std::int64_t>(options.capture_max_age * 1e9);
+        config.capture = capture_config;
+    }
 
     auto made = engine::Engine::create(config);
     if (!made) {
@@ -4312,6 +4415,10 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         }
     }
 
+    if (config.capture && detector != nullptr) {
+        detector->annotate_into(eng);
+    }
+
     Status ran = eng.run();
 
     finished.store(true, std::memory_order_release);
@@ -4344,6 +4451,13 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
 
     const source::SourceStats source_stats = eng.source_stats();
+
+    // The tracks still alive go onto the last segment, which run() left open
+    // for them, and then it is closed so the counters below are final.
+    const std::uint64_t capture_annotations =
+        detector != nullptr && config.capture ? detector->finish_annotations() : 0;
+    eng.close_capture();
+    const std::optional<capture::WriterStats> capture_stats = eng.capture_stats();
 
     if (auto stopped = egress.stop(); !stopped && outcome) {
         outcome = std::unexpected(with_context(stopped.error(), "stopping the audio egress"));
@@ -4692,6 +4806,26 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                                  characterise::summarise_candidates(answer->candidates));
                 }
             }
+        }
+    }
+
+    if (capture_stats.has_value()) {
+        const capture::WriterStats& written = *capture_stats;
+        std::println("capture   {} segments, {:.1f} MiB written under {}",
+                     written.segments_written,
+                     static_cast<double>(written.bytes_written) / (1024.0 * 1024.0),
+                     options.capture_root);
+        std::println("  lost            {} blocks dropped ({} samples), {} unwritten",
+                     written.blocks_dropped, written.samples_dropped, written.blocks_unwritten);
+        std::println("  retention       {} segments deleted, {:.1f} MiB retained",
+                     written.segments_deleted,
+                     static_cast<double>(written.retained_bytes) / (1024.0 * 1024.0));
+        if (detector != nullptr) {
+            std::println("  annotations     {} sent, {} arrived after their segment closed",
+                         capture_annotations, written.annotations_discarded);
+        }
+        if (!written.last_error.empty()) {
+            std::println("  stopped writing {}", written.last_error);
         }
     }
 
@@ -5086,7 +5220,7 @@ int main(int argc, char** argv)
     // the first two watch the whole span and need no receiver at all, and
     // the third brings its own.
     if (options->receivers.empty() && options->rds.empty() && !options->spectrum &&
-        !options->detect && !options->characterise_asked) {
+        !options->detect && !options->characterise_asked && options->capture_root.empty()) {
         std::println(stderr,
                      "revenant-cli: nothing to do. Add a receiver with --vrx, such as "
                      "--vrx 162.550M:nfm:16k, watch the span with --spectrum, look for "

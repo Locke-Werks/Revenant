@@ -120,6 +120,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/capture/limits.h"
 #include "core/dsp/types.h"
 #include "core/decode/vocoder_plugin.h"
 #include "core/engine/engine.h"
@@ -140,6 +141,7 @@ using revenant::Status;
 using revenant::fail;
 using revenant::with_context;
 
+namespace capture = revenant::capture;
 namespace dsp = revenant::dsp;
 namespace engine = revenant::engine;
 namespace rpc = revenant::rpc;
@@ -297,6 +299,12 @@ struct Options {
     // executable, and the switch that loads none. docs/plugins.md.
     std::string plugin_dir;
     bool no_plugins = false;
+
+    // EngineConfig::capture, the same flags and grammar as revenant-cli's.
+    std::string capture_root;
+    std::optional<capture::SegmentLimit> capture_segment;
+    std::uint64_t capture_retain = 0;
+    double capture_max_age = 0.0;
 
     // Zero is "work it out from the source rate", which is what the engine
     // does with EngineConfig::channels at zero. See default_channel_count in
@@ -476,6 +484,19 @@ void print_usage()
         "                      pinned to one lane, so one that falls behind holds up\n"
         "                      only the receivers sharing its lane. Lanes run above\n"
         "                      normal priority.\n"
+        "\n"
+        "Capture:\n"
+        "  --capture <dir>     Keep the raw stream as rolling SigMF segments under dir,\n"
+        "                      annotated with what the detector found. Every source a\n"
+        "                      client opens is captured, each as its own stream.\n"
+        "  --capture-segment <size|secs>\n"
+        "                      Close a segment past this size, default 256M, or past\n"
+        "                      this many seconds when it ends in s, such as 60s.\n"
+        "  --capture-retain <size>\n"
+        "                      Delete the oldest segments to stay under this, such as\n"
+        "                      50G. Default keeps everything.\n"
+        "  --capture-max-age <age>\n"
+        "                      Delete segments older than this, such as 24h or 7d.\n"
         "\n"
         "Run:\n"
         "  --duration <sec>    Stop after this many seconds of source time. Accepts a\n"
@@ -872,6 +893,39 @@ void print_usage()
             continue;
         }
 
+        if (arg == "--capture" || arg == "--capture-segment" || arg == "--capture-retain" ||
+            arg == "--capture-max-age") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            if (arg == "--capture") {
+                if (text->empty()) {
+                    return fail("--capture takes a directory to write segments under");
+                }
+                options.capture_root = *text;
+            } else if (arg == "--capture-segment") {
+                auto limit = capture::parse_segment_limit(*text, arg);
+                if (!limit) {
+                    return std::unexpected(limit.error());
+                }
+                options.capture_segment = *limit;
+            } else if (arg == "--capture-retain") {
+                auto bytes = capture::parse_capture_size(*text, arg);
+                if (!bytes) {
+                    return std::unexpected(bytes.error());
+                }
+                options.capture_retain = *bytes;
+            } else {
+                auto seconds = capture::parse_capture_duration(*text, arg);
+                if (!seconds) {
+                    return std::unexpected(seconds.error());
+                }
+                options.capture_max_age = *seconds;
+            }
+            continue;
+        }
+
         if (arg.starts_with("-")) {
             return fail(std::format("unknown option '{}'", arg));
         }
@@ -880,6 +934,12 @@ void print_usage()
                                     arg));
         }
         options.uri = std::string(arg);
+    }
+
+    if (options.capture_root.empty() &&
+        (options.capture_segment || options.capture_retain != 0 || options.capture_max_age != 0.0)) {
+        return fail("--capture-segment, --capture-retain and --capture-max-age shape a capture, "
+                    "and there is none without --capture <dir>");
     }
 
     return options;
@@ -1149,6 +1209,19 @@ void print_engine_block(const engine::Engine& eng)
     // only what the spectrum stage detects, so it is not asked for without one.
     config.probe_receivers = options.spectrum_points != 0 ? options.probes : 0;
     config.probe_cpu_budget = options.probe_cpu.value_or(config.probe_cpu_budget);
+
+    if (!options.capture_root.empty()) {
+        engine::EngineConfig::Capture capture_config;
+        capture_config.root = options.capture_root;
+        if (options.capture_segment) {
+            capture_config.max_segment_bytes = options.capture_segment->bytes;
+            capture_config.max_segment_seconds = options.capture_segment->seconds;
+        }
+        capture_config.retention_bytes = options.capture_retain;
+        capture_config.retention_max_age_ns =
+            static_cast<std::int64_t>(options.capture_max_age * 1e9);
+        config.capture = capture_config;
+    }
 
     auto created = engine::Engine::create(config);
     if (!created) {
@@ -1535,6 +1608,10 @@ void print_engine_block(const engine::Engine& eng)
     // subscriptions; server.h requires the engine to outlive it.
     (*server)->stop();
 
+    // After the server, whose detector hands the tracks still alive to the
+    // last segment as it stops.
+    eng.close_capture();
+
     if (g_teardown_done != nullptr) {
         static_cast<void>(SetEvent(g_teardown_done));
     }
@@ -1556,6 +1633,19 @@ void print_engine_block(const engine::Engine& eng)
                  wall_seconds, stats.blocks_delivered, stats.samples_delivered);
     std::println("spectrum   {} frames sent, {} dropped", (*server)->frames_sent(),
                  (*server)->frames_dropped());
+    if (const auto written = eng.capture_stats(); written.has_value()) {
+        // The last stream's writer, for the same reason the sample counts
+        // above are the last source's.
+        std::println("capture    {} segments, {:.1f} MiB written under {}; {} blocks dropped, "
+                     "{} segments deleted, {} annotations too late",
+                     written->segments_written,
+                     static_cast<double>(written->bytes_written) / (1024.0 * 1024.0),
+                     options.capture_root, written->blocks_dropped, written->segments_deleted,
+                     written->annotations_discarded);
+        if (!written->last_error.empty()) {
+            std::println("CAPTURE    stopped writing: {}", written->last_error);
+        }
+    }
     if (stats.overrun_events != 0) {
         std::println("OVERRUN    {} events, {} samples lost", stats.overrun_events,
                      stats.samples_lost);

@@ -883,6 +883,21 @@ struct SourceStats {
     combOffsetHz @22 :Float64;
     combDriftHzPerS @23 :Float32;
     combLinesFound @24 :UInt32;
+
+    # The rolling capture, core/capture/writer.h, for the current stream or
+    # the last one. captureOn is false when the engine was started without
+    # one or no stream has run yet, and every other field is then zero.
+    # captureBlocksDropped counts blocks the writer's queue could not hold,
+    # which is a gap in the capture and not in the live graph.
+    # captureLastError is empty while the writer is healthy; once set it has
+    # stopped writing for the rest of the stream.
+    captureOn @25 :Bool;
+    captureSegmentsWritten @26 :UInt64;
+    captureBytesWritten @27 :UInt64;
+    captureBlocksDropped @28 :UInt64;
+    captureSegmentsDeleted @29 :UInt64;
+    captureRetainedBytes @30 :UInt64;
+    captureLastError @31 :Text;
 }
 
 struct VrxParams {
