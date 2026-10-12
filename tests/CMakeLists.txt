@@ -233,3 +233,6 @@ else()
         "No Python 3 interpreter: the retired-claims and modal-dialog checks "
         "will not run in ctest here. CI's guards job still runs them.")
 endif()
+
+# The rolling capture: search and the offline index pass.
+add_subdirectory(capture)

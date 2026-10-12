@@ -260,3 +260,11 @@ add_subdirectory(transcribe)
 
 # The wire. Two libraries, and the comment in rpc/CMakeLists.txt says why.
 add_subdirectory(rpc)
+
+# The rolling capture's search and its offline index pass. target_sources
+# rather than the list above, so the capture pieces landing in parallel each
+# append a block here instead of editing one shared list.
+target_sources(revenant_core PRIVATE
+    capture/index.cpp
+    capture/search.cpp
+)
