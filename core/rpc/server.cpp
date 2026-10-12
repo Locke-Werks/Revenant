@@ -1522,6 +1522,13 @@ public:
     // once everything queued has been applied.
     void forget_across_retune();
 
+    // Everything above the engine that a front-end retune takes down, shared
+    // by a retune asked for and one a capture replay followed: removals
+    // cleaned up with a reason each, the detector and decoders forgotten,
+    // and SOURCE_RETUNED sent. `reasons` gets one sentence per removal.
+    void after_source_retuned(const engine::SourceRetune& landed,
+                              std::vector<std::string>& reasons);
+
     // The detector half of the above and nothing else, for a change that
     // moves every absolute frequency without moving the radio: a new crystal
     // correction relabels the span, so each track's centre was computed from
@@ -1648,6 +1655,10 @@ public:
     // per removal, in the engine's order. Loop thread.
     [[nodiscard]] Expected<engine::SourceRetune> retune_source(
         std::int64_t wanted, std::vector<std::string>& reasons);
+
+    // Takes the retunes a capture replay followed between segments and does
+    // for each what retune_source does after its tune. Loop thread.
+    void follow_engine_retunes();
 
     // ServerOptions::engine_plugins, null when the host did not scan.
     [[nodiscard]] const plugin::EnginePluginSet* engine_plugins() const {
@@ -4901,6 +4912,7 @@ kj::Promise<void> ServerImpl::pump() {
     drain_decoded();
     drain_transcripts();
     drain_plugin_commands();
+    follow_engine_retunes();
 
     // Reconciled on the pump's own heartbeat, which is the spectrum's frame
     // rate while a source is open, and at most twice a second: often enough
@@ -7204,7 +7216,27 @@ Expected<engine::SourceRetune> ServerImpl::retune_source(std::int64_t wanted,
     if (!landed) {
         return std::unexpected(landed.error());
     }
+    after_source_retuned(*landed, reasons);
+    return *std::move(landed);
+}
 
+void ServerImpl::follow_engine_retunes() {
+    // A capture replay crossing into a segment recorded at another centre.
+    // The engine has already moved and removed what it had to on its delivery
+    // thread; what is left is everything above it, the same as a retune a
+    // client asked for. The annotator is flushed late rather than before the
+    // change, which is the best a retune nobody here started allows: the
+    // tracks it holds were measured against the old centre and must not be
+    // written onto the new one.
+    std::vector<std::string> reasons;
+    for (const engine::SourceRetune& landed : engine_.take_followed_retunes()) {
+        flush_capture_annotations();
+        after_source_retuned(landed, reasons);
+    }
+}
+
+void ServerImpl::after_source_retuned(const engine::SourceRetune& landed,
+                                      std::vector<std::string>& reasons) {
     // Every receiver the engine removed gets the cleanup removeVrx gives one,
     // because it has been removed just as surely. Before 2026-09-23 this
     // answer was discarded and none of that happened: an audio subscriber
@@ -7218,14 +7250,14 @@ Expected<engine::SourceRetune> ServerImpl::retune_source(std::int64_t wanted,
     // new place in a channel needs a filter the graph will not swap in place,
     // and saying "outside the span" then would be false.
     reasons.clear();
-    reasons.reserve(landed->removed.size());
-    for (const engine::RetuneRemoval& gone : landed->removed) {
+    reasons.reserve(landed.removed.size());
+    for (const engine::RetuneRemoval& gone : landed.removed) {
         std::string reason =
             !gone.reason.empty()
                 ? gone.reason
                 : std::format("the front end was retuned to {} Hz and the engine removed the "
                               "receiver at {} Hz",
-                              landed->center, gone.frequency);
+                              landed.center, gone.frequency);
         after_vrx_removed(gone.id, kj::StringPtr(reason.c_str()));
         reasons.push_back(std::move(reason));
     }
@@ -7238,9 +7270,9 @@ Expected<engine::SourceRetune> ServerImpl::retune_source(std::int64_t wanted,
     ++source_retunes_;
     plugin::Event event;
     event.type = RV_ENGINE_EVENT_SOURCE_RETUNED;
-    event.center_hz = static_cast<std::int64_t>(landed->center);
+    event.center_hz = static_cast<std::int64_t>(landed.center);
     event.epoch = source_retunes_;
-    for (const engine::RetuneRemoval& gone : landed->removed) {
+    for (const engine::RetuneRemoval& gone : landed.removed) {
         std::uint32_t cause = RV_ENGINE_REMOVED_OTHER;
         switch (gone.cause) {
             case engine::RetuneCause::OutsideSpan: cause = RV_ENGINE_REMOVED_OUTSIDE_SPAN; break;
@@ -7252,9 +7284,10 @@ Expected<engine::SourceRetune> ServerImpl::retune_source(std::int64_t wanted,
             .cause = cause,
             .frequency_hz = static_cast<std::int64_t>(gone.frequency)});
     }
+    // The first sample at the new centre for a retune the stream carried;
+    // zero from set_source_center, which the event has always sent.
+    event.start_sample = landed.at;
     emit_plugin_event(event);
-
-    return *std::move(landed);
 }
 
 // ---------------------------------------------------------------------------
