@@ -146,6 +146,12 @@ revenant_apply_warnings(revenant_lock_holder)
 # receiver and mapped back onto the source clock, which is where a transcript
 # is drawn on the waterfall.
 
+# test_engine_capture.cpp needs a GPU. It is the rolling capture behind a real
+# engine: a retune mid-stream splitting a segment at the right sample, and
+# detections landing in the meta of the segment they were heard in. Tagged
+# [capture] as well, and registered under the capture label below, so
+# ctest -L capture runs it beside tests/capture.
+
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
@@ -158,6 +164,7 @@ add_executable(revenant_engine_tests
     test_device_lock.cpp
     test_engine.cpp
     test_engine_agc.cpp
+    test_engine_capture.cpp
     test_engine_comb.cpp
     test_engine_dv.cpp
     test_engine_noise.cpp
@@ -198,3 +205,16 @@ revenant_apply_warnings(revenant_engine_tests)
 revenant_apply_reference_fp(revenant_engine_tests)
 
 revenant_discover_tests(revenant_engine_tests engine)
+
+# test_engine_capture.cpp's cases carry the capture label too, by name, since
+# a discovered test list carries names and not tags. Every case there has
+# "capture" in its name for this reason.
+set(capture_hook "${CMAKE_CURRENT_BINARY_DIR}/revenant_engine_tests_capture_labels.cmake")
+file(WRITE "${capture_hook}"
+    "foreach(name IN LISTS revenant_engine_tests_TESTS)\n"
+    "  if(name MATCHES \"capture\")\n"
+    "    set_tests_properties(\"\${name}\" PROPERTIES LABELS \"engine;capture\")\n"
+    "  endif()\n"
+    "endforeach()\n"
+)
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${capture_hook}")

@@ -133,6 +133,7 @@ public:
         // The probe pool goes before the graph, because its worker calls the
         // graph's control plane and its destructor removes its receivers.
         source_.reset();
+        stop_capture();
         probes_.reset();
         graph_.reset();
         scheduler_.reset();
@@ -654,6 +655,10 @@ public:
         // attach_audio_sink's on-demand pruning does not cover this.
         drop_audio_fanouts();
 
+        // The stream has ended, so this closes its last segment. The next
+        // source is a new stream and gets a new writer and epoch at run().
+        stop_capture();
+
         // The destructor's order, for the destructor's reasons: the source's
         // thread calls into the graph, the graph's completion thread calls into
         // the receivers' sinks, and the ring outlives both. ring_ is reset here
@@ -780,13 +785,19 @@ public:
         // frequency is measured against and the line below overwrites it.
         const dsp::Hertz was = info_.source_center;
 
+        // Bracket the tune in stream indices for the capture. See
+        // capture_center_for: no sample at or past `after` can predate the
+        // tune, and none before `before` can follow it.
+        const dsp::SampleIndex before = source_->stats().write_index;
         auto landed = excusing_pause([&] { return source_->tune(center); });
         if (!landed) {
             return std::unexpected(with_context(landed.error(), "Engine::set_source_center"));
         }
+        const dsp::SampleIndex after = source_->stats().write_index;
 
         // The one piece of engine state a retune moves.
         info_.source_center = *landed;
+        publish_capture_retune(*landed, before, after);
 
         // A comb found at the old centre is somewhere else at the new one, or
         // gone; the stage forgets it and averages a fresh spectrum.
@@ -1035,6 +1046,10 @@ public:
                 return std::unexpected(with_context(set.error(), "Engine::set_calibration"));
             }
             info_.source_center = source_->center();
+            // A relabel, not a retune: the samples did not move, so there is
+            // no gap to wait for and the next block carries the new label.
+            const dsp::SampleIndex now = source_->stats().write_index;
+            publish_capture_retune(info_.source_center, now, now);
         }
         graph_->set_front_end_correction(settings.dc_removal, settings.iq_correction);
         calibration_ = settings;
@@ -1340,10 +1355,26 @@ public:
         options.pace = pace_.load(std::memory_order_acquire);
 
         Graph* graph = graph_.get();
-        auto started = source_->start(options, [graph](const source::SourceBlock& block) {
+        source::BlockSink sink = [graph](const source::SourceBlock& block) {
             return graph->on_block(block);
-        });
+        };
+        if (config_.capture) {
+            if (auto opened = start_capture(); !opened) {
+                running_.store(false, std::memory_order_release);
+                return std::unexpected(with_context(opened.error(), "Engine::run"));
+            }
+            // Ahead of the graph, so a block the graph blocks on (a Demand
+            // source's backpressure) is already queued for the disk. consume()
+            // never blocks and never fails the stream.
+            capture::SegmentWriter* writer = writer_.get();
+            sink = [this, graph, writer](const source::SourceBlock& block) {
+                writer->consume(block, capture_center_for(block));
+                return graph->on_block(block);
+            };
+        }
+        auto started = source_->start(options, std::move(sink));
         if (!started) {
+            stop_capture();
             running_.store(false, std::memory_order_release);
             return std::unexpected(with_context(started.error(), "Engine::run"));
         }
@@ -1364,6 +1395,10 @@ public:
         // whatever error ended the stream, which is what this wants either
         // way.
         Status ended = source_->stop();
+        // The writer is NOT stopped here. The stream's last segment stays open
+        // so a detector draining its tracks after run() returns can still
+        // annotate it; close_capture, close_source, the next run() or the
+        // destructor closes it, whichever comes first.
         Status flushed = graph_->flush();
         // The last arrival offered at the instant the factor freezes at, so
         // a block delivered after the loop's last pass is in it.
@@ -1394,6 +1429,117 @@ public:
             return std::unexpected(scheduler_->error());
         }
         return {};
+    }
+
+    [[nodiscard]] std::optional<capture::WriterStats> capture_stats() const override {
+        const std::scoped_lock held(capture_lock_);
+        if (writer_ != nullptr) {
+            return writer_->stats();
+        }
+        return last_capture_stats_;
+    }
+
+    void add_capture_annotation(dsp::SampleIndex absolute_start,
+                                const capture::Annotation& annotation,
+                                std::optional<std::uint64_t> track_id) override {
+        const std::scoped_lock held(capture_lock_);
+        if (writer_ != nullptr) {
+            writer_->add_annotation(absolute_start, annotation, track_id);
+        }
+    }
+
+    void close_capture() override {
+        if (running_.load(std::memory_order_acquire)) {
+            // The open segment belongs to a stream that is still delivering;
+            // it closes when that stream does.
+            return;
+        }
+        stop_capture();
+    }
+
+    // One writer per stream, made here at the start of run().
+    [[nodiscard]] Status start_capture() {
+        stop_capture();
+        capture::WriterConfig writer_config;
+        writer_config.root = config_.capture->root;
+        writer_config.max_segment_bytes = config_.capture->max_segment_bytes;
+        writer_config.max_segment_seconds = config_.capture->max_segment_seconds;
+        writer_config.retention_bytes = config_.capture->retention_bytes;
+        writer_config.retention_max_age_ns = config_.capture->retention_max_age_ns;
+        writer_config.hw =
+            capabilities_.display_name.empty() ? capabilities_.uri : capabilities_.display_name;
+
+        auto writer = std::make_unique<capture::SegmentWriter>(std::move(writer_config));
+        if (auto started = writer->start(); !started) {
+            return std::unexpected(with_context(started.error(), "the rolling capture"));
+        }
+
+        capture_pending_.store(false, std::memory_order_release);
+        capture_center_.store(info_.source_center, std::memory_order_release);
+
+        const std::scoped_lock held(capture_lock_);
+        writer_ = std::move(writer);
+        return {};
+    }
+
+    // Closes the open segment and keeps the counters for capture_stats. Safe
+    // with no writer, and safe twice.
+    void stop_capture() {
+        std::unique_ptr<capture::SegmentWriter> writer;
+        {
+            const std::scoped_lock held(capture_lock_);
+            writer = std::move(writer_);
+        }
+        if (writer == nullptr) {
+            return;
+        }
+        // Outside the lock: stop() drains the queue to disk, and a status
+        // poll should not wait behind that.
+        writer->stop();
+        const std::scoped_lock held(capture_lock_);
+        last_capture_stats_ = writer->stats();
+    }
+
+    // A retune for the delivery thread to apply at the right block. The
+    // control thread is the only writer; the fields are published by the
+    // release on capture_pending_.
+    void publish_capture_retune(dsp::Hertz center, dsp::SampleIndex before,
+                                dsp::SampleIndex after) {
+        capture_retune_center_.store(center, std::memory_order_relaxed);
+        capture_retune_before_.store(before, std::memory_order_relaxed);
+        capture_retune_after_.store(after, std::memory_order_relaxed);
+        capture_pending_.store(true, std::memory_order_release);
+    }
+
+    // The centre a block was taken at, from the engine's own record of the
+    // last retune and never from the source, which a sink may not call.
+    //
+    // WHERE A RETUNE LANDS IN THE STREAM. set_source_center reads the
+    // source's write index on both sides of tune(). A sample at or past
+    // `after` was produced once tune() had returned, so it is at the new
+    // centre. One before `before` was produced before tune() began, so it is
+    // at the old one. Between the two is the window tune() ran in, and there
+    // the source says which side a block is on the only way it can: a
+    // streaming RTL-SDR stops its transfers to retune and reports what went
+    // missing as dropped_before on the first block after, so a block in the
+    // window with a gap ahead of it is the first new one. A source that
+    // retunes without a gap has an empty window, before == after, and the
+    // rule is exact. The writer closes a segment at the first block whose
+    // centre changed, so this is the whole of how a retune becomes a
+    // segment boundary.
+    [[nodiscard]] dsp::Hertz capture_center_for(const source::SourceBlock& block) {
+        if (capture_pending_.load(std::memory_order_acquire)) {
+            const dsp::SampleIndex start = block.stamp.start;
+            const bool past = start >= capture_retune_after_.load(std::memory_order_relaxed);
+            const bool after_gap = block.dropped_before > 0 &&
+                                   start >= capture_retune_before_.load(std::memory_order_relaxed);
+            if (past || after_gap) {
+                capture_center_.store(capture_retune_center_.load(std::memory_order_relaxed),
+                                      std::memory_order_relaxed);
+                capture_pending_.store(false, std::memory_order_relaxed);
+            }
+        }
+        return capture_center_.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] Status stop() override {
@@ -1716,6 +1862,21 @@ private:
     // constness is about: the answer is only meaningful when no transition is
     // half-applied.
     mutable std::mutex lifecycle_lock_;
+
+    // The rolling capture. writer_ is swapped under capture_lock_ by the
+    // control plane only; the delivery thread holds a raw pointer captured at
+    // run(), which outlives the stream because nothing stops the writer while
+    // running_ is true.
+    mutable std::mutex capture_lock_;
+    std::unique_ptr<capture::SegmentWriter> writer_;
+    std::optional<capture::WriterStats> last_capture_stats_;
+
+    // capture_center_ is the delivery thread's alone once a stream runs.
+    std::atomic<dsp::Hertz> capture_center_{0};
+    std::atomic<bool> capture_pending_{false};
+    std::atomic<dsp::Hertz> capture_retune_center_{0};
+    std::atomic<dsp::SampleIndex> capture_retune_before_{0};
+    std::atomic<dsp::SampleIndex> capture_retune_after_{0};
 };
 
 }  // namespace

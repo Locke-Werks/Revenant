@@ -112,6 +112,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <map>
@@ -124,6 +125,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/capture/format.h"
+#include "core/capture/writer.h"
 #include "core/dsp/comb_cancel.h"
 #include "core/dsp/front_end_correction.h"
 #include "core/dsp/pfb.h"
@@ -322,6 +325,20 @@ struct EngineConfig {
     // through unchanged. Engine::set_comb_cancel changes it while the engine
     // runs, and the choice carries across a change of source.
     bool comb_cancel = true;
+
+    // The rolling capture, core/capture/writer.h. Nothing, the default, writes
+    // nothing. When set, every stream run() starts gets a SegmentWriter of its
+    // own with a fresh stream epoch, fed from the source's sink ahead of the
+    // graph, and stopped when the stream ends.
+    struct Capture {
+        std::filesystem::path root;
+        // WriterConfig's limits, carried as they are: zero disables each.
+        std::uint64_t max_segment_bytes = 256ULL * 1024 * 1024;
+        double max_segment_seconds = 0.0;
+        std::uint64_t retention_bytes = 0;
+        std::int64_t retention_max_age_ns = 0;
+    };
+    std::optional<Capture> capture;
 };
 
 // The widest receiver a grid is expected to be able to carry, anywhere on it.
@@ -1875,6 +1892,26 @@ public:
     // submit_probe is: an Engine written before it has nothing to report.
     [[nodiscard]] virtual EngineLoad load() const;
 
+    // The rolling capture's counters for the current stream, or the last one
+    // when none is running. Nothing when EngineConfig::capture is unset or no
+    // stream has started yet. Per stream, because each stream is its own
+    // writer and its own epoch.
+    [[nodiscard]] virtual std::optional<capture::WriterStats> capture_stats() const;
+
+    // Hands a detection to the running stream's writer, which holds it until
+    // the segment containing `absolute_start` closes. `absolute_start` is a
+    // stream index in the current stream. Dropped with no capture or no
+    // stream: an annotation is a note on samples, and there are none to note.
+    virtual void add_capture_annotation(dsp::SampleIndex absolute_start,
+                                        const capture::Annotation& annotation,
+                                        std::optional<std::uint64_t> track_id);
+
+    // Closes the last stream's open segment once run() has returned. run()
+    // leaves it open so tracks still alive at the end of the stream can be
+    // annotated onto it; this is the caller saying it has finished doing so.
+    // close_source and the destructor do the same. Ignored while running.
+    virtual void close_capture();
+
     // Tier two: put a probe receiver on a detection, collect its baseband and
     // characterise it. core/engine/probe.h has the pool, the buckets and the
     // dwell.
@@ -1977,6 +2014,13 @@ inline std::size_t Engine::take_probe_outcomes(std::span<ProbeOutcome>) { return
 inline ProbeStats Engine::probe_stats() const { return {}; }
 
 inline EngineLoad Engine::load() const { return {}; }
+
+inline std::optional<capture::WriterStats> Engine::capture_stats() const { return std::nullopt; }
+
+inline void Engine::add_capture_annotation(dsp::SampleIndex, const capture::Annotation&,
+                                           std::optional<std::uint64_t>) {}
+
+inline void Engine::close_capture() {}
 
 inline Expected<CalibrationState> Engine::calibration() const {
     return fail("this engine keeps no calibration: it was written before "
