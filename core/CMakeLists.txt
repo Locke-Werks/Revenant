@@ -268,3 +268,11 @@ add_subdirectory(rpc)
 target_sources(revenant_core PRIVATE capture/writer.cpp)
 set_source_files_properties(capture/writer.cpp PROPERTIES
     COMPILE_DEFINITIONS "REVENANT_CAPTURE_RECORDER_VERSION=\"${REVENANT_VERSION}\"")
+
+# The rolling capture's search and its offline index pass. target_sources
+# rather than the list above, so the capture pieces landing in parallel each
+# append a block here instead of editing one shared list.
+target_sources(revenant_core PRIVATE
+    capture/index.cpp
+    capture/search.cpp
+)
