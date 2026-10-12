@@ -362,7 +362,8 @@ void append_number(std::string& out, std::string_view key, double value)
     }
 }
 
-[[nodiscard]] std::string serialise(const Annotation& annotation, std::string_view generator)
+[[nodiscard]] std::string serialise(const Annotation& annotation, std::string_view generator,
+                                    std::uint64_t track_id = 0)
 {
     std::string out = "{\n";
     out += std::format("            \"core:sample_start\": {}", annotation.sample_start);
@@ -378,6 +379,9 @@ void append_number(std::string& out, std::string_view key, double value)
     append_number(out, "revenant:snr_db", annotation.snr_db);
     if (!annotation.family.empty()) {
         out += std::format(",\n            \"revenant:family\": {}", escaped(annotation.family));
+    }
+    if (track_id != 0) {
+        out += std::format(",\n            \"revenant:track_id\": {}", track_id);
     }
     out += "\n        }";
     return out;
@@ -752,10 +756,15 @@ Expected<std::vector<StoredAnnotation>> read_annotations(const std::string& meta
     return out;
 }
 
-Expected<std::string> merge_annotations(std::string_view meta_text,
-                                        std::span<const Annotation> annotations,
-                                        std::string_view generator,
-                                        const std::optional<IndexStamp>& stamp)
+namespace {
+
+// The merge behind both public forms. With `replaced` set, entries already
+// under that generator are dropped before `added` goes in; without it nothing
+// is dropped. Each added entry is written under its own generator and track id.
+[[nodiscard]] Expected<std::string> merge_entries(std::string_view meta_text,
+                                                  std::span<const StoredAnnotation> added,
+                                                  std::optional<std::string_view> replaced,
+                                                  const std::optional<IndexStamp>& stamp)
 {
     const Scanner scanner(meta_text);
     auto document = top_level(scanner, meta_text);
@@ -780,15 +789,16 @@ Expected<std::string> merge_annotations(std::string_view meta_text,
             if (!one) {
                 return std::unexpected(one.error());
             }
-            if (one->generator == generator) {
+            if (replaced.has_value() && one->generator == *replaced) {
                 continue;
             }
             merged.emplace_back(one->annotation.sample_start,
                                 std::string(scanner.raw((*entries)[i])));
         }
     }
-    for (const Annotation& annotation : annotations) {
-        merged.emplace_back(annotation.sample_start, serialise(annotation, generator));
+    for (const StoredAnnotation& entry : added) {
+        merged.emplace_back(entry.annotation.sample_start,
+                            serialise(entry.annotation, entry.generator, entry.track_id));
     }
     // Stable, so entries that start together keep the order they were in.
     std::ranges::stable_sort(merged, {}, &std::pair<std::uint64_t, std::string>::first);
@@ -855,6 +865,75 @@ Expected<std::string> merge_annotations(std::string_view meta_text,
     return out;
 }
 
+// Temporary file beside the target, then a rename over it, so a reader never
+// sees half a file and a crash mid-write leaves the old one.
+[[nodiscard]] Status replace_file(const std::string& path, std::string_view text)
+{
+    const std::filesystem::path target(path);
+    std::filesystem::path temporary = target;
+    temporary += ".tmp";
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return fail(std::format("could not create '{}'", temporary.string()));
+        }
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        out.flush();
+        if (!out) {
+            out.close();
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            return fail(std::format("could not write '{}'", temporary.string()));
+        }
+    }
+    // Replaces the existing file in one step on Windows as well: MSVC's
+    // rename is MoveFileExW with MOVEFILE_REPLACE_EXISTING.
+    std::error_code error;
+    std::filesystem::rename(temporary, target, error);
+    if (error) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        return fail(std::format("could not replace '{}': {}", path, error.message()),
+                    error.value());
+    }
+    return {};
+}
+
+}  // namespace
+
+Expected<std::string> merge_annotations(std::string_view meta_text,
+                                        std::span<const Annotation> annotations,
+                                        std::string_view generator,
+                                        const std::optional<IndexStamp>& stamp)
+{
+    std::vector<StoredAnnotation> added;
+    added.reserve(annotations.size());
+    for (const Annotation& annotation : annotations) {
+        added.push_back(StoredAnnotation{annotation, std::string(generator), 0});
+    }
+    return merge_entries(meta_text, added, generator, stamp);
+}
+
+Expected<std::string> append_annotations(std::string_view meta_text,
+                                         std::span<const StoredAnnotation> annotations)
+{
+    return merge_entries(meta_text, annotations, std::nullopt, std::nullopt);
+}
+
+Status append_annotations_to(const std::string& meta_path,
+                             std::span<const StoredAnnotation> annotations)
+{
+    auto text = read_file(meta_path);
+    if (!text) {
+        return std::unexpected(text.error());
+    }
+    auto merged = append_annotations(*text, annotations);
+    if (!merged) {
+        return std::unexpected(with_context(merged.error(), meta_path));
+    }
+    return replace_file(meta_path, *merged);
+}
+
 Expected<std::vector<IndexStamp>> read_index_stamps(const std::string& meta_path)
 {
     auto text = read_file(meta_path);
@@ -901,34 +980,7 @@ Status write_annotations(const std::string& meta_path, std::span<const Annotatio
         return std::unexpected(with_context(merged.error(), meta_path));
     }
 
-    const std::filesystem::path target(meta_path);
-    std::filesystem::path temporary = target;
-    temporary += ".tmp";
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            return fail(std::format("could not create '{}'", temporary.string()));
-        }
-        out.write(merged->data(), static_cast<std::streamsize>(merged->size()));
-        out.flush();
-        if (!out) {
-            out.close();
-            std::error_code ignored;
-            std::filesystem::remove(temporary, ignored);
-            return fail(std::format("could not write '{}'", temporary.string()));
-        }
-    }
-    // Replaces the existing file in one step on Windows as well: MSVC's
-    // rename is MoveFileExW with MOVEFILE_REPLACE_EXISTING.
-    std::error_code error;
-    std::filesystem::rename(temporary, target, error);
-    if (error) {
-        std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
-        return fail(std::format("could not replace '{}': {}", meta_path, error.message()),
-                    error.value());
-    }
-    return {};
+    return replace_file(meta_path, *merged);
 }
 
 std::vector<Hit> run_query(std::span<const IndexedSegment> segments, const Query& query)

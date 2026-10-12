@@ -46,11 +46,18 @@
 // retune is closed at the first block the caller attributes to the new centre.
 // The writer can be no more exact about a retune than the caller is.
 //
-// ANNOTATIONS ARRIVE LATE. add_annotation is keyed by absolute stream index and
-// held until the segment containing that index closes. One that arrives after
-// its segment closed is discarded and counted, because rewriting a closed meta
-// would race the catalog reading it; an offline index pass is where that
-// segment gets its annotations back.
+// ANNOTATIONS ARRIVE LATE. The live detector reports a track when it ends, so
+// a track longer than what was left of its first segment arrives after that
+// segment closed. add_annotation is keyed by absolute stream index and the
+// annotation's span [start, start + count) is clipped to every segment of the
+// current epoch it overlaps, each part keeping the track id so a search can
+// join them. The part in the open segment waits for that segment to close;
+// parts in segments already closed are appended to their metas on the writer
+// thread, through a temporary and a rename, so the catalog reading a meta sees
+// the old file or the new one and never half of either. A part whose segment
+// the ring has already deleted, or that predates the bounded index of closed
+// segments, is counted in annotations_discarded, as is one whose meta could
+// not be replaced.
 
 #pragma once
 
@@ -134,7 +141,11 @@ struct WriterStats {
     // Data files a previous run's ring had already given up on, found and
     // deleted at start(). Also counted in segments_deleted.
     std::uint64_t orphans_deleted = 0;
+    // Annotation parts lost: their segment was deleted, fell out of the
+    // closed-segment index, or its meta could not be replaced.
     std::uint64_t annotations_discarded = 0;
+    // Annotation parts appended to a segment that had already closed.
+    std::uint64_t annotations_merged_late = 0;
     std::uint64_t retained_bytes = 0;
     // Empty while healthy. Once set, the writer has stopped writing and stays
     // stopped until it is restarted; the stream it is attached to carries on.
@@ -217,9 +228,9 @@ public:
     void set_gain_db(std::optional<double> gain_db);
 
     // `annotation.sample_start` is ignored; `absolute_start` is the stream
-    // index of the annotation's first sample. Converted to segment-relative
-    // when the segment that contains it closes, with the count clipped to the
-    // segment.
+    // index of the annotation's first sample. Split into one segment-relative
+    // part per segment it overlaps; see the header comment. Safe from any
+    // thread.
     void add_annotation(dsp::SampleIndex absolute_start, const Annotation& annotation,
                         std::optional<std::uint64_t> track_id = std::nullopt);
 
@@ -245,6 +256,17 @@ private:
         std::optional<std::uint64_t> track_id;
     };
 
+    // A closed segment of the current epoch, for filing the late parts of an
+    // annotation.
+    struct ClosedSegment {
+        std::filesystem::path meta;
+        dsp::SampleIndex first = 0;
+        dsp::SampleIndex end = 0;
+    };
+    // At 10 second segments, a little under three hours. A track that started
+    // before that has lost its early parts to the ring in any likely config.
+    static constexpr std::size_t kClosedIndexLimit = 1024;
+
     struct OpenSegment;
     struct RetainedSegment {
         std::filesystem::path data;
@@ -258,6 +280,7 @@ private:
     void process(Item& item);
     void open_segment(const Item& item, std::uint64_t dropped_before);
     void close_segment(std::string_view reason);
+    void route_annotations();
     void apply_retention();
     [[nodiscard]] bool remove_pair(const RetainedSegment& segment);
     void retry_pending_deletes();
@@ -279,10 +302,16 @@ private:
     std::uint64_t pending_loss_samples_ = 0;
     bool pending_loss_ = false;
     std::optional<double> gain_db_;
-    std::vector<PendingAnnotation> annotations_;
+    // Added and not yet routed by the writer thread.
+    std::vector<PendingAnnotation> incoming_;
     WriterStats stats_;
 
     // Writer thread only.
+    // Parts at or past the end of the last closed segment, waiting for the
+    // segment that holds them to close.
+    std::vector<PendingAnnotation> annotations_;
+    // In stream order; cleared when the epoch changes.
+    std::deque<ClosedSegment> closed_;
     std::unique_ptr<OpenSegment> open_;
     std::vector<RetainedSegment> retained_;
     // Pairs the ring chose to delete and could not. Their bytes are still on

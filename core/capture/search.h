@@ -118,6 +118,19 @@ struct IndexedSegment {
     std::string_view meta_text, std::span<const Annotation> annotations,
     std::string_view generator, const std::optional<IndexStamp>& stamp = std::nullopt);
 
+// Adds `annotations` to the meta's array, each under its own generator and
+// with its track id when nonzero, and removes nothing: every existing entry
+// and every other key stays byte for byte. The writer files the part of a
+// live track that fell in an already-closed segment this way, so a second
+// call adds to the first rather than replacing it.
+[[nodiscard]] Expected<std::string> append_annotations(
+    std::string_view meta_text, std::span<const StoredAnnotation> annotations);
+
+// The same on a file, replaced through a temporary and a rename as
+// write_annotations does.
+[[nodiscard]] Status append_annotations_to(const std::string& meta_path,
+                                           std::span<const StoredAnnotation> annotations);
+
 // Every field is a filter, and an unset one passes everything.
 //
 // Time and frequency are overlap tests, not containment: a hit is anything

@@ -7,10 +7,13 @@
 #include <cstring>
 #include <format>
 #include <fstream>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <system_error>
 #include <utility>
+
+#include "core/capture/search.h"
 
 #ifndef REVENANT_CAPTURE_RECORDER_VERSION
 #define REVENANT_CAPTURE_RECORDER_VERSION "unknown"
@@ -305,6 +308,30 @@ struct SideFile {
         (static_cast<std::uint64_t>(device()) << 32) ^ static_cast<std::uint64_t>(device());
     const std::uint64_t masked = value & 0x7FFF'FFFF'FFFF'FFFFULL;
     return masked == 0 ? 1 : masked;
+}
+
+struct Part {
+    dsp::SampleIndex start = 0;
+    std::uint64_t count = 0;
+};
+
+// The part of [start, start + count) inside [first, end). A zero-length
+// annotation is a point and belongs to the segment holding it.
+[[nodiscard]] std::optional<Part> clip(dsp::SampleIndex start, std::uint64_t count,
+                                       dsp::SampleIndex first, dsp::SampleIndex end)
+{
+    if (count == 0) {
+        if (start >= first && start < end) {
+            return Part{start, 0};
+        }
+        return std::nullopt;
+    }
+    const dsp::SampleIndex low = std::max(start, first);
+    const dsp::SampleIndex high = std::min(start + count, end);
+    if (low >= high) {
+        return std::nullopt;
+    }
+    return Part{low, high - low};
 }
 
 }  // namespace
@@ -640,6 +667,8 @@ Status SegmentWriter::start()
     // delete left behind.
     pending_delete_.clear();
     have_last_ = false;
+    closed_.clear();
+    annotations_.clear();
     {
         std::lock_guard lock(mutex_);
         stats_.retained_bytes = 0;
@@ -747,8 +776,13 @@ void SegmentWriter::set_gain_db(std::optional<double> gain_db)
 void SegmentWriter::add_annotation(dsp::SampleIndex absolute_start, const Annotation& annotation,
                                    std::optional<std::uint64_t> track_id)
 {
-    std::lock_guard lock(mutex_);
-    annotations_.push_back(PendingAnnotation{absolute_start, annotation, track_id});
+    {
+        std::lock_guard lock(mutex_);
+        incoming_.push_back(PendingAnnotation{absolute_start, annotation, track_id});
+    }
+    // An idle writer still files the late parts promptly, so a catalog read
+    // between blocks sees them.
+    wake_.notify_one();
 }
 
 WriterStats SegmentWriter::stats() const
@@ -761,18 +795,26 @@ void SegmentWriter::run()
 {
     for (;;) {
         Item item;
+        bool have_item = false;
         {
             std::unique_lock lock(mutex_);
-            wake_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
-            if (queue_.empty()) {
+            wake_.wait(lock, [this] {
+                return stopping_ || !queue_.empty() || !incoming_.empty();
+            });
+            if (!queue_.empty()) {
+                item = std::move(queue_.front());
+                queue_.pop_front();
+                have_item = true;
+            } else if (incoming_.empty()) {
                 break;
             }
-            item = std::move(queue_.front());
-            queue_.pop_front();
         }
-        process(item);
-        std::lock_guard lock(mutex_);
-        pool_.push_back(std::move(item.bytes));
+        if (have_item) {
+            process(item);
+            std::lock_guard lock(mutex_);
+            pool_.push_back(std::move(item.bytes));
+        }
+        route_annotations();
     }
     if (open_) {
         close_segment("stop");
@@ -840,6 +882,10 @@ void SegmentWriter::process(Item& item)
     if (restarted) {
         config_.stream_epoch = draw_epoch();
         have_last_ = false;
+        // The old epoch's segments are closed, and its indices mean nothing
+        // in the new one.
+        closed_.clear();
+        annotations_.clear();
     }
 
     if (!open_) {
@@ -947,24 +993,31 @@ void SegmentWriter::close_segment(std::string_view reason)
     fields.hw = config_.hw;
     fields.gain_db = segment->gain_db;
     {
+        // Whatever arrived since the last block is routed first, so a part
+        // that belongs here is in annotations_ rather than filed late.
+        route_annotations();
         const dsp::SampleIndex first = segment->info.first_index;
         const dsp::SampleIndex end = segment->info.end_index();
-        std::lock_guard lock(mutex_);
         std::vector<PendingAnnotation> keep;
         for (PendingAnnotation& pending : annotations_) {
-            if (pending.absolute_start >= end) {
-                keep.push_back(std::move(pending));
-            } else if (pending.absolute_start < first) {
-                ++stats_.annotations_discarded;
-            } else {
+            if (auto part = clip(pending.absolute_start, pending.annotation.sample_count, first,
+                                 end)) {
                 MetaFields::Entry entry;
-                entry.annotation = std::move(pending.annotation);
-                entry.annotation.sample_start = pending.absolute_start - first;
-                entry.annotation.sample_count =
-                    std::min<std::uint64_t>(entry.annotation.sample_count,
-                                            end - pending.absolute_start);
+                entry.annotation = pending.annotation;
+                entry.annotation.sample_start = part->start - first;
+                entry.annotation.sample_count = part->count;
                 entry.track_id = pending.track_id;
                 fields.annotations.push_back(std::move(entry));
+            }
+            // The rest carries on into the next segment. A part that lay
+            // wholly before `first` fell in a gap of lost samples and has
+            // nowhere to go.
+            const dsp::SampleIndex stop = pending.absolute_start + pending.annotation.sample_count;
+            if (stop > end || pending.absolute_start >= end) {
+                const dsp::SampleIndex from = std::max(pending.absolute_start, end);
+                pending.annotation.sample_count = stop > from ? stop - from : 0;
+                pending.absolute_start = from;
+                keep.push_back(std::move(pending));
             }
         }
         annotations_ = std::move(keep);
@@ -996,12 +1049,91 @@ void SegmentWriter::close_segment(std::string_view reason)
     retained.start_ns = segment->info.start_ns();
     retained.order_key = path_text(segment->dir.filename()) + "/" + segment->stem;
     retained_.push_back(std::move(retained));
+    closed_.push_back(ClosedSegment{meta, segment->info.first_index, segment->info.end_index()});
+    if (closed_.size() > kClosedIndexLimit) {
+        closed_.pop_front();
+    }
     {
         std::lock_guard lock(mutex_);
         ++stats_.segments_written;
         stats_.retained_bytes += retained_.back().bytes;
     }
     apply_retention();
+}
+
+void SegmentWriter::route_annotations()
+{
+    std::vector<PendingAnnotation> incoming;
+    {
+        std::lock_guard lock(mutex_);
+        incoming.swap(incoming_);
+    }
+    if (incoming.empty()) {
+        return;
+    }
+
+    // Late parts grouped by segment, so a meta is rewritten once per pass
+    // however many tracks ended in it.
+    std::vector<std::vector<StoredAnnotation>> late(closed_.size());
+    std::uint64_t lost = 0;
+    const dsp::SampleIndex tail = closed_.empty() ? 0 : closed_.back().end;
+    for (PendingAnnotation& pending : incoming) {
+        const dsp::SampleIndex start = pending.absolute_start;
+        const std::uint64_t count = pending.annotation.sample_count;
+        if (!closed_.empty() && start < closed_.front().first) {
+            ++lost;
+        }
+        // The first closed segment that ends after `start`; closed_ is in
+        // stream order, so the overlapping ones follow it contiguously.
+        auto it = std::ranges::partition_point(
+            closed_, [&](const ClosedSegment& c) { return c.end <= start; });
+        for (; it != closed_.end() && (it->first < start + count || it->first <= start); ++it) {
+            if (auto part = clip(start, count, it->first, it->end)) {
+                StoredAnnotation stored;
+                stored.annotation = pending.annotation;
+                stored.annotation.sample_start = part->start - it->first;
+                stored.annotation.sample_count = part->count;
+                stored.generator = std::string(kDetectGenerator);
+                stored.track_id = pending.track_id.value_or(0);
+                late[static_cast<std::size_t>(it - closed_.begin())].push_back(
+                    std::move(stored));
+            }
+        }
+        const dsp::SampleIndex stop = start + count;
+        if (stop > tail || start >= tail) {
+            const dsp::SampleIndex from = std::max(start, tail);
+            pending.annotation.sample_count = stop > from ? stop - from : 0;
+            pending.absolute_start = from;
+            annotations_.push_back(std::move(pending));
+        }
+    }
+
+    std::uint64_t merged = 0;
+    for (std::size_t i = 0; i < late.size(); ++i) {
+        if (late[i].empty()) {
+            continue;
+        }
+        // The ring runs on this thread, so a meta that is gone was deleted
+        // and cannot come back while the append is in progress.
+        std::error_code ec;
+        if (!fs::exists(closed_[i].meta, ec)) {
+            lost += late[i].size();
+            continue;
+        }
+        if (auto wrote = append_annotations_to(path_text(closed_[i].meta), late[i]); !wrote) {
+            // Most likely a reader holding the meta without sharing delete.
+            // The segment keeps what it had; this is not a reason to stop
+            // capturing.
+            lost += late[i].size();
+            continue;
+        }
+        merged += late[i].size();
+    }
+    if (lost != 0 || merged != 0) {
+        std::lock_guard lock(mutex_);
+        stats_.annotations_discarded += lost;
+        stats_.annotations_merged_late += merged;
+    }
 }
 
 void SegmentWriter::index_existing()

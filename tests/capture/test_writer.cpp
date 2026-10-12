@@ -24,6 +24,7 @@
 
 #include "core/capture/capture_source.h"
 #include "core/capture/format.h"
+#include "core/capture/search.h"
 #include "core/capture/writer.h"
 #include "core/source/file_source.h"
 #include "core/source/registry.h"
@@ -254,6 +255,80 @@ TEST_CASE("A meta carries every key format.h names and the file source reads it"
     REQUIRE(metadata->segments.size() == 1);
     CHECK(metadata->segments[0].center_hz == 145'500'000);
     CHECK(metadata->segments[0].anchor_ns == kAnchor);
+}
+
+TEST_CASE("A track spanning closed segments is filed in every one with its id",
+          "[capture][writer]")
+{
+    const Scratch scratch("late");
+    auto config = config_for(scratch.root());
+    config.max_segment_bytes = kBlock * 2;  // one block per segment
+    capture::SegmentWriter writer(config);
+    REQUIRE(writer.start().has_value());
+    Feeder feeder{writer, {}};
+    for (dsp::SampleIndex at = 0; at < 4 * kBlock; at += kBlock) {
+        feeder.feed(at, 98'100'000);
+    }
+    // Three closed and the fourth open before the track is reported, which
+    // is how a live track longer than a segment arrives.
+    const auto wait_for = [&](auto done) {
+        for (int i = 0; i < 2000 && !done(writer.stats()); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return done(writer.stats());
+    };
+    REQUIRE(wait_for([](const capture::WriterStats& s) { return s.segments_written == 3; }));
+
+    capture::Annotation annotation;
+    annotation.sample_count = 3000;
+    annotation.freq_lower = 98'000'000;
+    annotation.freq_upper = 98'200'000;
+    annotation.confidence = 0.9;
+    annotation.family = "wfm";
+    writer.add_annotation(500, annotation, 7);
+    REQUIRE(wait_for([](const capture::WriterStats& s) { return s.annotations_merged_late == 3; }));
+
+    // The ring took the first segment; a second track reaching back into it
+    // loses that part and keeps the rest.
+    auto segments = list_segments(scratch.root());
+    REQUIRE(segments.size() == 3);
+    fs::remove(segments[0].meta);
+    fs::remove(segments[0].data);
+    writer.add_annotation(900, annotation, 8);
+    writer.stop();
+
+    const auto stats = writer.stats();
+    CHECK(stats.annotations_discarded == 1);
+    CHECK(stats.annotations_merged_late == 3 + 2);
+
+    segments = list_segments(scratch.root());
+    REQUIRE(segments.size() == 3);
+    struct Expect {
+        std::uint64_t start;
+        std::uint64_t count;
+    };
+    // Segment 0 is gone; segments[i - 1] is segment i. Track 7 by segment,
+    // then track 8 (900 to 3900) in segments 1 to 3.
+    const Expect seven[] = {{500, 500}, {0, 1000}, {0, 1000}, {0, 500}};
+    const Expect eight[] = {{0, 0}, {0, 1000}, {0, 1000}, {0, 900}};
+    for (std::size_t i = 1; i < 4; ++i) {
+        INFO(i);
+        auto read = capture::read_annotations(segments[i - 1].meta.string());
+        REQUIRE(read.has_value());
+        REQUIRE(read->size() == 2);
+        for (const capture::StoredAnnotation& stored : *read) {
+            CHECK(stored.generator == capture::kDetectGenerator);
+            CHECK(stored.annotation.family == "wfm");
+            const Expect& want = stored.track_id == 7 ? seven[i] : eight[i];
+            CHECK((stored.track_id == 7 || stored.track_id == 8));
+            CHECK(stored.annotation.sample_start == want.start);
+            CHECK(stored.annotation.sample_count == want.count);
+        }
+    }
+    // A late append keeps the meta whole: the file source still reads it.
+    for (std::size_t i = 1; i < 4; ++i) {
+        CHECK(source::read_sigmf_metadata(segments[i - 1].meta.string()).has_value());
+    }
 }
 
 TEST_CASE("A full queue drops, counts and closes the segment as loss", "[capture][writer]")
