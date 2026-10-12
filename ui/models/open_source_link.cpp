@@ -20,6 +20,8 @@
 #include <cmath>
 #include <cstdint>
 #include <mutex>
+#include <string>
+#include <utility>
 
 #include <QMetaObject>
 #include <QString>
@@ -173,8 +175,65 @@ void EngineLink::note_comb_status(const rpc::SourceStats& stats)
     QMetaObject::invokeMethod(this, [this] { adopt_open_source(); }, Qt::QueuedConnection);
 }
 
+namespace {
+
+// SourceStats' capture fields into the sample models/capture_note.h reads.
+//
+// A TEMPLATE WITH A REQUIRES TEST, because the wire carries captureOn and the
+// rest (core/rpc/revenant.capnp @25 to @31) while rpc::SourceStats in
+// core/rpc/types.h, which this client reads, does not copy them yet. Until it
+// does the sample stays off and the readout says nothing, which is the honest
+// answer for a client that cannot see the capture; once the fields land under
+// these names the readout lights up with no change here.
+template <typename Stats>
+[[nodiscard]] CaptureSample capture_sample_of(const Stats& stats)
+{
+    CaptureSample sample;
+    if constexpr (requires {
+                      stats.capture_on;
+                      stats.capture_segments_written;
+                      stats.capture_bytes_written;
+                      stats.capture_blocks_dropped;
+                      stats.capture_segments_deleted;
+                      stats.capture_retained_bytes;
+                      stats.capture_last_error;
+                  }) {
+        sample.on = stats.capture_on;
+        sample.segments_written = stats.capture_segments_written;
+        sample.bytes_written = stats.capture_bytes_written;
+        sample.blocks_dropped = stats.capture_blocks_dropped;
+        sample.segments_deleted = stats.capture_segments_deleted;
+        sample.retained_bytes = stats.capture_retained_bytes;
+        sample.last_error = std::string(stats.capture_last_error);
+    }
+    return sample;
+}
+
+}  // namespace
+
+void EngineLink::note_capture_status(const rpc::SourceStats& stats)
+{
+    CaptureLine line = describe_capture(capture_sample_of(stats));
+
+    // Posted on a change only, like the comb's text: the retained size moves
+    // with every segment and nothing else here does.
+    if (capture_posted_ && line.state == posted_capture_.state &&
+        line.text == posted_capture_.text && line.detail == posted_capture_.detail) {
+        return;
+    }
+    capture_posted_ = true;
+    posted_capture_ = line;
+    {
+        const std::lock_guard<std::mutex> lock(open_source_mutex_);
+        handover_has_capture_ = true;
+        handover_capture_ = std::move(line);
+    }
+    QMetaObject::invokeMethod(this, [this] { adopt_open_source(); }, Qt::QueuedConnection);
+}
+
 void EngineLink::adopt_open_source()
 {
+    bool capture_moved = false;
     bool comb_moved = false;
     bool moved = false;
     {
@@ -200,12 +259,22 @@ void EngineLink::adopt_open_source()
             comb_locked_ = handover_comb_locked_;
             comb_moved = true;
         }
+        if (handover_has_capture_) {
+            handover_has_capture_ = false;
+            capture_text_ = QString::fromStdString(handover_capture_.text);
+            capture_detail_ = QString::fromStdString(handover_capture_.detail);
+            capture_fault_ = handover_capture_.state == CaptureState::Fault;
+            capture_moved = true;
+        }
     }
     if (moved) {
         emit openedSourceChanged();
     }
     if (comb_moved) {
         emit combStatusChanged();
+    }
+    if (capture_moved) {
+        emit captureStatusChanged();
     }
 }
 

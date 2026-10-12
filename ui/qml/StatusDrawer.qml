@@ -70,6 +70,18 @@ ColumnLayout {
         lines: 3
     }
 
+    // The capture writer's trouble, in full. Only while it is in trouble: a
+    // healthy capture is the control row's dim readout and nothing here.
+    NoticeRow {
+        visible: engineLink.connected && engineLink.captureFault
+        heading: "capture:"
+        headingColor: Theme.inkBad
+        headingBold: true
+        body: engineLink.captureDetail
+        bodyColor: Theme.ink
+        lines: 3
+    }
+
     // ------------------------------------------------------------------
     // What the engine built, when it is not what was asked for
     // ------------------------------------------------------------------

@@ -68,6 +68,27 @@ Rectangle {
             horizontalAlignment: Text.AlignLeft
         }
 
+        // The engine's rolling capture, when it has one: dim while it is only
+        // recording, the fault ink once the writer drops blocks or stops,
+        // because then the recording on disk has holes nobody else reports.
+        // The wording is models/capture_note.h; the full sentence is on hover
+        // and in the status drawer.
+        Readout {
+            visible: engineLink.connected && engineLink.captureText !== ""
+            widest: "rec 000.0 GB, 0000 seg"
+            text: engineLink.captureText
+            color: engineLink.captureFault ? Theme.inkBad : Theme.inkDim
+            font.bold: engineLink.captureFault
+            horizontalAlignment: Text.AlignLeft
+
+            HoverHandler { id: captureHover }
+
+            Tip {
+                visible: captureHover.hovered && engineLink.captureDetail !== ""
+                text: engineLink.captureDetail
+            }
+        }
+
         Rectangle {
             Layout.preferredWidth: 1
             Layout.preferredHeight: 16
