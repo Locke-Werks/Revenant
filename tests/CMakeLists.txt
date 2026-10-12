@@ -234,3 +234,24 @@ else()
         "No Python 3 interpreter: the retired-claims and modal-dialog checks "
         "will not run in ctest here. CI's guards job still runs them.")
 endif()
+
+# The rolling capture's catalog and replay. Their own binary rather than a
+# subdirectory, so the segment writer's suite can land beside them in
+# tests/capture without the two branches editing one CMakeLists. The cases
+# need no GPU: they write segments to temp and read them back.
+add_executable(revenant_capture_catalog_tests
+    support/no_modal_dialogs.cpp
+    capture/test_catalog.cpp
+    capture/test_capture_source.cpp
+)
+target_link_libraries(revenant_capture_catalog_tests PRIVATE
+    revenant_core
+    Catch2::Catch2WithMain
+)
+target_include_directories(revenant_capture_catalog_tests PRIVATE "${CMAKE_SOURCE_DIR}")
+revenant_apply_warnings(revenant_capture_catalog_tests)
+catch_discover_tests(revenant_capture_catalog_tests
+    PROPERTIES
+        LABELS "capture"
+        TIMEOUT 120
+)
