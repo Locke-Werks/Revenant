@@ -46,7 +46,7 @@ if(TARGET revenant_capture_tool)
     catch_discover_tests(revenant_capture_tool_tests
         TEST_PREFIX "capture_tool: "
         PROPERTIES
-            LABELS "tools;capture"
+            LABELS "capture"
             TIMEOUT 300
     )
 endif()
