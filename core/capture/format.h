@@ -97,10 +97,10 @@ inline constexpr std::string_view kExtensionVersion = "1.0.0";
 // One core:captures entry, sample_start 0, with core:frequency and
 // core:datetime (ISO 8601 UTC, the wall clock of the first sample).
 //
-// core:annotations carries what the detector saw while the segment was being
+// The top-level annotations array (SigMF has no core:annotations key) carries what the detector saw while the segment was being
 // written, and what an offline index pass added later. See Annotation.
 
-// Keys on a core:annotations entry. Core keys used:
+// Keys on an annotations entry. Core keys used:
 // core:sample_start, core:sample_count (relative to the segment),
 // core:freq_lower_edge, core:freq_upper_edge (absolute Hz), core:label
 // (the family name when one was given, otherwise "signal"),
