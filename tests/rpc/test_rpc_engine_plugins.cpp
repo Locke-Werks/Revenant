@@ -36,6 +36,7 @@
 #include "core/rpc/client.h"
 #include "core/rpc/decoders.h"
 #include "core/rpc/types.h"
+#include "tests/capture/catalog_fixture.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
 #include "tests/rpc/rpc_fixture.h"
@@ -383,6 +384,102 @@ TEST_CASE("a front-end retune reaches a plugin with what it removed", "[gpu][rpc
     INFO(log.dump());
     REQUIRE_FALSE(retuned.empty());
     CHECK(retuned.find("removed=") != std::string::npos);
+}
+
+TEST_CASE("a retune a capture replay follows reaches the session once, with what it removed",
+          "[gpu][rpc][plugin][capture]") {
+    REVENANT_NEEDS_GPU();
+
+    // The engine applies this retune on its delivery thread, so nothing on
+    // the server's side asked for it. Before the server drained
+    // take_followed_retunes, a client was never told: the receiver below
+    // vanished with no removed event and no SOURCE_RETUNED went out.
+    constexpr dsp::Hertz kMarine = 156'800'000;
+    constexpr dsp::Hertz kWeather = 162'550'000;
+    constexpr dsp::SampleRate kReplayRate = 2'048'000;
+    constexpr std::uint64_t kSegment = 1u << 19;
+
+    test::CaptureRoot root;
+    test::SegmentSpec first;
+    first.rate = kReplayRate;
+    first.center = kMarine;
+    first.sample_count = kSegment;
+    test::write_segment(root.path(), first);
+    test::SegmentSpec second = first;
+    second.first_index = kSegment;
+    second.center = kWeather;
+    test::write_segment(root.path(), second);
+
+    const auto dir = plugin_directory("followed-retune", {kRpcTestEnginePluginGood});
+    const plugin::EnginePluginSet set = scan(dir);
+    REQUIRE(set.modules().size() == 1);
+
+    PluginLog log;
+    HarnessOptions options;
+    // Realtime, and a spectrum stage, because the server takes followed
+    // retunes on its pump and frames are what ring it.
+    options.source_uri = "capture:///" + root.utf8() + "?pace=1";
+    options.channels = test::kChannels;
+    options.spectrum_transform = 2048;
+    options.engine_plugins = &set;
+    options.plugin_log = log.sink();
+    Harness harness;
+    const auto ready = harness.open(options);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    auto vrx = harness.client().add_vrx(
+        rpc::VrxParams{.center = 100'000, .bandwidth = 0, .demod = rpc::Demod::Nfm});
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    std::mutex lock;
+    std::vector<rpc::VrxEvent> events;
+    REQUIRE(harness.client()
+                .subscribe_vrx_events(
+                    [&](const rpc::VrxEvent& event) {
+                        const std::scoped_lock held(lock);
+                        events.push_back(event);
+                    },
+                    [](const std::string&) {})
+                .has_value());
+
+    // The server installs its spectrum sink on the first subscriber, and
+    // without it nothing rings the pump.
+    REQUIRE(harness.client().subscribe_spectrum(1, [](const auto&) {}).has_value());
+
+    REQUIRE(harness.start_engine().has_value());
+    const std::string retuned =
+        log.find({event_type(RV_ENGINE_EVENT_SOURCE_RETUNED), std::format("center={} ", kWeather),
+                  std::format("start={} ", kSegment)});
+    INFO(log.dump());
+    INFO("engine centre " << harness.engine().info().source_center);
+    REQUIRE_FALSE(retuned.empty());
+    CHECK(retuned.find("removed=0 ") == std::string::npos);
+    CHECK(harness.stop_engine().has_value());
+
+    const auto lines = log.lines();
+    CHECK(std::ranges::count_if(lines, [](const std::string& line) {
+              return line.find(event_type(RV_ENGINE_EVENT_SOURCE_RETUNED)) != std::string::npos;
+          }) == 1);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    bool removed = false;
+    while (!removed && std::chrono::steady_clock::now() < deadline) {
+        {
+            const std::scoped_lock held(lock);
+            removed = std::ranges::any_of(events, [&](const rpc::VrxEvent& event) {
+                return event.kind == rpc::VrxEventKind::Removed && event.vrx == *vrx;
+            });
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(removed);
+    const auto ids = harness.client().vrx_ids();
+    REQUIRE(ids.has_value());
+    CHECK(std::ranges::find(*ids, *vrx) == ids->end());
+
+    harness.client().unsubscribe_vrx_events();
 }
 
 // ---------------------------------------------------------------------------

@@ -1626,7 +1626,9 @@ public:
 
     [[nodiscard]] virtual const source::SourceCapabilities& source_capabilities() const = 0;
 
-    [[nodiscard]] virtual const EngineInfo& info() const = 0;
+    // By value: source_center can move on the delivery thread (a replay
+    // following a retune), so the snapshot is taken under an atomic load.
+    [[nodiscard]] virtual EngineInfo info() const = 0;
 
     // Where the front end can be pointed, and whether it can be pointed at
     // all. Everything false and zero before a source is open.

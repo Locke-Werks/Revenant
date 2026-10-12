@@ -63,7 +63,7 @@ public:
     // moved after it. Written only by set_source_center, on the server's
     // event loop thread, which is the same single writer the real engine's
     // EngineInfo has.
-    [[nodiscard]] const engine::EngineInfo& info() const override {
+    [[nodiscard]] engine::EngineInfo info() const override {
         return retuned_.load(std::memory_order_acquire) ? info_ : inner_->info();
     }
 

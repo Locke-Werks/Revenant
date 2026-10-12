@@ -73,6 +73,7 @@ void log_line(const rv_engine_plugin& self, const std::string& line)
                        " decoder=" + ev.decoder +
                        " kind=" + ev.kind +
                        " removed=" + std::to_string(ev.removed_count) +
+                       " start=" + std::to_string(ev.start_sample) +
                        " dropped=" + std::to_string(ev.events_dropped_before) +
                        " fields=" + std::to_string(ev.field_count);
     for (std::uint32_t i = 0; i < ev.field_count; ++i) {

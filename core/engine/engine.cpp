@@ -761,7 +761,16 @@ public:
         return capabilities_;
     }
 
-    [[nodiscard]] const EngineInfo& info() const override { return info_; }
+    // A copy because source_center is stored from the delivery thread when a
+    // replay follows a retune, so a reference handed out here would be read
+    // as a plain field while it is written.
+    [[nodiscard]] EngineInfo info() const override {
+        EngineInfo out = info_;
+        // atomic_ref<const T> is C++26; a load does not write through this.
+        out.source_center =
+            std::atomic_ref(const_cast<dsp::Hertz&>(info_.source_center)).load();
+        return out;
+    }
 
     [[nodiscard]] SourceTuning source_tuning() const override {
         SourceTuning out;
@@ -1073,11 +1082,11 @@ public:
             if (auto set = corrected_->set_correction_ppb(settings.correction_ppb); !set) {
                 return std::unexpected(with_context(set.error(), "Engine::set_calibration"));
             }
-            info_.source_center = source_->center();
+            std::atomic_ref(info_.source_center).store(source_->center());
             // A relabel, not a retune: the samples did not move, so there is
             // no gap to wait for and the next block carries the new label.
             const dsp::SampleIndex now = source_->stats().write_index;
-            publish_capture_retune(info_.source_center, now, now);
+            publish_capture_retune(std::atomic_ref(info_.source_center).load(), now, now);
         }
         graph_->set_front_end_correction(settings.dc_removal, settings.iq_correction);
         calibration_ = settings;
@@ -1507,7 +1516,8 @@ public:
         }
 
         capture_pending_.store(false, std::memory_order_release);
-        capture_center_.store(info_.source_center, std::memory_order_release);
+        capture_center_.store(std::atomic_ref(info_.source_center).load(),
+                              std::memory_order_release);
 
         const std::scoped_lock held(capture_lock_);
         writer_ = std::move(writer);
