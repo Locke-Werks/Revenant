@@ -85,6 +85,15 @@ a capture of somebody scanning replays as one run. Measured on 2026-10-12: ten
 seconds of a 2.4 MS/s capture spanning two segments replayed as exactly
 24,000,000 samples at 68x realtime with every counter zero.
 
+## In the client
+
+With the engine started with `--capture`, a capture button appears in the top
+bar. Its panel lists the last hour's hits over the span being recorded, newest
+first; a double click replays one, and "back to the radio" opens the radio
+picker. A replay is not itself recorded. The session calls behind it,
+`captureCatalog`, `captureSearch` and `captureOccupancy`, are in
+[rpc.md](rpc.md).
+
 ## Limits
 
 - A track the live detector follows is annotated when it ends, as one entry

@@ -147,8 +147,8 @@ The band can be stored. `--capture` on either tool writes everything the radio
 delivers to disk as SigMF segments in its own sample format, keeps a bounded
 window of them, and files the detector's tracks into each segment's metadata;
 `revenant-capture` lists, searches, indexes and extracts what was kept, and a
-`capture://` URI replays any stretch of it through the same graph. The client
-does not browse a capture yet. [capture.md](capture.md) has the details and the
+`capture://` URI replays any stretch of it through the same graph. The client's
+capture panel lists the last hour's hits and replays one on a double click. [capture.md](capture.md) has the details and the
 measurements.
 
 What does not. The engine runs one radio
