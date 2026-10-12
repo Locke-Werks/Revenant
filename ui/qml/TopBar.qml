@@ -38,6 +38,7 @@ Rectangle {
         const panel = name === "radio" ? radioPanel
                     : name === "memories" ? memoriesPanel
                     : name === "settings" ? settingsPanel
+                    : name === "capture" ? capturePanel
                     : null
         if (panel === null)
             return
@@ -201,6 +202,40 @@ Rectangle {
                     id: memoriesView
                     Layout.preferredWidth: Math.min(900, bar.width - 40)
                     popover: memoriesPanel
+                }
+            }
+        }
+
+        // The rolling capture's recent hits. Only while the engine keeps a
+        // capture, or while one of its hits is replaying so the list stays
+        // reachable after the radio closed; an engine with no capture has
+        // nothing to browse and the bar says nothing about it.
+        RButton {
+            id: captureButton
+            flat: true
+            text: "capture"
+            ink: Theme.inkDim
+            visible: engineLink.connected
+                     && (engineLink.captureText !== ""
+                         || String(engineLink.openedSource.uri || "").startsWith("capture:"))
+            onClicked: capturePanel.opened ? capturePanel.close() : capturePanel.open()
+
+            Tip {
+                visible: parent.hovered && !capturePanel.opened
+                text: "what the capture caught in the last hour"
+            }
+
+            Popover {
+                id: capturePanel
+                parent: captureButton
+                onOpened: captureView.opened()
+
+                CapturePanel {
+                    id: captureView
+                    backToRadio: function() {
+                        capturePanel.close()
+                        radioPanel.open()
+                    }
                 }
             }
         }

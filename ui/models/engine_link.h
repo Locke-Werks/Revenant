@@ -1748,6 +1748,15 @@ class EngineLink : public QObject {
     Q_PROPERTY(QString captureDetail READ captureDetail NOTIFY captureStatusChanged)
     Q_PROPERTY(bool captureFault READ captureFault NOTIFY captureStatusChanged)
 
+    // The capture panel's list: the last searchCapture's hits as rows from
+    // models/capture_browser.h, newest first, each a map of time, duration,
+    // frequency, label, confidence and uri. captureSearchBusy is true from the
+    // ask until the answer; captureSearchFault is the engine's refusal in its
+    // own words. Implemented in capture_link.cpp.
+    Q_PROPERTY(QVariantList captureHits READ captureHits NOTIFY captureHitsChanged)
+    Q_PROPERTY(bool captureSearchBusy READ captureSearchBusy NOTIFY captureHitsChanged)
+    Q_PROPERTY(QString captureSearchFault READ captureSearchFault NOTIFY captureHitsChanged)
+
     // The focused receiver's choice as the engine reports it on the
     // receiver's status, "auto", "on" or "off", and whether the engine is
     // transcribing it now. The segmented control binds the first and moves
@@ -2112,6 +2121,11 @@ public:
     // answers, and sourcePaceFault carries a refusal. Implemented in
     // pace_link.cpp.
     Q_INVOKABLE void setSourcePace(double pace);
+
+    // Asks the engine's capture for the last hour's hits over the span now
+    // captured. On the supervisor, because a search reads the capture's index
+    // from disk. See capture_link.cpp.
+    Q_INVOKABLE void searchCapture();
 
     // Opens what the picker composed, closing whatever is open first.
     //
@@ -3000,6 +3014,9 @@ public:
     [[nodiscard]] QString combText() const { return comb_text_; }
     [[nodiscard]] bool combLocked() const { return comb_locked_; }
     [[nodiscard]] QString captureText() const { return capture_text_; }
+    [[nodiscard]] QVariantList captureHits() const { return capture_hits_; }
+    [[nodiscard]] bool captureSearchBusy() const { return capture_search_busy_; }
+    [[nodiscard]] QString captureSearchFault() const { return capture_search_fault_; }
     [[nodiscard]] QString captureDetail() const { return capture_detail_; }
     [[nodiscard]] bool captureFault() const { return capture_fault_; }
 
@@ -3215,6 +3232,7 @@ signals:
     void combCancelChanged();
     void combStatusChanged();
     void captureStatusChanged();
+    void captureHitsChanged();
 
     // New entries are on captionFeed(). The decode log has its own rows.
     void transcriptsArrived();
@@ -4328,6 +4346,22 @@ private:
     // the engine's answer. See pace_link.cpp.
     void apply_source_pace();
     void adopt_source_pace();
+
+    // Supervisor thread, then the Qt thread: a capture search searchCapture
+    // posted, and its rows. See capture_link.cpp.
+    void apply_capture_search();
+    void adopt_capture_search();
+
+    std::mutex capture_search_mutex_;
+    bool want_capture_search_ = false;            // guarded by capture_search_mutex_
+    double want_capture_low_hz_ = 0.0;            // guarded by capture_search_mutex_
+    double want_capture_high_hz_ = 0.0;           // guarded by capture_search_mutex_
+    bool handover_has_capture_hits_ = false;      // guarded by capture_search_mutex_
+    QVariantList handover_capture_hits_;          // guarded by capture_search_mutex_
+    QString handover_capture_search_fault_;       // guarded by capture_search_mutex_
+    QVariantList capture_hits_;
+    bool capture_search_busy_ = false;
+    QString capture_search_fault_;
 
     // Supervisor thread. Sends the excision switch when one is pending.
     void apply_impulse_excision();

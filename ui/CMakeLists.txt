@@ -245,6 +245,8 @@ qt_add_executable(revenant_ui
     models/recording_plan.h
     models/recording_status.h
     models/capture_note.h
+    models/capture_browser.h
+    models/capture_link.cpp
     models/source_link.cpp
     models/transcribe_link.cpp
     models/view_link.cpp
@@ -291,6 +293,7 @@ qt_add_qml_module(revenant_ui
         qml/StatusRow.qml
         qml/SourcePicker.qml
         qml/FrequencyManagerPanel.qml
+        qml/CapturePanel.qml
         qml/RecordingSection.qml
         qml/RecordingStrip.qml
         qml/DetectionControls.qml
@@ -686,6 +689,7 @@ if(REVENANT_UI_TESTS)
             tests/test_caption_layout.cpp
             tests/test_calibration.cpp
             tests/test_capture_note.cpp
+            tests/test_capture_browser.cpp
             tests/test_colour_map.cpp
             tests/test_composite_probe.cpp
             tests/test_decoded_log.cpp
