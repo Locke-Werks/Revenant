@@ -23,8 +23,14 @@
 // data file alone, with the stem ending in kOpenSuffix, and the catalog skips
 // it. A segment whose writer died is therefore a data file with no meta, which
 // the catalog reports as orphaned rather than guessing its metadata, and a
-// recovery pass can finalise it from the extent alone because the open name
-// carries everything the meta needs except the length.
+// recovery pass can finalise it from the extent plus <stem>.open.revenant, a
+// few key=value lines the writer puts beside the data before its first sample.
+// The stem alone cannot carry it: rate, format, the exact anchor, the gain and
+// core:hw are not in it. The side file is deleted on close, so a closed
+// segment is the two SigMF files and nothing else.
+//
+// Cs24 is written as ci24_le, which the file source does not read yet, so a
+// 24-bit capture stores but does not replay until it does.
 
 #pragma once
 
