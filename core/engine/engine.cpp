@@ -147,6 +147,7 @@ public:
         config_ = config;
         pace_.store(config.pace, std::memory_order_release);
         impulse_excision_.store(config.impulse_excision, std::memory_order_release);
+        comb_cancel_.store(config.comb_cancel, std::memory_order_release);
 
         gpu::Context::Options options;
         options.device_index = config.gpu_index;
@@ -504,6 +505,7 @@ public:
         graph_->set_front_end_correction(stored.settings.dc_removal,
                                          stored.settings.iq_correction);
         graph_->set_impulse_excision(impulse_excision_.load(std::memory_order_acquire));
+        graph_->set_comb_cancel(comb_cancel_.load(std::memory_order_acquire));
 
         source_ = std::move(source);
         capabilities_ = source_->capabilities();
@@ -785,6 +787,12 @@ public:
 
         // The one piece of engine state a retune moves.
         info_.source_center = *landed;
+
+        // A comb found at the old centre is somewhere else at the new one, or
+        // gone; the stage forgets it and averages a fresh spectrum.
+        if (graph_ != nullptr) {
+            graph_->note_source_retune();
+        }
 
         // And the marker on every receiver's stream, so a consumer that
         // accumulates state about the transmitter it is hearing has the same
@@ -1441,6 +1449,7 @@ public:
         out.vrx_retune_refusals = stats.vrx_retune_refusals;
         out.frame_stalls = stats.frame_stalls;
         out.impulse_excision = graph_->impulse_excision();
+        out.comb_cancel = graph_->comb_cancel();
         return out;
     }
 
@@ -1449,6 +1458,15 @@ public:
         impulse_excision_.store(on, std::memory_order_release);
         if (graph_ != nullptr) {
             graph_->set_impulse_excision(on);
+        }
+        return {};
+    }
+
+    [[nodiscard]] Status set_comb_cancel(bool on) override {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        comb_cancel_.store(on, std::memory_order_release);
+        if (graph_ != nullptr) {
+            graph_->set_comb_cancel(on);
         }
         return {};
     }
@@ -1596,6 +1614,7 @@ private:
     // The excision switch outlives a graph, so a choice made between sources
     // or before the first one is the one the next graph is built with.
     std::atomic<bool> impulse_excision_{true};
+    std::atomic<bool> comb_cancel_{true};
     EngineInfo info_{};
     std::string clamp_note_;
 

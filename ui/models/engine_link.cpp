@@ -194,6 +194,11 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
                                std::memory_order_release);
         excision_set_.store(true, std::memory_order_release);
     }
+    if (store.contains(settings::kCombCancel)) {
+        comb_wanted_.store(store.value(settings::kCombCancel, true).toBool(),
+                           std::memory_order_release);
+        comb_set_.store(true, std::memory_order_release);
+    }
 
     // Every rack change is a chance that a receiver's engine id moved under
     // a choice, which is what the per-receiver reconcile is about. Compared
@@ -293,6 +298,34 @@ void EngineLink::apply_impulse_excision()
     (void)client_->set_impulse_excision(excision_wanted_.load(std::memory_order_acquire));
 }
 
+void EngineLink::setCombCancel(bool on)
+{
+    if (comb_set_.load(std::memory_order_acquire) &&
+        comb_wanted_.load(std::memory_order_acquire) == on) {
+        return;
+    }
+    comb_wanted_.store(on, std::memory_order_release);
+    comb_set_.store(true, std::memory_order_release);
+    QSettings().setValue(settings::kCombCancel, on);
+    comb_pending_.store(true, std::memory_order_release);
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+    emit combCancelChanged();
+}
+
+void EngineLink::apply_comb_cancel()
+{
+    if (client_ == nullptr || !comb_pending_.exchange(false, std::memory_order_acq_rel)) {
+        return;
+    }
+    // As with the excision: an engine older than the call has no comb stage,
+    // and the checkbox already shows what was asked.
+    (void)client_->set_comb_cancel(comb_wanted_.load(std::memory_order_acquire));
+}
+
 void EngineLink::apply_plugin_receivers()
 {
     if (client_ == nullptr ||
@@ -327,6 +360,7 @@ void EngineLink::supervise()
             apply_calibration();
             apply_source_pace();
             apply_impulse_excision();
+            apply_comb_cancel();
             apply_plugin_receivers();
 
             // Then the receiver work. A drag posts a request and wakes this
@@ -467,6 +501,7 @@ void EngineLink::supervise()
             apply_calibration();
             apply_source_pace();
             apply_impulse_excision();
+            apply_comb_cancel();
             apply_plugin_receivers();
 
             apply_receiver_request();
@@ -786,6 +821,9 @@ bool EngineLink::attempt_connect()
     // comes up at its default.
     if (excision_set_.load(std::memory_order_acquire)) {
         excision_pending_.store(true, std::memory_order_release);
+    }
+    if (comb_set_.load(std::memory_order_acquire)) {
+        comb_pending_.store(true, std::memory_order_release);
     }
 
     // And auto DV's hold on plugin receivers, which a restarted engine has

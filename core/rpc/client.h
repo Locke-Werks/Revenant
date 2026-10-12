@@ -350,6 +350,10 @@ public:
     // SourceStats carries whether it is on and what it has removed.
     [[nodiscard]] virtual Status set_impulse_excision(bool on) = 0;
 
+    // The span-wide comb cancellation, engine-wide and on by default.
+    // SourceStats carries whether it is on and what its tracker reports.
+    [[nodiscard]] virtual Status set_comb_cancel(bool on) = 0;
+
     // Whether engine plugins may open receivers, engine-wide and allowed by
     // default. Refusing removes every receiver a plugin holds. The client's
     // auto DV refuses it so it and the P25 trunk tracker never share a channel.

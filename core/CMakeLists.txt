@@ -136,6 +136,9 @@ add_library(revenant_core STATIC
     identify/identify.cpp
     plugin/dll_scan.cpp
     plugin/engine_plugin.cpp
+    dsp/comb_detect.cpp
+    dsp/comb_kernels_reference.cpp
+    dsp/comb_tracker.cpp
     dsp/complex_ops.cpp
     dsp/convert.cpp
     dsp/denormal_mode.cpp
@@ -239,6 +242,8 @@ revenant_add_shaders(revenant_core
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/noise_blank.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/noise_line.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/noise_spectral.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/comb_project.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/comb_subtract.comp"
 )
 
 revenant_apply_warnings(revenant_core)

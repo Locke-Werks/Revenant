@@ -85,4 +85,10 @@ namespace revenant::gpu::shaders {
 [[nodiscard]] std::span<const std::uint32_t> noise_line();
 [[nodiscard]] std::span<const std::uint32_t> noise_spectral();
 
+// Span-wide comb cancellation on the ring: the per-line, per-sub-block
+// projections the host tracker reads, and the in-place subtraction of the
+// synthesised comb. Twins in core/dsp/comb_cancel.h.
+[[nodiscard]] std::span<const std::uint32_t> comb_project();
+[[nodiscard]] std::span<const std::uint32_t> comb_subtract();
+
 }  // namespace revenant::gpu::shaders

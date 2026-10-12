@@ -442,6 +442,19 @@ ColumnLayout {
         }
     }
 
+    // Engine-wide: finds a comb of evenly spaced interference lines across
+    // the span and subtracts it before the channelizer. Cancels nothing until
+    // it has locked; the control row shows what it is doing. Remembered and
+    // re-sent on each connection; models/settings.h, kCombCancel.
+    RCheckBox {
+        text: "cancel comb interference across the span"
+        checked: engineLink.combCancel
+        onToggled: {
+            engineLink.combCancel = checked
+            checked = Qt.binding(() => engineLink.combCancel)
+        }
+    }
+
     Rule {}
 
     SectionTitle { text: "speech" }

@@ -23,6 +23,8 @@
 #include "shaders/noise_blank_comp.h"
 #include "shaders/noise_line_comp.h"
 #include "shaders/noise_spectral_comp.h"
+#include "shaders/comb_project_comp.h"
+#include "shaders/comb_subtract_comp.h"
 
 namespace revenant::gpu::shaders {
 
@@ -107,6 +109,15 @@ std::span<const std::uint32_t> noise_line() {
 std::span<const std::uint32_t> noise_spectral() {
     return std::span<const std::uint32_t>(noise_spectral_comp_spv,
                                           std::size(noise_spectral_comp_spv));
+}
+
+std::span<const std::uint32_t> comb_project() {
+    return std::span<const std::uint32_t>(comb_project_comp_spv, std::size(comb_project_comp_spv));
+}
+
+std::span<const std::uint32_t> comb_subtract() {
+    return std::span<const std::uint32_t>(comb_subtract_comp_spv,
+                                          std::size(comb_subtract_comp_spv));
 }
 
 }  // namespace revenant::gpu::shaders

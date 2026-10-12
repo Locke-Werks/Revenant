@@ -1,0 +1,105 @@
+// Span-wide comb cancellation, subtract pass: synthesise the comb from the
+// tracker's amplitudes and the lines' integer phases, and subtract it from
+// the ring in place, writing what was removed beside it.
+//
+// core/dsp/comb_cancel.h states the contract. For each n in [0, count):
+//
+//     removed[n] = sum over l ascending of amplitude_l * tone_l(n)
+//     cleaned[n] = x[first + n] - removed[n]
+//
+// One invocation per sample. The sum starts from negative zero and adds each
+// line's product in line order, the product being two separate multiplies
+// and an add or subtract per component, all `precise` so nothing is
+// contracted into an FMA. Starting from negative zero is the
+// core/dsp/impulse_excision.h trick: with no lines the removed sample is -0,
+// which adds to anything without changing it. With no lines the cleaned
+// sample is the raw one copied rather than x - (-0), because that
+// subtraction turns a raw -0 into +0 and the pair would no longer add back to
+// the raw sample to the bit.
+//
+// The CPU twin is reference_comb_subtract in
+// core/dsp/comb_kernels_reference.cpp, bit-identical.
+//
+// IN PLACE THROUGH TWO BINDINGS, as in impulse_excise.comp: the engine binds
+// the ring as both Source and Destination, each invocation reads and writes
+// only its own slot, and the conformance test can hand it two buffers.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+// dsp::kCombTableLog2.
+const uint kTableShift = 32u - 12u;
+
+layout(std430, binding = 0) readonly buffer Source {
+    vec2 samples[];
+} src;
+
+// dsp::CombLine.
+struct Line {
+    uint phase0;
+    uint step;
+    uint pad0;
+    uint pad1;
+    vec2 amplitude;
+};
+
+layout(std430, binding = 1) readonly buffer Lines {
+    Line values[];
+} lines;
+
+layout(std430, binding = 2) readonly buffer Table {
+    vec2 values[];
+} table;
+
+layout(std430, binding = 3) writeonly buffer Destination {
+    vec2 samples[];
+} dst;
+
+layout(std430, binding = 4) writeonly buffer Removed {
+    vec2 samples[];
+} removed;
+
+// dsp::CombParams.
+layout(push_constant) uniform Params {
+    uint ring_mask;
+    uint first;
+    uint count;
+    uint lines;
+    uint sub_blocks;
+    uint removed_mask;
+    uint pad0;
+    uint pad1;
+} params;
+
+void main() {
+    const uint n = gl_GlobalInvocationID.x;
+    if (n >= params.count) {
+        return;
+    }
+    const uint slot = (params.first + n) & params.ring_mask;
+    const vec2 x = src.samples[slot];
+
+    const float nothing = uintBitsToFloat(0x80000000u);
+    precise float sum_re = nothing;
+    precise float sum_im = nothing;
+    for (uint l = 0u; l < params.lines; ++l) {
+        const uint phase = lines.values[l].phase0 + n * lines.values[l].step;
+        const vec2 t = table.values[phase >> kTableShift];
+        const vec2 a = lines.values[l].amplitude;
+        // a * t
+        precise float re = a.x * t.x - a.y * t.y;
+        precise float im = a.x * t.y + a.y * t.x;
+        sum_re = sum_re + re;
+        sum_im = sum_im + im;
+    }
+
+    if (params.lines == 0u) {
+        dst.samples[slot] = x;
+    } else {
+        precise float out_re = x.x - sum_re;
+        precise float out_im = x.y - sum_im;
+        dst.samples[slot] = vec2(out_re, out_im);
+    }
+    removed.samples[(params.first + n) & params.removed_mask] = vec2(sum_re, sum_im);
+}

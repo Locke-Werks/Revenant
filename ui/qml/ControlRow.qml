@@ -57,6 +57,17 @@ Rectangle {
         // Absent, with its divider, on a source that has no direct sampling.
         DirectSamplingControl {}
 
+        // What the span-wide comb cancellation is doing, in the readout's
+        // voice: dim while it is only looking, ink while it is cancelling.
+        // Absent with the stage off or no engine. The switch is in settings.
+        Readout {
+            visible: engineLink.connected && engineLink.combText !== ""
+            widest: "comb locked 256 lines -60 dB"
+            text: engineLink.combText
+            color: engineLink.combLocked ? Theme.ink : Theme.inkDim
+            horizontalAlignment: Text.AlignLeft
+        }
+
         Rectangle {
             Layout.preferredWidth: 1
             Layout.preferredHeight: 16

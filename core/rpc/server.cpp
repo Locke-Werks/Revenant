@@ -3091,6 +3091,13 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> setCombCancel(SetCombCancelContext context) override {
+        if (auto set = owner_.engine().set_comb_cancel(context.getParams().getOn()); !set) {
+            return to_exception(set.error());
+        }
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> setPluginReceivers(SetPluginReceiversContext context) override {
         owner_.set_plugin_receivers(context.getParams().getAllowed());
         return kj::READY_NOW;

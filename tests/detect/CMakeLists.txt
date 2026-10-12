@@ -25,6 +25,7 @@
 add_executable(revenant_detect_tests
     ../support/no_modal_dialogs.cpp
     scene_frames.cpp
+    test_comb_detect.cpp
     test_detector.cpp
     test_detector_overlap.cpp
     test_detector_scene.cpp

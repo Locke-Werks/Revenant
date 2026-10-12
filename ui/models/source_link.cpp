@@ -406,6 +406,7 @@ void EngineLink::poll_front_end(bool engine_running)
 
     note_samples_delivered(stats->samples_delivered);
     note_direct_branch(stats->direct_sampling);
+    note_comb_status(*stats);
 
     FrontEndSample sample;
     sample.engine_running = engine_running;

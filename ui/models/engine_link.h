@@ -1730,6 +1730,15 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool impulseExcision READ impulseExcision WRITE setImpulseExcision NOTIFY
                    impulseExcisionChanged)
 
+    // The engine's span-wide comb cancellation, as the operator set it, by
+    // the excision's rules: on until told otherwise, remembered under
+    // kCombCancel. combText is what the stage is doing, read off the
+    // SourceStats poll: "comb", "comb acquiring", "comb locked 154 lines
+    // -18 dB" or "comb lost", and empty with the stage off or no engine.
+    Q_PROPERTY(bool combCancel READ combCancel WRITE setCombCancel NOTIFY combCancelChanged)
+    Q_PROPERTY(QString combText READ combText NOTIFY combStatusChanged)
+    Q_PROPERTY(bool combLocked READ combLocked NOTIFY combStatusChanged)
+
     // The focused receiver's choice as the engine reports it on the
     // receiver's status, "auto", "on" or "off", and whether the engine is
     // transcribing it now. The segmented control binds the first and moves
@@ -2974,6 +2983,14 @@ public:
     }
     void setImpulseExcision(bool on);
 
+    [[nodiscard]] bool combCancel() const
+    {
+        return comb_wanted_.load(std::memory_order_acquire);
+    }
+    void setCombCancel(bool on);
+    [[nodiscard]] QString combText() const { return comb_text_; }
+    [[nodiscard]] bool combLocked() const { return comb_locked_; }
+
     // The focused receiver's choice, by name. A name that is not one of the
     // three is ignored rather than read as auto.
     Q_INVOKABLE void setReceiverTranscribe(const QString& choice);
@@ -3183,6 +3200,8 @@ signals:
     void transcriptionChanged();
 
     void impulseExcisionChanged();
+    void combCancelChanged();
+    void combStatusChanged();
 
     // New entries are on captionFeed(). The decode log has its own rows.
     void transcriptsArrived();
@@ -3217,6 +3236,10 @@ private:
     // The same poll, the same handover: the ADC branch in force.
     void note_direct_branch(rpc::DirectSamplingMode branch);
 
+    // The same poll again: the comb cancellation's state, as the line the
+    // top bar draws. Posted on a change of the line only.
+    void note_comb_status(const rpc::SourceStats& stats);
+
     // Qt thread, queued from the two above.
     void adopt_open_source();
 
@@ -3228,6 +3251,9 @@ private:
     bool handover_has_delivered_ = false;     // guarded by open_source_mutex_
     std::uint64_t handover_delivered_ = 0;    // guarded by open_source_mutex_
     bool handover_has_branch_ = false;        // guarded by open_source_mutex_
+    bool handover_has_comb_ = false;          // guarded by open_source_mutex_
+    QString handover_comb_text_;              // guarded by open_source_mutex_
+    bool handover_comb_locked_ = false;       // guarded by open_source_mutex_
     rpc::DirectSamplingMode handover_branch_ = rpc::DirectSamplingMode::Off;  // same
 
     // Supervisor thread only. Cleared by attempt_connect, because an engine
@@ -3240,11 +3266,15 @@ private:
     bool delivered_posted_ = false;
     rpc::DirectSamplingMode posted_branch_ = rpc::DirectSamplingMode::Off;
     bool branch_posted_ = false;
+    QString posted_comb_text_;
+    bool comb_posted_ = false;
 
     // Qt thread only.
     QVariantMap open_source_;
     qulonglong samples_delivered_ = 0;
     QString direct_branch_ = QStringLiteral("off");
+    QString comb_text_;
+    bool comb_locked_ = false;
 
 private:
     // The supervisor thread, and the two halves of what it does.
@@ -4280,6 +4310,7 @@ private:
 
     // Supervisor thread. Sends the excision switch when one is pending.
     void apply_impulse_excision();
+    void apply_comb_cancel();
     void apply_plugin_receivers();
 
     // ---- the recording's pace --------------------------------------------
@@ -5128,6 +5159,11 @@ private:
     std::atomic<bool> excision_wanted_{true};
     std::atomic<bool> excision_set_{false};
     std::atomic<bool> excision_pending_{false};
+
+    // The comb switch, by the same three.
+    std::atomic<bool> comb_wanted_{true};
+    std::atomic<bool> comb_set_{false};
+    std::atomic<bool> comb_pending_{false};
 
     // Auto DV and the P25 trunk tracker are one or the other: while auto DV
     // is on the engine is told plugins may not open receivers. What is

@@ -124,6 +124,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/dsp/comb_cancel.h"
 #include "core/dsp/front_end_correction.h"
 #include "core/dsp/pfb.h"
 #include "core/dsp/types.h"
@@ -314,6 +315,13 @@ struct EngineConfig {
     // set_impulse_excision changes it while the engine runs, and the choice
     // carries across a change of source.
     bool impulse_excision = true;
+
+    // The span-wide comb cancellation, core/dsp/comb_cancel.h. On by default
+    // for the same reason as the excision: the stage cancels nothing until it
+    // has detected a comb and locked to it, so a capture without one comes
+    // through unchanged. Engine::set_comb_cancel changes it while the engine
+    // runs, and the choice carries across a change of source.
+    bool comb_cancel = true;
 };
 
 // The widest receiver a grid is expected to be able to carry, anywhere on it.
@@ -695,8 +703,9 @@ struct FrontEndCorrectionStatus {
 // What the span-wide impulse excision is doing.
 //
 // The stage is core/shaders/impulse_excise.comp, run on each block after the
-// front-end correction and before the channelizer, so the spectrum, the
-// waterfall, the detector and every receiver see the cleaned stream.
+// front-end correction and the comb cancellation and before the
+// channelizer, so the spectrum, the waterfall, the detector and every
+// receiver see the cleaned stream.
 // core/dsp/impulse_excision.h has the design. Counts are cumulative from the
 // source's open; a reader takes two and subtracts.
 struct ImpulseExcisionStatus {
@@ -712,6 +721,21 @@ struct ImpulseExcisionStatus {
     // Runs that stood over the threshold and were longer than the widest
     // impulse, so were left alone as signals.
     std::uint64_t spared = 0;
+};
+
+// What the span-wide comb cancellation is doing. The stage is
+// core/shaders/comb_project.comp and comb_subtract.comp, run on each block
+// after the front-end correction and before the impulse excision; core/dsp/comb_cancel.h
+// has the design. `status` is the tracker's as the recording thread last
+// published it, field by field, so a reader can see one block's lock state
+// beside the next block's line count; nothing acts on it but a person.
+struct CombCancelStatus {
+    bool on = false;
+    dsp::CombStatus status{};
+
+    // Detections run since the source opened, and those that found a comb.
+    std::uint64_t detections = 0;
+    std::uint64_t detections_found = 0;
 };
 
 // A device's calibration as the engine holds it, and what the engine has
@@ -1453,6 +1477,10 @@ struct GraphConditions {
     // The span-wide impulse excision's switch and counts, on this message
     // for the reason the two above are: the wire already polls it.
     ImpulseExcisionStatus impulse_excision{};
+
+    // The span-wide comb cancellation's switch and state, here for the same
+    // reason.
+    CombCancelStatus comb_cancel{};
 };
 
 // Cumulative host time and throughput, for measuring contention rather than
@@ -1903,6 +1931,10 @@ public:
     // is: an Engine written before the stage existed has none and says so.
     [[nodiscard]] virtual Status set_impulse_excision(bool on);
 
+    // Switches the span-wide comb cancellation, by the same rules as
+    // set_impulse_excision. What it is doing rides on graph_conditions().
+    [[nodiscard]] virtual Status set_comb_cancel(bool on);
+
 protected:
     Engine() = default;
 
@@ -1964,6 +1996,11 @@ inline Expected<CalibrationState> Engine::set_calibration(const source::DeviceCa
 inline Status Engine::set_impulse_excision(bool) {
     return fail("this engine has no impulse excision: it was written before "
                 "core/dsp/impulse_excision.h existed");
+}
+
+inline Status Engine::set_comb_cancel(bool) {
+    return fail("this engine has no comb cancellation: it was written before "
+                "core/dsp/comb_cancel.h existed");
 }
 
 inline void Engine::drop_audio_fanouts() {

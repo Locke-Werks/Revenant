@@ -183,6 +183,10 @@ inline constexpr QLatin1StringView kTranscription{"speech/transcribe"};
 // it has been. See EngineLink::setImpulseExcision.
 inline constexpr QLatin1StringView kImpulseExcision{"radio/impulseExcision"};
 
+// The engine's span-wide comb cancellation, on or off, by the same rules as
+// kImpulseExcision. See EngineLink::setCombCancel.
+inline constexpr QLatin1StringView kCombCancel{"radio/combCancel"};
+
 // The last ten recordings opened from the picker, newest first, as one JSON
 // array for the reason kBookmarks is one. Each entry is the path and the
 // centre, rate and format boxes as they were typed, so a recording that

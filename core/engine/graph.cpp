@@ -109,14 +109,18 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <limits>
 #include <mutex>
 #include <new>
 #include <optional>
+#include <thread>
 #include <utility>
 
+#include "core/dsp/comb_cancel.h"
 #include "core/dsp/convert.h"
 #include "core/dsp/impulse_excision.h"
 #include "core/dsp/pfb_branch_reference.h"
@@ -874,6 +878,23 @@ struct Graph::Impl {
         gpu::Buffer excise_counters;
         VkDescriptorSet excise_set = VK_NULL_HANDLE;
         bool excise_counted = false;
+
+        // The comb cancellation's lines for this frame, written by the host
+        // into staging and copied to the device at the head of the stage, and
+        // the projections the project pass wrote straight into host-visible
+        // memory. Read back by the recording thread when it next takes this
+        // slot, as the moments are; comb_observed_count is zero when no
+        // project pass ran.
+        gpu::Buffer comb_lines_staging;
+        gpu::Buffer comb_lines;
+        gpu::Buffer comb_projections;
+        VkDescriptorSet comb_project_set = VK_NULL_HANDLE;
+        VkDescriptorSet comb_subtract_set = VK_NULL_HANDLE;
+        dsp::SampleIndex comb_observed_start = 0;
+        std::uint32_t comb_observed_count = 0;
+        std::uint32_t comb_observed_lines = 0;
+        std::uint32_t comb_observed_sub_blocks = 0;
+        std::uint64_t comb_observed_epoch = 0;
     };
 
     const gpu::Context* context = nullptr;
@@ -959,6 +980,113 @@ struct Graph::Impl {
     std::atomic<std::uint64_t> excise_samples{0};
     std::atomic<std::uint64_t> excise_events{0};
     std::atomic<std::uint64_t> excise_spared{0};
+
+    // The span-wide comb cancellation, core/dsp/comb_cancel.h. Two pipelines
+    // built with the coarse chain whether or not the stage is on, the shared
+    // phase-to-tone table, and the ring the subtract pass writes what it
+    // removed into.
+    gpu::ComputePipeline comb_project_pipeline;
+    gpu::ComputePipeline comb_subtract_pipeline;
+    gpu::Buffer comb_table;
+    gpu::Buffer comb_removed;
+    std::uint32_t comb_removed_mask = 0;
+
+    // Recording thread only. The tracker, the next sample the stage has not
+    // yet covered (so a range is never cancelled twice when the excision is
+    // switched and the range the stage follows jumps), whether the stage ran
+    // on the previous block, and the retune epoch the tracker was last reset
+    // at.
+    dsp::CombTracker comb_tracker;
+    dsp::SampleIndex comb_next = 0;
+    bool comb_was_on = false;
+    std::uint64_t comb_tracker_epoch = 0;
+
+    // Written by set_comb_cancel and note_source_retune on any thread.
+    std::atomic<bool> comb_on{true};
+    std::atomic<std::uint64_t> comb_epoch{0};
+
+    // The tracker's status as the recording thread last published it. Field
+    // by field, for the reason FrontEndCorrectionStatus gives: only a person
+    // reads these.
+    std::atomic<std::uint8_t> comb_lock{0};
+    std::atomic<std::uint32_t> comb_lines_cancelled{0};
+    std::atomic<float> comb_suppression_db{0.0F};
+    std::atomic<float> comb_drift{0.0F};
+    std::atomic<double> comb_offset_hz{0.0};
+    std::atomic<double> comb_spacing_hz{0.0};
+    std::atomic<std::int32_t> comb_k_lo{0};
+    std::atomic<std::int32_t> comb_k_hi{-1};
+    std::atomic<std::uint32_t> comb_lines_found{0};
+    std::atomic<float> comb_median_height_db{0.0F};
+    std::atomic<std::uint64_t> comb_detections{0};
+    std::atomic<std::uint64_t> comb_detections_found{0};
+
+    // DETECTION, OFF THE SAMPLE PATH. The completion thread folds each
+    // spectrum frame it delivers into a linear average (comb_avg_*, completion
+    // thread only). Once the average spans a second of source time it hands
+    // a copy to the detection thread through comb_job_power and
+    // comb_job_state, and starts a new average. The detection thread runs
+    // detect_comb and leaves its answer in comb_result for the recording
+    // thread, which hands it to the tracker at its next block.
+    //
+    // Two single-slot handoffs, each with one writer and one reader, and an
+    // atomic that says whose turn it is; no lock on either side:
+    //
+    //   comb_job_*     completion thread writes while comb_job_state is
+    //                  kCombJobIdle, then stores kCombJobReady; the detection
+    //                  thread reads while it is kCombJobReady and stores
+    //                  kCombJobIdle when finished. A window that completes
+    //                  while a detection is still running is dropped and
+    //                  counted in comb_windows_dropped; the next one follows a
+    //                  second later.
+    //   comb_result    detection thread writes while comb_result_full is
+    //                  false, then sets it; the recording thread reads while it
+    //                  is true and clears it. A result that finds the slot
+    //                  still full is dropped the same way.
+    //
+    // Every job and result carries the retune epoch it was averaged under, so
+    // a spectrum measured before a retune never reaches the tracker after it.
+    static constexpr std::uint32_t kCombJobIdle = 0;
+    static constexpr std::uint32_t kCombJobReady = 1;
+    static constexpr std::uint32_t kCombJobStop = 2;
+
+    std::vector<double> comb_avg_sum;
+    std::uint64_t comb_avg_frames = 0;
+    dsp::SampleIndex comb_avg_first = 0;
+    dsp::SampleIndex comb_avg_last = 0;
+    std::uint64_t comb_avg_epoch = 0;
+    bool comb_avg_running = false;
+
+    std::vector<float> comb_job_power;
+    dsp::SampleRate comb_job_rate = 0;
+    std::uint64_t comb_job_epoch = 0;
+    std::atomic<std::uint32_t> comb_job_state{kCombJobIdle};
+
+    struct CombResult {
+        std::optional<dsp::CombEstimate> estimate;
+        std::uint64_t epoch = 0;
+    };
+    CombResult comb_result;
+    std::atomic<bool> comb_result_full{false};
+    std::atomic<std::uint64_t> comb_windows_dropped{0};
+
+    // log2(10) / 10: a decibel value times this is the base-two exponent of
+    // its linear power.
+    static constexpr float kDbToLog2 = 0.33219280948873623F;
+
+    // Recording thread: where a slot's projections land when read back.
+    std::vector<dsp::Complex32> comb_projection_scratch;
+    std::atomic<std::uint64_t> comb_plans_refused{0};
+    std::atomic<std::uint64_t> comb_samples_cancelled{0};
+
+    std::thread comb_detector;
+
+    // REVENANT_COMB_DUMP, when set, is a path prefix: every spectrum handed
+    // to detect_comb is written to <prefix>.<n>.<rate>.f32 as raw floats, so
+    // a detection that finds nothing on a live comb can be replayed offline.
+    // Read once at prepare; the detection thread is the only writer.
+    std::string comb_dump_prefix;
+    std::uint64_t comb_dumps = 0;
 
     // A second specialization of core/shaders/spectrum.comp, at one channel
     // and the passband's own transform size.
@@ -1078,6 +1206,7 @@ struct Graph::Impl {
     ~Impl() { destroy(); }
 
     void destroy() noexcept {
+        stop_comb_detector();
         // Deregistering rather than stopping the ring. Both wake a producer
         // parked on this consumer's retirement, because release_slot bumps
         // the epoch, and only this one leaves the ring usable: a graph that
@@ -1294,7 +1423,8 @@ struct Graph::Impl {
         const dsp::ExcisionParams* passes[] = {&plan.segment, &plan.reference, &plan.flag,
                                                &plan.apply};
 
-        // The convert, the copy and the correction all wrote the block.
+        // The convert, the copy, the correction and the comb all wrote the
+        // block.
         record_barrier(frame.commands,
                        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
@@ -1324,6 +1454,305 @@ struct Graph::Impl {
             readbacks.fetch_add(1, std::memory_order_relaxed);
             excise_examined.fetch_add(plan.apply.count, std::memory_order_relaxed);
         }
+    }
+
+    // Recording thread. Folds the projections a slot's previous project pass
+    // left into the tracker. Slots are reused in submission order, so the
+    // tracker sees its observations in block order, frames_in_flight blocks
+    // behind the block being planned.
+    void read_comb_projections(Frame& frame) {
+        if (frame.comb_observed_count == 0) {
+            return;
+        }
+        const std::uint32_t count = frame.comb_observed_count;
+        frame.comb_observed_count = 0;
+        const std::size_t values =
+            static_cast<std::size_t>(frame.comb_observed_lines) * frame.comb_observed_sub_blocks;
+        if (values > comb_projection_scratch.size()) {
+            return;
+        }
+        const std::span<dsp::Complex32> projections(comb_projection_scratch.data(), values);
+        if (!frame.comb_projections.read(std::as_writable_bytes(projections))) {
+            // One block's projections lost: the tracker sees a gap, which it
+            // has to cope with anyway across a dropped block.
+            return;
+        }
+        if (frame.comb_observed_epoch != comb_tracker_epoch) {
+            // Measured before a retune or a switch the tracker has since
+            // forgotten.
+            return;
+        }
+        dsp::CombObservation observation;
+        observation.start = frame.comb_observed_start;
+        observation.count = count;
+        observation.sub_blocks = frame.comb_observed_sub_blocks;
+        observation.projections = projections;
+        comb_tracker.observe(observation);
+    }
+
+    // Recording thread. Takes a finished detection if one is waiting.
+    void take_comb_detection() {
+        if (!comb_result_full.load(std::memory_order_acquire)) {
+            return;
+        }
+        const CombResult result = comb_result;
+        comb_result_full.store(false, std::memory_order_release);
+        if (result.epoch != comb_epoch.load(std::memory_order_acquire) ||
+            !result.estimate.has_value()) {
+            return;
+        }
+        // Fed only while the tracker has nothing. The detection's spectrum is
+        // measured after the cancellation, so once the stage is cancelling it
+        // sees what is left of the comb, and handing that back would restart
+        // acquisition on a comb the tracker already holds; the tracker reports
+        // a comb it has stopped fitting as lost, and then this picks it up
+        // afresh. While acquiring, a detection a second later would restart a
+        // pull-in that may need longer than that.
+        const dsp::CombLock lock = comb_tracker.status().lock;
+        if (lock == dsp::CombLock::kIdle || lock == dsp::CombLock::kLost) {
+            comb_tracker.detected(*result.estimate);
+        }
+    }
+
+    void publish_comb_status() {
+        const dsp::CombStatus status = comb_tracker.status();
+        comb_lines_cancelled.store(status.lines_cancelled, std::memory_order_relaxed);
+        comb_suppression_db.store(status.suppression_db, std::memory_order_relaxed);
+        comb_drift.store(status.spacing_drift_hz_per_s, std::memory_order_relaxed);
+        comb_offset_hz.store(status.comb.offset_hz, std::memory_order_relaxed);
+        comb_spacing_hz.store(status.comb.spacing_hz, std::memory_order_relaxed);
+        comb_k_lo.store(status.comb.k_lo, std::memory_order_relaxed);
+        comb_k_hi.store(status.comb.k_hi, std::memory_order_relaxed);
+        comb_lines_found.store(status.comb.lines_found, std::memory_order_relaxed);
+        comb_median_height_db.store(status.comb.median_height_db, std::memory_order_relaxed);
+        comb_lock.store(static_cast<std::uint8_t>(status.lock), std::memory_order_release);
+    }
+
+    // Recording thread. Plans the comb cancellation over [start, end), the
+    // block just written, and returns the plan to record, or nothing.
+    std::optional<dsp::CombBlockPlan> plan_comb_cancel(dsp::SampleIndex start,
+                                                       dsp::SampleIndex end) {
+        const bool on = comb_on.load(std::memory_order_acquire);
+        const std::uint64_t epoch = comb_epoch.load(std::memory_order_acquire);
+        if (!on) {
+            if (comb_was_on) {
+                comb_tracker.reset();
+                publish_comb_status();
+            }
+            comb_was_on = false;
+            return std::nullopt;
+        }
+        if (!comb_was_on || epoch != comb_tracker_epoch) {
+            comb_tracker.reset();
+            comb_tracker_epoch = epoch;
+        }
+        comb_was_on = true;
+        take_comb_detection();
+
+        start = std::max(start, comb_next);
+        if (end <= start) {
+            publish_comb_status();
+            return std::nullopt;
+        }
+        comb_next = end;
+        dsp::CombBlockPlan plan =
+            comb_tracker.plan(start, static_cast<std::uint32_t>(end - start));
+        publish_comb_status();
+        if (plan.lines.empty() || plan.count == 0) {
+            return std::nullopt;
+        }
+        return plan;
+    }
+
+    // Recording thread. Records the project pass and, once the tracker is
+    // cancelling, the subtract pass, both in place on the ring after the
+    // front-end correction and before the impulse excision.
+    void record_comb_cancel(Frame& frame, const dsp::CombBlockPlan& plan) {
+        const auto lines = static_cast<std::uint32_t>(
+            std::min<std::size_t>(plan.lines.size(), dsp::kCombMaxLines));
+        dsp::CombParams params;
+        params.ring_mask = static_cast<std::uint32_t>(ring->geometry().capacity_mask);
+        params.first = static_cast<std::uint32_t>(plan.start & ring->geometry().capacity_mask);
+        params.count = plan.count;
+        params.lines = lines;
+        params.sub_blocks = plan.sub_blocks;
+        params.removed_mask = comb_removed_mask;
+        if (!dsp::validate(params) ||
+            static_cast<std::size_t>(lines) * plan.sub_blocks > comb_projection_scratch.size()) {
+            comb_plans_refused.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        const VkDeviceSize line_bytes = static_cast<VkDeviceSize>(lines) * sizeof(dsp::CombLine);
+        if (!frame.comb_lines_staging.write(std::as_bytes(std::span(plan.lines.data(), lines)))) {
+            comb_plans_refused.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        VkBufferCopy region{};
+        region.size = line_bytes;
+        vkCmdCopyBuffer(frame.commands, frame.comb_lines_staging.handle(),
+                        frame.comb_lines.handle(), 1, &region);
+
+        // The convert, the copy and the correction wrote the ring; the line
+        // copy wrote the lines.
+        record_barrier(frame.commands,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+        record_dispatch(frame.commands, comb_project_pipeline, frame.comb_project_set,
+                        std::as_bytes(std::span<const dsp::CombParams>(&params, 1)),
+                        group_count(static_cast<std::uint64_t>(lines) * plan.sub_blocks,
+                                    geometry.local_size_x));
+        dispatches.fetch_add(1, std::memory_order_relaxed);
+        readbacks.fetch_add(1, std::memory_order_relaxed);
+        frame.comb_observed_start = plan.start;
+        frame.comb_observed_count = plan.count;
+        frame.comb_observed_lines = lines;
+        frame.comb_observed_sub_blocks = plan.sub_blocks;
+        frame.comb_observed_epoch = comb_tracker_epoch;
+
+        if (!plan.subtract) {
+            return;
+        }
+
+        // The subtract overwrites what the project read.
+        record_barrier(frame.commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        record_dispatch(frame.commands, comb_subtract_pipeline, frame.comb_subtract_set,
+                        std::as_bytes(std::span<const dsp::CombParams>(&params, 1)),
+                        group_count(plan.count, geometry.local_size_x));
+        dispatches.fetch_add(1, std::memory_order_relaxed);
+        comb_samples_cancelled.fetch_add(plan.count, std::memory_order_relaxed);
+    }
+
+    // The completion thread, for one spectrum frame. Folds it into the
+    // detection's average and, once that spans a second of source time, hands
+    // it to the detection thread.
+    void fold_comb_spectrum(std::span<const float> power_db, dsp::SampleIndex frame_start) {
+        if (!comb_on.load(std::memory_order_acquire) || !comb_detector.joinable()) {
+            comb_avg_running = false;
+            return;
+        }
+        const std::uint64_t epoch = comb_epoch.load(std::memory_order_acquire);
+        if (!comb_avg_running || epoch != comb_avg_epoch ||
+            comb_avg_sum.size() != power_db.size()) {
+            comb_avg_sum.assign(power_db.size(), 0.0);
+            comb_avg_frames = 0;
+            comb_avg_first = frame_start;
+            comb_avg_epoch = epoch;
+            comb_avg_running = true;
+        }
+        // Ten frames a second is plenty for an average over one, and folding
+        // every frame would spend a power per bin per frame on this thread.
+        const auto fold_every = static_cast<dsp::SampleIndex>(config.source_rate / 10);
+        if (comb_avg_frames == 0 || frame_start < comb_avg_last ||
+            frame_start - comb_avg_last >= fold_every) {
+            for (std::size_t i = 0; i < power_db.size(); ++i) {
+                comb_avg_sum[i] += static_cast<double>(std::exp2(power_db[i] * kDbToLog2));
+            }
+            ++comb_avg_frames;
+            comb_avg_last = frame_start;
+        }
+
+        if (frame_start < comb_avg_first ||
+            frame_start - comb_avg_first < static_cast<dsp::SampleIndex>(config.source_rate)) {
+            return;
+        }
+
+        if (comb_avg_frames == 0) {
+            return;
+        }
+
+        // The frame is M * N / 2 bins covering exactly the source rate, but
+        // its bin zero sits half a coarse channel below -rate / 2
+        // (SpectrumGeometry::bin_zero_hz), so DC is not at bins / 2, where
+        // detect_comb wants it. A sampled band is periodic, so rotating the
+        // frame until the bin centred on DC lands at bins / 2 gives the same
+        // spectrum on detect_comb's axis, at a rate of bins * bin width.
+        const SpectrumGeometry& g = geometry.spectrum;
+        const std::size_t bins = comb_avg_sum.size();
+        const double bin_width = g.bin_width_hz();
+        if (bin_width <= 0.0) {
+            comb_avg_running = false;
+            return;
+        }
+        const auto dc_bin = static_cast<std::int64_t>(std::llround(-g.bin_zero_hz() / bin_width));
+        const auto half = static_cast<std::int64_t>(bins / 2);
+        const auto period = static_cast<std::int64_t>(bins);
+        const std::int64_t shift = ((dc_bin - half) % period + period) % period;
+        const auto rate = static_cast<dsp::SampleRate>(
+            std::llround(static_cast<double>(bins) * bin_width));
+
+        if (comb_job_state.load(std::memory_order_acquire) == kCombJobIdle) {
+            comb_job_power.resize(bins);
+            const double scale = 1.0 / static_cast<double>(comb_avg_frames);
+            for (std::size_t i = 0; i < bins; ++i) {
+                const auto from =
+                    static_cast<std::size_t>((static_cast<std::int64_t>(i) + shift) % period);
+                comb_job_power[i] = static_cast<float>(comb_avg_sum[from] * scale);
+            }
+            comb_job_rate = rate;
+            comb_job_epoch = epoch;
+            comb_job_state.store(kCombJobReady, std::memory_order_release);
+            comb_job_state.notify_one();
+        } else {
+            comb_windows_dropped.fetch_add(1, std::memory_order_relaxed);
+        }
+        comb_avg_running = false;
+    }
+
+    // The detection thread. Waits for a job, runs it, leaves the answer.
+    void run_comb_detector() {
+        for (;;) {
+            comb_job_state.wait(kCombJobIdle, std::memory_order_acquire);
+            const std::uint32_t state = comb_job_state.load(std::memory_order_acquire);
+            if (state == kCombJobStop) {
+                return;
+            }
+            if (state != kCombJobReady) {
+                continue;
+            }
+            dsp::CombSpectrum spectrum;
+            spectrum.power = dsp::ConstRealSpan(comb_job_power.data(), comb_job_power.size());
+            spectrum.rate = comb_job_rate;
+            if (!comb_dump_prefix.empty()) {
+                const std::string name = std::format("{}.{}.{}.f32", comb_dump_prefix,
+                                                     comb_dumps++, comb_job_rate);
+                if (std::FILE* file = std::fopen(name.c_str(), "wb"); file != nullptr) {
+                    (void)std::fwrite(comb_job_power.data(), sizeof(float),
+                                      comb_job_power.size(), file);
+                    std::fclose(file);
+                }
+            }
+            auto found = dsp::detect_comb(spectrum);
+            comb_detections.fetch_add(1, std::memory_order_relaxed);
+            if (found && found->has_value()) {
+                comb_detections_found.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (found && !comb_result_full.load(std::memory_order_acquire)) {
+                comb_result.estimate = *found;
+                comb_result.epoch = comb_job_epoch;
+                comb_result_full.store(true, std::memory_order_release);
+            } else if (found) {
+                comb_windows_dropped.fetch_add(1, std::memory_order_relaxed);
+            }
+            std::uint32_t expected = kCombJobReady;
+            comb_job_state.compare_exchange_strong(expected, kCombJobIdle,
+                                                   std::memory_order_acq_rel);
+        }
+    }
+
+    void stop_comb_detector() noexcept {
+        if (!comb_detector.joinable()) {
+            return;
+        }
+        comb_job_state.store(kCombJobStop, std::memory_order_release);
+        comb_job_state.notify_all();
+        comb_detector.join();
     }
 
     void push_control(ControlOp* op) {
@@ -2200,6 +2629,8 @@ struct Graph::Impl {
         // was listening, which is what a stats reader wants.
         spectrum_frames.fetch_add(1, std::memory_order_relaxed);
 
+        fold_comb_spectrum(values, frame.spectrum_start);
+
         if (frame.spectrum_sink == nullptr || !*frame.spectrum_sink) {
             return {};
         }
@@ -2723,14 +3154,15 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
     // The buffer count is the sum of the seven kernels' bindings: convert 2,
     // branch 3, transform 3, spectrum 4, levels 2, and the front-end
     // correction's moments 2 and correct 2, and the impulse excision's 7 in
-    // one set its four pipelines share.
+    // one set its four pipelines share, and the comb cancellation's project 4
+    // and subtract 5.
     VkDescriptorPoolSize pool_size{};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pool_size.descriptorCount = config.frames_in_flight * 25;
+    pool_size.descriptorCount = config.frames_in_flight * 34;
 
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = config.frames_in_flight * 8;
+    pool_info.maxSets = config.frames_in_flight * 10;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = &pool_size;
 
@@ -3210,6 +3642,89 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
             design, ring_mask, *rings, dsp::excision_threshold(dsp::kExciseDefaultThresholdDb));
     }
 
+    // The comb cancellation: two kernels, the tone table both read, and the
+    // ring of what was removed. The table goes up through a one-off runner,
+    // like the filter tables above, because it is not the sample path.
+    {
+        gpu::ComputePipeline::Options project;
+        project.spirv = gpu::shaders::comb_project();
+        project.storage_buffer_count = 4;
+        project.local_size_x = impl.geometry.local_size_x;
+        project.push_constant_bytes = sizeof(dsp::CombParams);
+        auto project_pipeline = gpu::ComputePipeline::create(context, project);
+        if (!project_pipeline) {
+            return std::unexpected(
+                with_context(project_pipeline.error(), "Graph::prepare comb project"));
+        }
+        impl.comb_project_pipeline = std::move(*project_pipeline);
+
+        gpu::ComputePipeline::Options subtract;
+        subtract.spirv = gpu::shaders::comb_subtract();
+        subtract.storage_buffer_count = 5;
+        subtract.local_size_x = impl.geometry.local_size_x;
+        subtract.push_constant_bytes = sizeof(dsp::CombParams);
+        auto subtract_pipeline = gpu::ComputePipeline::create(context, subtract);
+        if (!subtract_pipeline) {
+            return std::unexpected(
+                with_context(subtract_pipeline.error(), "Graph::prepare comb subtract"));
+        }
+        impl.comb_subtract_pipeline = std::move(*subtract_pipeline);
+
+        const std::vector<dsp::Complex32> table = dsp::comb_table();
+        const VkDeviceSize table_bytes = table.size() * sizeof(dsp::Complex32);
+        auto device_table = gpu::Buffer::create(context, table_bytes, kDeviceStorage,
+                                                gpu::MemoryKind::DeviceLocal);
+        if (!device_table) {
+            return std::unexpected(with_context(device_table.error(), "Graph::prepare comb table"));
+        }
+        impl.comb_table = std::move(*device_table);
+        auto runner = gpu::CommandRunner::create(context);
+        if (!runner) {
+            return std::unexpected(with_context(runner.error(), "Graph::prepare comb table"));
+        }
+        auto staged = gpu::Buffer::create(context, table_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                          gpu::MemoryKind::Upload);
+        if (!staged) {
+            return std::unexpected(with_context(staged.error(), "Graph::prepare comb table"));
+        }
+        if (auto wrote = staged->write(std::as_bytes(std::span(table))); !wrote) {
+            return std::unexpected(with_context(wrote.error(), "Graph::prepare comb table"));
+        }
+        const std::vector<gpu::CommandRunner::BufferCopy> copies{
+            {staged->handle(), impl.comb_table.handle(), table_bytes},
+        };
+        if (auto copied = runner->copy(copies); !copied) {
+            return std::unexpected(with_context(copied.error(), "Graph::prepare comb table"));
+        }
+
+        // What was removed is kept for frames_in_flight blocks and one more,
+        // which is as far back as anything could want to read it beside the
+        // cleaned samples, and never more than the ring itself.
+        const std::uint64_t wanted = std::bit_ceil(static_cast<std::uint64_t>(
+            impl.geometry.block_samples * (impl.config.frames_in_flight + 1ULL)));
+        const std::uint64_t removed_samples =
+            std::min<std::uint64_t>(wanted, impl.ring->geometry().capacity_mask + 1ULL);
+        auto removed = gpu::Buffer::create(context, removed_samples * kComplexBytes,
+                                           kDeviceStorage, gpu::MemoryKind::DeviceLocal);
+        if (!removed) {
+            return std::unexpected(with_context(removed.error(), "Graph::prepare comb removed"));
+        }
+        impl.comb_removed = std::move(*removed);
+        impl.comb_removed_mask = static_cast<std::uint32_t>(removed_samples - 1);
+
+        impl.comb_projection_scratch.assign(
+            static_cast<std::size_t>(dsp::kCombMaxLines) * dsp::kCombMaxSubBlocks,
+            dsp::Complex32{});
+        impl.comb_tracker = dsp::CombTracker(impl.config.source_rate);
+        if (const char* dump = std::getenv("REVENANT_COMB_DUMP"); dump != nullptr) {
+            impl.comb_dump_prefix = dump;
+        }
+        if (impl.geometry.spectrum.enabled()) {
+            Impl* self = &impl;
+            impl.comb_detector = std::thread([self] { self->run_comb_detector(); });
+        }
+    }
+
     impl.coarse_builds.fetch_add(1, std::memory_order_relaxed);
 
     // --- one frame's worth of everything, times frames_in_flight ------------
@@ -3330,7 +3845,30 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
             }
         }
 
-        VkDescriptorSetLayout layouts[8]{};
+        {
+            const VkDeviceSize line_bytes =
+                static_cast<VkDeviceSize>(dsp::kCombMaxLines) * sizeof(dsp::CombLine);
+            auto line_staging = gpu::Buffer::create(context, line_bytes,
+                                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                               gpu::MemoryKind::Upload);
+            auto lines = gpu::Buffer::create(context, line_bytes, kDeviceStorage,
+                                             gpu::MemoryKind::DeviceLocal);
+            auto projections = gpu::Buffer::create(
+                context,
+                static_cast<VkDeviceSize>(impl.comb_projection_scratch.size()) * kComplexBytes,
+                kReadbackUsage, gpu::MemoryKind::Readback);
+            for (auto* made : {&line_staging, &lines, &projections}) {
+                if (!*made) {
+                    return std::unexpected(
+                        with_context(made->error(), "Graph::prepare comb buffers"));
+                }
+            }
+            frame.comb_lines_staging = std::move(*line_staging);
+            frame.comb_lines = std::move(*lines);
+            frame.comb_projections = std::move(*projections);
+        }
+
+        VkDescriptorSetLayout layouts[10]{};
         std::uint32_t set_count = 0;
         if (impl.has_convert) {
             layouts[set_count++] = impl.convert_pipeline.descriptor_layout();
@@ -3344,6 +3882,8 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         layouts[set_count++] = impl.iq_moments_pipeline.descriptor_layout();
         layouts[set_count++] = impl.iq_correct_pipeline.descriptor_layout();
         layouts[set_count++] = impl.excise_pipelines[0].descriptor_layout();
+        layouts[set_count++] = impl.comb_project_pipeline.descriptor_layout();
+        layouts[set_count++] = impl.comb_subtract_pipeline.descriptor_layout();
 
         VkDescriptorSetAllocateInfo set_alloc{};
         set_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -3351,7 +3891,7 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         set_alloc.descriptorSetCount = set_count;
         set_alloc.pSetLayouts = layouts;
 
-        VkDescriptorSet sets[8]{};
+        VkDescriptorSet sets[10]{};
         result = vkAllocateDescriptorSets(device, &set_alloc, sets);
         if (result != VK_SUCCESS) {
             return fail(std::format("vkAllocateDescriptorSets failed for frame {} ({})", i,
@@ -3431,6 +3971,28 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
                                       frame.excise_counters.handle()};
             if (auto wrote = write_storage_set(device, frame.excise_set, bound); !wrote) {
                 return std::unexpected(with_context(wrote.error(), "Graph::prepare excision set"));
+            }
+        }
+
+        // The comb's two sets. The ring twice in the subtract's, as the
+        // source and the destination, in place like the excision.
+        frame.comb_project_set = sets[next++];
+        {
+            const VkBuffer bound[] = {impl.ring->buffer(), frame.comb_lines.handle(),
+                                      impl.comb_table.handle(), frame.comb_projections.handle()};
+            if (auto wrote = write_storage_set(device, frame.comb_project_set, bound); !wrote) {
+                return std::unexpected(
+                    with_context(wrote.error(), "Graph::prepare comb project set"));
+            }
+        }
+        frame.comb_subtract_set = sets[next++];
+        {
+            const VkBuffer bound[] = {impl.ring->buffer(), frame.comb_lines.handle(),
+                                      impl.comb_table.handle(), impl.ring->buffer(),
+                                      impl.comb_removed.handle()};
+            if (auto wrote = write_storage_set(device, frame.comb_subtract_set, bound); !wrote) {
+                return std::unexpected(
+                    with_context(wrote.error(), "Graph::prepare comb subtract set"));
             }
         }
     }
@@ -4090,6 +4652,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
     // is only handed out once the completion thread has retired its frame.
     impl.read_front_end_moments(frame);
     impl.read_excision_counters(frame);
+    impl.read_comb_projections(frame);
 
     // The one host pass over the samples, into pinned memory the convert
     // kernel reads directly. Partitioned across the pool because at 20 MS/s
@@ -4165,6 +4728,18 @@ Status Graph::on_block(const source::SourceBlock& block) {
         block.stamp.start, static_cast<std::uint32_t>(block.sample_count), published_end,
         excision);
 
+    // The comb cancellation runs BEFORE the excision, over the whole block
+    // just written. A comb from a switching supply is a pulse train in time:
+    // run after the excision, the excision cut its peaks out as impulses
+    // (6% of samples on the owner's HF comb, 24,000 "impulses" a second) and
+    // left the tracker projecting a comb with holes in it. Cancelled first,
+    // the periodic part is gone before the excision looks, and the excision
+    // is left the impulses that are not periodic. The comb has no lag, so
+    // the excision's limit above still bounds the channelizer.
+    const std::optional<dsp::CombBlockPlan> comb = impl.plan_comb_cancel(
+        block.stamp.start,
+        block.stamp.start + static_cast<dsp::SampleIndex>(block.sample_count));
+
     std::uint32_t block_count = 0;
     if (channel_limit > first_block * decimation) {
         const dsp::SampleIndex last = (channel_limit - 1) / decimation;
@@ -4196,8 +4771,12 @@ Status Graph::on_block(const source::SourceBlock& block) {
     // not want it yet.
     bool record_spectrum = false;
     dsp::SampleIndex spectrum_first_block = 0;
-    const bool spectrum_wanted = impl.geometry.spectrum.enabled() &&
-                                 impl.spectrum_sink != nullptr && *impl.spectrum_sink;
+    // The comb detection averages the spectrum too, so with the stage on the
+    // spectrum is computed whether or not a sink is attached.
+    const bool spectrum_wanted =
+        impl.geometry.spectrum.enabled() &&
+        ((impl.spectrum_sink != nullptr && *impl.spectrum_sink) ||
+         impl.comb_on.load(std::memory_order_acquire));
     if (block_count > 0 && spectrum_wanted) {
         const auto points = static_cast<dsp::SampleIndex>(impl.geometry.spectrum.transform);
         const dsp::SampleIndex one_past = first_block + block_count;
@@ -4271,6 +4850,9 @@ Status Graph::on_block(const source::SourceBlock& block) {
 
     impl.record_front_end_correction(frame, destination,
                                      static_cast<std::uint32_t>(block.sample_count));
+    if (comb.has_value()) {
+        impl.record_comb_cancel(frame, *comb);
+    }
     if (excision.has_value()) {
         impl.record_impulse_excision(frame, *excision);
     }
@@ -4614,6 +5196,34 @@ void Graph::set_front_end_correction(bool dc_removal, bool iq_correction) {
 
 void Graph::set_impulse_excision(bool on) {
     impl_->impulse_excision.store(on, std::memory_order_release);
+}
+
+void Graph::set_comb_cancel(bool on) {
+    impl_->comb_on.store(on, std::memory_order_release);
+}
+
+void Graph::note_source_retune() {
+    impl_->comb_epoch.fetch_add(1, std::memory_order_acq_rel);
+}
+
+CombCancelStatus Graph::comb_cancel() const {
+    const Impl& impl = *impl_;
+    CombCancelStatus out;
+    out.on = impl.comb_on.load(std::memory_order_acquire);
+    out.status.lock = static_cast<dsp::CombLock>(impl.comb_lock.load(std::memory_order_acquire));
+    out.status.lines_cancelled = impl.comb_lines_cancelled.load(std::memory_order_relaxed);
+    out.status.suppression_db = impl.comb_suppression_db.load(std::memory_order_relaxed);
+    out.status.spacing_drift_hz_per_s = impl.comb_drift.load(std::memory_order_relaxed);
+    out.status.comb.offset_hz = impl.comb_offset_hz.load(std::memory_order_relaxed);
+    out.status.comb.spacing_hz = impl.comb_spacing_hz.load(std::memory_order_relaxed);
+    out.status.comb.k_lo = impl.comb_k_lo.load(std::memory_order_relaxed);
+    out.status.comb.k_hi = impl.comb_k_hi.load(std::memory_order_relaxed);
+    out.status.comb.lines_found = impl.comb_lines_found.load(std::memory_order_relaxed);
+    out.status.comb.median_height_db =
+        impl.comb_median_height_db.load(std::memory_order_relaxed);
+    out.detections = impl.comb_detections.load(std::memory_order_relaxed);
+    out.detections_found = impl.comb_detections_found.load(std::memory_order_relaxed);
+    return out;
 }
 
 ImpulseExcisionStatus Graph::impulse_excision() const {

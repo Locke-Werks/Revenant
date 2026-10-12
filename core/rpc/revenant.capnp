@@ -867,6 +867,22 @@ struct SourceStats {
     excisedSamples @14 :UInt64;
     excisionEvents @15 :UInt64;
     excisionSpared @16 :UInt64;
+
+    # The span-wide comb cancellation, core/dsp/comb_cancel.h: whether it is
+    # on, and what its tracker last reported. combLock is 0 idle (no comb
+    # found), 1 acquiring (found, not yet cancelling), 2 locked (cancelling)
+    # and 3 lost (was cancelling, stopped fitting, cancelling nothing).
+    # combLines is the lines cancelled now and combSuppressionDb the mean depth
+    # over them; the rest describe the comb as tracked, frequencies in hertz at
+    # baseband.
+    combCancel @17 :Bool;
+    combLock @18 :UInt8;
+    combLines @19 :UInt32;
+    combSuppressionDb @20 :Float32;
+    combSpacingHz @21 :Float64;
+    combOffsetHz @22 :Float64;
+    combDriftHzPerS @23 :Float32;
+    combLinesFound @24 :UInt32;
 }
 
 struct VrxParams {
@@ -3685,6 +3701,11 @@ interface Session {
     # again. The plugins keep running and keep their decoded subscriptions,
     # so a tracker still logs grants. ENGINE-WIDE and allowed by default.
     setPluginReceivers @36 (allowed :Bool) -> ();
+
+    # Switches the span-wide comb cancellation, by the rules setImpulseExcision
+    # gives: engine-wide, on by default, carried across a change of source and
+    # accepted with no source open. SourceStats reports what it is doing.
+    setCombCancel @37 (on :Bool) -> ();
 }
 
 # What one loaded plugin can decode, as it declared itself through

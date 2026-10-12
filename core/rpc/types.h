@@ -445,6 +445,17 @@ struct SourceStats {
     std::uint64_t excision_events = 0;
     std::uint64_t excision_spared = 0;
 
+    // The span-wide comb cancellation's switch and tracker state. See the
+    // schema; comb_lock is dsp::CombLock's value.
+    bool comb_cancel = false;
+    std::uint8_t comb_lock = 0;
+    std::uint32_t comb_lines = 0;
+    float comb_suppression_db = 0.0F;
+    double comb_spacing_hz = 0.0;
+    double comb_offset_hz = 0.0;
+    float comb_drift_hz_per_s = 0.0F;
+    std::uint32_t comb_lines_found = 0;
+
     // The ADC branch in force now, never Auto. See the schema.
     DirectSamplingMode direct_sampling = DirectSamplingMode::Off;
 };

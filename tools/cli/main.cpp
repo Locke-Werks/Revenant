@@ -444,6 +444,9 @@ struct Options {
     // EngineConfig::impulse_excision. On unless --no-excision.
     bool excision = true;
 
+    // EngineConfig::comb_cancel. On unless --no-comb.
+    bool comb = true;
+
     SampleRate audio_rate = 48'000;
     int gpu = -1;
 
@@ -816,6 +819,11 @@ void print_usage()
         "                      excision is on by default and cuts impulses out of\n"
         "                      the whole span before the channelizer; see\n"
         "                      docs/noise.md.\n"
+        "  --no-comb           Leave a comb of interference lines in the capture.\n"
+        "                      The span-wide comb cancellation is on by default,\n"
+        "                      cancels nothing until it has found a comb and locked\n"
+        "                      to it, and then subtracts it before the channelizer;\n"
+        "                      see core/dsp/comb_cancel.h.\n"
         "  --channels <n>      Channelizer channel count, default 64 above 30 MHz and\n"
         "                      the engine's own choice below it. Zero lets the engine\n"
         "                      size the grid from the source everywhere: a 2 MS/s\n"
@@ -1271,6 +1279,11 @@ void print_usage()
 
         if (arg == "--no-excision") {
             options.excision = false;
+            continue;
+        }
+
+        if (arg == "--no-comb") {
+            options.comb = false;
             continue;
         }
 
@@ -3289,12 +3302,15 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     config.channels_yield_to_source = !options.channels_given;
     config.audio_rate = options.audio_rate;
     config.impulse_excision = options.excision;
+    config.comb_cancel = options.comb;
 
     // Chosen before the engine is created, because the spectrum stage is part
     // of the coarse chain and is built once when the source is opened.
     // --detect needs the same stage, so it turns it on rather than failing
-    // later with a message about a flag the operator did not pass.
-    if (options.spectrum || options.detect) {
+    // later with a message about a flag the operator did not pass. So does
+    // the comb cancellation, which detects from the averaged spectrum and
+    // without the stage never runs a single detection.
+    if (options.spectrum || options.detect || options.comb) {
         config.spectrum_transform = options.spectrum_points != 0 ? options.spectrum_points
                                                                  : dsp::kDefaultSpectrumTransform;
         config.spectrum_floor_db = options.spectrum_floor_db;
@@ -4852,6 +4868,20 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                      "burst{} left alone",
                      excision.samples_excised, excision.events, excision.samples_examined,
                      excision.spared, excision.spared == 1 ? "" : "s");
+    }
+    // The comb's state at the end, for the same reason, and printed even when
+    // nothing was found: a stage that ran no detections, or ran them and
+    // found nothing, is otherwise indistinguishable from one that is off.
+    if (const engine::CombCancelStatus comb = eng.graph_conditions().comb_cancel;
+        comb.on) {
+        constexpr const char* kLockNames[] = {"idle", "acquiring", "locked", "lost"};
+        const auto lock = static_cast<std::size_t>(comb.status.lock);
+        std::println("  COMB            {}, {} lines at {:.3f} Hz spacing, {} cancelled at "
+                     "{:.1f} dB; found in {} of {} detections",
+                     lock < std::size(kLockNames) ? kLockNames[lock] : "unknown",
+                     comb.status.comb.line_count(), comb.status.comb.spacing_hz,
+                     comb.status.lines_cancelled, comb.status.suppression_db,
+                     comb.detections_found, comb.detections);
     }
     if (waterfall != nullptr && waterfall->dropped() != 0) {
         any_counter = true;

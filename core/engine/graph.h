@@ -677,6 +677,18 @@ public:
     void set_impulse_excision(bool on);
     [[nodiscard]] ImpulseExcisionStatus impulse_excision() const;
 
+    // Switches the span-wide comb cancellation, core/dsp/comb_cancel.h. An
+    // atomic the recording thread reads at the next block. Switching it on
+    // starts from nothing: the stage averages a spectrum, detects, acquires
+    // and only then cancels.
+    void set_comb_cancel(bool on);
+    [[nodiscard]] CombCancelStatus comb_cancel() const;
+
+    // The source's centre moved. Any thread. The comb tracker is reset at the
+    // next block and the detection's averaging starts again, because a comb
+    // measured at the old centre says nothing reliable about the new one.
+    void note_source_retune();
+
     // --- the sample path, the source thread only ----------------------------
 
     // The source's BlockSink. Blocks as backpressure against a Demand source

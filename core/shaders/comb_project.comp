@@ -1,0 +1,106 @@
+// Span-wide comb cancellation, project pass: each active line's complex
+// projection over each sub-block of the dispatch, for the host tracker.
+//
+// core/dsp/comb_cancel.h states the design and the contract:
+//
+//     proj[l * sub_blocks + s] = sum over n in sub-block s of
+//                                x[first + n] * conj(tone_l(n))
+//
+// with tone_l(n) = table[(phase0_l + n * step_l) >> (32 - kCombTableLog2)],
+// the phase an exact uint32 that wraps modulo 2^32.
+//
+// REDUCTION ORDER. One invocation per projection, invocation l * sub_blocks
+// + s, so no sum is ever split across invocations and the result does not
+// depend on the workgroup size the host specializes. Within the invocation
+// the sub-block is walked in sample order in chunks of kChunk samples: each
+// chunk is summed from zero in sample order, and the chunk sums are added to
+// a running total from zero in chunk order, the last chunk short when the
+// sub-block is not a multiple of kChunk. Two levels keep the rounding error
+// near that of a sum of kChunk terms plus one of L / kChunk terms rather than
+// one of L terms. Every multiply, add and subtract is `precise`, so nothing is
+// contracted into an FMA.
+//
+// The CPU twin is reference_comb_project in
+// core/dsp/comb_kernels_reference.cpp, bit-identical: the same products, the
+// same chunks, the same order.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+// dsp::kCombTableLog2.
+const uint kTableShift = 32u - 12u;
+
+// Samples per inner chunk of the reduction.
+const uint kChunk = 64u;
+
+layout(std430, binding = 0) readonly buffer Source {
+    vec2 samples[];
+} src;
+
+// dsp::CombLine.
+struct Line {
+    uint phase0;
+    uint step;
+    uint pad0;
+    uint pad1;
+    vec2 amplitude;
+};
+
+layout(std430, binding = 1) readonly buffer Lines {
+    Line values[];
+} lines;
+
+layout(std430, binding = 2) readonly buffer Table {
+    vec2 values[];
+} table;
+
+layout(std430, binding = 3) writeonly buffer Projections {
+    vec2 values[];
+} proj;
+
+// dsp::CombParams.
+layout(push_constant) uniform Params {
+    uint ring_mask;
+    uint first;
+    uint count;
+    uint lines;
+    uint sub_blocks;
+    uint removed_mask;
+    uint pad0;
+    uint pad1;
+} params;
+
+void main() {
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= params.lines * params.sub_blocks) {
+        return;
+    }
+    const uint l = id / params.sub_blocks;
+    const uint s = id - l * params.sub_blocks;
+    const uint length = params.count / params.sub_blocks;
+    const uint begin = s * length;
+    const uint phase0 = lines.values[l].phase0;
+    const uint step = lines.values[l].step;
+
+    precise float total_re = 0.0;
+    precise float total_im = 0.0;
+    for (uint c = 0u; c < length; c += kChunk) {
+        const uint end = min(c + kChunk, length);
+        precise float chunk_re = 0.0;
+        precise float chunk_im = 0.0;
+        for (uint m = c; m < end; ++m) {
+            const uint n = begin + m;
+            const vec2 x = src.samples[(params.first + n) & params.ring_mask];
+            const vec2 t = table.values[(phase0 + n * step) >> kTableShift];
+            // x * conj(t)
+            precise float re = x.x * t.x + x.y * t.y;
+            precise float im = x.y * t.x - x.x * t.y;
+            chunk_re = chunk_re + re;
+            chunk_im = chunk_im + im;
+        }
+        total_re = total_re + chunk_re;
+        total_im = total_im + chunk_im;
+    }
+    proj.values[id] = vec2(total_re, total_im);
+}

@@ -538,6 +538,14 @@ static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
     out.excised_samples = in.getExcisedSamples();
     out.excision_events = in.getExcisionEvents();
     out.excision_spared = in.getExcisionSpared();
+    out.comb_cancel = in.getCombCancel();
+    out.comb_lock = in.getCombLock();
+    out.comb_lines = in.getCombLines();
+    out.comb_suppression_db = in.getCombSuppressionDb();
+    out.comb_spacing_hz = in.getCombSpacingHz();
+    out.comb_offset_hz = in.getCombOffsetHz();
+    out.comb_drift_hz_per_s = in.getCombDriftHzPerS();
+    out.comb_lines_found = in.getCombLinesFound();
     out.direct_sampling = read_direct_sampling(in.getDirectSampling());
     return out;
 }
@@ -1412,6 +1420,7 @@ public:
                                                      double min_margin) override;
     [[nodiscard]] Status set_detection_threshold(double threshold_db) override;
     [[nodiscard]] Status set_impulse_excision(bool on) override;
+    [[nodiscard]] Status set_comb_cancel(bool on) override;
     [[nodiscard]] Status set_plugin_receivers(bool allowed) override;
 
     [[nodiscard]] Status subscribe_spectrum(std::uint32_t every_nth,
@@ -2120,6 +2129,14 @@ Status ClientImpl::set_detection_threshold(double threshold_db) {
 Status ClientImpl::set_impulse_excision(bool on) {
     return on_loop("set_impulse_excision", [on](LoopState& state) {
         auto request = state.session.setImpulseExcisionRequest();
+        request.setOn(on);
+        return request.send().ignoreResult();
+    });
+}
+
+Status ClientImpl::set_comb_cancel(bool on) {
+    return on_loop("set_comb_cancel", [on](LoopState& state) {
+        auto request = state.session.setCombCancelRequest();
         request.setOn(on);
         return request.send().ignoreResult();
     });

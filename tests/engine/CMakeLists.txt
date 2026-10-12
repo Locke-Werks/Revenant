@@ -158,6 +158,7 @@ add_executable(revenant_engine_tests
     test_device_lock.cpp
     test_engine.cpp
     test_engine_agc.cpp
+    test_engine_comb.cpp
     test_engine_dv.cpp
     test_engine_noise.cpp
     test_engine_pacing.cpp

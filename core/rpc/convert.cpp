@@ -548,6 +548,15 @@ void write_source_stats(schema::SourceStats::Builder out, const source::SourceSt
     out.setExcisedSamples(conditions.impulse_excision.samples_excised);
     out.setExcisionEvents(conditions.impulse_excision.events);
     out.setExcisionSpared(conditions.impulse_excision.spared);
+    const engine::CombCancelStatus& comb = conditions.comb_cancel;
+    out.setCombCancel(comb.on);
+    out.setCombLock(static_cast<std::uint8_t>(comb.status.lock));
+    out.setCombLines(comb.status.lines_cancelled);
+    out.setCombSuppressionDb(comb.status.suppression_db);
+    out.setCombSpacingHz(comb.status.comb.spacing_hz);
+    out.setCombOffsetHz(comb.status.comb.offset_hz);
+    out.setCombDriftHzPerS(comb.status.spacing_drift_hz_per_s);
+    out.setCombLinesFound(comb.status.comb.lines_found);
     out.setDirectSampling(static_cast<schema::DirectSamplingMode>(in.direct_sampling));
 }
 

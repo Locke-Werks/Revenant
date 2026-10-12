@@ -17,6 +17,7 @@
 
 #include "models/engine_link.h"
 
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 
@@ -139,8 +140,42 @@ void EngineLink::note_direct_branch(rpc::DirectSamplingMode branch)
     QMetaObject::invokeMethod(this, [this] { adopt_open_source(); }, Qt::QueuedConnection);
 }
 
+void EngineLink::note_comb_status(const rpc::SourceStats& stats)
+{
+    // dsp::CombLock's values, which the schema carries as a number.
+    QString text;
+    bool locked = false;
+    if (stats.comb_cancel) {
+        switch (stats.comb_lock) {
+            case 1: text = QStringLiteral("comb acquiring"); break;
+            case 2:
+                locked = true;
+                text = QStringLiteral("comb locked %1 lines %2 dB")
+                           .arg(stats.comb_lines)
+                           .arg(-std::abs(static_cast<double>(stats.comb_suppression_db)), 0,
+                                'f', 0);
+                break;
+            case 3: text = QStringLiteral("comb lost"); break;
+            default: text = QStringLiteral("comb"); break;
+        }
+    }
+    if (comb_posted_ && text == posted_comb_text_) {
+        return;
+    }
+    comb_posted_ = true;
+    posted_comb_text_ = text;
+    {
+        const std::lock_guard<std::mutex> lock(open_source_mutex_);
+        handover_has_comb_ = true;
+        handover_comb_text_ = text;
+        handover_comb_locked_ = locked;
+    }
+    QMetaObject::invokeMethod(this, [this] { adopt_open_source(); }, Qt::QueuedConnection);
+}
+
 void EngineLink::adopt_open_source()
 {
+    bool comb_moved = false;
     bool moved = false;
     {
         const std::lock_guard<std::mutex> lock(open_source_mutex_);
@@ -159,9 +194,18 @@ void EngineLink::adopt_open_source()
             direct_branch_ = QString::fromLatin1(rpc::direct_sampling_mode_name(handover_branch_));
             moved = true;
         }
+        if (handover_has_comb_) {
+            handover_has_comb_ = false;
+            comb_text_ = handover_comb_text_;
+            comb_locked_ = handover_comb_locked_;
+            comb_moved = true;
+        }
     }
     if (moved) {
         emit openedSourceChanged();
+    }
+    if (comb_moved) {
+        emit combStatusChanged();
     }
 }
 

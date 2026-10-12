@@ -1,0 +1,389 @@
+// Span-wide comb cancellation: finding a comb of evenly spaced interference
+// lines in the whole capture and subtracting it before the channelizer, so the
+// spectrum, the waterfall, the detector and every receiver see the cleaned
+// stream.
+//
+// WHAT IT IS FOR. A switching supply, an LED driver, a USB or Ethernet PHY or
+// the receiver's own clock puts a train of narrow lines across HF, spaced at
+// its switching frequency: dozens to hundreds of lines, each a few dB to 20 dB
+// over the floor, all moving together. The lines are one waveform repeating at
+// a period, so they can be estimated and subtracted rather than notched, and a
+// subtraction costs the programme under a line only what falls inside the
+// estimator's bandwidth, a few hertz, where a notch costs the whole bin.
+//
+// THE MODEL. Line k of the comb sits at baseband frequency
+//
+//     f_k(t) = c(t) + k * d(t),    k in [k_lo, k_hi]
+//
+// with c the offset of line 0 and d the spacing. AFFINE, NOT HARMONIC: an
+// external source's lines are harmonics n * F of a fundamental, which at
+// baseband is c = n0 * F - centre and d = F, so the harmonic case is the affine
+// one with c and d tied. Tracking c and d separately covers that case, a comb
+// made inside the receiver whose offset is a clock product unrelated to the
+// tuning, and a comb that moves with the tuning, without having to know which
+// it is first.
+//
+// THE PERIOD VARIES. A supply's switching frequency moves with its load and
+// temperature, so d(t) and c(t) are tracked, not fixed. A change dd in the
+// spacing moves line k by k * dd: every line moves, by an amount proportional
+// to its index. That proportionality is also what confirms a comb: unrelated
+// carriers that happen to sit on a grid do not drift in step with it.
+//
+// THREE PARTS, AND WHERE EACH RUNS.
+//
+//   detect     CPU, from a time-averaged power spectrum of the whole span.
+//              Finds candidate (c, d, k_lo, k_hi) with no prior: narrow
+//              persistent peaks, then the spacing that puts the most of them
+//              on one grid, then a least-squares fit of the grid to the peaks.
+//              Runs at acquisition and after every retune. detect_comb below.
+//
+//   track      CPU, per block. Takes each active line's complex projection
+//              over each sub-block (from the project kernel), measures each
+//              line's phase advance, fits the common model of that advance
+//              across lines, alpha + beta * k, weighted by line strength, and
+//              steers two loops, one for c and one for d. Also keeps each
+//              line's complex amplitude as a slow average of its derotated
+//              projection. CombTracker below.
+//
+//   cancel     GPU, two kernels on the device ring, in place, after the
+//              front-end correction and before the impulse excision, which
+//              would otherwise cut a pulse-train comb's peaks out as impulses:
+//                core/shaders/comb_project.comp   the per-line, per-sub-block
+//                                                 projections the tracker reads
+//                core/shaders/comb_subtract.comp  synthesises the comb from the
+//                                                 tracker's amplitudes and
+//                                                 phases and subtracts it
+//
+// PHASE IS INTEGER. Each line's phase is a uint32 fraction of a cycle and its
+// per-sample increment is a uint32 too, so a line's phase at sample n of a
+// block is (phase0 + n * step) mod 2^32 with no rounding anywhere, the same on
+// the host, the device and the twin. That is the frequency-is-integer rule
+// (docs/conventions.md) carried into the oscillator: a uint32 step at 2.4 MS/s
+// resolves 0.00056 Hz, and a block of any length accumulates no phase error.
+// The top kCombTableLog2 bits index a host-built cosine/sine table, so the
+// synthesised tone is bit-identical between kernel and twin. Quantising phase
+// to 2^-12 of a cycle bounds the cancellation's depth near 60 dB below each
+// line, far below what any comb seen so far stands above the floor.
+//
+// LATENCY. The tracker reads projections of block b and plans block
+// b + frames_in_flight from a prediction, so the loops carry a feed-forward
+// frequency term and their bandwidth is set against that delay. A comb moving
+// faster than the loops follow is reported as unlocked and left alone rather
+// than half-cancelled.
+//
+// RAW PLUS REMOVED. As in core/dsp/impulse_excision.h, the subtract pass writes
+// what it removed beside the cleaned sample, so a client can be shown the comb
+// that was taken out.
+//
+// PROVENANCE, per docs/clean-room.md. The design is this project's own. The
+// principle, estimating a periodic interferer and subtracting it rather than
+// filtering, is the textbook one of adaptive interference cancellation and of
+// synchronous averaging in machinery diagnostics; no document was opened for
+// this work and no other program's source was read.
+
+#pragma once
+
+#include <complex>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <vector>
+
+#include "core/dsp/types.h"
+#include "core/error.h"
+
+namespace revenant::dsp {
+
+// ---------------------------------------------------------------------------
+// Shared limits
+// ---------------------------------------------------------------------------
+
+// The most lines the stage will cancel at once. Sized for a full HF span at a
+// switching frequency of 10 kHz and up. A detection can hold more (a comb at
+// four bins' spacing across a full span is about 3500 lines); CombTracker
+// trims, starting from the kCombMaxLines central to the detected range and,
+// once locked, swapping a line that has stood out of nothing for 64 blocks
+// for the next untried k outward, so the slots settle on lines that are
+// there. core/dsp/comb_tracker.cpp has the reasoning.
+inline constexpr std::uint32_t kCombMaxLines = 256;
+
+// The fewest lines that count as a comb. Fewer than this is a handful of
+// carriers, which the stage has no business removing.
+inline constexpr std::uint32_t kCombMinLines = 8;
+
+// Phase-to-tone table: 2^12 entries of (cos, sin) of 2 pi i / 4096, built on
+// the host in double and rounded to float once.
+inline constexpr std::uint32_t kCombTableLog2 = 12;
+inline constexpr std::uint32_t kCombTableSize = 1U << kCombTableLog2;
+
+// Sub-blocks per block for the projections. The phase advance between
+// adjacent sub-blocks is what the tracker's frequency discriminator reads, so
+// the sub-block length sets its pull-in range: +/- rate / (2 * sub-block).
+inline constexpr std::uint32_t kCombMaxSubBlocks = 16;
+
+// ---------------------------------------------------------------------------
+// Detection
+// ---------------------------------------------------------------------------
+
+// A comb, as found or as tracked. Frequencies in hertz at baseband, as doubles:
+// these are estimates with fractional-hertz precision, not tunings, and become
+// integer phase steps (comb_step) at the one place they reach the oscillator.
+struct CombEstimate {
+    double offset_hz = 0.0;   // c, the frequency of line k = 0
+    double spacing_hz = 0.0;  // d
+    std::int32_t k_lo = 0;
+    std::int32_t k_hi = -1;   // inclusive; k_hi < k_lo is no comb
+
+    // Lines in [k_lo, k_hi] that stood out of the floor at detection. A grid
+    // with gaps is still one comb; the tracker keeps the gaps as lines it
+    // does not cancel until they show.
+    std::uint32_t lines_found = 0;
+
+    // Median over found lines of each line's height above the local floor, dB.
+    float median_height_db = 0.0F;
+
+    [[nodiscard]] std::uint32_t line_count() const
+    {
+        return k_hi < k_lo ? 0U : static_cast<std::uint32_t>(k_hi - k_lo + 1);
+    }
+};
+
+// What detect_comb reads: a linear power spectrum of the whole span averaged
+// over at least a second, in natural order with DC at bins / 2 (the order the
+// spectrum kernel hands the UI), bin i centred on (i - bins / 2) * rate / bins.
+struct CombSpectrum {
+    ConstRealSpan power;  // linear, any consistent scale
+    SampleRate rate = 0;
+};
+
+// No comb in the spectrum is std::nullopt, not an error. An error is a
+// spectrum that cannot be read: empty, rate not positive, too few bins.
+[[nodiscard]] Expected<std::optional<CombEstimate>> detect_comb(const CombSpectrum& spectrum);
+
+// ---------------------------------------------------------------------------
+// The kernels' contract
+// ---------------------------------------------------------------------------
+
+// A line's integer phase step for a frequency at a rate: round(f / rate * 2^32)
+// taken mod 2^32, so a negative frequency is a step above 2^31.
+[[nodiscard]] std::uint32_t comb_step(double frequency_hz, SampleRate rate);
+
+// The table both kernels bind, kCombTableSize (cos, sin) pairs.
+[[nodiscard]] std::vector<Complex32> comb_table();
+
+// One active line, as both kernels read it from a storage buffer (std430,
+// four packed 32-bit words then a vec2). phase0 is the line's phase at the
+// dispatch's first sample.
+struct CombLine {
+    std::uint32_t phase0 = 0;
+    std::uint32_t step = 0;
+    std::uint32_t pad0 = 0;
+    std::uint32_t pad1 = 0;
+    Complex32 amplitude{};  // what subtract removes; project ignores it
+};
+static_assert(sizeof(CombLine) == 6 * sizeof(std::uint32_t),
+              "CombLine must be six packed 32-bit words to alias the kernels' std430 struct");
+
+// Push constants of both kernels, eight packed words.
+//
+// `first` is the ring slot of the dispatch's first sample, as in
+// core/dsp/impulse_excision.h. The project pass covers `count` samples split
+// into `sub_blocks` equal sub-blocks (count a multiple of sub_blocks) and
+// writes lines * sub_blocks projections, line-major:
+//
+//     proj[l * sub_blocks + s] = sum over n in sub-block s of
+//                                x[first + n] * conj(tone_l(n))
+//
+// with tone_l(n) = table[(phase0_l + n * step_l) >> (32 - kCombTableLog2)].
+// The subtract pass writes, for each n in [0, count),
+//
+//     removed[n] = sum over l ascending of amplitude_l * tone_l(n)
+//     cleaned[n] = x[first + n] - removed[n]
+//
+// Bit-identical between kernel and twin: the twins transcribe the kernels'
+// operation order, as core/dsp/vrx_reference.h requires of every twin.
+struct CombParams {
+    std::uint32_t ring_mask = 0;
+    std::uint32_t first = 0;
+    std::uint32_t count = 0;
+    std::uint32_t lines = 0;
+    std::uint32_t sub_blocks = 1;
+    std::uint32_t removed_mask = 0;
+    std::uint32_t pad0 = 0;
+    std::uint32_t pad1 = 0;
+};
+static_assert(sizeof(CombParams) == 8 * sizeof(std::uint32_t),
+              "CombParams must be eight packed 32-bit words to alias the kernels' push "
+              "constant block");
+
+[[nodiscard]] Status validate(const CombParams& params);
+
+// Twins of the two kernels. `raw` and `cleaned` are separate so a conformance
+// test can compare them; the engine binds one ring as both.
+[[nodiscard]] Status reference_comb_project(const CombParams& params, ConstComplexSpan raw,
+                                            std::span<const CombLine> lines,
+                                            ConstComplexSpan table, ComplexSpan projections);
+[[nodiscard]] Status reference_comb_subtract(const CombParams& params, ConstComplexSpan raw,
+                                             std::span<const CombLine> lines,
+                                             ConstComplexSpan table, ComplexSpan cleaned,
+                                             ComplexSpan removed);
+
+// ---------------------------------------------------------------------------
+// Tracking
+// ---------------------------------------------------------------------------
+
+enum class CombLock : std::uint8_t {
+    kIdle,       // nothing detected, nothing cancelled
+    kAcquiring,  // detected, loops pulling in, nothing cancelled yet
+    kLocked,     // cancelling
+    kLost,       // was locked, the model stopped fitting; cancellation off
+};
+
+// What the stage reports, for the RPC and the UI indicator.
+struct CombStatus {
+    CombLock lock = CombLock::kIdle;
+    CombEstimate comb{};
+    std::uint32_t lines_cancelled = 0;
+
+    // Mean over cancelled lines of the line's power before minus the
+    // residual's power at the line after, dB. The figure the UI shows.
+    float suppression_db = 0.0F;
+
+    // The loops' current estimate of how fast the spacing is moving, Hz/s.
+    float spacing_drift_hz_per_s = 0.0F;
+};
+
+// One block's projections, as read back from the project pass of block
+// `start`. Line-major, lines * sub_blocks, the lines being exactly those the
+// tracker handed out for that block, in that order.
+struct CombObservation {
+    SampleIndex start = 0;
+    std::uint32_t count = 0;
+    std::uint32_t sub_blocks = 0;
+    std::span<const Complex32> projections;
+};
+
+// What the graph dispatches for one block: the lines with their phases at the
+// block's first sample, and the amplitudes subtract removes. Empty `lines` is
+// a block the stage leaves alone.
+struct CombBlockPlan {
+    SampleIndex start = 0;
+    std::uint32_t count = 0;
+    std::uint32_t sub_blocks = 1;
+    std::vector<CombLine> lines;
+    bool subtract = false;  // false while acquiring: project only
+};
+
+// The host side of the stage. Pure: a function of the detections and
+// observations it is handed and of nothing else, no clock, no global, so the
+// engine, the behaviour tests and a replay of a capture all drive it the same
+// way. Single-threaded: the graph's recording thread owns it.
+class CombTracker {
+public:
+    CombTracker() = default;
+    explicit CombTracker(SampleRate rate);
+
+    // Forget everything; the next detection starts acquisition again. Called
+    // on every retune and source change.
+    void reset();
+
+    // A fresh detection. Ignored while locked to a comb it agrees with; starts
+    // acquisition otherwise.
+    void detected(const CombEstimate& estimate);
+
+    // The projections of an earlier block's project pass, in block order.
+    void observe(const CombObservation& observation);
+
+    // The plan for the block [start, start + count), which has just been
+    // written to the ring and is planned before any observation of it.
+    [[nodiscard]] CombBlockPlan plan(SampleIndex start, std::uint32_t count);
+
+    [[nodiscard]] CombStatus status() const;
+
+private:
+    // Value members only; the tracker is copyable so a test can fork it.
+
+    // One parameter of the model, c or d, as an exact fixed-point polynomial
+    // in the sample index: phase in cycles * 2^64, frequency in cycles per
+    // sample * 2^64 and its rate of change in cycles per sample^2 * 2^64, all
+    // wrapping mod 2^64, so advancing it by n samples is exact integer
+    // arithmetic and two advances compose to one.
+    struct Axis {
+        std::uint64_t phase = 0;
+        std::uint64_t freq = 0;
+        std::uint64_t rate = 0;
+    };
+
+    // An active line and what has been learnt about it.
+    struct Line {
+        std::int32_t k = 0;
+        std::complex<double> amp{};  // per-sample amplitude against the model's phase
+        bool seeded = false;         // amp holds a phase reference
+        bool fresh = true;           // no observation folded into the averages yet
+        double coherent = 0.0;       // average |tone|^2 per sample, noise-biased
+        double noise = 0.0;          // average noise power per sample near the line
+        double before = 0.0;         // average line power seen by subtract
+        double after = 0.0;          // average power left after subtract
+        std::uint32_t weak_blocks = 0;
+        bool in_band = true;
+    };
+
+    // What was handed out for one block, kept until its observation arrives.
+    struct PlannedLine {
+        std::uint32_t slot = 0;
+        std::int32_t k = 0;
+        std::uint32_t phase0 = 0;
+        std::uint32_t step = 0;
+        Complex32 amp{};
+        bool in_band = true;
+    };
+    struct PlanRecord {
+        SampleIndex start = 0;
+        SampleIndex mid = 0;
+        std::uint32_t count = 0;
+        std::uint32_t sub_blocks = 1;
+        std::uint64_t generation = 0;
+        bool subtract = false;
+        std::vector<PlannedLine> lines;
+    };
+
+    enum class Stage : std::uint8_t { kFrequency, kPhase };
+
+    void start_acquisition(const CombEstimate& estimate);
+    [[nodiscard]] bool agrees(const CombEstimate& estimate) const;
+    void advance_to(SampleIndex index);
+    void correct(SampleIndex at, double dc_phase, double dc_freq, double dc_rate,
+                 double dd_phase, double dd_freq, double dd_rate);
+    void replace_weak_lines();
+    [[nodiscard]] double line_snr(const Line& line, std::uint32_t count) const;
+
+    SampleRate rate_ = 0;
+    CombLock lock_ = CombLock::kIdle;
+    Stage stage_ = Stage::kFrequency;
+    std::uint64_t generation_ = 0;
+
+    bool anchored_ = false;
+    SampleIndex anchor_ = 0;  // the index the axes are evaluated at
+    Axis c_{};
+    Axis d_{};
+    double initial_offset_hz_ = 0.0;
+    double initial_spacing_hz_ = 0.0;
+
+    std::vector<Line> lines_;
+    std::int32_t range_lo_ = 0;  // the detection's k range, for replacements
+    std::int32_t range_hi_ = -1;
+    std::int32_t next_lo_ = 0;   // next untried k below and above the active set
+    std::int32_t next_hi_ = 0;
+    bool next_take_hi_ = true;
+
+    std::vector<PlanRecord> records_;
+    std::uint32_t last_count_ = 0;
+
+    std::uint32_t observed_ = 0;      // observations since acquisition started
+    std::uint32_t settle_blocks_ = 0;  // consecutive blocks meeting the stage exit test
+    bool wide_ = true;                 // short sub-blocks, for the widest pull-in
+    std::uint32_t bad_blocks_ = 0;     // consecutive blocks failing the lock test
+    bool seed_pending_ = false;
+};
+
+}  // namespace revenant::dsp
