@@ -52,6 +52,7 @@
 #include <format>
 #include <future>
 #include <map>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -1450,6 +1451,11 @@ public:
     [[nodiscard]] Expected<std::vector<DecoderInfo>> decoders() override;
     [[nodiscard]] Expected<VocoderPlugins> vocoder_plugins() override;
     [[nodiscard]] Expected<EnginePlugins> engine_plugins() override;
+    [[nodiscard]] Expected<CaptureCatalog> capture_catalog(
+        std::optional<std::int64_t> from_ns, std::optional<std::int64_t> to_ns) override;
+    [[nodiscard]] Expected<CaptureSearchResult> capture_search(const CaptureQuery& query) override;
+    [[nodiscard]] Expected<std::vector<CaptureBucket>> capture_occupancy(
+        const CaptureOccupancyRequest& request) override;
     [[nodiscard]] Expected<std::string> subscribe_decoded(std::uint64_t vrx,
                                                           std::string_view decoder,
                                                           DecodedCallback on_message,
@@ -2784,6 +2790,124 @@ Expected<EnginePlugins> ClientImpl::engine_plugins() {
                 out.files.push_back(std::move(file));
             }
             return out;
+        });
+    });
+}
+
+namespace {
+
+// Unset goes as the schema's default, which passes everything.
+void write_capture_query(schema::CaptureQuery::Builder out, const CaptureQuery& query) {
+    constexpr std::int64_t lowest = std::numeric_limits<std::int64_t>::min();
+    constexpr std::int64_t highest = std::numeric_limits<std::int64_t>::max();
+    out.setFromNs(query.from_ns.value_or(lowest));
+    out.setToNs(query.to_ns.value_or(highest));
+    out.setFreqLow(query.freq_low_hz.value_or(lowest));
+    out.setFreqHigh(query.freq_high_hz.value_or(highest));
+    out.setMinConfidence(query.min_confidence);
+    out.setHasMinSnr(query.min_snr_db.has_value());
+    out.setMinSnrDb(query.min_snr_db.value_or(0.0));
+    out.setMinDurationNs(query.min_duration_ns);
+    out.setFamily(query.family.c_str());
+    out.setGenerator(query.generator.c_str());
+    out.setLimit(query.limit);
+}
+
+}  // namespace
+
+Expected<CaptureCatalog> ClientImpl::capture_catalog(std::optional<std::int64_t> from_ns,
+                                                     std::optional<std::int64_t> to_ns) {
+    return on_loop("captureCatalog", [from_ns, to_ns](LoopState& state) {
+        auto request = state.session.captureCatalogRequest();
+        request.setFromNs(from_ns.value_or(std::numeric_limits<std::int64_t>::min()));
+        request.setToNs(to_ns.value_or(std::numeric_limits<std::int64_t>::max()));
+        return request.send().then([](auto&& response) {
+            const auto in = response.getCatalog();
+            CaptureCatalog out;
+            for (const auto row : in.getSegments()) {
+                CaptureSegment segment;
+                segment.start_ns = row.getStartNs();
+                segment.duration_ns = row.getDurationNs();
+                segment.center_hz = row.getCenter();
+                segment.sample_rate = row.getSampleRate();
+                segment.format = read_text(row.getFormat());
+                segment.bytes = row.getBytes();
+                segment.close_reason = read_text(row.getCloseReason());
+                segment.annotations = row.getAnnotations();
+                segment.stream_epoch = row.getStreamEpoch();
+                segment.first_index = row.getFirstIndex();
+                segment.sample_count = row.getSampleCount();
+                out.segments.push_back(std::move(segment));
+            }
+            for (const auto row : in.getGaps()) {
+                out.gaps.push_back(CaptureGap{row.getStreamEpoch(), row.getFromNs(),
+                                              row.getToNs(), row.getSamples()});
+            }
+            out.captured_ns = in.getCapturedNs();
+            out.bytes = in.getBytes();
+            out.root_bytes = in.getRootBytes();
+            out.in_progress = in.getInProgress();
+            out.orphaned = in.getOrphaned();
+            for (const auto line : in.getProblems()) {
+                out.problems.push_back(read_text(line));
+            }
+            return out;
+        });
+    });
+}
+
+Expected<CaptureSearchResult> ClientImpl::capture_search(const CaptureQuery& query) {
+    return on_loop("captureSearch", [query](LoopState& state) {
+        auto request = state.session.captureSearchRequest();
+        write_capture_query(request.initQuery(), query);
+        return request.send().then([](auto&& response) {
+            const auto in = response.getResult();
+            CaptureSearchResult out;
+            out.hits.reserve(in.getHits().size());
+            for (const auto row : in.getHits()) {
+                CaptureHit hit;
+                hit.start_ns = row.getStartNs();
+                hit.end_ns = row.getEndNs();
+                hit.freq_lower_hz = row.getFreqLower();
+                hit.freq_upper_hz = row.getFreqUpper();
+                hit.confidence = row.getConfidence();
+                hit.snr_db = row.getSnrDb();
+                hit.peak_db = row.getPeakDb();
+                hit.family = read_text(row.getFamily());
+                hit.generator = read_text(row.getGenerator());
+                hit.track_id = row.getTrackId();
+                hit.replay_uri = read_text(row.getReplayUri());
+                out.hits.push_back(std::move(hit));
+            }
+            out.matched = in.getMatched();
+            for (const auto line : in.getSkipped()) {
+                out.skipped.push_back(read_text(line));
+            }
+            return out;
+        });
+    });
+}
+
+Expected<std::vector<CaptureBucket>> ClientImpl::capture_occupancy(
+    const CaptureOccupancyRequest& wanted) {
+    return on_loop("captureOccupancy", [wanted](LoopState& state) {
+        auto request = state.session.captureOccupancyRequest();
+        auto out = request.initRequest();
+        out.setFromNs(wanted.from_ns);
+        out.setToNs(wanted.to_ns);
+        out.setBucketNs(wanted.bucket_ns);
+        out.setFreqLow(wanted.freq_low_hz);
+        out.setFreqHigh(wanted.freq_high_hz);
+        write_capture_query(out.initFilter(), wanted.filter);
+        return request.send().then([](auto&& response) {
+            std::vector<CaptureBucket> buckets;
+            buckets.reserve(response.getBuckets().size());
+            for (const auto row : response.getBuckets()) {
+                buckets.push_back(CaptureBucket{row.getStartNs(), row.getEndNs(),
+                                                row.getOccupied(), row.getCaptured(),
+                                                row.getHits()});
+            }
+            return buckets;
         });
     });
 }

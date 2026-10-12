@@ -27,6 +27,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -199,6 +200,10 @@ struct HarnessOptions {
     // ServerOptions::transcribe_prepare, passed through. A case passes a fake
     // recogniser; empty is a server that does not transcribe.
     transcribe::Prepare transcribe_prepare;
+
+    // The rolling capture, EngineConfig::capture as it is. Unset records
+    // nothing, which is every case but the capture ones.
+    std::optional<engine::EngineConfig::Capture> capture;
 };
 
 // A ring request the engine satisfies in full, so nothing is clamped.

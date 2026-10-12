@@ -300,6 +300,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <future>
@@ -327,6 +328,8 @@
 #include <kj/memory.h>
 #include <kj/string.h>
 
+#include "core/capture/catalog.h"
+#include "core/capture/search.h"
 #include "core/capture/track_annotations.h"
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
@@ -434,6 +437,96 @@ void release_engine(const engine::Engine& engine) {
                                  : std::format("{} (code {})", error.message, error.code);
     return {to_exception_type(error.category), __FILE__, __LINE__,
             kj::heapString(text.data(), text.size())};
+}
+
+// The schema's CaptureQuery as search.h's. The schema's defaults are the
+// extremes of the range, and an extreme reads back as no filter at all, so
+// a query the client left alone is the same query as one it never sent.
+[[nodiscard]] capture::Query read_capture_query(schema::CaptureQuery::Reader in) {
+    constexpr std::int64_t lowest = std::numeric_limits<std::int64_t>::min();
+    constexpr std::int64_t highest = std::numeric_limits<std::int64_t>::max();
+    capture::Query out;
+    if (in.getFromNs() != lowest) {
+        out.from_ns = in.getFromNs();
+    }
+    if (in.getToNs() != highest) {
+        out.to_ns = in.getToNs();
+    }
+    if (in.getFreqLow() != lowest) {
+        out.freq_low = in.getFreqLow();
+    }
+    if (in.getFreqHigh() != highest) {
+        out.freq_high = in.getFreqHigh();
+    }
+    out.min_confidence = in.getMinConfidence();
+    if (in.getHasMinSnr()) {
+        out.min_snr_db = in.getMinSnrDb();
+    }
+    out.min_duration_ns = in.getMinDurationNs();
+    out.family = std::string(in.getFamily().cStr());
+    out.generator = std::string(in.getGenerator().cStr());
+    return out;
+}
+
+void write_capture_catalog(schema::CaptureCatalog::Builder out, const CaptureCatalog& in) {
+    auto segments = out.initSegments(static_cast<unsigned>(in.segments.size()));
+    for (std::size_t i = 0; i < in.segments.size(); ++i) {
+        const CaptureSegment& from = in.segments[i];
+        auto row = segments[static_cast<unsigned>(i)];
+        row.setStartNs(from.start_ns);
+        row.setDurationNs(from.duration_ns);
+        row.setCenter(from.center_hz);
+        row.setSampleRate(from.sample_rate);
+        row.setFormat(from.format.c_str());
+        row.setBytes(from.bytes);
+        row.setCloseReason(from.close_reason.c_str());
+        row.setAnnotations(from.annotations);
+        row.setStreamEpoch(from.stream_epoch);
+        row.setFirstIndex(from.first_index);
+        row.setSampleCount(from.sample_count);
+    }
+    auto gaps = out.initGaps(static_cast<unsigned>(in.gaps.size()));
+    for (std::size_t i = 0; i < in.gaps.size(); ++i) {
+        auto row = gaps[static_cast<unsigned>(i)];
+        row.setStreamEpoch(in.gaps[i].stream_epoch);
+        row.setFromNs(in.gaps[i].from_ns);
+        row.setToNs(in.gaps[i].to_ns);
+        row.setSamples(in.gaps[i].samples);
+    }
+    out.setCapturedNs(in.captured_ns);
+    out.setBytes(in.bytes);
+    out.setRootBytes(in.root_bytes);
+    out.setInProgress(in.in_progress);
+    out.setOrphaned(in.orphaned);
+    auto problems = out.initProblems(static_cast<unsigned>(in.problems.size()));
+    for (std::size_t i = 0; i < in.problems.size(); ++i) {
+        problems.set(static_cast<unsigned>(i), in.problems[i].c_str());
+    }
+}
+
+void write_capture_search(schema::CaptureSearchResult::Builder out,
+                          const CaptureSearchResult& in) {
+    auto hits = out.initHits(static_cast<unsigned>(in.hits.size()));
+    for (std::size_t i = 0; i < in.hits.size(); ++i) {
+        const CaptureHit& from = in.hits[i];
+        auto row = hits[static_cast<unsigned>(i)];
+        row.setStartNs(from.start_ns);
+        row.setEndNs(from.end_ns);
+        row.setFreqLower(from.freq_lower_hz);
+        row.setFreqUpper(from.freq_upper_hz);
+        row.setConfidence(from.confidence);
+        row.setSnrDb(from.snr_db);
+        row.setPeakDb(from.peak_db);
+        row.setFamily(from.family.c_str());
+        row.setGenerator(from.generator.c_str());
+        row.setTrackId(from.track_id);
+        row.setReplayUri(from.replay_uri.c_str());
+    }
+    out.setMatched(in.matched);
+    auto skipped = out.initSkipped(static_cast<unsigned>(in.skipped.size()));
+    for (std::size_t i = 0; i < in.skipped.size(); ++i) {
+        skipped.set(static_cast<unsigned>(i), in.skipped[i].c_str());
+    }
 }
 
 [[nodiscard]] std::string describe(const kj::Exception& exception) {
@@ -1668,12 +1761,39 @@ public:
     // Whether the plugin at `index` in engine_plugins()->modules() is running.
     [[nodiscard]] bool plugin_running(std::size_t index) const;
 
+    // The rolling capture, browsed. Answered on the capture worker and
+    // resolved on the loop thread, where the caller writes the results; each
+    // is refused when the engine keeps no capture.
+    [[nodiscard]] kj::Promise<CaptureCatalog> capture_catalog(std::int64_t from_ns,
+                                                              std::int64_t to_ns);
+    [[nodiscard]] kj::Promise<CaptureSearchResult> capture_search(capture::Query query,
+                                                                  std::uint32_t limit);
+    [[nodiscard]] kj::Promise<std::vector<CaptureBucket>> capture_occupancy(
+        capture::OccupancyRequest request);
+
 private:
     void serve(ServerOptions options);
     void announce(Status status);
 
     void run_listings();
     void close_listings();
+
+    // `work` runs on the capture worker; its answer resolves the promise on
+    // the loop thread that made it.
+    template <typename T>
+    [[nodiscard]] kj::Promise<T> on_capture_worker(std::function<Expected<T>()> work);
+    void run_capture_jobs();
+    void close_capture_jobs();
+
+    // Capture worker only. The catalog refreshed, or null when the root does
+    // not exist yet because no stream has been recorded.
+    [[nodiscard]] Expected<const capture::Catalog*> fresh_catalog();
+
+    // Capture worker only. The segments with their annotations as search.h
+    // wants them, read through annotation_cache_. A meta that will not read
+    // is named in `skipped` and left out.
+    [[nodiscard]] std::vector<capture::IndexedSegment> indexed_segments(
+        std::span<const capture::CatalogSegment> segments, std::vector<std::string>& skipped);
 
     [[nodiscard]] kj::Promise<void> pump();
     void drain();
@@ -1797,6 +1917,35 @@ private:
     std::condition_variable listing_wake_;
     std::deque<ListingFulfiller> listings_;
     bool listings_closed_ = false;
+
+    // The capture worker, on the listing worker's terms: started on the first
+    // capture call, joined by stop() while the loop can still be armed. Its
+    // own thread because refreshing a catalog of thousands of metas, or
+    // reading every one for a search, is disk work the loop must not wait on.
+    //
+    // A job is called with true to run and false to be rejected unrun.
+    using CaptureJob = std::function<void(bool run)>;
+    std::thread capture_thread_;
+    std::mutex capture_jobs_lock_;
+    std::condition_variable capture_wake_;
+    std::deque<CaptureJob> capture_jobs_;
+    bool capture_jobs_closed_ = false;
+
+    // EngineConfig::capture's root as UTF-8, empty when there is none. Set in
+    // start() and never again.
+    std::string capture_root_;
+
+    // The capture worker's alone. One catalog for the life of the server,
+    // refreshed rather than reopened, so a call after the first parses only
+    // the metas closed since. The annotation cache is keyed by meta path and
+    // checked against the meta's size, the catalog's own change signal.
+    struct CachedMeta {
+        std::uint64_t meta_bytes = 0;
+        std::vector<capture::StoredAnnotation> annotations;
+        std::vector<capture::IndexStamp> stamps;
+    };
+    std::optional<capture::Catalog> catalog_;
+    std::map<std::string, CachedMeta> annotation_cache_;
 
     // The wideband detector, and everything about it.
     //
@@ -3135,6 +3284,45 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> captureCatalog(CaptureCatalogContext context) override {
+        const auto params = context.getParams();
+        return owner_.capture_catalog(params.getFromNs(), params.getToNs())
+            .then([context](CaptureCatalog&& answer) mutable {
+                write_capture_catalog(context.getResults().initCatalog(), answer);
+            });
+    }
+
+    kj::Promise<void> captureSearch(CaptureSearchContext context) override {
+        const auto query = context.getParams().getQuery();
+        return owner_.capture_search(read_capture_query(query), query.getLimit())
+            .then([context](CaptureSearchResult&& answer) mutable {
+                write_capture_search(context.getResults().initResult(), answer);
+            });
+    }
+
+    kj::Promise<void> captureOccupancy(CaptureOccupancyContext context) override {
+        const auto in = context.getParams().getRequest();
+        capture::OccupancyRequest request;
+        request.from_ns = in.getFromNs();
+        request.to_ns = in.getToNs();
+        request.bucket_ns = in.getBucketNs();
+        request.freq_low = in.getFreqLow();
+        request.freq_high = in.getFreqHigh();
+        request.filter = read_capture_query(in.getFilter());
+        return owner_.capture_occupancy(std::move(request))
+            .then([context](std::vector<CaptureBucket>&& buckets) mutable {
+                auto out = context.getResults().initBuckets(static_cast<unsigned>(buckets.size()));
+                for (std::size_t i = 0; i < buckets.size(); ++i) {
+                    auto row = out[static_cast<unsigned>(i)];
+                    row.setStartNs(buckets[i].start_ns);
+                    row.setEndNs(buckets[i].end_ns);
+                    row.setOccupied(buckets[i].occupied);
+                    row.setCaptured(buckets[i].captured);
+                    row.setHits(buckets[i].hits);
+                }
+            });
+    }
+
     kj::Promise<void> setPluginReceivers(SetPluginReceiversContext context) override {
         owner_.set_plugin_receivers(context.getParams().getAllowed());
         return kj::READY_NOW;
@@ -3344,6 +3532,21 @@ private:
 
 Status ServerImpl::start(const ServerOptions& options) {
     vocoders_ = options.vocoders;
+
+    if (const auto root = engine_.capture_root(); root.has_value()) {
+        std::error_code ec;
+        const std::filesystem::path absolute = std::filesystem::absolute(*root, ec);
+        const std::u8string text = (ec ? *root : absolute).lexically_normal().generic_u8string();
+        capture_root_.assign(text.begin(), text.end());
+        while (capture_root_.size() > 1 && capture_root_.back() == '/') {
+            capture_root_.pop_back();
+        }
+    }
+
+    // A retune a replay follows happens on the engine's delivery thread and
+    // waits in take_followed_retunes for the pump. Rung here so it is drained
+    // when it happens, not when the next frame or chunk happens to arrive.
+    engine_.set_retune_sink([this] { wake_loop(); });
 
     // Speech to text, when the host gave a way to prepare a recogniser. Made
     // here and not on first use so the status call can answer about it from
@@ -6515,6 +6718,362 @@ void ServerImpl::close_listings() {
 }
 
 // ---------------------------------------------------------------------------
+// The rolling capture, browsed
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Every hit a search sends at most, whatever the query asks: ten thousand
+// rows is about a megabyte on the wire and more than a list in a window can
+// usefully show. CaptureSearchResult::matched says how many there were.
+constexpr std::uint32_t kMaxCaptureHits = 10'000;
+
+// A request for more buckets than this is refused rather than computed. A
+// day in one-second buckets is 86400, and a client asking for a year of them
+// has made an arithmetic mistake rather than a request.
+constexpr std::int64_t kMaxOccupancyBuckets = 200'000;
+
+[[nodiscard]] Error capture_off() {
+    return Error{"this engine keeps no rolling capture: it was started without --capture, "
+                 "so there is nothing to browse"};
+}
+
+// A replay of [from_ns, to_ns) over the engine's own root, at realtime. Whole
+// nanoseconds rather than ISO text, because the ISO form a capture URI takes
+// is to the millisecond and a hit is not.
+[[nodiscard]] std::string replay_uri(std::string_view root, std::int64_t from_ns,
+                                     std::int64_t to_ns) {
+    std::string encoded;
+    for (const char c : root) {
+        const auto byte = static_cast<unsigned char>(c);
+        const bool plain = (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+                           (byte >= '0' && byte <= '9') || c == '-' || c == '.' || c == '_' ||
+                           c == '~' || c == '/' || c == ':';
+        encoded += plain ? std::string(1, c) : std::format("%{:02X}", byte);
+    }
+    // A share is //server/share, which the registry reads as the authority. A
+    // drive path needs the third slash so C: is not taken for a host.
+    std::string uri = "capture:";
+    if (encoded.starts_with("//")) {
+        uri += encoded;
+    } else if (encoded.starts_with('/')) {
+        uri += "//" + encoded;
+    } else {
+        uri += "///" + encoded;
+    }
+    return std::format("{}?from={}&to={}&pace=1", uri, from_ns, to_ns);
+}
+
+}  // namespace
+
+template <typename T>
+kj::Promise<T> ServerImpl::on_capture_worker(std::function<Expected<T>()> work) {
+    if (capture_root_.empty()) {
+        return to_exception(capture_off());
+    }
+
+    // Made on the loop thread, as list_sources makes its promise: only the
+    // fulfiller crosses.
+    auto answer = kj::newPromiseAndCrossThreadFulfiller<T>();
+    auto fulfiller =
+        std::make_shared<kj::Own<kj::CrossThreadPromiseFulfiller<T>>>(kj::mv(answer.fulfiller));
+    CaptureJob job = [fulfiller, work = std::move(work)](bool run) {
+        if (!run) {
+            (*fulfiller)->reject(
+                to_exception(Error{"the RPC server stopped before this capture call ran"}));
+            return;
+        }
+        auto result = work();
+        if (result) {
+            (*fulfiller)->fulfill(std::move(*result));
+        } else {
+            (*fulfiller)->reject(to_exception(result.error()));
+        }
+    };
+
+    {
+        const std::scoped_lock held(capture_jobs_lock_);
+        if (capture_jobs_closed_) {
+            return to_exception(Error{"this RPC server is stopping and will not read the capture"});
+        }
+        if (!capture_thread_.joinable()) {
+            try {
+                capture_thread_ = std::thread([this] { run_capture_jobs(); });
+            } catch (const std::exception& error) {
+                return to_exception(Error{std::format(
+                    "the RPC server could not start the thread that reads the capture: {}",
+                    error.what())});
+            }
+        }
+        capture_jobs_.push_back(std::move(job));
+    }
+    capture_wake_.notify_one();
+    return kj::mv(answer.promise);
+}
+
+void ServerImpl::run_capture_jobs() {
+    describe_this_thread(L"revenant rpc capture", ThreadClass::Display);
+    for (;;) {
+        CaptureJob job;
+        {
+            std::unique_lock held(capture_jobs_lock_);
+            capture_wake_.wait(held,
+                               [this] { return capture_jobs_closed_ || !capture_jobs_.empty(); });
+            if (capture_jobs_closed_) {
+                break;
+            }
+            job = std::move(capture_jobs_.front());
+            capture_jobs_.pop_front();
+        }
+        job(true);
+    }
+
+    std::deque<CaptureJob> abandoned;
+    {
+        const std::scoped_lock held(capture_jobs_lock_);
+        abandoned.swap(capture_jobs_);
+    }
+    for (CaptureJob& job : abandoned) {
+        job(false);
+    }
+}
+
+void ServerImpl::close_capture_jobs() {
+    {
+        const std::scoped_lock held(capture_jobs_lock_);
+        capture_jobs_closed_ = true;
+    }
+    capture_wake_.notify_all();
+    if (capture_thread_.joinable()) {
+        // Bounded by the one job already running, a catalog refresh or a
+        // search's reads.
+        capture_thread_.join();
+    }
+}
+
+Expected<const capture::Catalog*> ServerImpl::fresh_catalog() {
+    if (catalog_.has_value()) {
+        if (auto refreshed = catalog_->refresh(); !refreshed) {
+            return std::unexpected(with_context(refreshed.error(), "the rolling capture"));
+        }
+        return &*catalog_;
+    }
+
+    // The writer makes the root when its first stream starts, so an engine
+    // that has not run yet has none, and that is an empty capture rather than
+    // a broken one.
+    std::error_code ec;
+    const std::filesystem::path root(std::u8string(capture_root_.begin(), capture_root_.end()));
+    if (!std::filesystem::exists(root, ec)) {
+        return nullptr;
+    }
+    auto opened = capture::Catalog::open(capture_root_);
+    if (!opened) {
+        return std::unexpected(with_context(opened.error(), "the rolling capture"));
+    }
+    catalog_.emplace(std::move(*opened));
+    return &*catalog_;
+}
+
+std::vector<capture::IndexedSegment> ServerImpl::indexed_segments(
+    std::span<const capture::CatalogSegment> segments, std::vector<std::string>& skipped) {
+    // The catalog's annotations do not say which generator wrote them or
+    // which track, and a query filters on the one and a hit reports the
+    // other, so the meta is read again: once per size it has had.
+    std::vector<capture::IndexedSegment> out;
+    out.reserve(segments.size());
+    for (const capture::CatalogSegment& segment : segments) {
+        auto cached = annotation_cache_.find(segment.meta_path);
+        if (cached == annotation_cache_.end() || cached->second.meta_bytes != segment.meta_bytes) {
+            auto annotations = capture::read_annotations(segment.meta_path);
+            if (!annotations) {
+                skipped.push_back(
+                    std::format("{}: {}", segment.meta_path, annotations.error().message));
+                continue;
+            }
+            auto stamps = capture::read_index_stamps(segment.meta_path);
+            if (!stamps) {
+                skipped.push_back(std::format("{}: {}", segment.meta_path, stamps.error().message));
+                continue;
+            }
+            cached = annotation_cache_
+                         .insert_or_assign(segment.meta_path,
+                                           CachedMeta{segment.meta_bytes, std::move(*annotations),
+                                                      std::move(*stamps)})
+                         .first;
+        }
+        out.push_back(capture::IndexedSegment{segment.data_path, segment.info,
+                                              cached->second.annotations,
+                                              cached->second.stamps});
+    }
+
+    // The ring deletes segments, and their entries would otherwise stay for
+    // the life of the server. Swept only once the cache has outgrown the
+    // catalog, so a steady state costs nothing.
+    if (catalog_.has_value() && annotation_cache_.size() > 2 * catalog_->segments().size() + 64) {
+        std::set<std::string_view> live;
+        for (const capture::CatalogSegment& segment : catalog_->segments()) {
+            live.insert(segment.meta_path);
+        }
+        std::erase_if(annotation_cache_,
+                      [&](const auto& entry) { return !live.contains(entry.first); });
+    }
+    return out;
+}
+
+kj::Promise<CaptureCatalog> ServerImpl::capture_catalog(std::int64_t from_ns, std::int64_t to_ns) {
+    if (to_ns <= from_ns) {
+        return to_exception(Error{std::format(
+            "captureCatalog was asked for {} to {}, which is empty or backwards", from_ns, to_ns)});
+    }
+    return on_capture_worker<CaptureCatalog>([this, from_ns, to_ns]() -> Expected<CaptureCatalog> {
+        auto fresh = fresh_catalog();
+        if (!fresh) {
+            return std::unexpected(fresh.error());
+        }
+        CaptureCatalog out;
+        const capture::Catalog* const catalog = *fresh;
+        if (catalog == nullptr) {
+            return out;
+        }
+
+        const std::vector<capture::CatalogSegment> segments = catalog->overlapping(from_ns, to_ns);
+        out.segments.reserve(segments.size());
+        std::map<std::uint64_t, std::vector<const capture::CatalogSegment*>> by_epoch;
+        for (const capture::CatalogSegment& segment : segments) {
+            CaptureSegment row;
+            row.start_ns = segment.info.start_ns();
+            row.duration_ns = segment.end_ns() - row.start_ns;
+            row.center_hz = segment.info.center;
+            row.sample_rate = segment.info.rate;
+            row.format = source::format_name(segment.info.format);
+            row.bytes = segment.data_bytes + segment.meta_bytes;
+            row.close_reason = segment.close_reason;
+            row.annotations = static_cast<std::uint32_t>(segment.annotations.size());
+            row.stream_epoch = segment.info.stream_epoch;
+            row.first_index = segment.info.first_index;
+            row.sample_count = segment.info.sample_count;
+            out.captured_ns += row.duration_ns;
+            out.bytes += row.bytes;
+            out.segments.push_back(std::move(row));
+            by_epoch[segment.info.stream_epoch].push_back(&segment);
+        }
+
+        // Per epoch, because indices compare only within one: a new epoch is
+        // a restarted source, not lost samples. revenant-capture list's rule.
+        for (auto& [epoch, run] : by_epoch) {
+            std::ranges::sort(run, {},
+                              [](const capture::CatalogSegment* s) { return s->info.first_index; });
+            for (std::size_t i = 1; i < run.size(); ++i) {
+                const capture::CatalogSegment& before = *run[i - 1];
+                const capture::CatalogSegment& after = *run[i];
+                if (after.info.first_index <= before.info.end_index()) {
+                    continue;
+                }
+                out.gaps.push_back(CaptureGap{epoch, before.end_ns(), after.info.start_ns(),
+                                              after.info.first_index - before.info.end_index()});
+            }
+        }
+        std::ranges::sort(out.gaps, {}, &CaptureGap::from_ns);
+
+        out.root_bytes = catalog->total_bytes();
+        for (const capture::UnfinishedSegment& file : catalog->unfinished()) {
+            ++(file.in_progress ? out.in_progress : out.orphaned);
+        }
+        for (const capture::CatalogProblem& problem : catalog->problems()) {
+            out.problems.push_back(std::format("{}: {}", problem.path, problem.reason));
+        }
+        return out;
+    });
+}
+
+kj::Promise<CaptureSearchResult> ServerImpl::capture_search(capture::Query query,
+                                                            std::uint32_t limit) {
+    const std::uint32_t cap = limit == 0 ? kMaxCaptureHits : std::min(limit, kMaxCaptureHits);
+    return on_capture_worker<CaptureSearchResult>(
+        [this, query = std::move(query), cap]() -> Expected<CaptureSearchResult> {
+            auto fresh = fresh_catalog();
+            if (!fresh) {
+                return std::unexpected(fresh.error());
+            }
+            CaptureSearchResult out;
+            const capture::Catalog* const catalog = *fresh;
+            if (catalog == nullptr) {
+                return out;
+            }
+
+            // Only the segments the time filter can reach are read.
+            const std::vector<capture::CatalogSegment> segments = catalog->overlapping(
+                query.from_ns.value_or(std::numeric_limits<std::int64_t>::min()),
+                query.to_ns.value_or(std::numeric_limits<std::int64_t>::max()));
+            const std::vector<capture::IndexedSegment> indexed =
+                indexed_segments(segments, out.skipped);
+            const std::vector<capture::Hit> hits = capture::run_query(indexed, query);
+
+            out.matched = hits.size();
+            const std::size_t sent = std::min<std::size_t>(hits.size(), cap);
+            out.hits.reserve(sent);
+            for (std::size_t i = 0; i < sent; ++i) {
+                const capture::Hit& hit = hits[i];
+                CaptureHit row;
+                row.start_ns = hit.start_ns;
+                row.end_ns = hit.end_ns;
+                row.freq_lower_hz = hit.freq_lower;
+                row.freq_upper_hz = hit.freq_upper;
+                row.confidence = hit.confidence;
+                row.snr_db = hit.snr_db;
+                row.peak_db = hit.peak_db;
+                row.family = hit.family;
+                row.generator = hit.generator;
+                row.track_id = hit.track_id;
+                row.replay_uri = replay_uri(capture_root_, hit.start_ns, hit.end_ns);
+                out.hits.push_back(std::move(row));
+            }
+            return out;
+        });
+}
+
+kj::Promise<std::vector<CaptureBucket>> ServerImpl::capture_occupancy(
+    capture::OccupancyRequest request) {
+    // Refused here, before the worker, for a bucket count the answer could
+    // not carry. search.h's occupancy refuses the rest in its own words.
+    if (request.bucket_ns > 0 && request.to_ns > request.from_ns &&
+        (request.to_ns - request.from_ns) / request.bucket_ns >= kMaxOccupancyBuckets) {
+        return to_exception(Error{std::format(
+            "captureOccupancy was asked for {} buckets of {} ns, and the most it answers is {}",
+            (request.to_ns - request.from_ns) / request.bucket_ns, request.bucket_ns,
+            kMaxOccupancyBuckets)});
+    }
+    return on_capture_worker<std::vector<CaptureBucket>>(
+        [this, request = std::move(request)]() -> Expected<std::vector<CaptureBucket>> {
+            auto fresh = fresh_catalog();
+            if (!fresh) {
+                return std::unexpected(fresh.error());
+            }
+            std::vector<capture::IndexedSegment> indexed;
+            if (const capture::Catalog* const catalog = *fresh; catalog != nullptr) {
+                // A segment whose meta will not read is left out, so its time
+                // counts as not captured rather than as quiet.
+                std::vector<std::string> skipped;
+                const std::vector<capture::CatalogSegment> segments =
+                    catalog->overlapping(request.from_ns, request.to_ns);
+                indexed = indexed_segments(segments, skipped);
+            }
+            auto buckets = capture::occupancy(indexed, request);
+            if (!buckets) {
+                return std::unexpected(buckets.error());
+            }
+            std::vector<CaptureBucket> out;
+            out.reserve(buckets->size());
+            for (const capture::OccupancyBucket& bucket : *buckets) {
+                out.push_back(CaptureBucket{bucket.start_ns, bucket.end_ns, bucket.occupied,
+                                            bucket.captured, bucket.hits});
+            }
+            return out;
+        });
+}
+
+// ---------------------------------------------------------------------------
 // Speech to text
 // ---------------------------------------------------------------------------
 
@@ -7711,6 +8270,11 @@ void ServerImpl::stop() {
     // back through a fulfiller that arms this loop, so the thread that can
     // fire one has to be joined while the loop is still there to be armed.
     close_listings();
+    close_capture_jobs();
+
+    // Taken off before the loop goes. Once this returns no call into
+    // wake_loop is running or will start.
+    engine_.set_retune_sink({});
 
     {
         std::scoped_lock held(sink_lock_);

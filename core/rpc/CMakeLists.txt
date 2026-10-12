@@ -88,6 +88,12 @@ endif()
 
 revenant_apply_warnings(revenant_rpc_server)
 
+# server.cpp holds every Session method and the capnp templates each one
+# instantiates, which outgrew COFF's 65279 section limit on 2026-10-12.
+if(MSVC)
+    target_compile_options(revenant_rpc_server PRIVATE /bigobj)
+endif()
+
 # The same reasoning as revenant_core's: an SDR has no business being built
 # with fast math, and a conversion layer that reassociated a rational would
 # be the worst place to find that out.

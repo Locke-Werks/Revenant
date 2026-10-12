@@ -179,6 +179,9 @@ struct Hit {
     double snr_db = 0.0;
     std::string family;
     std::string generator;
+
+    // The live detector's track id, zero when the entry carried none.
+    std::uint64_t track_id = 0;
 };
 
 // Every annotation passing the query, ordered by start, then by lower edge,

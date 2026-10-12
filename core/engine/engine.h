@@ -1757,6 +1757,16 @@ public:
     // for whoever holds those. A live radio never adds to this list.
     [[nodiscard]] virtual std::vector<SourceRetune> take_followed_retunes() { return {}; }
 
+    // Called on the delivery thread each time take_followed_retunes gains an
+    // entry, after the entry is there to be taken. The server's spectrum and
+    // audio sinks are what ring its loop, so without this a replay retune sat
+    // undrained until some unrelated frame or chunk arrived, and with nothing
+    // subscribed it was never drained at all. The callable has to be cheap
+    // and must not call back into the engine. An empty one removes it; once
+    // that call returns, no call to the old one is in progress or will start.
+    using RetuneSink = std::function<void()>;
+    virtual void set_retune_sink(RetuneSink sink) { static_cast<void>(sink); }
+
     // The front end's gain, by the stage's own name, answering with the value
     // the device took.
     //
@@ -1933,6 +1943,10 @@ public:
     // writer and its own epoch.
     [[nodiscard]] virtual std::optional<capture::WriterStats> capture_stats() const;
 
+    // EngineConfig::capture's root, or nothing when the engine records no
+    // capture. The one root the wire may browse: a client never names a path.
+    [[nodiscard]] virtual std::optional<std::filesystem::path> capture_root() const;
+
     // Hands a detection to the running stream's writer, which holds it until
     // the segment containing `absolute_start` closes. `absolute_start` is a
     // stream index in the current stream. Dropped with no capture or no
@@ -2051,6 +2065,8 @@ inline ProbeStats Engine::probe_stats() const { return {}; }
 inline EngineLoad Engine::load() const { return {}; }
 
 inline std::optional<capture::WriterStats> Engine::capture_stats() const { return std::nullopt; }
+
+inline std::optional<std::filesystem::path> Engine::capture_root() const { return std::nullopt; }
 
 inline void Engine::add_capture_annotation(dsp::SampleIndex, const capture::Annotation&,
                                            std::optional<std::uint64_t>) {}

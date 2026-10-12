@@ -1025,6 +1025,7 @@ std::vector<Hit> run_query(std::span<const IndexedSegment> segments, const Query
             hit.snr_db = a.snr_db;
             hit.family = a.family;
             hit.generator = stored.generator;
+            hit.track_id = stored.track_id;
             hits.push_back(std::move(hit));
         }
     }

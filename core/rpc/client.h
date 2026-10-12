@@ -551,6 +551,19 @@ public:
     // rule for an older engine.
     [[nodiscard]] virtual Expected<EnginePlugins> engine_plugins() = 0;
 
+    // The engine's rolling capture: what segments it holds, what was seen in
+    // them, and how busy a band was over time. Only the root the engine was
+    // started with is reachable, and each is refused in words by an engine
+    // keeping no capture, and as unimplemented by one older than the calls.
+    // A hit's replay_uri goes to open_source as it is; see docs/rpc.md for
+    // what opening it does to the recording.
+    [[nodiscard]] virtual Expected<CaptureCatalog> capture_catalog(
+        std::optional<std::int64_t> from_ns, std::optional<std::int64_t> to_ns) = 0;
+    [[nodiscard]] virtual Expected<CaptureSearchResult> capture_search(
+        const CaptureQuery& query) = 0;
+    [[nodiscard]] virtual Expected<std::vector<CaptureBucket>> capture_occupancy(
+        const CaptureOccupancyRequest& request) = 0;
+
     // Attaches a decoder to a receiver and streams what it recovers, one
     // DecodedMessage per event, until the subscription or the receiver ends.
     //

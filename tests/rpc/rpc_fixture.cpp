@@ -56,6 +56,7 @@ Status Harness::open(const HarnessOptions& options) {
     config.pace = options.pace;
     config.spectrum_transform = options.spectrum_transform;
     config.passband_transform = options.passband_transform;
+    config.capture = options.capture;
 
     auto created = engine::Engine::create(config);
     if (!created) {

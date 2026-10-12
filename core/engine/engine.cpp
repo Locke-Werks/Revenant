@@ -1398,7 +1398,16 @@ public:
             follow_block_center(block);
             return graph->on_block(block);
         };
-        if (config_.capture) {
+        if (config_.capture && replays_capture()) {
+            // A replay is not recorded. Written into the root it reads from,
+            // it would be a second copy of samples already there under a new
+            // epoch, read back by the catalog as a fresh stream, and the ring
+            // would delete real history to make room for it. The radio's last
+            // segment is closed here rather than left open on a writer no
+            // stream feeds; recording starts again with the next stream that
+            // is not a replay.
+            stop_capture();
+        } else if (config_.capture) {
             if (auto opened = start_capture(); !opened) {
                 running_.store(false, std::memory_order_release);
                 return std::unexpected(with_context(opened.error(), "Engine::run"));
@@ -1524,6 +1533,10 @@ public:
         return {};
     }
 
+    [[nodiscard]] bool replays_capture() const {
+        return capabilities_.uri.starts_with("capture:");
+    }
+
     // Closes the open segment and keeps the counters for capture_stats. Safe
     // with no writer, and safe twice.
     void stop_capture() {
@@ -1586,8 +1599,28 @@ public:
         SourceRetune out = rebase_receivers(was, landed);
         out.at = at;
 
-        const std::scoped_lock held(followed_lock_);
-        followed_.push_back(std::move(out));
+        {
+            const std::scoped_lock held(followed_lock_);
+            followed_.push_back(std::move(out));
+        }
+        const std::scoped_lock held(retune_sink_lock_);
+        if (retune_sink_) {
+            retune_sink_();
+        }
+    }
+
+    void set_retune_sink(RetuneSink sink) override {
+        // The same lock the call runs under, so a caller tearing down what
+        // the sink points at knows it is not mid-call once this returns.
+        const std::scoped_lock held(retune_sink_lock_);
+        retune_sink_ = std::move(sink);
+    }
+
+    [[nodiscard]] std::optional<std::filesystem::path> capture_root() const override {
+        if (!config_.capture) {
+            return std::nullopt;
+        }
+        return config_.capture->root;
     }
 
     [[nodiscard]] std::vector<SourceRetune> take_followed_retunes() override {
@@ -1973,6 +2006,8 @@ private:
     // What follow_block_center did, kept for take_followed_retunes.
     std::mutex followed_lock_;
     std::vector<SourceRetune> followed_;
+    std::mutex retune_sink_lock_;
+    RetuneSink retune_sink_;
 
     // capture_center_ is the delivery thread's alone once a stream runs.
     std::atomic<dsp::Hertz> capture_center_{0};

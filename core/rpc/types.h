@@ -1623,4 +1623,93 @@ struct Transcript {
     std::uint64_t dropped_before = 0;
 };
 
+// The rolling capture, browsed. Mirrors the schema's CaptureCatalog and the
+// structs beside it; their comments there are the contract. Times are Unix
+// epoch nanoseconds, frequencies absolute hertz.
+struct CaptureSegment {
+    std::int64_t start_ns = 0;
+    std::int64_t duration_ns = 0;
+    std::int64_t center_hz = 0;
+    std::int64_t sample_rate = 0;
+    std::string format;
+    std::uint64_t bytes = 0;
+    std::string close_reason;
+    std::uint32_t annotations = 0;
+    std::uint64_t stream_epoch = 0;
+    std::uint64_t first_index = 0;
+    std::uint64_t sample_count = 0;
+};
+
+struct CaptureGap {
+    std::uint64_t stream_epoch = 0;
+    std::int64_t from_ns = 0;
+    std::int64_t to_ns = 0;
+    std::uint64_t samples = 0;
+};
+
+struct CaptureCatalog {
+    std::vector<CaptureSegment> segments;
+    std::vector<CaptureGap> gaps;
+    std::int64_t captured_ns = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t root_bytes = 0;
+    std::uint32_t in_progress = 0;
+    std::uint32_t orphaned = 0;
+    std::vector<std::string> problems;
+};
+
+// Unset is "no filter", which is what the schema's defaults say on the wire.
+struct CaptureQuery {
+    std::optional<std::int64_t> from_ns;
+    std::optional<std::int64_t> to_ns;
+    std::optional<std::int64_t> freq_low_hz;
+    std::optional<std::int64_t> freq_high_hz;
+    double min_confidence = 0.0;
+    std::optional<double> min_snr_db;
+    std::int64_t min_duration_ns = 0;
+    std::string family;
+    std::string generator;
+    // Zero is the server's cap.
+    std::uint32_t limit = 0;
+};
+
+struct CaptureHit {
+    std::int64_t start_ns = 0;
+    std::int64_t end_ns = 0;
+    std::int64_t freq_lower_hz = 0;
+    std::int64_t freq_upper_hz = 0;
+    double confidence = 0.0;
+    double snr_db = 0.0;
+    double peak_db = 0.0;
+    std::string family;
+    std::string generator;
+    std::uint64_t track_id = 0;
+    // For Client::open_source as it stands.
+    std::string replay_uri;
+};
+
+struct CaptureSearchResult {
+    std::vector<CaptureHit> hits;
+    std::uint64_t matched = 0;
+    std::vector<std::string> skipped;
+};
+
+struct CaptureOccupancyRequest {
+    std::int64_t from_ns = 0;
+    std::int64_t to_ns = 0;
+    std::int64_t bucket_ns = 0;
+    std::int64_t freq_low_hz = 0;
+    std::int64_t freq_high_hz = 0;
+    // Its time, frequency and limit are ignored.
+    CaptureQuery filter;
+};
+
+struct CaptureBucket {
+    std::int64_t start_ns = 0;
+    std::int64_t end_ns = 0;
+    double occupied = 0.0;
+    double captured = 0.0;
+    std::uint32_t hits = 0;
+};
+
 }  // namespace revenant::rpc

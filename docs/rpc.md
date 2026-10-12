@@ -1466,6 +1466,79 @@ epoch unchanged. Measured on the RTX 4090 on 2026-09-23 over two runs, a
 `setSourcePace(4)`. `tests/engine/test_sources.cpp` has the stopwatch restart
 at the source.
 
+### The rolling capture can be browsed, and a replay of it is not recorded
+
+`revenant-capture` lists, searches and measures a capture root from a terminal.
+Three `Session` calls added on 2026-10-12 answer the same questions over the
+wire, from the same code: `core/capture/catalog.h` for the list and
+`core/capture/search.h` for the rest.
+
+- `captureCatalog(fromNs, toNs)` lists every closed segment with a sample in
+  the range: start, duration, centre, rate, format, bytes on disk, close
+  reason and how many annotations its meta carries, plus the stream epoch and
+  indices. Beside them the gaps, which are samples the writer lost inside one
+  epoch (a new epoch is a restarted source and not a gap), the wall clock and
+  bytes the listed segments cover, the bytes under the whole root, the data
+  files still being written or orphaned, and one line per meta that would not
+  read.
+- `captureSearch(query)` is `run_query` over a `CaptureQuery` that mirrors
+  `capture::Query` field for field. A hit carries absolute start and end in
+  Unix nanoseconds, its frequency edges, confidence, SNR, family, the
+  generator that wrote it, the live detector's track id, and a `replayUri`:
+  `capture://` over the root from the hit's start to its end at `pace=1`,
+  ready for `openSource` as it is. At most 10000 hits are sent; `matched` says
+  how many there were.
+- `captureOccupancy` cuts a time range into buckets and answers, for a band,
+  the share of each bucket something was present in, the share a segment
+  covered at all, and how many annotations touched it. A bucket with nothing
+  captured is a different answer from a quiet one, which is why both shares
+  cross. More than 200000 buckets is refused.
+
+**Only the engine's own root.** Nothing here takes a path. The root is the one
+`revenant-engine --capture` was given, so a session can read what this engine
+recorded and nothing else on the disk, under the same login as every other
+call. An engine started without `--capture` refuses all three with a sentence
+naming the flag, and a client says "this engine keeps no capture" rather than
+"the capture is empty". An engine that has not run a stream yet has no root
+on disk, and that is answered as an empty capture.
+
+**Off the loop thread.** The server keeps one `Catalog` for its life on a
+worker of its own, started on the first call, and refreshes it before each
+answer. The first call on a large root parses every meta, a few thousand for
+a full ring; after that a refresh parses only what closed since. A search
+also reads each meta again for the generator and track id the catalog does
+not keep, cached against the meta's size, which is the catalog's own signal
+that the writer or an index pass has appended to it.
+
+**Opening a hit while the engine records.** A hit only exists in a closed
+segment: the writer holds a detection until the segment it falls in closes,
+and only then is it in a meta to be found. So the stretch a `replayUri` names
+is on disk and finished, and the replay never reads a file the writer is
+still appending to. Opening it takes a `closeSource` first, as any change of
+source does, and that closes the radio's open segment with its annotations.
+
+**A replay is not recorded.** When the source is a `capture://` replay the
+engine starts no writer for the stream. Recording it into the root it reads
+from would write a second copy of samples already there under a fresh epoch,
+which the catalog would list as a new stream, and the ring would delete real
+history to make room for the copy. So recording stops when a client switches
+to a replay, the radio's last segment is closed rather than left open on a
+writer nothing feeds, and `captureOn` in `SourceStats` stays true with the
+counters of the last recorded stream. Recording starts again, under a new
+epoch, with the next source that is not a replay.
+`tests/rpc/test_rpc_capture.cpp` writes a root with a real engine, reads it
+back through all three calls, opens a hit's URI on that engine, and checks the
+root is unchanged after the replay ran.
+
+**A retune a replay follows wakes the server.** The engine applies one on its
+delivery thread and keeps the answer for `take_followed_retunes`, which the
+server drains on its pump. Until 2026-10-12 only spectrum, audio and decoded
+traffic rang the pump, so with none of it subscribed the removed receivers
+were never cleaned up and no client was told. `Engine::set_retune_sink` now
+rings it at the retune, the way the spectrum and audio sinks ring it for
+their own traffic, and the same test file checks the list is drained with
+nothing subscribed.
+
 ### A clamped passband says so in words, and an FM one is refused instead
 
 `VrxPlacement::clampReason` is empty unless something was clamped, and is

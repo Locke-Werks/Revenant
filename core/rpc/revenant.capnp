@@ -3721,6 +3721,168 @@ interface Session {
     # gives: engine-wide, on by default, carried across a change of source and
     # accepted with no source open. SourceStats reports what it is doing.
     setCombCancel @37 (on :Bool) -> ();
+
+    # THE ROLLING CAPTURE, BROWSED, added on 2026-10-12. Three questions over
+    # the root the engine was started with (--capture), answered from
+    # core/capture/catalog.h and core/capture/search.h exactly as
+    # revenant-capture answers them in a terminal. Only that root: no call
+    # here takes a path, so a session can read what this engine recorded and
+    # nothing else on the disk. Each is refused in words when the engine was
+    # started without a capture, and a client says "this engine keeps no
+    # capture" rather than "the capture is empty". An older engine refuses
+    # them as unimplemented.
+    #
+    # Answered off the loop thread, from a catalog the server keeps and
+    # refreshes before each answer, so the first call on a large root pays for
+    # parsing every meta and later ones pay for a directory listing. Times are
+    # Unix epoch nanoseconds and every range is half open, [fromNs, toNs).
+    # The defaults are the whole of time, which is what a client leaving them
+    # alone wants.
+    #
+    # A hit's replayUri opens with openSource while the engine is still
+    # recording into the same root. docs/rpc.md says what happens to the
+    # recording when it does: it stops, because a replay is never recorded.
+    captureCatalog @38 (fromNs :Int64 = -9223372036854775808,
+                        toNs :Int64 = 9223372036854775807)
+        -> (catalog :CaptureCatalog);
+    captureSearch @39 (query :CaptureQuery) -> (result :CaptureSearchResult);
+    captureOccupancy @40 (request :CaptureOccupancyRequest)
+        -> (buckets :List(CaptureBucket));
+}
+
+# One closed segment of the rolling capture. Segments still being written are
+# not listed, as the catalog never presents one.
+struct CaptureSegment {
+    startNs @0 :Int64;
+    durationNs @1 :Int64;
+    center @2 :Int64;
+    sampleRate @3 :Int64;
+
+    # core/source/capabilities.h's format_name: "cu8", "cs16", "cf32".
+    format @4 :Text;
+
+    # Data and meta together, which is what the segment costs on disk.
+    bytes @5 :UInt64;
+
+    # revenant:close_reason, empty when the meta carried none.
+    closeReason @6 :Text;
+    annotations @7 :UInt32;
+
+    streamEpoch @8 :UInt64;
+    firstIndex @9 :UInt64;
+    sampleCount @10 :UInt64;
+}
+
+# Samples the writer lost inside one stream: two segments of one epoch whose
+# indices do not meet. A new epoch is a restarted source and not a gap.
+struct CaptureGap {
+    streamEpoch @0 :UInt64;
+    fromNs @1 :Int64;
+    toNs @2 :Int64;
+    samples @3 :UInt64;
+}
+
+struct CaptureCatalog {
+    # Every segment with a sample in the range, oldest first.
+    segments @0 :List(CaptureSegment);
+    gaps @1 :List(CaptureGap);
+
+    # Over the segments listed: wall clock covered and bytes on disk.
+    capturedNs @2 :Int64;
+    bytes @3 :UInt64;
+
+    # Over the whole root, whatever the range: what the retention budget is
+    # measured against.
+    rootBytes @4 :UInt64;
+
+    # Data files being written now, and closed-looking ones with no meta.
+    inProgress @5 :UInt32;
+    orphaned @6 :UInt32;
+
+    # One line per meta the catalog could not read, path and reason.
+    problems @7 :List(Text);
+}
+
+# core/capture/search.h's Query. Every field is a filter and its default
+# passes everything. Time and frequency are overlap tests.
+struct CaptureQuery {
+    fromNs @0 :Int64 = -9223372036854775808;
+    toNs @1 :Int64 = 9223372036854775807;
+    freqLow @2 :Int64 = -9223372036854775808;
+    freqHigh @3 :Int64 = 9223372036854775807;
+    minConfidence @4 :Float64;
+
+    # A Bool beside it because every value of a Float64 is a threshold.
+    hasMinSnr @5 :Bool;
+    minSnrDb @6 :Float64;
+
+    minDurationNs @7 :Int64;
+
+    # Case-insensitive, anywhere in the family. Non-empty excludes an
+    # annotation with none.
+    family @8 :Text;
+
+    # Exact: "revenant-detect" for the live detector, "revenant-index" for
+    # the offline pass. Empty takes both.
+    generator @9 :Text;
+
+    # The most hits sent. Zero is the server's cap, 10000, which is also the
+    # most it will send whatever is asked.
+    limit @10 :UInt32;
+}
+
+struct CaptureHit {
+    startNs @0 :Int64;
+    endNs @1 :Int64;
+    freqLower @2 :Int64;
+    freqUpper @3 :Int64;
+    confidence @4 :Float64;
+    snrDb @5 :Float64;
+    peakDb @6 :Float64;
+    family @7 :Text;
+    generator @8 :Text;
+
+    # The live detector's track, zero when the annotation carried none.
+    trackId @9 :UInt64;
+
+    # capture:// over the root, from the hit's start to its end, at pace=1,
+    # ready for openSource.
+    replayUri @10 :Text;
+}
+
+struct CaptureSearchResult {
+    # Ordered by start, then lower edge.
+    hits @0 :List(CaptureHit);
+
+    # How many matched before the limit, so a client can say "first 10000 of".
+    matched @1 :UInt64;
+
+    # Metas that could not be read for their annotations, path and reason.
+    # One bad sidecar does not hide the rest.
+    skipped @2 :List(Text);
+}
+
+struct CaptureOccupancyRequest {
+    fromNs @0 :Int64;
+    toNs @1 :Int64;
+    bucketNs @2 :Int64;
+    freqLow @3 :Int64;
+    freqHigh @4 :Int64;
+
+    # Applied to each annotation; its own time and frequency are ignored in
+    # favour of the fields above, and so is its limit.
+    filter @5 :CaptureQuery;
+}
+
+# core/capture/search.h's OccupancyBucket. occupied and captured are shares
+# of the bucket, 0 to 1; a bucket with captured at zero was not recorded,
+# which is a different answer from a quiet band.
+struct CaptureBucket {
+    startNs @0 :Int64;
+    endNs @1 :Int64;
+    occupied @2 :Float64;
+    captured @3 :Float64;
+    hits @4 :UInt32;
 }
 
 # What one loaded plugin can decode, as it declared itself through
