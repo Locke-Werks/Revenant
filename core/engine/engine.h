@@ -179,6 +179,20 @@ struct EngineConfig {
     // resolution, so this changes nothing on VHF.
     bool channels_yield_to_source = false;
 
+    // The widest receiver the caller already knows it will place, in hertz,
+    // or zero for none. Read only when channels_yield_to_source marks the
+    // count as a default: the grid is then coarsened, never refined, to
+    // channel_count_for(rate, this), so the receiver fits where it would
+    // otherwise be refused at placement.
+    //
+    // revenant-cli sets it from its --vrx and --rds list. Its 64-channel
+    // default exists for docs/detection.md's VHF tables, which are a property
+    // of a detection run; a run that names a 200 kHz WFM receiver on a 2.4
+    // MS/s dongle was refused on that default with "--channels 8 carries it",
+    // which is the README's own quick start failing. A --detect run with no
+    // receivers passes zero and keeps the 64 its tables were measured on.
+    dsp::Hertz carry_receiver_hz = 0;
+
     std::uint32_t taps_per_branch = 17;
 
     // Audio rate every receiver resamples to unless it asks for another.

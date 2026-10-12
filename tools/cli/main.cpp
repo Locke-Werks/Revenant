@@ -441,7 +441,9 @@ struct Options {
 
     // Whether --channels was given. When it was not, 64 is a default that
     // gives way to the engine's own choice on a source that states the
-    // resolution it needs, which is HF: EngineConfig::channels_yield_to_source.
+    // resolution it needs, which is HF: EngineConfig::channels_yield_to_source,
+    // and to a receiver this run names that the 64 cannot carry:
+    // EngineConfig::carry_receiver_hz.
     bool channels_given = false;
 
     // EngineConfig::impulse_excision. On unless --no-excision.
@@ -616,9 +618,9 @@ void print_usage()
         "                      the same station at the same time by adding an ordinary\n"
         "                      --vrx <freq>:wfm --play beside it.\n"
         "                      The composite reaches 59375 Hz either side, so the grid\n"
-        "                      has to have channels wide enough to grant that: at a\n"
-        "                      2.4 MS/s source --channels 8 does and the default 64\n"
-        "                      does not. The refusal names the numbers.\n"
+        "                      has to have channels wide enough to grant that. Without\n"
+        "                      --channels the grid is sized to carry it; a count that\n"
+        "                      is too fine is refused and the refusal names the numbers.\n"
         "  --rds-region <r>    rbds (default, North America) or rds (Europe and the\n"
         "                      rest of ITU regions 1 and 3). It chooses the programme\n"
         "                      type table and whether a PI code is read back as a call\n"
@@ -850,7 +852,9 @@ void print_usage()
         "                      to it, and then subtracts it before the channelizer;\n"
         "                      see core/dsp/comb_cancel.h.\n"
         "  --channels <n>      Channelizer channel count, default 64 above 30 MHz and\n"
-        "                      the engine's own choice below it. Zero lets the engine\n"
+        "                      the engine's own choice below it, coarsened when a\n"
+        "                      --vrx or --rds receiver needs wider channels than that\n"
+        "                      default gives. Zero lets the engine\n"
         "                      size the grid from the source everywhere: a 2 MS/s\n"
         "                      capture at 7.1 MHz opens on 256 channels and 7.6 Hz\n"
         "                      bins, a 96 kS/s one on 16 channels and 5.9 Hz. A number\n"
@@ -1394,7 +1398,11 @@ void print_usage()
                 // The DEFAULT stays 64 on VHF, where docs/detection.md's
                 // measurements were all taken at 64 channels over 2.4 MS/s.
                 // Below 30 MHz it gives way to the engine's own choice unless
-                // a count was given here; Options::channels_given.
+                // a count was given here; Options::channels_given. On any
+                // band it also gives way to a --vrx or --rds receiver it
+                // could not carry, since a run that names one is not a
+                // detection run measured against those tables:
+                // EngineConfig::carry_receiver_hz.
                 //
                 // WHAT THIS PARAGRAPH USED TO SAY: "The DEFAULT stays 64.
                 // docs/detection.md's measurements are all taken at 64
@@ -3390,6 +3398,18 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     config.gpu_index = options.gpu;
     config.channels = options.channels;
     config.channels_yield_to_source = !options.channels_given;
+    // The widest receiver this run names, so a default grid is sized to carry
+    // it rather than refusing it at placement. Twice the larger edge, because
+    // a receiver is centred in its channel and an asymmetric passband still
+    // needs its far edge inside. EngineConfig::carry_receiver_hz.
+    for (const VrxSpec& spec : options.receivers) {
+        const Hertz reach = std::max(spec.passband.high, -spec.passband.low);
+        config.carry_receiver_hz = std::max(config.carry_receiver_hz, 2 * reach);
+    }
+    if (!options.rds.empty()) {
+        config.carry_receiver_hz =
+            std::max(config.carry_receiver_hz, dsp::default_passband(Demod::Wfm).width());
+    }
     config.audio_rate = options.audio_rate;
     config.impulse_excision = options.excision;
     config.comb_cancel = options.comb;
@@ -3631,7 +3651,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         // channels and is not at the audio rate. The three digital voice
         // modes are two channels of complex too, but out of the fine stage,
         // at the rate their decoder wants, which VrxStatus::demod_rate
-        // carries. Everything else is mono audio.
+        // carries. Everything else is audio, mono except a stereo WFM receiver.
         //
         // WHAT THIS USED TO SAY: "The three digital voice modes are taps on
         // the same terms", and it took their rate from the placement. They
@@ -3644,8 +3664,13 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             receiver.rate = status->demod_rate;
             receiver.channels = 2;
         } else {
+            // A stereo WFM receiver publishes two channels on every chunk,
+            // pilot or not: without one the kernel hands the sum out in both,
+            // bit-identical. VrxStatus::decoding_stereo is the engine's own
+            // answer, so the egress registers what will arrive rather than
+            // refusing every chunk of a recording that then holds 0 frames.
             receiver.rate = options.audio_rate;
-            receiver.channels = 1;
+            receiver.channels = status->decoding_stereo() ? 2 : 1;
         }
         receivers.push_back(receiver);
     }

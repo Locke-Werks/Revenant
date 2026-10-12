@@ -166,6 +166,26 @@ if(REVENANT_BUILD_TOOLS AND TARGET revenant-cli)
         LABELS "tools"
         TIMEOUT 180
         PASS_REGULAR_EXPRESSION "groups +[0-9]+ formed, [0-9]+ ended")
+
+    # The README quick start's shape, on a synthetic source: a WFM receiver
+    # recorded with no --channels. It used to be refused on the 64-channel
+    # default ("--channels 8 carries it"), and with --channels 8 every chunk
+    # was refused by the egress for arriving stereo on a mono registration,
+    # leaving a WAV of 0 frames. The pass line is the receiver reporting
+    # frames out on two channels; the fail lines are either refusal.
+    add_test(
+        NAME cli_wfm_record
+        COMMAND revenant-cli
+                "synthetic:wideband?rate=2400000&emitters=8&seed=4242"
+                --vrx +300k:wfm:200k
+                --record "${CMAKE_CURRENT_BINARY_DIR}/cli_wfm_record.wav"
+                --duration 1
+    )
+    set_tests_properties(cli_wfm_record PROPERTIES
+        LABELS "tools"
+        TIMEOUT 120
+        PASS_REGULAR_EXPRESSION "wfm +[1-9][0-9]* frames out at 48000 S/s, 2 channels"
+        FAIL_REGULAR_EXPRESSION "carries it;registered for")
 endif()
 
 # The prose ratchet: no retired claim has come back anywhere in the tree.
