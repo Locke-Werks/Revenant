@@ -26,6 +26,31 @@ else()
     message(STATUS "revenant_core is not present yet, skipping the channel tests")
 endif()
 
+# revenant-capture's commands, through the library the executable runs. Host
+# code except the one index case, which takes the GPU fixture, is tagged [gpu]
+# and skips itself without a device.
+if(TARGET revenant_capture_tool)
+    add_executable(revenant_capture_tool_tests
+        ../support/no_modal_dialogs.cpp
+        ../reference/gpu_fixture.cpp
+        test_capture_tool.cpp
+    )
+    target_link_libraries(revenant_capture_tool_tests PRIVATE
+        revenant_capture_tool
+        Catch2::Catch2WithMain
+    )
+    target_include_directories(revenant_capture_tool_tests PRIVATE "${CMAKE_SOURCE_DIR}")
+    revenant_apply_warnings(revenant_capture_tool_tests)
+    revenant_apply_reference_fp(revenant_capture_tool_tests)
+
+    catch_discover_tests(revenant_capture_tool_tests
+        TEST_PREFIX "capture_tool: "
+        PROPERTIES
+            LABELS "capture"
+            TIMEOUT 300
+    )
+endif()
+
 # The BER harness against closed-form theory.
 #
 # Registered as a CTest entry running the tool itself rather than as a C++ case,
