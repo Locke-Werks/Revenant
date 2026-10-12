@@ -456,6 +456,15 @@ struct SourceStats {
     float comb_drift_hz_per_s = 0.0F;
     std::uint32_t comb_lines_found = 0;
 
+    // The rolling capture. See the schema.
+    bool capture_on = false;
+    std::uint64_t capture_segments_written = 0;
+    std::uint64_t capture_bytes_written = 0;
+    std::uint64_t capture_blocks_dropped = 0;
+    std::uint64_t capture_segments_deleted = 0;
+    std::uint64_t capture_retained_bytes = 0;
+    std::string capture_last_error;
+
     // The ADC branch in force now, never Auto. See the schema.
     DirectSamplingMode direct_sampling = DirectSamplingMode::Off;
 };

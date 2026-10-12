@@ -178,34 +178,16 @@ void EngineLink::note_comb_status(const rpc::SourceStats& stats)
 namespace {
 
 // SourceStats' capture fields into the sample models/capture_note.h reads.
-//
-// A TEMPLATE WITH A REQUIRES TEST, because the wire carries captureOn and the
-// rest (core/rpc/revenant.capnp @25 to @31) while rpc::SourceStats in
-// core/rpc/types.h, which this client reads, does not copy them yet. Until it
-// does the sample stays off and the readout says nothing, which is the honest
-// answer for a client that cannot see the capture; once the fields land under
-// these names the readout lights up with no change here.
-template <typename Stats>
-[[nodiscard]] CaptureSample capture_sample_of(const Stats& stats)
+[[nodiscard]] CaptureSample capture_sample_of(const rpc::SourceStats& stats)
 {
     CaptureSample sample;
-    if constexpr (requires {
-                      stats.capture_on;
-                      stats.capture_segments_written;
-                      stats.capture_bytes_written;
-                      stats.capture_blocks_dropped;
-                      stats.capture_segments_deleted;
-                      stats.capture_retained_bytes;
-                      stats.capture_last_error;
-                  }) {
-        sample.on = stats.capture_on;
-        sample.segments_written = stats.capture_segments_written;
-        sample.bytes_written = stats.capture_bytes_written;
-        sample.blocks_dropped = stats.capture_blocks_dropped;
-        sample.segments_deleted = stats.capture_segments_deleted;
-        sample.retained_bytes = stats.capture_retained_bytes;
-        sample.last_error = std::string(stats.capture_last_error);
-    }
+    sample.on = stats.capture_on;
+    sample.segments_written = stats.capture_segments_written;
+    sample.bytes_written = stats.capture_bytes_written;
+    sample.blocks_dropped = stats.capture_blocks_dropped;
+    sample.segments_deleted = stats.capture_segments_deleted;
+    sample.retained_bytes = stats.capture_retained_bytes;
+    sample.last_error = stats.capture_last_error;
     return sample;
 }
 

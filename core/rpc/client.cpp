@@ -546,6 +546,13 @@ static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
     out.comb_offset_hz = in.getCombOffsetHz();
     out.comb_drift_hz_per_s = in.getCombDriftHzPerS();
     out.comb_lines_found = in.getCombLinesFound();
+    out.capture_on = in.getCaptureOn();
+    out.capture_segments_written = in.getCaptureSegmentsWritten();
+    out.capture_bytes_written = in.getCaptureBytesWritten();
+    out.capture_blocks_dropped = in.getCaptureBlocksDropped();
+    out.capture_segments_deleted = in.getCaptureSegmentsDeleted();
+    out.capture_retained_bytes = in.getCaptureRetainedBytes();
+    out.capture_last_error = std::string(in.getCaptureLastError().cStr());
     out.direct_sampling = read_direct_sampling(in.getDirectSampling());
     return out;
 }
