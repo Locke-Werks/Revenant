@@ -176,6 +176,7 @@
 #include "models/receiver_scroll.h"
 #include "models/scroll_tune.h"
 #include "models/span_view.h"
+#include "models/capture_note.h"
 #include "models/front_end_note.h"
 #include "models/gain_control.h"
 #include "models/source_pacing.h"
@@ -1739,6 +1740,14 @@ class EngineLink : public QObject {
     Q_PROPERTY(QString combText READ combText NOTIFY combStatusChanged)
     Q_PROPERTY(bool combLocked READ combLocked NOTIFY combStatusChanged)
 
+    // The engine's rolling capture, read off the same SourceStats poll, in
+    // the words models/capture_note.h gives it. captureText is empty with the
+    // capture off; captureFault is true only while the writer is dropping
+    // blocks or has stopped, and captureDetail is the sentence behind it.
+    Q_PROPERTY(QString captureText READ captureText NOTIFY captureStatusChanged)
+    Q_PROPERTY(QString captureDetail READ captureDetail NOTIFY captureStatusChanged)
+    Q_PROPERTY(bool captureFault READ captureFault NOTIFY captureStatusChanged)
+
     // The focused receiver's choice as the engine reports it on the
     // receiver's status, "auto", "on" or "off", and whether the engine is
     // transcribing it now. The segmented control binds the first and moves
@@ -2990,6 +2999,9 @@ public:
     void setCombCancel(bool on);
     [[nodiscard]] QString combText() const { return comb_text_; }
     [[nodiscard]] bool combLocked() const { return comb_locked_; }
+    [[nodiscard]] QString captureText() const { return capture_text_; }
+    [[nodiscard]] QString captureDetail() const { return capture_detail_; }
+    [[nodiscard]] bool captureFault() const { return capture_fault_; }
 
     // The focused receiver's choice, by name. A name that is not one of the
     // three is ignored rather than read as auto.
@@ -3202,6 +3214,7 @@ signals:
     void impulseExcisionChanged();
     void combCancelChanged();
     void combStatusChanged();
+    void captureStatusChanged();
 
     // New entries are on captionFeed(). The decode log has its own rows.
     void transcriptsArrived();
@@ -3239,6 +3252,7 @@ private:
     // The same poll again: the comb cancellation's state, as the line the
     // top bar draws. Posted on a change of the line only.
     void note_comb_status(const rpc::SourceStats& stats);
+    void note_capture_status(const rpc::SourceStats& stats);
 
     // Qt thread, queued from the two above.
     void adopt_open_source();
@@ -3254,6 +3268,8 @@ private:
     bool handover_has_comb_ = false;          // guarded by open_source_mutex_
     QString handover_comb_text_;              // guarded by open_source_mutex_
     bool handover_comb_locked_ = false;       // guarded by open_source_mutex_
+    bool handover_has_capture_ = false;       // guarded by open_source_mutex_
+    CaptureLine handover_capture_;            // guarded by open_source_mutex_
     rpc::DirectSamplingMode handover_branch_ = rpc::DirectSamplingMode::Off;  // same
 
     // Supervisor thread only. Cleared by attempt_connect, because an engine
@@ -3268,6 +3284,8 @@ private:
     bool branch_posted_ = false;
     QString posted_comb_text_;
     bool comb_posted_ = false;
+    CaptureLine posted_capture_;
+    bool capture_posted_ = false;
 
     // Qt thread only.
     QVariantMap open_source_;
@@ -3275,6 +3293,9 @@ private:
     QString direct_branch_ = QStringLiteral("off");
     QString comb_text_;
     bool comb_locked_ = false;
+    QString capture_text_;
+    QString capture_detail_;
+    bool capture_fault_ = false;
 
 private:
     // The supervisor thread, and the two halves of what it does.
