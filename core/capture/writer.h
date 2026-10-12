@@ -131,6 +131,9 @@ struct WriterStats {
     // both files are actually gone.
     std::uint64_t delete_failures = 0;
     std::uint64_t pending_deletes = 0;
+    // Data files a previous run's ring had already given up on, found and
+    // deleted at start(). Also counted in segments_deleted.
+    std::uint64_t orphans_deleted = 0;
     std::uint64_t annotations_discarded = 0;
     std::uint64_t retained_bytes = 0;
     // Empty while healthy. Once set, the writer has stopped writing and stays
@@ -259,6 +262,7 @@ private:
     [[nodiscard]] bool remove_pair(const RetainedSegment& segment);
     void retry_pending_deletes();
     void index_existing();
+    void adopt_orphans();
     void fail_writing(std::string message);
     [[nodiscard]] std::int64_t now() const;
 

@@ -287,6 +287,14 @@ struct SideFile {
     return dir / std::format("{}{}", stem, kMetaExtension);
 }
 
+// The one test of whether a data file belongs to a segment still being
+// written. Recovery takes every file this accepts and orphan adoption takes
+// none of them, so the two cannot both claim a file.
+[[nodiscard]] bool is_open_data_name(std::string_view name)
+{
+    return name.ends_with(std::format("{}{}", kOpenSuffix, kDataExtension));
+}
+
 [[nodiscard]] std::uint64_t draw_epoch()
 {
     // An identifier rather than anything in the sample path, so the seed rule
@@ -490,7 +498,7 @@ Expected<RecoveryReport> recover_open_segments(const fs::path& root)
             continue;
         }
         const std::string name = path_text(it->path().filename());
-        if (name.ends_with(open_tail)) {
+        if (is_open_data_name(name)) {
             found.push_back(it->path());
         }
     }
@@ -632,10 +640,14 @@ Status SegmentWriter::start()
     // delete left behind.
     pending_delete_.clear();
     have_last_ = false;
+    {
+        std::lock_guard lock(mutex_);
+        stats_.retained_bytes = 0;
+    }
+    adopt_orphans();
 
     std::lock_guard lock(mutex_);
-    stats_.retained_bytes = 0;
-    stats_.pending_deletes = 0;
+    stats_.pending_deletes = pending_delete_.size();
     for (const RetainedSegment& segment : retained_) {
         stats_.retained_bytes += segment.bytes;
     }
@@ -1030,6 +1042,80 @@ void SegmentWriter::index_existing()
         }
     }
     std::ranges::sort(retained_, {}, &RetainedSegment::order_key);
+}
+
+void SegmentWriter::adopt_orphans()
+{
+    // The pending list does not survive a restart, so a pair whose meta went
+    // and whose data refused is, after one, a data file nothing tracks. The
+    // ring removes the meta first, which is what makes it recognisable: a
+    // closed name, no meta, and no side file. The newest closed segment
+    // bounds it, because a close that died between rename and meta leaves
+    // the same shape at the head of the capture, and that one is a recording
+    // to keep, not a leftover to delete.
+    if (retained_.empty()) {
+        return;
+    }
+    const std::string newest = retained_.back().order_key;
+
+    std::vector<RetainedSegment> orphans;
+    std::error_code ec;
+    for (fs::directory_iterator days(config_.root, ec), end; !ec && days != end;
+         days.increment(ec)) {
+        if (!days->is_directory(ec)) {
+            continue;
+        }
+        std::error_code inner;
+        for (fs::directory_iterator it(days->path(), inner), done; !inner && it != done;
+             it.increment(inner)) {
+            const std::string name = path_text(it->path().filename());
+            if (!name.ends_with(kDataExtension) || is_open_data_name(name)) {
+                continue;
+            }
+            const std::string stem = name.substr(0, name.size() - kDataExtension.size());
+            auto fields = parse_stem(stem);
+            if (!fields) {
+                continue;
+            }
+            const std::string key = path_text(days->path().filename()) + "/" + stem;
+            std::error_code probe;
+            if (key >= newest || fs::exists(meta_path(days->path(), stem), probe) ||
+                fs::exists(side_path(days->path(), stem), probe) || probe) {
+                continue;
+            }
+            const std::uint64_t bytes = fs::file_size(it->path(), probe);
+            if (probe) {
+                continue;
+            }
+            RetainedSegment orphan;
+            orphan.data = it->path();
+            orphan.meta = meta_path(days->path(), stem);
+            orphan.bytes = bytes;
+            orphan.start_ns = fields->start_ns;
+            orphan.order_key = key;
+            orphans.push_back(std::move(orphan));
+        }
+    }
+
+    // Removed after the listing rather than during it, since remove_pair may
+    // take the day directory the iterator is standing in.
+    std::uint64_t deleted = 0;
+    std::uint64_t refused = 0;
+    for (RetainedSegment& orphan : orphans) {
+        if (remove_pair(orphan)) {
+            ++deleted;
+        } else {
+            ++refused;
+            pending_delete_.push_back(std::move(orphan));
+        }
+    }
+    std::lock_guard lock(mutex_);
+    stats_.segments_deleted += deleted;
+    stats_.orphans_deleted += deleted;
+    stats_.delete_failures += refused;
+    for (const RetainedSegment& segment : pending_delete_) {
+        stats_.retained_bytes += segment.bytes;
+    }
 }
 
 bool SegmentWriter::remove_pair(const RetainedSegment& segment)

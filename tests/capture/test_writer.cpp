@@ -573,7 +573,128 @@ TEST_CASE("The ring deletes a segment under a replay that keeps reading it to th
     CHECK(first_segment == block_bytes(0, kBlock));
 }
 
+namespace {
+
+// Three closed one-block segments a stopped writer left, oldest first.
+[[nodiscard]] std::vector<Segment> three_segments(const fs::path& root)
+{
+    auto config = config_for(root);
+    config.max_segment_bytes = kBlock * 2;
+    capture::SegmentWriter writer(config);
+    REQUIRE(writer.start().has_value());
+    Feeder feeder{writer, {}};
+    feeder.feed(0, 433'920'000);
+    feeder.feed(kBlock, 433'920'000);
+    feeder.feed(2 * kBlock, 433'920'000);
+    writer.stop();
+    auto segments = list_segments(root);
+    REQUIRE(segments.size() == 3);
+    return segments;
+}
+
+void write_bytes(const fs::path& path, std::string_view bytes)
+{
+    std::ofstream out(path, std::ios::binary);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+}  // namespace
+
+TEST_CASE("A restart deletes a data file the ring had already given up on, and nothing else",
+          "[capture][writer][retention]")
+{
+    const Scratch scratch("orphan");
+    const auto segments = three_segments(scratch.root());
+    const fs::path dir = segments.front().data.parent_path();
+
+    // What a refused ring delete leaves after a restart: the meta went, the
+    // data did not, and the pending list that remembered it is gone.
+    fs::remove(segments.front().meta);
+    const fs::path orphan = segments.front().data;
+
+    // A segment still open, which recovery owns. Recovery is off below, so
+    // this stays open and adoption must not touch it.
+    capture::SegmentInfo info;
+    info.stream_epoch = 0x9999;
+    info.epoch_anchor_ns = kAnchor;
+    info.rate = kRate;
+    info.center = 162'000'000;
+    info.first_index = 500;
+    const std::string open_stem = capture::make_stem(info);
+    const fs::path open_data = dir / (open_stem + ".open.sigmf-data");
+    write_bytes(open_data, "abcd");
+    write_bytes(dir / (open_stem + ".open.revenant"), "rate=1000000\nformat=cu8\n");
+
+    // A closed name with a side file beside it is a close that died part way,
+    // which recovery's side of the house still describes, so it is not a
+    // leftover either.
+    info.first_index = 600;
+    const std::string sided_stem = capture::make_stem(info);
+    const fs::path sided = dir / (sided_stem + ".sigmf-data");
+    write_bytes(sided, "abcd");
+    write_bytes(dir / (sided_stem + ".open.revenant"), "rate=1000000\nformat=cu8\n");
+
+    // A meta-less data file newer than every closed segment is a close that
+    // died between rename and meta: a recording, not a leftover.
+    info.first_index = 50'000'000;
+    const fs::path newest = dir / (capture::make_stem(info) + ".sigmf-data");
+    write_bytes(newest, "abcd");
+
+    auto config = config_for(scratch.root());
+    config.stream_epoch = 0x5678;
+    config.recover_on_start = false;
+    capture::SegmentWriter writer(config);
+    REQUIRE(writer.start().has_value());
+    const auto started = writer.stats();
+    writer.stop();
+
+    CHECK(!fs::exists(orphan));
+    CHECK(started.orphans_deleted == 1);
+    CHECK(started.segments_deleted == 1);
+    CHECK(started.pending_deletes == 0);
+    CHECK(fs::exists(open_data));
+    CHECK(fs::exists(sided));
+    CHECK(fs::exists(newest));
+    CHECK(fs::exists(segments[1].data));
+    CHECK(fs::exists(segments[2].data));
+}
+
 #if defined(_WIN32)
+TEST_CASE("An orphan whose delete is refused at start stays pending until a close retries it",
+          "[capture][writer][retention]")
+{
+    const Scratch scratch("orphan_held");
+    const auto segments = three_segments(scratch.root());
+    fs::remove(segments.front().meta);
+    const fs::path orphan = segments.front().data;
+
+    HANDLE held = CreateFileW(orphan.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(held != INVALID_HANDLE_VALUE);
+
+    auto config = config_for(scratch.root());
+    config.stream_epoch = 0x5678;
+    config.max_segment_bytes = kBlock * 2;
+    capture::SegmentWriter writer(config);
+    REQUIRE(writer.start().has_value());
+    const auto started = writer.stats();
+    CHECK(started.orphans_deleted == 0);
+    CHECK(started.delete_failures == 1);
+    CHECK(started.pending_deletes == 1);
+    // Still on disk, so still counted against the budget.
+    CHECK(started.retained_bytes >= fs::file_size(orphan));
+
+    CloseHandle(held);
+    Feeder feeder{writer, {}};
+    feeder.feed(0, 433'920'000);
+    writer.stop();
+
+    const auto retried = writer.stats();
+    CHECK(!fs::exists(orphan));
+    CHECK(retried.pending_deletes == 0);
+    CHECK(retried.segments_deleted == 1);
+}
+
 TEST_CASE("A refused ring delete is counted and kept pending until the next close retries it",
           "[capture][writer][retention]")
 {
