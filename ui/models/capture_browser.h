@@ -6,21 +6,91 @@
 // CaptureHitIn and hands the rows to QML as they come out of here.
 //
 // THE DEFAULT QUESTION IS "WHAT JUST HAPPENED HERE": the last hour, over the
-// span the engine is capturing now. A wider window is a longer list nobody
-// reads, and hits outside the span are off the screen the operator is
-// looking at when they open the panel.
+// span the engine is capturing now. Longer windows, a typed band and a
+// minimum duration are offered, but the panel opens on that default, because
+// hits outside the span are off the screen the operator is looking at.
 
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <format>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "models/frequency_entry.h"
 
 namespace revenant::ui {
 
 inline constexpr std::int64_t kCaptureWindowNs = 3'600'000'000'000LL;
+
+// The windows and minimum durations the panel offers, short to long. A fixed
+// few rather than a typed number: the question is "how far back", and four
+// answers cover it without a box to get wrong.
+struct CaptureChoice {
+    std::string_view label;
+    std::int64_t ns;
+};
+
+inline constexpr std::array kCaptureWindows{
+    CaptureChoice{"15 min", kCaptureWindowNs / 4},
+    CaptureChoice{"1 h", kCaptureWindowNs},
+    CaptureChoice{"6 h", 6 * kCaptureWindowNs},
+    CaptureChoice{"24 h", 24 * kCaptureWindowNs},
+};
+
+inline constexpr std::array kCaptureMinDurations{
+    CaptureChoice{"any", 0},
+    CaptureChoice{"1 s", 1'000'000'000LL},
+    CaptureChoice{"5 s", 5'000'000'000LL},
+    CaptureChoice{"30 s", 30'000'000'000LL},
+};
+
+// A label not in the list reads as the default rather than as zero, so a
+// stale label from QML cannot turn into an empty window.
+template <std::size_t N>
+[[nodiscard]] constexpr std::int64_t capture_choice_ns(const std::array<CaptureChoice, N>& choices,
+                                                       std::string_view label,
+                                                       std::size_t fallback)
+{
+    for (const CaptureChoice& choice : choices) {
+        if (choice.label == label) {
+            return choice.ns;
+        }
+    }
+    return choices[fallback].ns;
+}
+
+struct CaptureBand {
+    std::int64_t low_hz = 0;
+    std::int64_t high_hz = 0;
+};
+
+// "162.4M:162.6M", read with the tuning box's parse_frequency so a bare
+// number is megahertz here as it is on the dial. Either order is taken.
+// Anything else, a single frequency included, is nullopt: the panel says it
+// could not read the text rather than searching for something not typed.
+[[nodiscard]] inline std::optional<CaptureBand> parse_capture_band(std::string_view text)
+{
+    const std::size_t colon = text.find(':');
+    if (colon == std::string_view::npos || text.find(':', colon + 1) != std::string_view::npos) {
+        return std::nullopt;
+    }
+    const auto low = parse_frequency(text.substr(0, colon));
+    const auto high = parse_frequency(text.substr(colon + 1));
+    if (!low || !high || low->hertz == high->hertz) {
+        return std::nullopt;
+    }
+    return CaptureBand{std::min(low->hertz, high->hertz), std::max(low->hertz, high->hertz)};
+}
+
+// The occupancy strip's columns: enough to see a burst in a day's window,
+// few enough that the answer is a small message.
+inline constexpr std::int64_t kCaptureOccupancyBuckets = 120;
 
 struct CaptureWindow {
     std::int64_t from_ns = 0;
@@ -31,13 +101,13 @@ struct CaptureWindow {
 
 // A span the engine has not reported yet is zero wide; asking with it would
 // match nothing and read as "no signals", so the frequency filter is dropped
-// instead and the caller sees every hit in the hour.
-[[nodiscard]] inline CaptureWindow capture_window(std::int64_t now_ns, double span_low_hz,
-                                                  double span_high_hz)
+// instead and the caller sees every hit in the window.
+[[nodiscard]] inline CaptureWindow capture_window(std::int64_t now_ns, std::int64_t window_ns,
+                                                  double span_low_hz, double span_high_hz)
 {
     CaptureWindow window;
     window.to_ns = now_ns;
-    window.from_ns = now_ns - kCaptureWindowNs;
+    window.from_ns = now_ns - window_ns;
     if (span_high_hz > span_low_hz) {
         window.freq_low_hz = static_cast<std::int64_t>(span_low_hz);
         window.freq_high_hz = static_cast<std::int64_t>(span_high_hz);

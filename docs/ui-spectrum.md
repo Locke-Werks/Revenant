@@ -270,6 +270,7 @@ receiver limit from eight to 64".
 | panels | open the radio picker | `Ctrl+O` |
 | panels | open the frequency manager | `Ctrl+B` |
 | panels | open the settings | `Ctrl+,` |
+| panels | open the capture | `Ctrl+Shift+C` |
 | panels | save the receiver as a memory | `Ctrl+D` |
 | panels | show or hide the receivers | `Ctrl+R` |
 | panels | pop the receivers out or dock them | `Ctrl+Shift+W` |

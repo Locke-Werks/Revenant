@@ -32,6 +32,9 @@ Rectangle {
     readonly property alias tuneDial: tuneBar.dial
     property int tuneDigit: -1
 
+    // Whether the capture button is on the bar, for its key in Commands.qml.
+    readonly property bool captureOffered: captureButton.visible
+
     // Opens one of the bar's panels by name, or closes it if it is open, the
     // way its button does. The keys reach the panels through this.
     function togglePanel(name) {
@@ -147,6 +150,9 @@ Rectangle {
         TuneBar {
             id: tuneBar
             Layout.minimumWidth: 0
+            Layout.maximumWidth: room
+            // The bar less its margins, the gap and the buttons on the right.
+            room: Math.max(0, bar.width - 24 - 2 * 12 - rightGroup.implicitWidth)
             keyDigit: bar.tuneDigit
         }
 
@@ -171,281 +177,292 @@ Rectangle {
 
         Item { Layout.fillWidth: true }
 
-        // The frequency manager. Shown with no engine too: the memories are
-        // a file on this machine, and importing, editing and exporting them
-        // need no radio.
-        RButton {
-            id: memoriesButton
-            flat: true
-            text: "memories"
-            ink: Theme.inkDim
-            onClicked: memoriesPanel.opened ? memoriesPanel.close() : memoriesPanel.open()
+        // The bar's buttons and chips, held at their full width. A narrow
+        // window takes the room out of the tuning row instead, which drops its
+        // hint and its band shortcuts first; squeezing these drew them on top
+        // of one another at 1280 wide.
+        RowLayout {
+            id: rightGroup
+            spacing: 12
+            Layout.minimumWidth: implicitWidth
 
-            // Each of the bar's buttons names its key on hover, so the keys
-            // are found where the mouse already is.
-            Tip {
-                visible: parent.hovered && !memoriesPanel.opened
-                text: "the frequency manager  " + KeyMap.keysText("panel.memories")
-            }
+            // The frequency manager. Shown with no engine too: the memories are
+            // a file on this machine, and importing, editing and exporting them
+            // need no radio.
+            RButton {
+                id: memoriesButton
+                flat: true
+                text: "memories"
+                ink: Theme.inkDim
+                onClicked: memoriesPanel.opened ? memoriesPanel.close() : memoriesPanel.open()
 
-            // Wider than the bar's other panels, so it is kept inside the
-            // window's left edge as well as opening leftwards from the button:
-            // the bar starts at the window's edge, so the button's x in the
-            // row plus the row's margin is its distance from that edge.
-            Popover {
-                id: memoriesPanel
-                parent: memoriesButton
-                x: Math.max(8 - memoriesButton.x - 12, memoriesButton.width - width)
-                onOpened: memoriesView.opened()
-
-                FrequencyManagerPanel {
-                    id: memoriesView
-                    Layout.preferredWidth: Math.min(900, bar.width - 40)
-                    popover: memoriesPanel
+                // Each of the bar's buttons names its key on hover, so the keys
+                // are found where the mouse already is.
+                Tip {
+                    visible: parent.hovered && !memoriesPanel.opened
+                    text: "the frequency manager  " + KeyMap.keysText("panel.memories")
                 }
-            }
-        }
 
-        // The rolling capture's recent hits. Only while the engine keeps a
-        // capture, or while one of its hits is replaying so the list stays
-        // reachable after the radio closed; an engine with no capture has
-        // nothing to browse and the bar says nothing about it.
-        RButton {
-            id: captureButton
-            flat: true
-            text: "capture"
-            ink: Theme.inkDim
-            visible: engineLink.connected
-                     && (engineLink.captureText !== ""
-                         || String(engineLink.openedSource.uri || "").startsWith("capture:"))
-            onClicked: capturePanel.opened ? capturePanel.close() : capturePanel.open()
+                // Wider than the bar's other panels, so it is kept inside the
+                // window's left edge as well as opening leftwards from the button:
+                // the bar starts at the window's edge, so the button's x in the
+                // row plus the row's margin is its distance from that edge.
+                Popover {
+                    id: memoriesPanel
+                    parent: memoriesButton
+                    x: Math.max(8 - memoriesButton.x - 12, memoriesButton.width - width)
+                    onOpened: memoriesView.opened()
 
-            Tip {
-                visible: parent.hovered && !capturePanel.opened
-                text: "what the capture caught in the last hour"
-            }
-
-            Popover {
-                id: capturePanel
-                parent: captureButton
-                onOpened: captureView.opened()
-
-                CapturePanel {
-                    id: captureView
-                    backToRadio: function() {
-                        capturePanel.close()
-                        radioPanel.open()
+                    FrequencyManagerPanel {
+                        id: memoriesView
+                        Layout.preferredWidth: Math.min(900, bar.width - 40)
+                        popover: memoriesPanel
                     }
                 }
             }
-        }
 
-        RButton {
-            id: radioButton
-            flat: true
-            text: engineLink.sourceOpen ? "radio" : "radio: none open"
-            ink: engineLink.sourceOpen ? Theme.inkDim : Theme.inkWarn
-            visible: engineLink.connected
-            onClicked: radioPanel.opened ? radioPanel.close() : radioPanel.open()
+            // The rolling capture's recent hits. Only while the engine keeps a
+            // capture, or while one of its hits is replaying so the list stays
+            // reachable after the radio closed; an engine with no capture has
+            // nothing to browse and the bar says nothing about it.
+            RButton {
+                id: captureButton
+                flat: true
+                text: "capture"
+                ink: Theme.inkDim
+                visible: engineLink.connected
+                         && (engineLink.captureText !== ""
+                             || String(engineLink.openedSource.uri || "").startsWith("capture:"))
+                onClicked: capturePanel.opened ? capturePanel.close() : capturePanel.open()
 
-            Tip {
-                visible: parent.hovered && !radioPanel.opened
-                text: "choose a radio or open a recording  " + KeyMap.keysText("panel.radio")
-            }
+                Tip {
+                    visible: parent.hovered && !capturePanel.opened
+                    text: "what the capture caught  " + KeyMap.keysText("panel.capture")
+                }
 
-            Popover {
-                id: radioPanel
-                parent: radioButton
-                SourcePicker {}
-            }
-        }
+                Popover {
+                    id: capturePanel
+                    parent: captureButton
+                    solid: true
+                    onOpened: captureView.opened()
 
-        // The application's settings. Shown with no engine too: the band plan
-        // needs none, and the detector's values are kept on this machine.
-        // Modal, unlike the bar's other panels, because it is a place to
-        // change things and not something to glance at over the span.
-        RButton {
-            id: settingsButton
-            flat: true
-            text: "settings"
-            ink: Theme.inkDim
-            onClicked: settingsPanel.opened ? settingsPanel.close() : settingsPanel.open()
-
-            Tip {
-                visible: parent.hovered && !settingsPanel.opened
-                text: "detection, band plan and speech settings  "
-                      + KeyMap.keysText("panel.settings")
-            }
-
-            Popover {
-                id: settingsPanel
-                parent: settingsButton
-                modal: true
-                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-                onOpened: settingsView.sync()
-
-                SettingsPanel {
-                    id: settingsView
+                    CapturePanel {
+                        id: captureView
+                        backToRadio: function() {
+                            capturePanel.close()
+                            radioPanel.open()
+                        }
+                    }
                 }
             }
-        }
 
-        // The receivers, docked under the span or in their own window.
-        // Checked while they are shown, wherever that is, and a click hides
-        // them or brings them back.
-        RButton {
-            flat: true
-            checkable: true
-            checked: receiverPlacement.shown
-            text: "receivers"
-            ink: Theme.inkDim
-            tint: Theme.receiverColour(engineLink.focusedSlot)
-            onClicked: receiverPlacement.shown = !receiverPlacement.shown
+            RButton {
+                id: radioButton
+                flat: true
+                text: engineLink.sourceOpen ? "radio" : "radio: none open"
+                ink: engineLink.sourceOpen ? Theme.inkDim : Theme.inkWarn
+                visible: engineLink.connected
+                onClicked: radioPanel.opened ? radioPanel.close() : radioPanel.open()
 
-            Tip {
-                visible: parent.hovered
-                text: (receiverPlacement.shown ? "hide the receivers  " : "show the receivers  ")
-                      + KeyMap.keysText("window.receivers")
+                Tip {
+                    visible: parent.hovered && !radioPanel.opened
+                    text: "choose a radio or open a recording  " + KeyMap.keysText("panel.radio")
+                }
+
+                Popover {
+                    id: radioPanel
+                    parent: radioButton
+                    SourcePicker {}
+                }
             }
-        }
 
-        // SPEECH TO TEXT: the engine's one switch, the owner's decision of
-        // 2026-10-03, beside the receivers because it acts on every one of
-        // them, and independent of the rack's auto DV, which only opens
-        // receivers. The engine's switch is shared by every session, so this
-        // is drawn from what the engine reports; models/transcription.h has
-        // what the chip beside it says. Greyed with its reason on hover for an
-        // engine that does not transcribe, rather than hidden, so the operator
-        // can find out why.
-        RButton {
-            id: speechButton
-            flat: true
-            checkable: true
-            visible: engineLink.connected
-            checked: engineLink.transcriptionOn
-            text: "speech"
-            ink: engineLink.transcriptionOffered ? Theme.inkDim : Theme.inkOff
-            onClicked: engineLink.toggleTranscription()
+            // The application's settings. Shown with no engine too: the band plan
+            // needs none, and the detector's values are kept on this machine.
+            // Modal, unlike the bar's other panels, because it is a place to
+            // change things and not something to glance at over the span.
+            RButton {
+                id: settingsButton
+                flat: true
+                text: "settings"
+                ink: Theme.inkDim
+                onClicked: settingsPanel.opened ? settingsPanel.close() : settingsPanel.open()
 
-            Tip {
-                visible: parent.hovered
-                text: !engineLink.transcriptionOffered
-                      ? engineLink.transcriptionDetail
-                      : (engineLink.transcriptionOn ? "turn speech to text off  "
-                                                     : "turn speech to text on  ")
-                        + KeyMap.keysText("transcription.toggle")
-                        + "\nWhile it is on the engine transcribes every receiver that makes "
-                        + "speech: digital voice by call, analogue by squelch, wfm only where "
-                        + "a receiver is chosen in. The text is drawn on the waterfall beside "
-                        + "its receiver and goes into the decode log. The first time it goes "
-                        + "on the engine downloads its speech model, about 1.6 GB."
+                Tip {
+                    visible: parent.hovered && !settingsPanel.opened
+                    text: "detection, band plan and speech settings  "
+                          + KeyMap.keysText("panel.settings")
+                }
+
+                Popover {
+                    id: settingsPanel
+                    parent: settingsButton
+                    modal: true
+                    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                    onOpened: settingsView.sync()
+
+                    SettingsPanel {
+                        id: settingsView
+                    }
+                }
             }
-        }
 
-        // The model's download, its loading, a failure, or the queue, in a
-        // word or two with the engine's sentence on hover. Nothing while
-        // there is nothing to say.
-        StatusChip {
-            visible: engineLink.connected && engineLink.transcriptionOffered
-                     && engineLink.transcriptionLabel.length > 0
-            label: engineLink.transcriptionLabel
-            detail: engineLink.transcriptionDetail
-            ink: engineLink.transcriptionTone === "busy" ? Theme.accent
-                 : engineLink.transcriptionTone === "bad" ? Theme.inkBad
-                 : Theme.inkDim
-        }
+            // The receivers, docked under the span or in their own window.
+            // Checked while they are shown, wherever that is, and a click hides
+            // them or brings them back.
+            RButton {
+                flat: true
+                checkable: true
+                checked: receiverPlacement.shown
+                text: "receivers"
+                ink: Theme.inkDim
+                tint: Theme.receiverColour(engineLink.focusedSlot)
+                onClicked: receiverPlacement.shown = !receiverPlacement.shown
 
-        // Every notice the pill does not name, each a chip with its sentence
-        // verbatim on hover; see controls/StatusChip.qml. The pill names the
-        // first and these are the rest, so no notice is on screen twice.
-        Repeater {
-            model: bar.status.chips
+                Tip {
+                    visible: parent.hovered
+                    text: (receiverPlacement.shown ? "hide the receivers  " : "show the receivers  ")
+                          + KeyMap.keysText("window.receivers")
+                }
+            }
 
+            // SPEECH TO TEXT: the engine's one switch, the owner's decision of
+            // 2026-10-03, beside the receivers because it acts on every one of
+            // them, and independent of the rack's auto DV, which only opens
+            // receivers. The engine's switch is shared by every session, so this
+            // is drawn from what the engine reports; models/transcription.h has
+            // what the chip beside it says. Greyed with its reason on hover for an
+            // engine that does not transcribe, rather than hidden, so the operator
+            // can find out why.
+            RButton {
+                id: speechButton
+                flat: true
+                checkable: true
+                visible: engineLink.connected
+                checked: engineLink.transcriptionOn
+                text: "speech"
+                ink: engineLink.transcriptionOffered ? Theme.inkDim : Theme.inkOff
+                onClicked: engineLink.toggleTranscription()
+
+                Tip {
+                    visible: parent.hovered
+                    text: !engineLink.transcriptionOffered
+                          ? engineLink.transcriptionDetail
+                          : (engineLink.transcriptionOn ? "turn speech to text off  "
+                                                         : "turn speech to text on  ")
+                            + KeyMap.keysText("transcription.toggle")
+                            + "\nWhile it is on the engine transcribes every receiver that makes "
+                            + "speech: digital voice by call, analogue by squelch, wfm only where "
+                            + "a receiver is chosen in. The text is drawn on the waterfall beside "
+                            + "its receiver and goes into the decode log. The first time it goes "
+                            + "on the engine downloads its speech model, about 1.6 GB."
+                }
+            }
+
+            // The model's download, its loading, a failure, or the queue, in a
+            // word or two with the engine's sentence on hover. Nothing while
+            // there is nothing to say.
             StatusChip {
-                required property string modelData
-
-                label: modelData
-                detail: bar.noticeDetail(modelData)
-                ink: bar.noticeInk(modelData)
+                visible: engineLink.connected && engineLink.transcriptionOffered
+                         && engineLink.transcriptionLabel.length > 0
+                label: engineLink.transcriptionLabel
+                detail: engineLink.transcriptionDetail
+                ink: engineLink.transcriptionTone === "busy" ? Theme.accent
+                     : engineLink.transcriptionTone === "bad" ? Theme.inkBad
+                     : Theme.inkDim
             }
-        }
 
-        // The one removal an add answers. A retune that moved a receiver to a
-        // place in its channel needing a different filter was refused only
-        // because the engine builds a new filter for a new receiver, so this
-        // puts one back at the frequency it was on, in the same mode. Offered
-        // for nothing else, because anything else would be refused again; see
-        // receiver_can_come_back in models/receiver_gone.h. A chip that acts,
-        // not a dialog: the sentence beside it is the question. Beside the
-        // "receiver let go" notice, which is the pill or the chip before it.
-        StatusChip {
-            visible: engineLink.receiverGoneText.length > 0 && engineLink.receiverComebackHz > 0
-            label: "add it back"
-            detail: "Adds a receiver again on the frequency the retune let go, in the same mode. "
-                    + "The engine builds the filter its new place in the channel needs."
-            ink: Theme.inkWarn
+            // Every notice the pill does not name, each a chip with its sentence
+            // verbatim on hover; see controls/StatusChip.qml. The pill names the
+            // first and these are the rest, so no notice is on screen twice.
+            Repeater {
+                model: bar.status.chips
 
-            Accessible.role: Accessible.Button
-            Accessible.name: "add the receiver back"
+                StatusChip {
+                    required property string modelData
 
-            TapHandler {
-                onTapped: engineLink.addGoneReceiverBack()
-            }
-        }
-
-        // The status pill: a dot and a word or two, and everything behind it
-        // in the drawer. models/status_summary.h decides what it says. When it
-        // names a notice it is that notice's chip too: the sentence is on its
-        // hover and no chip repeats it.
-        RButton {
-            id: pill
-
-            readonly property color level: bar.status.level >= 3 ? Theme.inkBad
-                                          : bar.status.level === 2 ? Theme.inkWarn
-                                          : bar.status.level === 1 ? Theme.ink
-                                          : Theme.accent
-
-            flat: true
-            leftPadding: 22
-            alignment: Text.AlignLeft
-
-            // As wide as the longest headline, so the buttons to its left do
-            // not move each time the rate's digits change.
-            Layout.preferredWidth: widest.advanceWidth + 36
-            text: bar.status.headline
-            ink: bar.status.level >= 2 ? pill.level : Theme.inkDim
-            onClicked: drawer.opened ? drawer.close() : drawer.open()
-
-            Tip {
-                visible: pill.hovered && !drawer.opened
-                delay: 250
-                text: {
-                    const sentence = bar.noticeDetail(bar.status.headline)
-                    return sentence.length > 0 ? sentence : "the engine's status, and the drawer"
+                    label: modelData
+                    detail: bar.noticeDetail(modelData)
+                    ink: bar.noticeInk(modelData)
                 }
             }
 
-            TextMetrics {
-                id: widest
-                font: pill.font
-                text: "front end overloaded"
+            // The one removal an add answers. A retune that moved a receiver to a
+            // place in its channel needing a different filter was refused only
+            // because the engine builds a new filter for a new receiver, so this
+            // puts one back at the frequency it was on, in the same mode. Offered
+            // for nothing else, because anything else would be refused again; see
+            // receiver_can_come_back in models/receiver_gone.h. A chip that acts,
+            // not a dialog: the sentence beside it is the question. Beside the
+            // "receiver let go" notice, which is the pill or the chip before it.
+            StatusChip {
+                visible: engineLink.receiverGoneText.length > 0 && engineLink.receiverComebackHz > 0
+                label: "add it back"
+                detail: "Adds a receiver again on the frequency the retune let go, in the same mode. "
+                        + "The engine builds the filter its new place in the channel needs."
+                ink: Theme.inkWarn
+
+                Accessible.role: Accessible.Button
+                Accessible.name: "add the receiver back"
+
+                TapHandler {
+                    onTapped: engineLink.addGoneReceiverBack()
+                }
             }
 
-            Rectangle {
-                x: 9
-                anchors.verticalCenter: parent.verticalCenter
-                width: 7
-                height: 7
-                radius: 3.5
-                color: pill.level
-            }
+            // The status pill: a dot and a word or two, and everything behind it
+            // in the drawer. models/status_summary.h decides what it says. When it
+            // names a notice it is that notice's chip too: the sentence is on its
+            // hover and no chip repeats it.
+            RButton {
+                id: pill
 
-            Popover {
-                id: drawer
-                parent: pill
-                width: 820
-                StatusDrawer {
-                    Layout.fillWidth: true
+                readonly property color level: bar.status.level >= 3 ? Theme.inkBad
+                                              : bar.status.level === 2 ? Theme.inkWarn
+                                              : bar.status.level === 1 ? Theme.ink
+                                              : Theme.accent
+
+                flat: true
+                leftPadding: 22
+                alignment: Text.AlignLeft
+
+                // As wide as the longest headline, so the buttons to its left do
+                // not move each time the rate's digits change.
+                Layout.preferredWidth: widest.advanceWidth + 36
+                text: bar.status.headline
+                ink: bar.status.level >= 2 ? pill.level : Theme.inkDim
+                onClicked: drawer.opened ? drawer.close() : drawer.open()
+
+                Tip {
+                    visible: pill.hovered && !drawer.opened
+                    delay: 250
+                    text: {
+                        const sentence = bar.noticeDetail(bar.status.headline)
+                        return sentence.length > 0 ? sentence : "the engine's status, and the drawer"
+                    }
+                }
+
+                TextMetrics {
+                    id: widest
+                    font: pill.font
+                    text: "front end overloaded"
+                }
+
+                Rectangle {
+                    x: 9
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 7
+                    height: 7
+                    radius: 3.5
+                    color: pill.level
+                }
+
+                Popover {
+                    id: drawer
+                    parent: pill
+                    width: 820
+                    StatusDrawer {
+                        Layout.fillWidth: true
+                    }
                 }
             }
         }

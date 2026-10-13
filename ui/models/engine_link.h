@@ -1757,6 +1757,11 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool captureSearchBusy READ captureSearchBusy NOTIFY captureHitsChanged)
     Q_PROPERTY(QString captureSearchFault READ captureSearchFault NOTIFY captureHitsChanged)
 
+    // The same search's window cut into kCaptureOccupancyBuckets columns,
+    // oldest first, each a map of occupied and captured shares, 0 to 1. Empty
+    // when the engine did not answer it; the list is still good without it.
+    Q_PROPERTY(QVariantList captureOccupancy READ captureOccupancy NOTIFY captureHitsChanged)
+
     // The focused receiver's choice as the engine reports it on the
     // receiver's status, "auto", "on" or "off", and whether the engine is
     // transcribing it now. The segmented control binds the first and moves
@@ -2122,10 +2127,15 @@ public:
     // pace_link.cpp.
     Q_INVOKABLE void setSourcePace(double pace);
 
-    // Asks the engine's capture for the last hour's hits over the span now
-    // captured. On the supervisor, because a search reads the capture's index
-    // from disk. See capture_link.cpp.
-    Q_INVOKABLE void searchCapture();
+    // Asks the engine's capture for hits over a window, one of
+    // models/capture_browser.h's labels, no shorter than minDuration, also
+    // one of its labels. An empty band is the span now captured; otherwise
+    // it is "low:high" as parse_capture_band reads it, and text it cannot
+    // read is a fault without a search. On the supervisor, because a search
+    // reads the capture's index from disk. See capture_link.cpp.
+    Q_INVOKABLE void searchCapture(const QString& window = QStringLiteral("1 h"),
+                                   const QString& band = QString(),
+                                   const QString& minDuration = QStringLiteral("any"));
 
     // Opens what the picker composed, closing whatever is open first.
     //
@@ -3015,6 +3025,7 @@ public:
     [[nodiscard]] bool combLocked() const { return comb_locked_; }
     [[nodiscard]] QString captureText() const { return capture_text_; }
     [[nodiscard]] QVariantList captureHits() const { return capture_hits_; }
+    [[nodiscard]] QVariantList captureOccupancy() const { return capture_occupancy_; }
     [[nodiscard]] bool captureSearchBusy() const { return capture_search_busy_; }
     [[nodiscard]] QString captureSearchFault() const { return capture_search_fault_; }
     [[nodiscard]] QString captureDetail() const { return capture_detail_; }
@@ -4356,10 +4367,14 @@ private:
     bool want_capture_search_ = false;            // guarded by capture_search_mutex_
     double want_capture_low_hz_ = 0.0;            // guarded by capture_search_mutex_
     double want_capture_high_hz_ = 0.0;           // guarded by capture_search_mutex_
+    std::int64_t want_capture_window_ns_ = 0;     // guarded by capture_search_mutex_
+    std::int64_t want_capture_min_ns_ = 0;        // guarded by capture_search_mutex_
     bool handover_has_capture_hits_ = false;      // guarded by capture_search_mutex_
     QVariantList handover_capture_hits_;          // guarded by capture_search_mutex_
+    QVariantList handover_capture_occupancy_;     // guarded by capture_search_mutex_
     QString handover_capture_search_fault_;       // guarded by capture_search_mutex_
     QVariantList capture_hits_;
+    QVariantList capture_occupancy_;
     bool capture_search_busy_ = false;
     QString capture_search_fault_;
 

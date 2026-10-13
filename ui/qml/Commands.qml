@@ -131,6 +131,10 @@ Item {
             }
         },
         "panel.open": (name) => {
+            // An engine with no capture has nothing to list, and its button
+            // is not on the bar for the panel to hang from.
+            if (name === "capture" && !commands.topBar.captureOffered)
+                return
             commands.bringForward(commands.mainWindow)
             commands.topBar.togglePanel(name)
         },

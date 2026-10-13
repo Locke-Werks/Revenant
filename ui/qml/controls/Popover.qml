@@ -20,6 +20,10 @@ Popup {
 
     default property alias content: column.data
 
+    // A list read row by row wants nothing of the spectrum showing through
+    // it; a panel of controls is fine with the hint of what it sits over.
+    property bool solid: false
+
     // The caller sets parent to the control the popover hangs from, which is
     // what places it in that control's coordinates.
     x: parent ? Math.min(0, parent.width - width) : 0
@@ -29,7 +33,7 @@ Popup {
 
     background: Rectangle {
         radius: Theme.radius + 2
-        color: Theme.panel
+        color: popover.solid ? Theme.panelSolid : Theme.panel
         border.width: 1
         border.color: Theme.border
     }

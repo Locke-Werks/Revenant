@@ -27,10 +27,30 @@ RowLayout {
     readonly property alias dial: tuneDial
     property int keyDigit: -1
 
+    // The width TopBar can give this row. What does not fit goes in a set
+    // order, the scroll hint first and then the band shortcuts, so a narrow
+    // window loses the extras and keeps the dial and the band menu. Measured
+    // from the parts rather than from implicitWidth, which would change with
+    // what it decides and loop.
+    property real room: Number.MAX_VALUE
+    readonly property real coreWidth: tuneLabel.implicitWidth + tuneDial.implicitWidth
+                                      + picker.openerWidth + 3 * spacing + 8
+    readonly property bool roomForShortcuts: room >= coreWidth + picker.favouritesWidth
+    readonly property bool roomForHint:
+        roomForShortcuts && room >= coreWidth + picker.favouritesWidth + hintText.width + spacing
+
     spacing: 8
     visible: engineLink.connected
+    clip: true
+
+    TextMetrics {
+        id: hintText
+        font.pixelSize: Theme.sizeBody
+        text: "or scroll over the spectrum"
+    }
 
     Label {
+        id: tuneLabel
         text: "tune"
         color: engineLink.sourceCanRetune ? Theme.inkTune : Theme.inkDim
         font.pixelSize: Theme.sizeTitle
@@ -78,7 +98,10 @@ RowLayout {
     // and where its edges came from are models/band_plan.h, and 462.5625
     // MHz, the standing real-radio test band from docs/, is one of the
     // shortcuts there as it was here.
-    BandPicker {}
+    BandPicker {
+        id: picker
+        shortcuts: tuneBar.roomForShortcuts
+    }
 
 
     // WHAT THE DEVICE ACTUALLY TOOK. Only when it differs from what
@@ -110,8 +133,8 @@ RowLayout {
     // recording, where the line below explains the dead box instead.
     Label {
         Layout.minimumWidth: 0
-        visible: engineLink.sourceCanRetune
-        text: "or scroll over the spectrum"
+        visible: engineLink.sourceCanRetune && tuneBar.roomForHint
+        text: hintText.text
         color: Theme.inkDim
         font.pixelSize: Theme.sizeBody
         elide: Text.ElideRight

@@ -370,15 +370,31 @@ RowLayout {
         picker.reveal()
     }
 
+    // Off when the top bar is too narrow for the shortcuts; the menu still
+    // has every band. TuneBar decides from the two widths below, which do
+    // not depend on whether the shortcuts are shown.
+    property bool shortcuts: true
+    readonly property real openerWidth: opener.implicitWidth
+    readonly property real favouritesWidth: {
+        let width = 0
+        for (let i = 0; i < favourites.count; ++i) {
+            const item = favourites.itemAt(i)
+            if (item && item.modelData.favourite)
+                width += item.implicitWidth + picker.spacing
+        }
+        return width
+    }
+
     spacing: 2
 
     Repeater {
+        id: favourites
         model: picker.bands
 
         RButton {
             required property var modelData
 
-            visible: modelData.favourite
+            visible: modelData.favourite && picker.shortcuts
             flat: true
             text: modelData.name
             enabled: picker.reachable(modelData)

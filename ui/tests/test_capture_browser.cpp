@@ -19,7 +19,11 @@ using revenant::ui::capture_window;
 using revenant::ui::CaptureHitIn;
 using revenant::ui::format_capture_duration;
 using revenant::ui::format_capture_range;
+using revenant::ui::capture_choice_ns;
+using revenant::ui::kCaptureMinDurations;
 using revenant::ui::kCaptureWindowNs;
+using revenant::ui::kCaptureWindows;
+using revenant::ui::parse_capture_band;
 
 namespace {
 
@@ -79,7 +83,7 @@ TEST_CASE("durations and ranges stay short", "[capture_browser]")
 
 TEST_CASE("the window is the last hour over the span", "[capture_browser]")
 {
-    const auto window = capture_window(10 * kCaptureWindowNs, 144e6, 146e6);
+    const auto window = capture_window(10 * kCaptureWindowNs, kCaptureWindowNs, 144e6, 146e6);
     CHECK(window.to_ns == 10 * kCaptureWindowNs);
     CHECK(window.from_ns == 9 * kCaptureWindowNs);
     CHECK(window.freq_low_hz == 144'000'000);
@@ -89,7 +93,52 @@ TEST_CASE("the window is the last hour over the span", "[capture_browser]")
 TEST_CASE("an unknown span drops the frequency filter", "[capture_browser]")
 {
     // Rejects: a zero-wide filter, which matches nothing.
-    const auto window = capture_window(kCaptureWindowNs, 0.0, 0.0);
+    const auto window = capture_window(kCaptureWindowNs, kCaptureWindowNs, 0.0, 0.0);
     CHECK(window.freq_low_hz == 0);
     CHECK(window.freq_high_hz == 0);
+}
+
+TEST_CASE("the window is the one chosen", "[capture_browser]")
+{
+    const std::int64_t day = capture_choice_ns(kCaptureWindows, "24 h", 1);
+    CHECK(day == 24 * kCaptureWindowNs);
+    const auto window = capture_window(100 * kCaptureWindowNs, day, 0.0, 0.0);
+    CHECK(window.from_ns == 76 * kCaptureWindowNs);
+    CHECK(capture_choice_ns(kCaptureWindows, "15 min", 1) == kCaptureWindowNs / 4);
+    CHECK(capture_choice_ns(kCaptureMinDurations, "5 s", 0) == 5 * kSecond);
+}
+
+TEST_CASE("an unknown choice falls back to the default", "[capture_browser]")
+{
+    // Rejects: a stale label read as zero, an empty window that finds nothing.
+    CHECK(capture_choice_ns(kCaptureWindows, "2 h", 1) == kCaptureWindowNs);
+    CHECK(capture_choice_ns(kCaptureMinDurations, "", 0) == 0);
+}
+
+TEST_CASE("a typed band reads like the dial", "[capture_browser]")
+{
+    const auto band = parse_capture_band("162.4M:162.6M");
+    REQUIRE(band.has_value());
+    CHECK(band->low_hz == 162'400'000);
+    CHECK(band->high_hz == 162'600'000);
+
+    // A bare number is megahertz, as on the dial, and order does not matter.
+    const auto bare = parse_capture_band(" 146.6 : 146.4 ");
+    REQUIRE(bare.has_value());
+    CHECK(bare->low_hz == 146'400'000);
+    CHECK(bare->high_hz == 146'600'000);
+
+    const auto kilo = parse_capture_band("7100k:7200k");
+    REQUIRE(kilo.has_value());
+    CHECK(kilo->low_hz == 7'100'000);
+}
+
+TEST_CASE("a band that cannot be read is refused, not guessed", "[capture_browser]")
+{
+    // Rejects: one frequency taken as a zero-wide band, and junk as no filter.
+    CHECK_FALSE(parse_capture_band("162.4M").has_value());
+    CHECK_FALSE(parse_capture_band("162.4M:162.4M").has_value());
+    CHECK_FALSE(parse_capture_band("162.4M:").has_value());
+    CHECK_FALSE(parse_capture_band("a:b").has_value());
+    CHECK_FALSE(parse_capture_band("1M:2M:3M").has_value());
 }

@@ -1,10 +1,11 @@
-// The engine's rolling capture, browsed: what it caught in the last hour over
-// the span on screen, newest first, and a way to hear one again.
+// The engine's rolling capture, browsed: what it caught over a window, on the
+// span on screen or a typed band, newest first, and a way to hear one again.
 //
-// A LIST AND NOTHING ELSE. No filters, no timeline, no occupancy chart: the
-// question it answers is "what did I just miss", and the defaults in
-// models/capture_browser.h are that question. More controls wait for an
-// operator who needs them.
+// THE DEFAULTS ARE THE QUESTION. "What did I just miss": the last hour, this
+// span, any length. The window, band and minimum length are there for the
+// operator who wants a different one, and each change searches again. The
+// strip over the list is the same window's occupancy, oldest on the left,
+// so a burst can be seen before it is found in the rows.
 //
 // OPENING A ROW IS THE PICKER'S PATH. Its uri goes through engineLink.
 // openSource, which closes the radio and opens the replay, so the recording
@@ -27,10 +28,19 @@ ColumnLayout {
     readonly property bool replaying:
         String(engineLink.openedSource.uri || "").startsWith("capture:")
 
+    // Labels from models/capture_browser.h's kCaptureWindows and
+    // kCaptureMinDurations; EngineLink turns them into nanoseconds.
+    property string windowLabel: "1 h"
+    property string minDuration: "any"
+
     // Called when the popover opens, so the list is never older than the
     // last time the operator looked.
     function opened() {
-        engineLink.searchCapture()
+        panel.search()
+    }
+
+    function search() {
+        engineLink.searchCapture(panel.windowLabel, bandField.text, panel.minDuration)
     }
 
     spacing: 8
@@ -49,7 +59,7 @@ ColumnLayout {
         Label {
             Layout.fillWidth: true
             text: engineLink.captureSearchBusy ? "searching"
-                  : "last hour, this span, " + engineLink.captureHits.length
+                  : engineLink.captureHits.length
                     + (engineLink.captureHits.length === 1 ? " hit" : " hits")
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
@@ -60,7 +70,71 @@ ColumnLayout {
             text: "refresh"
             ink: Theme.inkDim
             enabled: !engineLink.captureSearchBusy
-            onClicked: engineLink.searchCapture()
+            onClicked: panel.search()
+        }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        RSegmented {
+            options: ["15 min", "1 h", "6 h", "24 h"]
+            current: panel.windowLabel
+            onPicked: (option) => {
+                panel.windowLabel = option
+                panel.search()
+            }
+        }
+
+        // Empty is the span being captured, which is what the placeholder
+        // says; a typed band is read on return.
+        RTextField {
+            id: bandField
+            Layout.preferredWidth: 220
+            mono: true
+            placeholderText: "this span, or 162.4M:162.6M"
+            onAccepted: panel.search()
+        }
+
+        Label {
+            text: "at least"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        RSegmented {
+            options: ["any", "1 s", "5 s", "30 s"]
+            current: panel.minDuration
+            onPicked: (option) => {
+                panel.minDuration = option
+                panel.search()
+            }
+        }
+    }
+
+    // Occupancy across the window, oldest left: brighter where more of the
+    // column held a signal, and a dimmer shade where nothing was recorded at
+    // all, because a gap in the capture is not the same news as a quiet band.
+    Row {
+        id: strip
+
+        visible: engineLink.captureOccupancy.length > 0
+        Layout.preferredWidth: 640
+        Layout.preferredHeight: 10
+
+        Repeater {
+            model: engineLink.captureOccupancy
+
+            Rectangle {
+                required property var modelData
+
+                width: strip.width / Math.max(1, engineLink.captureOccupancy.length)
+                height: strip.height
+                color: modelData.captured < 0.5 ? Theme.control
+                       : Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b,
+                                 0.12 + 0.88 * Math.min(1, modelData.occupied))
+            }
         }
     }
 
@@ -105,7 +179,7 @@ ColumnLayout {
     Label {
         visible: !engineLink.captureSearchBusy && engineLink.captureSearchFault === ""
                  && engineLink.captureHits.length === 0
-        text: "nothing caught in the last hour on this span"
+        text: "nothing caught in this window"
         color: Theme.inkDim
         font.pixelSize: Theme.sizeSmall
     }
