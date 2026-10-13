@@ -61,7 +61,7 @@ capture::Annotation annotation(std::uint64_t count, dsp::Hertz low, dsp::Hertz h
 // is where run() leaves it.
 void record(Harness& harness) {
     REQUIRE(harness.start_engine().has_value());
-    harness.wait_for_blocks((kSamples + kBlock - 1) / kBlock, 30'000);
+    REQUIRE(harness.wait_for_blocks((kSamples + kBlock - 1) / kBlock, 30'000) >= (kSamples + kBlock - 1) / kBlock);
     REQUIRE(harness.stop_engine().has_value());
 }
 
@@ -314,7 +314,7 @@ TEST_CASE("a retune a replay follows is drained with nothing subscribed",
     REQUIRE(ready.has_value());
 
     REQUIRE(harness.start_engine().has_value());
-    harness.wait_for_blocks(2 * kSegment / options.block_samples, 30'000);
+    REQUIRE(harness.wait_for_blocks(2 * kSegment / options.block_samples, 30'000) >= 2 * kSegment / options.block_samples);
     REQUIRE(harness.stop_engine().has_value());
     REQUIRE(harness.engine().info().source_center == kWeather);
 
