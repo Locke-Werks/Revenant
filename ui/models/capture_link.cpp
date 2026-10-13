@@ -27,13 +27,34 @@
 
 namespace revenant::ui {
 
-void EngineLink::searchCapture()
+void EngineLink::searchCapture(const QString& window, const QString& band,
+                               const QString& minDuration)
 {
+    double low = spanLowHz();
+    double high = spanHighHz();
+    if (!band.trimmed().isEmpty()) {
+        const auto typed = parse_capture_band(band.toStdString());
+        if (!typed) {
+            capture_hits_.clear();
+            capture_occupancy_.clear();
+            capture_search_fault_ =
+                QStringLiteral("could not read \"%1\" as a band; write it as 162.4M:162.6M")
+                    .arg(band.trimmed());
+            capture_search_busy_ = false;
+            emit captureHitsChanged();
+            return;
+        }
+        low = static_cast<double>(typed->low_hz);
+        high = static_cast<double>(typed->high_hz);
+    }
     {
         const std::lock_guard<std::mutex> lock(capture_search_mutex_);
         want_capture_search_ = true;
-        want_capture_low_hz_ = spanLowHz();
-        want_capture_high_hz_ = spanHighHz();
+        want_capture_low_hz_ = low;
+        want_capture_high_hz_ = high;
+        want_capture_window_ns_ = capture_choice_ns(kCaptureWindows, window.toStdString(), 1);
+        want_capture_min_ns_ =
+            capture_choice_ns(kCaptureMinDurations, minDuration.toStdString(), 0);
     }
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
@@ -51,6 +72,8 @@ void EngineLink::apply_capture_search()
     }
     double low = 0.0;
     double high = 0.0;
+    std::int64_t window_ns = kCaptureWindowNs;
+    std::int64_t min_ns = 0;
     {
         const std::lock_guard<std::mutex> lock(capture_search_mutex_);
         if (!std::exchange(want_capture_search_, false)) {
@@ -58,18 +81,41 @@ void EngineLink::apply_capture_search()
         }
         low = want_capture_low_hz_;
         high = want_capture_high_hz_;
+        window_ns = want_capture_window_ns_;
+        min_ns = want_capture_min_ns_;
     }
 
     const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::system_clock::now().time_since_epoch())
                             .count();
-    const CaptureWindow window = capture_window(now_ns, low, high);
+    const CaptureWindow window = capture_window(now_ns, window_ns, low, high);
     rpc::CaptureQuery query;
     query.from_ns = window.from_ns;
     query.to_ns = window.to_ns;
+    query.min_duration_ns = min_ns;
     if (window.freq_high_hz > window.freq_low_hz) {
         query.freq_low_hz = window.freq_low_hz;
         query.freq_high_hz = window.freq_high_hz;
+    }
+
+    // Asked only with a band, because occupancy needs one; a refusal leaves the strip empty and the list stands on its own.
+    QVariantList columns;
+    if (window.freq_high_hz > window.freq_low_hz) {
+        rpc::CaptureOccupancyRequest request;
+        request.from_ns = window.from_ns;
+        request.to_ns = window.to_ns;
+        request.bucket_ns = window_ns / kCaptureOccupancyBuckets;
+        request.freq_low_hz = window.freq_low_hz;
+        request.freq_high_hz = window.freq_high_hz;
+        request.filter.min_duration_ns = min_ns;
+        if (auto buckets = client_->capture_occupancy(request)) {
+            for (const rpc::CaptureBucket& bucket : *buckets) {
+                QVariantMap map;
+                map.insert(QStringLiteral("occupied"), bucket.occupied);
+                map.insert(QStringLiteral("captured"), bucket.captured);
+                columns.append(map);
+            }
+        }
     }
 
     QVariantList rows;
@@ -101,6 +147,7 @@ void EngineLink::apply_capture_search()
         const std::lock_guard<std::mutex> lock(capture_search_mutex_);
         handover_has_capture_hits_ = true;
         handover_capture_hits_ = std::move(rows);
+        handover_capture_occupancy_ = std::move(columns);
         handover_capture_search_fault_ = std::move(fault);
     }
     QMetaObject::invokeMethod(this, [this] { adopt_capture_search(); }, Qt::QueuedConnection);
@@ -114,8 +161,10 @@ void EngineLink::adopt_capture_search()
             return;
         }
         capture_hits_ = std::move(handover_capture_hits_);
+        capture_occupancy_ = std::move(handover_capture_occupancy_);
         capture_search_fault_ = std::move(handover_capture_search_fault_);
         handover_capture_hits_.clear();
+        handover_capture_occupancy_.clear();
         handover_capture_search_fault_.clear();
     }
     capture_search_busy_ = false;

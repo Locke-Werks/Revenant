@@ -88,9 +88,14 @@ seconds of a 2.4 MS/s capture spanning two segments replayed as exactly
 ## In the client
 
 With the engine started with `--capture`, a capture button appears in the top
-bar. Its panel lists the last hour's hits over the span being recorded, newest
-first; a double click replays one, and "back to the radio" opens the radio
-picker. A replay is not itself recorded. The session calls behind it,
+bar, and Ctrl+Shift+C opens and closes its panel. The panel lists hits newest
+first: by default the last hour over the span being recorded, with any
+length. A window of 15 min, 1 h, 6 h or 24 h, a typed band such as
+`162.4M:162.6M` (read like the tuning box, so a bare number is MHz), and a
+minimum length of 1, 5 or 30 s narrow it. A strip above the list shows the
+window's occupancy over that band, dimmer where nothing was captured. A
+double click replays a hit, and "back to the radio" opens the radio picker. A
+replay is not itself recorded. The session calls behind it,
 `captureCatalog`, `captureSearch` and `captureOccupancy`, are in
 [rpc.md](rpc.md).
 
