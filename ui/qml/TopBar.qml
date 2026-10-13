@@ -300,8 +300,26 @@ Rectangle {
                     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
                     onOpened: settingsView.sync()
 
-                    SettingsPanel {
-                        id: settingsView
+                    // Scrolled, because the sections together are taller than
+                    // an 800-pixel window and the last of them, the capture,
+                    // would otherwise sit off the bottom where nothing reaches.
+                    Flickable {
+                        id: settingsFlick
+
+                        Layout.preferredWidth: settingsView.implicitWidth + 14
+                        Layout.preferredHeight: Math.min(
+                            settingsView.implicitHeight,
+                            Overlay.overlay ? Overlay.overlay.height - 90 : 700)
+                        clip: true
+                        contentWidth: width
+                        contentHeight: settingsView.implicitHeight
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: RScrollBar {}
+
+                        SettingsPanel {
+                            id: settingsView
+                            width: settingsFlick.width - 14
+                        }
                     }
                 }
             }

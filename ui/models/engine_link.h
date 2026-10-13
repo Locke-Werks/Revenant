@@ -4568,6 +4568,10 @@ private:
     QElapsedTimer radio_save_clock_;
     bool last_source_considered_ = false;
 
+    // A restart began while connected to the engine it ended; true until the
+    // link sees that connection go. See setEngineStarted.
+    bool awaiting_old_engine_drop_ = false;
+
     // Any openSource on this window before the first connection landed, which
     // is what --open-recording does. Read by consider_last_source so a request
     // the operator made on the command line is not replaced by a remembered one.

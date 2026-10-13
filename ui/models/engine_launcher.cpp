@@ -76,38 +76,6 @@ constexpr std::size_t kLongestLine = 8192;
     return narrow(wide) + number;
 }
 
-// One argument quoted the way CommandLineToArgvW and the CRT read it back:
-// backslashes are literal except before a quote, where they escape in pairs.
-// The install directory is under Program Files, which has a space in it, so
-// this is the ordinary case and not a corner.
-[[nodiscard]] std::wstring quote_argument(const std::wstring& argument)
-{
-    if (!argument.empty() && argument.find_first_of(L" \t\n\v\"") == std::wstring::npos) {
-        return argument;
-    }
-    std::wstring out = L"\"";
-    for (auto it = argument.begin();; ++it) {
-        std::size_t backslashes = 0;
-        while (it != argument.end() && *it == L'\\') {
-            ++it;
-            ++backslashes;
-        }
-        if (it == argument.end()) {
-            // Doubled, so the closing quote below is not escaped by them.
-            out.append(backslashes * 2, L'\\');
-            break;
-        }
-        if (*it == L'"') {
-            out.append(backslashes * 2 + 1, L'\\');
-        } else {
-            out.append(backslashes, L'\\');
-        }
-        out.push_back(*it);
-    }
-    out.push_back(L'"');
-    return out;
-}
-
 // Closes a handle that may be null, and says so at the call site.
 void close_handle(void*& handle)
 {
@@ -158,7 +126,9 @@ bool loopback_port_answers(std::uint16_t port)
     return answered;
 }
 
-EngineLauncher::~EngineLauncher()
+EngineLauncher::~EngineLauncher() { stop(); }
+
+void EngineLauncher::stop()
 {
     if (job_ != nullptr) {
         // TerminateJobObject first, and then the close that would have done
@@ -179,11 +149,19 @@ EngineLauncher::~EngineLauncher()
     }
     close_handle(process_);
     close_handle(stderr_read_);
+    pid_ = 0;
+
+    const std::lock_guard<std::mutex> lock(mutex_);
+    tail_.clear();
+    exit_.reset();
 }
 
 std::string EngineLauncher::start(const std::filesystem::path& exe, std::uint16_t port,
-                                  const std::filesystem::path& token_file)
+                                  const std::filesystem::path& token_file,
+                                  const CaptureChoice& capture)
 {
+    stop();
+
     // THE JOB FIRST, AND NO ENGINE WITHOUT IT. An engine this window could not
     // tie to itself would outlive a crash and hold the radio, and the next
     // launch would find the port answering and connect to an orphan nobody
@@ -286,18 +264,8 @@ std::string EngineLauncher::start(const std::filesystem::path& exe, std::uint16_
     startup.StartupInfo.hStdError = write;
     startup.lpAttributeList = attributes;
 
-    // --pace 1 because the engine's default, 0, runs a synthetic scene as fast
-    // as the GPU allows, which is right for a benchmark and wrong for a window
-    // somebody is watching. A live radio sets its own pace and a recording the
-    // window opens plays at 1 regardless, so this only changes the synthetic
-    // source, and makes it what the person picking it expects.
-    std::wstring command = quote_argument(exe.wstring());
-    command += L" --no-source --pace 1 --port ";
-    command += std::to_wstring(port);
-    if (!token_file.empty()) {
-        command += L" --token-file ";
-        command += quote_argument(token_file.wstring());
-    }
+    std::wstring command = engine_command_line(exe, port, token_file, capture);
+    command_line_ = narrow(command);
 
     // CREATE_NO_WINDOW: the engine is a console program and the window is
     // what the person opened. Without it a console appears beside the window
@@ -413,8 +381,10 @@ bool loopback_port_answers(std::uint16_t) { return false; }
 
 EngineLauncher::~EngineLauncher() = default;
 
+void EngineLauncher::stop() {}
+
 std::string EngineLauncher::start(const std::filesystem::path&, std::uint16_t,
-                                  const std::filesystem::path&)
+                                  const std::filesystem::path&, const CaptureChoice&)
 {
     return "starting the engine from the window is implemented on Windows only";
 }

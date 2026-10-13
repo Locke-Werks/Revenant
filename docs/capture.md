@@ -87,6 +87,15 @@ seconds of a 2.4 MS/s capture spanning two segments replayed as exactly
 
 ## In the client
 
+The settings window's capture section turns the capture on for an engine the
+client starts itself: a switch (off by default), the folder (default
+`%LOCALAPPDATA%\Locke Werks\Revenant\capture`), the size kept (default `50G`)
+and the age kept (default none), in the same forms as the flags above and
+checked by the same parser. Applying a change restarts that engine with the
+new flags; the radio used last reopens, a recording does not. An engine the
+client did not start keeps whatever flags it was started with, and the
+section says so.
+
 With the engine started with `--capture`, a capture button appears in the top
 bar, and Ctrl+Shift+C opens and closes its panel. The panel lists hits newest
 first: by default the last hour over the span being recorded, with any

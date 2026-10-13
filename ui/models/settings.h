@@ -204,4 +204,17 @@ inline constexpr unsigned kBandPlanRegionDefault = 3U;  // kRegionUSCA
 inline constexpr QLatin1StringView kShowBandBar{"bands/showBar"};
 inline constexpr bool kShowBandBarDefault = true;
 
+// The rolling capture of an engine this window starts, as the engine's own
+// flag values: whether --capture is passed, the folder it names, and the text
+// of --capture-retain and --capture-max-age. Read when the window starts its
+// engine and when the settings window restarts it. An engine somebody else
+// started is never given them. Defaults and checks are models/capture_choice.h;
+// an unset folder is AppLocalDataLocation/capture, local and not roaming
+// because a capture is tens of gigabytes. An empty retain or max age is no
+// limit, as it is to the engine.
+inline constexpr QLatin1StringView kCaptureEnabled{"capture/enabled"};
+inline constexpr QLatin1StringView kCaptureFolder{"capture/folder"};
+inline constexpr QLatin1StringView kCaptureRetain{"capture/retain"};
+inline constexpr QLatin1StringView kCaptureMaxAge{"capture/maxAge"};
+
 }  // namespace revenant::ui::settings

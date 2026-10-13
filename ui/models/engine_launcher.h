@@ -29,6 +29,8 @@
 #include <thread>
 #include <vector>
 
+#include "models/capture_choice.h"
+
 namespace revenant::ui {
 
 // Whether anything accepts a TCP connection on 127.0.0.1:port within a short
@@ -51,12 +53,23 @@ public:
     EngineLauncher(EngineLauncher&&) = delete;
     EngineLauncher& operator=(EngineLauncher&&) = delete;
 
-    // Starts `exe --no-source --port <port>`, plus --token-file when one is
-    // named, with no console window and its stderr read by a thread of this
-    // object's. Empty on success, the reason otherwise, in words for the
-    // window. Called once.
+    // Starts the line models/capture_choice.h's engine_command_line builds,
+    // with no console window and its stderr read by a thread of this object's.
+    // Empty on success, the reason otherwise, in words for the window.
+    //
+    // Called again to restart: whatever this object started before is ended
+    // first, through stop(), because the new engine binds the same port and
+    // the old one has to have let it go.
     [[nodiscard]] std::string start(const std::filesystem::path& exe, std::uint16_t port,
-                                    const std::filesystem::path& token_file);
+                                    const std::filesystem::path& token_file,
+                                    const CaptureChoice& capture);
+
+    // Ends the engine this object started and waits for it to be gone. Does
+    // nothing when there is none.
+    void stop();
+
+    // The command line of the last start, for the window's stderr.
+    [[nodiscard]] const std::string& command_line() const { return command_line_; }
 
     struct Exit {
         std::uint32_t code = 0;
@@ -79,6 +92,7 @@ private:
     void* process_ = nullptr;
     void* stderr_read_ = nullptr;
     std::uint32_t pid_ = 0;
+    std::string command_line_;
 
     std::thread reader_;
 

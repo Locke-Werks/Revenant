@@ -44,6 +44,21 @@ void EngineLink::setEngineStarted(std::uint32_t pid)
     engine_start_slow_ = false;
     engine_start_text_.clear();
 
+    // A RESTART COMES THROUGH HERE TOO, from the settings window's capture
+    // section, and is a first connection again: the new engine has no source,
+    // so the radio used last is considered afresh. The connection this window
+    // still holds is to the engine just ended, and until the link has seen it
+    // drop, its sourceOpen describes that engine; so nothing is decided until
+    // it has.
+    last_source_considered_ = false;
+    open_asked_ = false;
+    awaiting_old_engine_drop_ = connected_;
+
+    // Disconnected first, so a restart does not stack a second handler on the
+    // timer and a second consider_last_source on connectionChanged.
+    disconnect(&engine_start_patience_, &QTimer::timeout, this, nullptr);
+    disconnect(this, &EngineLink::connectionChanged, this, &EngineLink::consider_last_source);
+
     engine_start_patience_.setSingleShot(true);
     engine_start_patience_.setInterval(kEngineStartPatience);
     connect(&engine_start_patience_, &QTimer::timeout, this, [this] {
@@ -141,6 +156,13 @@ void EngineLink::consider_last_source()
     // errorText is part of the slow sentence and moves on connectionChanged.
     if (engine_start_ == EngineStart::Starting && engine_start_slow_) {
         emit engineStartChanged();
+    }
+
+    if (awaiting_old_engine_drop_) {
+        if (!connected_) {
+            awaiting_old_engine_drop_ = false;
+        }
+        return;
     }
 
     if (!connected_ || last_source_considered_ || engine_start_ != EngineStart::Starting) {

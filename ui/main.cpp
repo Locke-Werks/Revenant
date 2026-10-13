@@ -169,6 +169,7 @@
 #include <QWindow>
 
 #include "audio/audio_player.h"
+#include "models/capture_settings.h"
 #include "models/engine_launcher.h"
 #include "models/engine_link.h"
 #include "models/engine_start.h"
@@ -666,29 +667,39 @@ int main(int argc, char* argv[])
     }
     const bool engine_wanted =
         revenant::ui::plan_engine_launch(launch_facts) == revenant::ui::EngineLaunch::Start;
-    std::string engine_refusal;
-    if (engine_wanted) {
-        // The token file the window reads, handed to the engine when it is
-        // not the default, so the two agree on one. engine_link.cpp's
-        // resolve_token reads REVENANT_RPC_TOKEN_FILE; the engine reads only
-        // its flag. REVENANT_RPC_TOKEN, a token in the environment, has no
-        // flag to pass it on with, and a window holding one is talking to an
-        // engine started with that token on purpose, which is not this one.
-        std::filesystem::path token_file;
-        if (const char* named = std::getenv("REVENANT_RPC_TOKEN_FILE"); named != nullptr) {
-            token_file = QString::fromLocal8Bit(named).toStdWString();
+    // The token file the window reads, handed to the engine when it is not
+    // the default, so the two agree on one. engine_link.cpp's resolve_token
+    // reads REVENANT_RPC_TOKEN_FILE; the engine reads only its flag.
+    // REVENANT_RPC_TOKEN, a token in the environment, has no flag to pass it
+    // on with, and a window holding one is talking to an engine started with
+    // that token on purpose, which is not this one.
+    std::filesystem::path token_file;
+    if (const char* named = std::getenv("REVENANT_RPC_TOKEN_FILE"); named != nullptr) {
+        token_file = QString::fromLocal8Bit(named).toStdWString();
+    }
+
+    // The capture is the operator's setting, and a smoke run's engine is
+    // CI's: it never captures, on the rule that a smoke run acts on none of
+    // the operator's choices.
+    const auto start_engine = [&engine_launcher, &engine_exe, port, &token_file, smoke] {
+        revenant::ui::CaptureChoice capture;
+        if (!smoke) {
+            capture = revenant::ui::CaptureSettings::saved();
         }
-        engine_refusal = engine_launcher.start(engine_exe, port, token_file);
-        if (engine_refusal.empty()) {
-            // Through QString rather than path::string(), which converts to
-            // the ANSI code page and throws on a name it cannot hold.
-            std::fprintf(stderr, "revenant-ui: started %s --no-source --pace 1 --port %u as process %u\n",
-                         QString::fromStdWString(engine_exe.wstring()).toLocal8Bit().constData(),
-                         static_cast<unsigned>(port),
+        std::string refusal = engine_launcher.start(engine_exe, port, token_file, capture);
+        if (refusal.empty()) {
+            std::fprintf(stderr, "revenant-ui: started %s as process %u\n",
+                         engine_launcher.command_line().c_str(),
                          static_cast<unsigned>(engine_launcher.pid()));
         } else {
-            std::fprintf(stderr, "revenant-ui: %s\n", engine_refusal.c_str());
+            std::fprintf(stderr, "revenant-ui: %s\n", refusal.c_str());
         }
+        return refusal;
+    };
+
+    std::string engine_refusal;
+    if (engine_wanted) {
+        engine_refusal = start_engine();
     }
 
     // Constructed here rather than by QML so the address from argv reaches
@@ -741,22 +752,43 @@ int main(int argc, char* argv[])
     // quarter of a second is well inside how long a person takes to read the
     // sentence it produces, and a poll is a lock and a load.
     QTimer engine_watch;
+    engine_watch.setInterval(250);
+    QObject::connect(&engine_watch, &QTimer::timeout, &link,
+                     [&engine_launcher, &link, &engine_watch] {
+                         const auto exit = engine_launcher.exited();
+                         if (!exit.has_value()) {
+                             return;
+                         }
+                         engine_watch.stop();
+                         const std::string sentence =
+                             revenant::ui::engine_exit_sentence(exit->code, exit->tail);
+                         std::fprintf(stderr, "revenant-ui: %s\n", sentence.c_str());
+                         link.setEngineStartFailed(QString::fromStdString(sentence));
+                     });
     if (engine_wanted && engine_refusal.empty()) {
-        engine_watch.setInterval(250);
-        QObject::connect(&engine_watch, &QTimer::timeout, &link,
-                         [&engine_launcher, &link, &engine_watch] {
-                             const auto exit = engine_launcher.exited();
-                             if (!exit.has_value()) {
-                                 return;
-                             }
-                             engine_watch.stop();
-                             const std::string sentence =
-                                 revenant::ui::engine_exit_sentence(exit->code, exit->tail);
-                             std::fprintf(stderr, "revenant-ui: %s\n", sentence.c_str());
-                             link.setEngineStartFailed(QString::fromStdString(sentence));
-                         });
         engine_watch.start();
     }
+
+    // The settings window's capture section. Applying a change to an engine
+    // this window started restarts it with the new flags: the engine reads
+    // them once, at its start. The watch stops first so the old engine's
+    // ending is not reported as a failure, and the link is told a start is
+    // under way again, which also reopens the radio used last on the new
+    // engine's first connection. An engine this window did not start is left
+    // alone; models/capture_choice.h, plan_capture_apply.
+    revenant::ui::CaptureSettings capture_settings;
+    capture_settings.setEngineOurs(engine_wanted);
+    QObject::connect(&capture_settings, &revenant::ui::CaptureSettings::restartWanted, &link,
+                     [&engine_watch, &link, &start_engine, &engine_launcher] {
+                         engine_watch.stop();
+                         const std::string refusal = start_engine();
+                         if (!refusal.empty()) {
+                             link.setEngineStartFailed(QString::fromStdString(refusal));
+                             return;
+                         }
+                         link.setEngineStarted(engine_launcher.pid());
+                         engine_watch.start();
+                     });
 
     if (!startup.empty()) {
         for (std::size_t i = 1; i < startup.size(); ++i) {
@@ -838,6 +870,7 @@ int main(int argc, char* argv[])
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("receiverPlacement"), &placement);
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
+    engine.rootContext()->setContextProperty(QStringLiteral("captureSettings"), &capture_settings);
     engine.rootContext()->setContextProperty(QStringLiteral("audioPlayer"), &player);
     engine.rootContext()->setContextProperty(QStringLiteral("frequencyManager"), &memories);
     engine.rootContext()->setContextProperty(QStringLiteral("recordingLink"), &recordings);

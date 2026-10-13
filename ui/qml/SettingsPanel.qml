@@ -472,4 +472,140 @@ ColumnLayout {
             checked = Qt.binding(() => engineLink.transcriptionOn)
         }
     }
+
+    Rule {}
+
+    SectionTitle { text: "capture" }
+
+    // The engine's rolling capture, as its own flags. Edited and then applied,
+    // because applying restarts the engine; models/capture_settings.h. An
+    // engine somebody else started keeps the flags they gave it.
+    component CaptureField: RowLayout {
+        id: field
+
+        required property string label
+        required property string problem
+        property string value: ""
+        property string placeholder: ""
+        property string hint: ""
+        property bool mono: true
+        property int fieldWidth: 120
+        signal edited(string text)
+
+        spacing: 8
+        Layout.fillWidth: true
+
+        Label {
+            text: field.label
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeBody
+            Layout.minimumWidth: 70
+        }
+
+        RTextField {
+            Layout.preferredWidth: field.fieldWidth
+            mono: field.mono
+            enabled: captureSettings.engineOurs
+            text: field.value
+            placeholderText: field.placeholder
+            onTextEdited: field.edited(text)
+        }
+
+        Label {
+            text: field.problem !== "" ? field.problem : field.hint
+            color: field.problem !== "" ? Theme.accent : Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+            Layout.maximumWidth: 460
+        }
+    }
+
+    Label {
+        visible: !captureSettings.engineOurs
+        Layout.fillWidth: true
+        Layout.maximumWidth: 640
+        wrapMode: Text.WordWrap
+        color: Theme.inkDim
+        font.pixelSize: Theme.sizeSmall
+        text: "This window did not start the engine it is connected to, so whether that engine "
+              + "captures is set by whoever started it, with the flags it was given. These "
+              + "settings apply to an engine this window starts."
+    }
+
+    RCheckBox {
+        text: "keep a rolling capture of the raw stream"
+        enabled: captureSettings.engineOurs
+        checked: captureSettings.enabled
+        onToggled: {
+            captureSettings.enabled = checked
+            checked = Qt.binding(() => captureSettings.enabled)
+        }
+    }
+
+    Label {
+        Layout.fillWidth: true
+        Layout.maximumWidth: 640
+        wrapMode: Text.WordWrap
+        color: Theme.inkDim
+        font.pixelSize: Theme.sizeSmall
+        text: captureSettings.costText
+    }
+
+    CaptureField {
+        label: "folder"
+        problem: captureSettings.folderProblem
+        fieldWidth: 360
+        mono: false
+        value: captureSettings.folder
+        placeholder: captureSettings.defaultFolder
+        onEdited: (text) => captureSettings.folder = text
+    }
+
+    CaptureField {
+        label: "keep up to"
+        problem: captureSettings.retainProblem
+        hint: "such as 50G or 500M; empty keeps everything"
+        value: captureSettings.retain
+        placeholder: "no limit"
+        onEdited: (text) => captureSettings.retain = text
+    }
+
+    CaptureField {
+        label: "keep for"
+        problem: captureSettings.maxAgeProblem
+        hint: "such as 24h or 7d; empty keeps any age"
+        value: captureSettings.maxAge
+        placeholder: "no limit"
+        onEdited: (text) => captureSettings.maxAge = text
+    }
+
+    RowLayout {
+        spacing: 8
+        visible: captureSettings.engineOurs
+
+        RButton {
+            text: "apply and restart the engine"
+            enabled: captureSettings.canApply
+            onClicked: captureSettings.apply()
+        }
+
+        RButton {
+            flat: true
+            text: "revert"
+            ink: Theme.inkDim
+            enabled: captureSettings.changed
+            onClicked: captureSettings.revert()
+        }
+
+        Label {
+            Layout.fillWidth: true
+            Layout.maximumWidth: 420
+            wrapMode: Text.WordWrap
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+            text: "Restarting closes the source and the receivers; the radio used last "
+                  + "reopens. A recording that was playing does not."
+        }
+    }
 }

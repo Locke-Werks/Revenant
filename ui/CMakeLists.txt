@@ -247,6 +247,9 @@ qt_add_executable(revenant_ui
     models/capture_note.h
     models/capture_browser.h
     models/capture_link.cpp
+    models/capture_choice.h
+    models/capture_settings.cpp
+    models/capture_settings.h
     models/source_link.cpp
     models/transcribe_link.cpp
     models/view_link.cpp
@@ -690,6 +693,7 @@ if(REVENANT_UI_TESTS)
             tests/test_calibration.cpp
             tests/test_capture_note.cpp
             tests/test_capture_browser.cpp
+            tests/test_capture_choice.cpp
             tests/test_colour_map.cpp
             tests/test_composite_probe.cpp
             tests/test_decoded_log.cpp
