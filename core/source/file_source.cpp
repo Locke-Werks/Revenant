@@ -354,7 +354,7 @@ constexpr std::uint64_t kMaxSidecarBytes = 64ull * 1024 * 1024;
 // an optional 'r' or 'c' for real or complex, then 'f', 'i' or 'u', then the
 // bit width, then '_le' or '_be'.
 //
-// This backend takes the four the engine's upload kernels convert, and every
+// This backend takes the five the engine's upload kernels convert, and every
 // refusal names the string it found. Two of them matter more than the rest.
 //
 // A real datatype is not an error in the recording. It is a recording of
@@ -410,12 +410,17 @@ constexpr std::uint64_t kMaxSidecarBytes = 64ull * 1024 * 1024;
     if (rest == "i16") {
         return SampleFormat::Cs16;
     }
+    // Three packed bytes per component, the layout the capture writer stores
+    // a 24-bit radio in and the one the cs24 upload kernel unpacks.
+    if (rest == "i24") {
+        return SampleFormat::Cs24;
+    }
     if (rest == "f32") {
         return SampleFormat::Cf32;
     }
     return fail(std::format(
-        "SigMF core:datatype '{}' is not one this backend reads. It takes cu8, ci8, ci16_le and "
-        "cf32_le, which are the formats the upload kernels convert.",
+        "SigMF core:datatype '{}' is not one this backend reads. It takes cu8, ci8, ci16_le, "
+        "ci24_le and cf32_le, which are the formats the upload kernels convert.",
         datatype));
 }
 

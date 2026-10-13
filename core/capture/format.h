@@ -28,9 +28,6 @@
 // The stem alone cannot carry it: rate, format, the exact anchor, the gain and
 // core:hw are not in it. The side file is deleted on close, so a closed
 // segment is the two SigMF files and nothing else.
-//
-// Cs24 is written as ci24_le, which the file source does not read yet, so a
-// 24-bit capture stores but does not replay until it does.
 
 #pragma once
 

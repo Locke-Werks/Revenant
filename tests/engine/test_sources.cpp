@@ -1402,6 +1402,65 @@ TEST_CASE("a 24-bit extensible WAV opens as cs24 and delivers its bytes untouche
     CHECK(delivered == payload);
 }
 
+TEST_CASE("a SigMF ci24_le pair opens as cs24 and delivers its bytes untouched",
+          "[source][sigmf][hf]") {
+    // ci24_le is what the capture writer stores a 24-bit radio as, so this is
+    // the reader half of a 24-bit capture replaying.
+    //
+    // REJECTS: the datatype parser before it knew i24, which refused the
+    // sidecar outright; and a reader that took the six-byte frame as eight or
+    // four, which would deliver the wrong count and misaligned codes.
+    const ScratchDir scratch("sigmf_cs24");
+    const auto data = scratch.path("hf24.sigmf-data");
+    const auto meta = scratch.path("hf24.sigmf-meta");
+
+    constexpr std::size_t kSamples = 1'001;
+    std::vector<std::byte> payload(kSamples * 6);
+    for (std::size_t i = 0; i < payload.size(); ++i) {
+        payload[i] = static_cast<std::byte>(static_cast<std::uint8_t>((i * 151U + 7U) & 0xFFU));
+    }
+    ScratchDir::write(data, payload);
+
+    SigmfCapture capture;
+    capture.has_frequency = true;
+    capture.frequency = 7'150'000;
+    ScratchDir::write_text(meta, sigmf_json("ci24_le", 96'000, {capture}));
+
+    auto opened = source::open_source(ScratchDir::uri(data));
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+
+    const auto& caps = (*opened)->capabilities();
+    CHECK(caps.native_format == source::SampleFormat::Cs24);
+    CHECK(caps.length_samples == kSamples);
+    CHECK((*opened)->sample_rate() == 96'000);
+    CHECK((*opened)->center() == 7'150'000);
+
+    std::vector<std::byte> delivered;
+    bool every_block_cs24 = true;
+    source::StreamOptions options;
+    options.block_samples = 97;
+    const auto started =
+        (*opened)->start(options, [&](const source::SourceBlock& block) -> Status {
+            every_block_cs24 = every_block_cs24 && block.format == source::SampleFormat::Cs24 &&
+                               block.bytes.size() == block.sample_count * 6;
+            delivered.insert(delivered.end(), block.bytes.begin(), block.bytes.end());
+            return {};
+        });
+    REQUIRE(started.has_value());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while ((*opened)->running() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto stopped = (*opened)->stop();
+    INFO(test::message_of(stopped));
+    CHECK(stopped.has_value());
+
+    CHECK(every_block_cs24);
+    REQUIRE(delivered.size() == payload.size());
+    CHECK(delivered == payload);
+}
+
 TEST_CASE("a 24-bit WAV that is not a whole number of frames is refused", "[source][wav]") {
     // Three stray bytes is half a frame at six bytes a sample. The generic
     // whole-sample check has to hold at a width that is not a power of two.

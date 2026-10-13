@@ -570,6 +570,83 @@ TEST_CASE("A written segment replays through the file source sample for sample",
     CHECK(anchor == kAnchor);
 }
 
+TEST_CASE("A 24-bit capture replays through capture:// sample for sample",
+          "[capture][writer][replay]")
+{
+    // REJECTS: a SigMF reader that refuses ci24_le, which left a 24-bit
+    // capture written and unplayable; and a writer and reader that disagree
+    // on the datatype spelling or the six-byte frame, which would show as a
+    // refusal or as a count and byte mismatch here.
+    const Scratch scratch("replay_cs24");
+    auto config = config_for(scratch.root());
+    // Two blocks per segment, so the replay crosses segment boundaries.
+    config.max_segment_bytes = kBlock * 6 * 2;
+    std::vector<std::byte> expected;
+    {
+        capture::SegmentWriter writer(config);
+        REQUIRE(writer.start().has_value());
+        constexpr std::size_t kBlocks = 5;
+        std::vector<std::byte> scratch_bytes(kBlock * 6);
+        for (dsp::SampleIndex at = 0; at < kBlocks * kBlock; at += kBlock) {
+            for (std::size_t i = 0; i < scratch_bytes.size(); ++i) {
+                // Index-dependent with the high bit often set, so a shifted
+                // frame or a sign-mangled byte cannot hide.
+                const auto n = at * 6 + i;
+                scratch_bytes[i] = static_cast<std::byte>((n * 151U + 7U) & 0xFFU);
+            }
+            source::SourceBlock block;
+            block.stamp = dsp::BlockTimestamp{at, kAnchor, kRate};
+            block.format = source::SampleFormat::Cs24;
+            block.sample_count = kBlock;
+            block.bytes = scratch_bytes;
+            writer.consume(block, 7'150'000);
+            expected.insert(expected.end(), scratch_bytes.begin(), scratch_bytes.end());
+        }
+        writer.stop();
+    }
+
+    const auto segments = list_segments(scratch.root());
+    REQUIRE(segments.size() >= 2);
+    for (const Segment& segment : segments) {
+        CHECK(has(segment, "\"core:datatype\":\"ci24_le\""));
+    }
+
+    auto opened = source::open_source("capture:///" + scratch.root().generic_string() +
+                                      "?pace=max");
+    INFO((opened ? std::string{} : opened.error().message));
+    REQUIRE(opened.has_value());
+    source::Source& replay = **opened;
+    CHECK(replay.capabilities().native_format == source::SampleFormat::Cs24);
+    CHECK(replay.capabilities().length_samples == expected.size() / 6);
+    CHECK(replay.center() == 7'150'000);
+
+    std::vector<std::byte> got;
+    std::uint64_t samples = 0;
+    bool every_block_cs24 = true;
+    source::StreamOptions options;
+    options.block_samples = 97;
+    REQUIRE(replay
+                .start(options, [&](const source::SourceBlock& block) -> Status {
+                    every_block_cs24 = every_block_cs24 &&
+                                       block.format == source::SampleFormat::Cs24 &&
+                                       block.bytes.size() == block.sample_count * 6;
+                    samples += block.sample_count;
+                    got.insert(got.end(), block.bytes.begin(), block.bytes.end());
+                    return {};
+                })
+                .has_value());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (replay.running() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(replay.stop().has_value());
+
+    CHECK(every_block_cs24);
+    CHECK(samples == expected.size() / 6);
+    REQUIRE(got.size() == expected.size());
+    CHECK(got == expected);
+}
+
 namespace {
 
 // Ages every segment written at kAnchor past a one day limit, so the next

@@ -99,5 +99,4 @@ picker. A replay is not itself recorded. The session calls behind it,
 - A track the live detector follows is annotated when it ends, as one entry
   per segment it was present in, joined by `revenant:track_id`.
 - Replay stops at a change of sample rate or of stream, which needs a new grid.
-- A 24-bit capture is written but does not replay yet.
 - The segment length is the granularity of `extract` and of the ring.

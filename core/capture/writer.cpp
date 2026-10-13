@@ -67,9 +67,8 @@ struct Civil {
     return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
 }
 
-// The datatype strings the file source reads back. Cs24 has no reader there
-// yet, so a cs24 segment is written faithfully and will not replay until the
-// SigMF reader learns ci24_le.
+// The datatype strings the file source reads back. Changing one strands
+// every segment already on disk under the old spelling.
 [[nodiscard]] std::string_view sigmf_datatype(source::SampleFormat format)
 {
     switch (format) {
