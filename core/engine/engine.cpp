@@ -46,6 +46,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -118,6 +119,44 @@ constexpr std::uint32_t kFirstProbeId = 0x8000'0000U;
         "out of vrx_ids and off every public receiver method",
         where, id.value));
 }
+
+// A replay of the rolling capture starts at the index its stream had reached
+// when the hit was written, which an hour into a 2.4 MS/s capture is billions
+// of samples in. The ring places sample i at slot i and refuses a first block
+// further than one ring from zero, so every replay of anything but the first
+// few seconds stopped the engine on its first block. The graph sees a replay
+// from its own zero instead, the anchor moved by the same span so every wall
+// clock downstream is unchanged. Live radios and files start at or near zero
+// and are not rebased.
+class ReplayOrigin {
+public:
+    explicit ReplayOrigin(bool active) : active_(active) {}
+
+    [[nodiscard]] source::SourceBlock place(const source::SourceBlock& block) {
+        if (!active_) {
+            return block;
+        }
+        if (!origin_) {
+            origin_ = block.stamp.start;
+            anchor_ns_ = dsp::BlockTimestamp{block.stamp.start, block.stamp.epoch_anchor_ns,
+                                             block.stamp.rate}
+                             .wall_clock_ns();
+        }
+        source::SourceBlock placed = block;
+        // A block before the origin is a seek backwards, which the graph
+        // refuses either way; leaving it unrebased keeps its words accurate.
+        if (block.stamp.start >= *origin_) {
+            placed.stamp.start = block.stamp.start - *origin_;
+            placed.stamp.epoch_anchor_ns = anchor_ns_;
+        }
+        return placed;
+    }
+
+private:
+    bool active_ = false;
+    std::optional<dsp::SampleIndex> origin_{};
+    std::int64_t anchor_ns_ = 0;
+};
 
 class EngineImpl final : public Engine {
 public:
@@ -1394,9 +1433,12 @@ public:
         Graph* graph = graph_.get();
         followed_device_center_ = corrected_ != nullptr ? corrected_->device_center()
                                                         : source_->center();
-        source::BlockSink sink = [this, graph](const source::SourceBlock& block) {
-            follow_block_center(block);
-            return graph->on_block(block);
+        // Shared by whichever sink runs; the source calls it from one thread.
+        auto origin = std::make_shared<ReplayOrigin>(replays_capture());
+        source::BlockSink sink = [this, graph, origin](const source::SourceBlock& block) {
+            const source::SourceBlock placed = origin->place(block);
+            follow_block_center(placed);
+            return graph->on_block(placed);
         };
         if (config_.capture && replays_capture()) {
             // A replay is not recorded. Written into the root it reads from,

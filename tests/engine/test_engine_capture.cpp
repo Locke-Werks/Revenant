@@ -353,3 +353,58 @@ TEST_CASE("a capture replay follows a retune between segments at the sample it w
     // Taken once.
     CHECK(eng.take_followed_retunes().empty());
 }
+
+TEST_CASE("a capture replay that starts far into its stream plays from the graph's own zero",
+          "[gpu][engine][capture]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // Every hit the client's capture panel replays is like this: written an
+    // hour into a stream, so its first index is billions of samples in. The
+    // ring places sample i at slot i, and until the engine rebased a replay
+    // the first block was refused as "further than one ring from the origin"
+    // and the engine stopped. 64 rings in is far enough to say the same.
+    constexpr dsp::Hertz kMarine = 156'800'000;
+    constexpr dsp::Hertz kWeather = 162'550'000;
+    constexpr dsp::SampleRate kReplayRate = 2'048'000;
+    constexpr std::uint64_t kSegment = 1u << 19;
+    constexpr std::uint64_t kFirst = std::uint64_t{1} << 26;
+
+    test::CaptureRoot root;
+    test::SegmentSpec first;
+    first.rate = kReplayRate;
+    first.center = kMarine;
+    first.first_index = kFirst;
+    first.sample_count = kSegment;
+    test::write_segment(root.path(), first);
+    test::SegmentSpec second = first;
+    second.first_index = kFirst + kSegment;
+    second.center = kWeather;
+    test::write_segment(root.path(), second);
+
+    engine::EngineConfig config;
+    config.channels = 64;
+    config.ring_seconds = 0.5;
+    config.gpu_index = -1;
+    config.spectrum_transform = 2048;
+    auto created = engine::Engine::create(config);
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    auto opened = eng.open_source("capture:///" + root.utf8() + "?pace=max");
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+
+    const Status ran = eng.run();
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+    CHECK(eng.source_stats().samples_delivered == 2 * kSegment);
+
+    // The retune is reported on the graph's scale, where the replay began at
+    // zero, because that is the scale receivers and plugins count on.
+    const std::vector<engine::SourceRetune> followed = eng.take_followed_retunes();
+    REQUIRE(followed.size() == 1);
+    CHECK(followed[0].center == kWeather);
+    CHECK(followed[0].at == kSegment);
+}
