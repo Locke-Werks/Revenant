@@ -273,6 +273,10 @@ Rectangle {
                 Popover {
                     id: radioPanel
                     parent: radioButton
+                    // Rows of status text (calibration, vocoders, plugins, the
+                    // device list), which read as written over the waterfall
+                    // when the spectrum shows through them.
+                    solid: true
                     SourcePicker {}
                 }
             }
