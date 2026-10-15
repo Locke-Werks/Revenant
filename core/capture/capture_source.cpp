@@ -243,6 +243,40 @@ struct Run {
                                 config.root, config.from_ns, all.back().end_ns()));
     }
 
+    // A window that spans a restart covers two streams, and a replay plays
+    // one. The stream holding from= is the wrong one when from= is a lead-in
+    // in front of something heard just after a restart: the capture panel
+    // replayed 1.7 s of the old stream's tail and stopped at the change,
+    // never reaching the hit. So with both ends given, the stream that covers
+    // most of the window is the one played, from its first sample in it.
+    if (config.from_given && config.to_given) {
+        std::uint64_t best_epoch = first->info.stream_epoch;
+        std::int64_t best_cover = -1;
+        for (const CatalogSegment& candidate : all) {
+            std::int64_t cover = 0;
+            for (const CatalogSegment& segment : all) {
+                if (segment.info.stream_epoch != candidate.info.stream_epoch) {
+                    continue;
+                }
+                const std::int64_t lo = std::max(segment.info.start_ns(), config.from_ns);
+                const std::int64_t hi = std::min(segment.end_ns(), config.to_ns);
+                cover += std::max<std::int64_t>(0, hi - lo);
+            }
+            if (cover > best_cover) {
+                best_cover = cover;
+                best_epoch = candidate.info.stream_epoch;
+            }
+        }
+        if (best_epoch != first->info.stream_epoch && best_cover > 0) {
+            for (const CatalogSegment& segment : all) {
+                if (segment.info.stream_epoch == best_epoch && segment.end_ns() > config.from_ns) {
+                    first = &segment;
+                    break;
+                }
+            }
+        }
+    }
+
     // The rest of the run, walked in index order within the epoch.
     std::vector<const CatalogSegment*> epoch;
     for (const CatalogSegment& segment : all) {

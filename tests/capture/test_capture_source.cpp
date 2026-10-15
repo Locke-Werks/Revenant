@@ -20,6 +20,7 @@ using revenant::capture::open_capture_source;
 using revenant::test::capture_bytes;
 using revenant::test::CaptureRoot;
 using revenant::test::kCaptureAnchorNs;
+using revenant::test::kCaptureEpoch;
 using revenant::test::SegmentSpec;
 using revenant::test::write_segment;
 
@@ -171,6 +172,42 @@ TEST_CASE("a seek lands on the sample asked for, and one into a gap on the next 
     CHECK(blocks.front().dropped == 0);
 
     CHECK_FALSE((*source)->seek(900));
+}
+
+TEST_CASE("a window across a restart plays the stream that covers most of it",
+          "[capture][replay]")
+{
+    // The capture panel's replay starts 3 s before a hit, and a hit heard just
+    // after the radio was reopened has its lead-in in the stream before. The
+    // replay played the old stream's last moments and stopped at the change.
+    CaptureRoot root;
+    SegmentSpec before;
+    before.sample_count = 500;  // 0 to 500 ms
+    before.close_reason = "stop";
+    write_segment(root.path(), before);
+    SegmentSpec after;
+    after.epoch = kCaptureEpoch + 1;
+    after.anchor_ns = kCaptureAnchorNs + 600 * kMs;  // 600 to 1600 ms
+    after.sample_count = 1000;
+    write_segment(root.path(), after);
+
+    CaptureSourceConfig config = config_for(root);
+    config.from_given = true;
+    config.from_ns = kCaptureAnchorNs + 300 * kMs;
+    config.to_given = true;
+    config.to_ns = kCaptureAnchorNs + 1400 * kMs;
+
+    auto source = open_capture_source(config);
+    REQUIRE(source);
+    const auto blocks = play(**source);
+    REQUIRE_FALSE(blocks.empty());
+    CHECK(blocks.front().start == 0);
+    CHECK(blocks.front().wall_ns == kCaptureAnchorNs + 600 * kMs);
+    std::uint64_t samples = 0;
+    for (const Delivered& d : blocks) {
+        samples += d.count;
+    }
+    CHECK(samples == 800);
 }
 
 TEST_CASE("from= and to= select the samples between them", "[capture][replay]")
