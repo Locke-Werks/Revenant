@@ -450,8 +450,15 @@ ColumnLayout {
             Item { Layout.fillWidth: true }
 
             Label {
+                // Filling from a preferred width of nothing, so it gives way. A layout
+                // fixes an item that does not fill at its preferred width, which for
+                // this text is all of it, and that pushed the whole panel past its
+                // edge and over the waterfall.
+                Layout.fillWidth: true
+                Layout.preferredWidth: 0
                 Layout.minimumWidth: 0
                 Layout.maximumWidth: 360
+                horizontalAlignment: Text.AlignRight
                 text: engineLink.calibrationPpmProblem(ppmField.text)
                 color: Theme.inkWarn
                 font.pixelSize: Theme.sizeSmall
@@ -1038,8 +1045,15 @@ ColumnLayout {
             // cannot disagree with the request: a preview built separately
             // in QML would be a second copy of every settling rule.
             Label {
+                // Filling from a preferred width of nothing, so it gives way. A layout
+                // fixes an item that does not fill at its preferred width, which for
+                // this text is all of it, and that pushed the whole panel past its
+                // edge and over the waterfall.
+                Layout.fillWidth: true
+                Layout.preferredWidth: 0
                 Layout.minimumWidth: 0
                 Layout.maximumWidth: 420
+                horizontalAlignment: Text.AlignRight
                 visible: !!sourceSettings.row
                 text: engineLink.composeSourceUri(
                           sourceRow.chosen,
