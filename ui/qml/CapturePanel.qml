@@ -145,9 +145,11 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: 10
 
+        // A replay plays its hit and stops. Said here, where the operator is,
+        // or the waterfall just freezes on its last row.
         Label {
-            text: "replaying"
-            color: Theme.accent
+            text: engineLink.engineRunning ? "replaying" : "replay ended"
+            color: engineLink.engineRunning ? Theme.accent : Theme.inkDim
             font.pixelSize: Theme.sizeSmall
             font.bold: true
         }
@@ -158,6 +160,12 @@ ColumnLayout {
             elide: Text.ElideMiddle
             color: Theme.ink
             font.pixelSize: Theme.sizeSmall
+        }
+
+        RButton {
+            visible: !engineLink.engineRunning
+            text: "replay again"
+            onClicked: engineLink.openSource(String(engineLink.openedSource.uri || ""))
         }
 
         RButton {

@@ -55,6 +55,7 @@ Rectangle {
         "connected": engineLink.connected,
         "engineStarting": engineLink.engineStarting,
         "engineRunning": engineLink.engineRunning,
+        "replay": String(engineLink.openedSource.uri || "").startsWith("capture:"),
         "sourceOpen": engineLink.sourceOpen,
         "sourceBehind": engineLink.sourceBehind,
         "frontEndFault": engineLink.frontEndFault,

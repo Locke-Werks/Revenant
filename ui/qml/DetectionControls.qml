@@ -318,7 +318,9 @@ RowLayout {
     Readout {
         widest: "starting"
         horizontalAlignment: Text.AlignLeft
+        // Stopped is not starting: a detector with no stream decides nothing.
         text: !detector.enabled ? ""
+              : !engineLink.engineRunning ? "stopped"
               : engineLink.detectionDecisions === 0
               ? "starting"
               : engineLink.detectionCount + "/" + engineLink.detectionTotal

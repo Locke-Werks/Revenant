@@ -50,6 +50,12 @@ struct StatusInputs {
     bool engine_starting = false;
 
     bool engine_running = false;
+
+    // The open source is a capture:// replay. One that has stopped has played
+    // what it was asked for, which is not a fault and was the commonest way to
+    // see "engine stopped" over a frozen waterfall with nothing saying why.
+    bool replay = false;
+
     bool source_open = false;
     bool source_behind = false;
     bool front_end_fault = false;
@@ -118,7 +124,8 @@ struct StatusCondition {
         {in.connected && in.source_behind, StatusLevel::Bad, "source behind"},
         {in.connected && in.detection_fault, StatusLevel::Bad, "detector refused"},
         {!in.connected && in.engine_starting, StatusLevel::Warn, "engine starting"},
-        {in.connected && !in.engine_running, StatusLevel::Warn, "engine stopped", false},
+        {in.connected && !in.engine_running, in.replay ? StatusLevel::Note : StatusLevel::Warn,
+         in.replay ? "replay ended" : "engine stopped", false},
         {in.connected && !in.source_open, StatusLevel::Warn, "no source open", false},
         {in.source_fault, StatusLevel::Warn, "radio refused"},
         {in.tune_fault, StatusLevel::Warn, "tune refused"},

@@ -88,6 +88,17 @@ TEST_CASE("the picture not being the radio's is bad", "[status]")
     CHECK(summarise_status(in).headline == "detector refused");
 }
 
+// A capture replay plays its hit and stops, which is the replay finishing and
+// not the engine failing.
+TEST_CASE("a replay that has stopped has ended, and that is a note", "[status]")
+{
+    auto in = healthy();
+    in.engine_running = false;
+    in.replay = true;
+    CHECK(summarise_status(in).level == StatusLevel::Note);
+    CHECK(summarise_status(in).headline == "replay ended");
+}
+
 // Rejects promoting what the operator did not get to a fault. A refused tune
 // is worth saying and nothing on screen is wrong because of it.
 TEST_CASE("what the operator asked for and did not get is a warning", "[status]")
