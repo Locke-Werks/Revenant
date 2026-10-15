@@ -6738,6 +6738,15 @@ constexpr std::int64_t kMaxOccupancyBuckets = 200'000;
                  "so there is nothing to browse"};
 }
 
+// How much of the air around a hit its replay carries. The hit alone is often
+// under a second, one row of waterfall that ended before anything could be
+// heard, and a replay that starts on the hit's first sample starts the
+// detector's one second integration and a decoder's lock there too, so the
+// start of the transmission was never heard either. The capture source clamps
+// both ends to what is on disk.
+constexpr std::int64_t kReplayLeadNs = 3'000'000'000;
+constexpr std::int64_t kReplayTailNs = 2'000'000'000;
+
 // A replay of [from_ns, to_ns) over the engine's own root, at realtime. Whole
 // nanoseconds rather than ISO text, because the ISO form a capture URI takes
 // is to the millisecond and a hit is not.
@@ -7026,7 +7035,8 @@ kj::Promise<CaptureSearchResult> ServerImpl::capture_search(capture::Query query
                 row.family = hit.family;
                 row.generator = hit.generator;
                 row.track_id = hit.track_id;
-                row.replay_uri = replay_uri(capture_root_, hit.start_ns, hit.end_ns);
+                row.replay_uri = replay_uri(capture_root_, hit.start_ns - kReplayLeadNs,
+                                            hit.end_ns + kReplayTailNs);
                 out.hits.push_back(std::move(row));
             }
             return out;

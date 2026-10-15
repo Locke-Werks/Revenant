@@ -1485,8 +1485,11 @@ wire, from the same code: `core/capture/catalog.h` for the list and
   `capture::Query` field for field. A hit carries absolute start and end in
   Unix nanoseconds, its frequency edges, confidence, SNR, family, the
   generator that wrote it, the live detector's track id, and a `replayUri`:
-  `capture://` over the root from the hit's start to its end at `pace=1`,
-  ready for `openSource` as it is. At most 10000 hits are sent; `matched` says
+  `capture://` over the root from 3 s before the hit's start to 2 s after its
+  end at `pace=1`, ready for `openSource` as it is. The margins are there
+  because a hit is often under a second, and a replay starting on its first
+  sample spends the start of the transmission on the detector's integration
+  and a decoder's lock. At most 10000 hits are sent; `matched` says
   how many there were.
 - `captureOccupancy` cuts a time range into buckets and answers, for a band,
   the share of each bucket something was present in, the share a segment
