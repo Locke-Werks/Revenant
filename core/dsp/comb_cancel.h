@@ -105,7 +105,7 @@ namespace revenant::dsp {
 // once locked, swapping a line that has stood out of nothing for 64 blocks
 // for the next untried k outward, so the slots settle on lines that are
 // there. core/dsp/comb_tracker.cpp has the reasoning.
-inline constexpr std::uint32_t kCombMaxLines = 256;
+inline constexpr std::uint32_t kCombMaxLines = 1024;
 
 // The fewest lines that count as a comb. Fewer than this is a handful of
 // carriers, which the stage has no business removing.
@@ -127,8 +127,11 @@ inline constexpr std::uint32_t kCombMaxSubBlocks = 16;
 // one affine model cannot hold together, so it locked to one and left every
 // other visible line standing. Each is its own comb here. Interleaved sources
 // whose lines share a grid only roughly are split by detect_combs the same
-// way. Four leaves room for an unrelated comb beside such a pair.
-inline constexpr std::uint32_t kCombMaxCombs = 4;
+// way. Live on 80 m (2026-10-16) every line also carries a ladder of mains-
+// ripple sidebands 59.5 Hz apart, which the tracker cancels with its line
+// (CombEstimate::sideband_orders): four orders either side make nine slots a
+// line, 684 for the strong family's 76, which is what sizes kCombMaxLines.
+inline constexpr std::uint32_t kCombMaxCombs = 8;
 
 // ---------------------------------------------------------------------------
 // Detection
@@ -150,6 +153,14 @@ struct CombEstimate {
 
     // Median over found lines of each line's height above the local floor, dB.
     float median_height_db = 0.0F;
+
+    // Modulation sidebands carried by every line: orders -sideband_orders to
+    // +sideband_orders at multiples of ripple_hz either side. A switcher whose
+    // supply ripples puts them there; the tracker cancels them with the line,
+    // since cancelling the carrier alone leaves them standing in the
+    // waterfall's bins. Zero orders is a bare comb.
+    double ripple_hz = 0.0;
+    std::int32_t sideband_orders = 0;
 
     [[nodiscard]] std::uint32_t line_count() const
     {
@@ -332,12 +343,15 @@ public:
     // The estimate describes the comb this tracker holds.
     [[nodiscard]] bool agrees(const CombEstimate& estimate) const;
 
-    // Fraction of the estimate's lines within kAgreeHz of one of this
+    // Fraction of the estimate's lines within tolerance_hz of one of this
     // tracker's lines: a detection of lines already owned, at another
     // spacing, would subtract them twice.
-    [[nodiscard]] double overlap(const CombEstimate& estimate) const;
+    [[nodiscard]] double overlap(const CombEstimate& estimate, double tolerance_hz) const;
 
     [[nodiscard]] std::uint32_t lines() const { return static_cast<std::uint32_t>(lines_.size()); }
+
+    // The tracked sideband ripple in hertz, zero for a bare comb.
+    [[nodiscard]] double ripple_hz() const;
 
 private:
     // Value members only; the tracker is copyable so a test can fork it.
@@ -353,9 +367,11 @@ private:
         std::uint64_t rate = 0;
     };
 
-    // An active line and what has been learnt about it.
+    // An active line and what has been learnt about it. m is the sideband
+    // order, zero for the line itself.
     struct Line {
         std::int32_t k = 0;
+        std::int32_t m = 0;
         std::complex<double> amp{};  // per-sample amplitude against the model's phase
         bool seeded = false;         // amp holds a phase reference
         bool fresh = true;           // no observation folded into the averages yet
@@ -363,6 +379,7 @@ private:
         double noise = 0.0;          // average noise power per sample near the line
         double before = 0.0;         // average line power seen by subtract
         double after = 0.0;          // average power left after subtract
+        double block_power = 0.0;    // average |block amplitude|^2, for a sideband's coherence
         std::uint32_t weak_blocks = 0;
         bool in_band = true;
     };
@@ -371,6 +388,7 @@ private:
     struct PlannedLine {
         std::uint32_t slot = 0;
         std::int32_t k = 0;
+        std::int32_t m = 0;
         std::uint32_t phase0 = 0;
         std::uint32_t step = 0;
         Complex32 amp{};
@@ -392,8 +410,10 @@ private:
     void advance_to(SampleIndex index);
     void correct(SampleIndex at, double dc_phase, double dc_freq, double dc_rate,
                  double dd_phase, double dd_freq, double dd_rate);
+    void correct_ripple(SampleIndex at, double dp, double df, double dr);
     void replace_weak_lines();
     [[nodiscard]] double line_snr(const Line& line, std::uint32_t count) const;
+    [[nodiscard]] bool stands_out(std::size_t slot, std::uint32_t count) const;
 
     SampleRate rate_ = 0;
     std::uint32_t max_lines_ = kCombMaxLines;
@@ -405,8 +425,11 @@ private:
     SampleIndex anchor_ = 0;  // the index the axes are evaluated at
     Axis c_{};
     Axis d_{};
+    Axis r_{};  // the sideband ripple, line (k, m) at c + k d + m r
     double initial_offset_hz_ = 0.0;
     double initial_spacing_hz_ = 0.0;
+    double initial_ripple_hz_ = 0.0;
+    std::int32_t orders_ = 0;
 
     std::vector<Line> lines_;
     std::int32_t range_lo_ = 0;  // the detection's k range, for replacements

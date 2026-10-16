@@ -168,6 +168,9 @@ constexpr double kTwo32 = 4294967296.0;
 constexpr double kFitSnr = 8.0;      // 9 dB in a block's resolution: used in the fits
 constexpr double kStandOut = 4.0;    // 6 dB: given an amplitude
 constexpr double kSnrCap = 1.0e4;    // 40 dB: no one line carries a fit alone
+// A sideband's averaged phasor holding this share of its average power: its
+// phase wanders under about 45 degrees against the tracked ripple.
+constexpr double kSideCoherence = 0.5;
 constexpr double kStatWeight = 1.0 / 8.0;
 constexpr double kAmpWeight = 1.0 / 16.0;
 constexpr double kLoopSeconds = 0.05;
@@ -364,6 +367,33 @@ double CombTracker::line_snr(const Line& line, std::uint32_t count) const
     return tone * n / line.noise;
 }
 
+// A carrier stands out on its own SNR. A sideband cannot be judged that way:
+// its sub-block projections carry the carrier a hundred hertz off at nearly
+// the sideband's own level, so its scatter reads as noise. It stands out when
+// its carrier does and its own averaged phasor is coherent, which is what a
+// tracked ripple gives and noise does not.
+bool CombTracker::stands_out(std::size_t slot, std::uint32_t count) const
+{
+    const Line& line = lines_[slot];
+    if (line.m == 0) {
+        return line_snr(line, count) >= kStandOut;
+    }
+    const std::size_t carrier = slot - static_cast<std::size_t>(static_cast<std::ptrdiff_t>(line.m));
+    if (carrier >= lines_.size() || lines_[carrier].m != 0 ||
+        line_snr(lines_[carrier], count) < kStandOut) {
+        return false;
+    }
+    return line.block_power > 0.0 && std::norm(line.amp) >= kSideCoherence * line.block_power;
+}
+
+double CombTracker::ripple_hz() const
+{
+    if (orders_ == 0) {
+        return 0.0;
+    }
+    return anchored_ ? signed_of(r_.freq) * static_cast<double>(rate_) : initial_ripple_hz_;
+}
+
 bool CombTracker::agrees(const CombEstimate& estimate) const
 {
     if (!anchored_) {
@@ -390,7 +420,7 @@ bool CombTracker::agrees(const CombEstimate& estimate) const
     return std::abs(err_c) < kAgreeHz && std::abs(estimate.spacing_hz - d) * half_span < kAgreeHz;
 }
 
-double CombTracker::overlap(const CombEstimate& estimate) const
+double CombTracker::overlap(const CombEstimate& estimate, double tolerance_hz) const
 {
     if (!active() || lines_.empty() || estimate.line_count() == 0) {
         return 0.0;
@@ -411,7 +441,7 @@ double CombTracker::overlap(const CombEstimate& estimate) const
     for (std::int32_t k = estimate.k_lo; k <= estimate.k_hi; ++k) {
         const double f = estimate.offset_hz + k * estimate.spacing_hz;
         const double j = std::round((f - c) / d);
-        if (j >= lo && j <= hi && std::abs(f - (c + j * d)) < kAgreeHz) {
+        if (j >= lo && j <= hi && std::abs(f - (c + j * d)) < tolerance_hz) {
             ++on;
         }
     }
@@ -433,15 +463,29 @@ void CombTracker::start_acquisition(const CombEstimate& estimate)
     range_lo_ = estimate.k_lo;
     range_hi_ = estimate.k_hi;
 
-    // The central max_lines_ of the range.
+    // Sidebands only with a ripple to put them at, and only as many orders as
+    // leave room for kCombMinLines carriers.
+    if (estimate.ripple_hz > 0.0 && estimate.sideband_orders > 0) {
+        orders_ = std::min<std::int32_t>(
+            estimate.sideband_orders,
+            static_cast<std::int32_t>((max_lines_ / kCombMinLines - 1) / 2));
+        initial_ripple_hz_ = estimate.ripple_hz;
+    }
+    const auto per_line = static_cast<std::int64_t>(2 * orders_ + 1);
+
+    // The central max_lines_ of the range, each carrier followed by its
+    // sidebands, -orders_ to +orders_.
     const std::int64_t total = static_cast<std::int64_t>(estimate.line_count());
-    const std::int64_t take = std::min<std::int64_t>(total, max_lines_);
+    const std::int64_t take = std::min<std::int64_t>(total, max_lines_ / per_line);
     const std::int64_t first = estimate.k_lo + (total - take) / 2;
-    lines_.reserve(static_cast<std::size_t>(take));
+    lines_.reserve(static_cast<std::size_t>(take * per_line));
     for (std::int64_t i = 0; i < take; ++i) {
-        Line line;
-        line.k = static_cast<std::int32_t>(first + i);
-        lines_.push_back(line);
+        for (std::int32_t m = -orders_; m <= orders_; ++m) {
+            Line line;
+            line.k = static_cast<std::int32_t>(first + i);
+            line.m = m;
+            lines_.push_back(line);
+        }
     }
     next_lo_ = static_cast<std::int32_t>(first - 1);
     next_hi_ = static_cast<std::int32_t>(first + take);
@@ -463,9 +507,19 @@ void CombTracker::advance_to(SampleIndex index)
     const auto n = static_cast<std::int64_t>(index - anchor_);
     const Axes c = advanced(c_, n);
     const Axes d = advanced(d_, n);
+    const Axes r = advanced(r_, n);
     c_ = Axis{c.phase, c.freq, c.rate};
     d_ = Axis{d.phase, d.freq, d.rate};
+    r_ = Axis{r.phase, r.freq, r.rate};
     anchor_ = index;
+}
+
+void CombTracker::correct_ripple(SampleIndex at, double dp, double df, double dr)
+{
+    const double dt = static_cast<double>(static_cast<std::int64_t>(anchor_ - at));
+    r_.phase += to_fixed(dp + df * dt + 0.5 * dr * dt * dt);
+    r_.freq += to_fixed(df + dr * dt);
+    r_.rate += to_fixed_small(dr);
 }
 
 // Corrections are errors at index `at`, applied to the model as a change of
@@ -502,6 +556,7 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
         anchor_ = mid;
         c_ = Axis{0, to_fixed(initial_offset_hz_ / rate), 0};
         d_ = Axis{0, to_fixed(initial_spacing_hz_ / rate), 0};
+        r_ = Axis{0, to_fixed(initial_ripple_hz_ / rate), 0};
     } else {
         const auto gap = static_cast<std::int64_t>(mid - anchor_);
         if (gap > static_cast<std::int64_t>(kGapSeconds * rate) || gap < 0) {
@@ -510,6 +565,7 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
             advance_to(mid);
             c_.rate = 0;
             d_.rate = 0;
+            r_.rate = 0;
             lock_ = CombLock::kAcquiring;
             stage_ = Stage::kFrequency;
             wide_ = true;
@@ -540,8 +596,9 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
 
     for (std::uint32_t slot = 0; slot < lines_.size(); ++slot) {
         Line& line = lines_[slot];
-        const std::uint64_t phase = c_.phase + times_k(d_.phase, line.k);
-        const std::uint64_t freq = c_.freq + times_k(d_.freq, line.k);
+        const std::uint64_t phase =
+            c_.phase + times_k(d_.phase, line.k) + times_k(r_.phase, line.m);
+        const std::uint64_t freq = c_.freq + times_k(d_.freq, line.k) + times_k(r_.freq, line.m);
         const auto step = static_cast<std::uint32_t>((freq + (1ULL << 31)) >> 32);
         const auto phase_mid = static_cast<std::uint32_t>((phase + (1ULL << 31)) >> 32);
         const std::uint32_t phase0 = phase_mid - step * half;
@@ -549,8 +606,7 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
         line.in_band = std::abs(signed_of(freq)) < kBandEdge;
 
         Complex32 amp{};
-        if (out.subtract && line.seeded && line.in_band &&
-            line_snr(line, count) >= kStandOut) {
+        if (out.subtract && line.seeded && line.in_band && stands_out(slot, count)) {
             amp = Complex32{static_cast<float>(line.amp.real()),
                             static_cast<float>(line.amp.imag())};
         }
@@ -560,7 +616,7 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
         planned.amplitude = amp;
         out.lines.push_back(planned);
 
-        record.lines.push_back(PlannedLine{slot, line.k, phase0, step, amp, line.in_band});
+        record.lines.push_back(PlannedLine{slot, line.k, line.m, phase0, step, amp, line.in_band});
     }
 
     records_.push_back(std::move(record));
@@ -572,8 +628,12 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
 
 void CombTracker::replace_weak_lines()
 {
-    for (Line& line : lines_) {
-        if (line.weak_blocks < kSwapBlocks) {
+    // A carrier is judged on itself; its sidebands, in the slots after it,
+    // move with it to the new k.
+    const auto per_line = static_cast<std::size_t>(2 * orders_ + 1);
+    for (std::size_t base = 0; base + per_line <= lines_.size(); base += per_line) {
+        const Line& carrier = lines_[base + static_cast<std::size_t>(orders_)];
+        if (carrier.weak_blocks < kSwapBlocks) {
             continue;
         }
         const bool hi_left = next_hi_ <= range_hi_;
@@ -582,14 +642,14 @@ void CombTracker::replace_weak_lines()
             return;
         }
         const bool take_hi = hi_left && (next_take_hi_ || !lo_left);
-        Line fresh;
-        if (take_hi) {
-            fresh.k = next_hi_++;
-        } else {
-            fresh.k = next_lo_--;
-        }
+        const std::int32_t k = take_hi ? next_hi_++ : next_lo_--;
         next_take_hi_ = !take_hi;
-        line = fresh;
+        for (std::size_t i = 0; i < per_line; ++i) {
+            Line fresh;
+            fresh.k = k;
+            fresh.m = lines_[base + i].m;
+            lines_[base + i] = fresh;
+        }
     }
 }
 
@@ -640,10 +700,13 @@ void CombTracker::observe(const CombObservation& observation)
     const auto back = static_cast<std::int64_t>(record.mid - anchor_);
     const Axes cb = advanced(c_, back);
     const Axes db = advanced(d_, back);
+    const Axes rb = advanced(r_, back);
 
     struct Measured {
         std::uint32_t slot = 0;
         double k = 0.0;
+        std::int32_t m = 0;   // sideband order, zero for a carrier
+        bool side_fit = false;
         Cd a_meas{};
         double freq_innovation = 0.0;  // cycles per sample
         double snr = 0.0;
@@ -652,25 +715,67 @@ void CombTracker::observe(const CombObservation& observation)
     std::vector<Measured> measured;
     measured.reserve(record.lines.size());
 
+    // Each line's whole-block projection, and with sidebands, each with its
+    // carrier group's other lines taken out. A first sideband 59.5 Hz from a
+    // carrier 19 dB stronger sees it through a 27 ms block's response at
+    // about -15 dB, which is more than the sideband itself; every tone in the
+    // block is known exactly from its planned phase and step, so the leak of
+    // line j into line i's projection is (P_j / N) times the closed-form sum
+    // of their tones' product over the block, and is subtracted.
+    std::vector<Cd> block_sum(record.lines.size());
+    for (std::size_t i = 0; i < record.lines.size(); ++i) {
+        for (std::uint32_t s = 0; s < S; ++s) {
+            const Complex32 p = projections[i * S + s];
+            block_sum[i] += Cd{p.real(), p.imag()};
+        }
+    }
+    std::vector<Cd> cleaned_sum = block_sum;
+    if (orders_ > 0) {
+        const auto reach = static_cast<std::ptrdiff_t>(2 * orders_);
+        const auto count = static_cast<std::ptrdiff_t>(record.lines.size());
+        for (std::ptrdiff_t i = 0; i < count; ++i) {
+            const PlannedLine& to = record.lines[static_cast<std::size_t>(i)];
+            for (std::ptrdiff_t j = std::max<std::ptrdiff_t>(0, i - reach);
+                 j <= std::min(count - 1, i + reach); ++j) {
+                const PlannedLine& from = record.lines[static_cast<std::size_t>(j)];
+                if (j == i || from.k != to.k) {
+                    continue;
+                }
+                const double dphi =
+                    static_cast<double>(static_cast<std::int32_t>(from.phase0 - to.phase0)) / kTwo32;
+                const double dw =
+                    static_cast<double>(static_cast<std::int32_t>(from.step - to.step)) / kTwo32;
+                Cd gain;
+                if (std::abs(dw) < 1e-12) {
+                    gain = Cd{N, 0.0};
+                } else {
+                    gain = (1.0 - std::polar(1.0, kTwoPi * dw * N)) /
+                           (1.0 - std::polar(1.0, kTwoPi * dw));
+                }
+                gain *= std::polar(1.0, kTwoPi * dphi);
+                cleaned_sum[static_cast<std::size_t>(i)] -=
+                    block_sum[static_cast<std::size_t>(j)] / N * gain;
+            }
+        }
+    }
+
     std::uint32_t strong = 0;
     for (std::size_t i = 0; i < record.lines.size(); ++i) {
         const PlannedLine& planned = record.lines[i];
-        if (planned.slot >= lines_.size() || lines_[planned.slot].k != planned.k) {
+        if (planned.slot >= lines_.size() || lines_[planned.slot].k != planned.k ||
+            lines_[planned.slot].m != planned.m) {
             continue;  // the slot was given to another line since
         }
         Line& line = lines_[planned.slot];
         const auto proj = projections.subspan(i * S, S);
 
         Cd D{};
-        Cd P{};
-        for (std::uint32_t s = 0; s < S; ++s) {
+        for (std::uint32_t s = 0; s + 1 < S; ++s) {
             const Cd p{proj[s].real(), proj[s].imag()};
-            P += p;
-            if (s + 1 < S) {
-                const Cd q{proj[s + 1].real(), proj[s + 1].imag()};
-                D += q * std::conj(p);
-            }
+            const Cd q{proj[s + 1].real(), proj[s + 1].imag()};
+            D += q * std::conj(p);
         }
+        const Cd P = cleaned_sum[i];
         const Cd z = std::abs(D) > 0.0 ? D / std::abs(D) : Cd{1.0, 0.0};
         Cd c{};
         Cd zs{1.0, 0.0};
@@ -704,24 +809,42 @@ void CombTracker::observe(const CombObservation& observation)
             kTwo32;
         const double plan_freq =
             static_cast<double>(static_cast<std::int32_t>(planned.step)) / kTwo32;
-        const std::uint64_t model_phase_fixed = cb.phase + times_k(db.phase, planned.k);
+        const std::uint64_t model_phase_fixed =
+            cb.phase + times_k(db.phase, planned.k) + times_k(rb.phase, planned.m);
         const double model_phase = static_cast<double>(model_phase_fixed) / kTwo64;
-        const double model_freq = signed_of(cb.freq + times_k(db.freq, planned.k));
+        const double model_freq =
+            signed_of(cb.freq + times_k(db.freq, planned.k) + times_k(rb.freq, planned.m));
         const double df_plan = S >= 2 ? std::arg(D) / (kTwoPi * L) : 0.0;
 
         Measured m;
         m.slot = planned.slot;
         m.k = static_cast<double>(planned.k);
+        m.m = planned.m;
         const double rotation = wrap_cycles(plan_phase - model_phase);
         m.a_meas = P / N * std::polar(1.0, kTwoPi * rotation);
         m.freq_innovation = plan_freq + df_plan - model_freq;
         m.snr = std::min(line_snr(line, record.count), kSnrCap);
-        m.fit = planned.in_band && m.snr >= kFitSnr;
-        if (planned.in_band && m.snr >= kStandOut) {
-            ++strong;
-            line.weak_blocks = 0;
-        } else {
-            ++line.weak_blocks;
+        // The carriers alone steer c and d and decide the lock; a sideband
+        // carries the ripple's error on top of the carrier's, and steers r.
+        m.fit = planned.in_band && m.snr >= kFitSnr && planned.m == 0;
+        if (planned.m != 0) {
+            // Weighted by its carrier: its own SNR is not measurable (see
+            // stands_out), and a ripple sideband scales with its carrier.
+            const std::size_t carrier =
+                planned.slot - static_cast<std::size_t>(static_cast<std::ptrdiff_t>(planned.m));
+            const double carrier_snr = carrier < lines_.size() && lines_[carrier].m == 0
+                                           ? std::min(line_snr(lines_[carrier], record.count), kSnrCap)
+                                           : 0.0;
+            m.side_fit = planned.in_band && carrier_snr >= kFitSnr;
+            m.snr = carrier_snr;
+        }
+        if (planned.m == 0) {
+            if (planned.in_band && m.snr >= kStandOut) {
+                ++strong;
+                line.weak_blocks = 0;
+            } else {
+                ++line.weak_blocks;
+            }
         }
 
         if (record.subtract && (planned.amp.real() != 0.0F || planned.amp.imag() != 0.0F)) {
@@ -775,6 +898,7 @@ void CombTracker::observe(const CombObservation& observation)
         for (const Measured& m : measured) {
             Line& line = lines_[m.slot];
             line.amp = m.a_meas;
+            line.block_power = std::norm(m.a_meas);
             line.seeded = true;
         }
         seed_pending_ = false;
@@ -801,16 +925,49 @@ void CombTracker::observe(const CombObservation& observation)
             correct(record.mid, alpha * ec, beta * ec / T, gamma * ec / (T * T), alpha * ed,
                     beta * ed / T, gamma * ed / (T * T));
         }
+        // The ripple: each sideband's phase error past what the carriers'
+        // fit gives its k is m times the ripple's, so the weighted least
+        // squares slope through the origin in m. Only the block projection
+        // is used, never the sub-blocks: a carrier a hundred hertz from its
+        // sideband leaks into a short sub-block at nearly its own level, and
+        // across a whole block about 22 dB down.
+        double ripple_error = 0.0;
+        if (orders_ > 0 && pfit.used >= kCombMinLines) {
+            double swy = 0.0;
+            double sww = 0.0;
+            std::uint32_t used = 0;
+            for (const Measured& m : measured) {
+                const Line& line = lines_[m.slot];
+                if (!m.side_fit || !line.seeded || std::abs(line.amp) <= 0.0) {
+                    continue;
+                }
+                const double y = wrap_cycles(std::arg(m.a_meas * std::conj(line.amp)) / kTwoPi -
+                                             (pfit.at_zero + pfit.slope * m.k));
+                const double mm = static_cast<double>(m.m);
+                swy += m.snr * y * mm;
+                sww += m.snr * mm * mm;
+                ++used;
+            }
+            if (used >= kCombMinLines && sww > 0.0) {
+                ripple_error = swy / sww;
+                correct_ripple(record.mid, alpha * ripple_error, beta * ripple_error / T,
+                               gamma * ripple_error / (T * T));
+            }
+        }
         // Amplitudes learn what the affine fit does not explain.
         for (const Measured& m : measured) {
             Line& line = lines_[m.slot];
-            const double fitted = pfit.used >= kCombMinLines ? pfit.at_zero + pfit.slope * m.k : 0.0;
+            const double fitted =
+                (pfit.used >= kCombMinLines ? pfit.at_zero + pfit.slope * m.k : 0.0) +
+                static_cast<double>(m.m) * ripple_error;
             const Cd target = m.a_meas * std::polar(1.0, -kTwoPi * fitted);
             if (!line.seeded) {
                 line.amp = target;
+                line.block_power = std::norm(target);
                 line.seeded = true;
             } else {
                 line.amp += kAmpWeight * (target - line.amp);
+                line.block_power += kAmpWeight * (std::norm(target) - line.block_power);
             }
         }
 
@@ -878,8 +1035,19 @@ CombStatus CombTracker::status() const
     std::vector<double> heights;
     double suppression = 0.0;
     std::uint32_t cancelled = 0;
+    std::uint32_t carriers = 0;
     const double n = static_cast<double>(std::max<std::uint32_t>(last_count_, 1));
-    for (const Line& line : lines_) {
+    for (std::size_t slot = 0; slot < lines_.size(); ++slot) {
+        const Line& line = lines_[slot];
+        if (line.m != 0) {
+            // Counted, but kept out of the heights and the suppression
+            // figure, whose noise estimates a nearby carrier spoils.
+            if (lock_ == CombLock::kLocked && line.seeded && line.in_band &&
+                stands_out(slot, last_count_)) {
+                ++cancelled;
+            }
+            continue;
+        }
         const double snr = line_snr(line, last_count_);
         if (!line.in_band || snr < kStandOut) {
             continue;
@@ -887,6 +1055,7 @@ CombStatus CombTracker::status() const
         heights.push_back(10.0 * std::log10(snr));
         if (lock_ == CombLock::kLocked && line.seeded) {
             ++cancelled;
+            ++carriers;
             const double floor = line.noise / n;
             const double before = std::max(line.before - floor, 0.0);
             // The average of |residual|^2 over blocks resolves the residual
@@ -906,7 +1075,7 @@ CombStatus CombTracker::status() const
         out.comb.median_height_db = static_cast<float>(heights[heights.size() / 2]);
     }
     out.lines_cancelled = cancelled;
-    out.suppression_db = cancelled > 0 ? static_cast<float>(suppression / cancelled) : 0.0F;
+    out.suppression_db = carriers > 0 ? static_cast<float>(suppression / carriers) : 0.0F;
     out.spacing_drift_hz_per_s =
         anchored_ ? static_cast<float>(signed_of(d_.rate) * rate * rate) : 0.0F;
     return out;

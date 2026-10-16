@@ -248,7 +248,11 @@ TEST_CASE("the comb cancellation locks to a drifting comb and takes it out of th
     CHECK(on.comb.detections_found > 0);
     REQUIRE(on.comb.status.lock == dsp::CombLock::kLocked);
     CHECK(on.comb.status.lines_cancelled >= dsp::kCombMinLines);
-    CHECK(std::abs(on.comb.status.comb.spacing_hz - spacing_at(kSeconds)) < 5.0);
+    // Held whole or as its two halves (detect_combs), so the comb reported is
+    // at the spacing or twice it.
+    const double spacing = on.comb.status.comb.spacing_hz;
+    CHECK((std::abs(spacing - spacing_at(kSeconds)) < 5.0 ||
+           std::abs(spacing - 2.0 * spacing_at(kSeconds)) < 10.0));
 
     // And the spectrum shows it gone: most of the lines' height taken away.
     CHECK(on.line_height_db < off.line_height_db - 10.0);

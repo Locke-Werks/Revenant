@@ -142,6 +142,7 @@ add_library(revenant_core STATIC
     dsp/comb_kernels_reference.cpp
     dsp/comb_tracker.cpp
     dsp/comb_bank.cpp
+    dsp/comb_spectrum.cpp
     dsp/complex_ops.cpp
     dsp/convert.cpp
     dsp/denormal_mode.cpp

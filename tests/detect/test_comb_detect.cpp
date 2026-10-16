@@ -384,8 +384,10 @@ TEST_CASE("comb detections separate two interleaved switchers", "[comb][detect]"
     }
 }
 
-// A single comb's even and odd lines sit on its grid, so it stays one comb.
-TEST_CASE("comb detections keep a single comb whole", "[comb][detect]")
+// A comb with both halves populated is held as the two halves, each at twice
+// the spacing: an exact model of every other line, and two families that sit
+// on each other's half grid for a while each get a tracker of their own.
+TEST_CASE("comb detections hold a single comb as its two exact halves", "[comb][detect]")
 {
     for (std::uint64_t seed = 400; seed < 408; ++seed) {
         INFO("seed " << seed);
@@ -394,9 +396,53 @@ TEST_CASE("comb detections keep a single comb whole", "[comb][detect]")
         const double c = 37.31 + 0.11 * static_cast<double>(seed - 400);
         const std::uint32_t drawn = scene.comb(c, d, 6.0, 15.0);
         const std::vector<CombEstimate> found = run_all(scene.render());
-        REQUIRE(found.size() == 1);
-        CHECK(on_comb(found[0], c, d, 1.0));
-        CHECK(found[0].lines_found >= drawn * 8 / 10);
+        REQUIRE(found.size() == 2);
+        const bool first_even = on_comb(found[0], c, 2.0 * d, 1.0);
+        const CombEstimate& even = first_even ? found[0] : found[1];
+        const CombEstimate& odd = first_even ? found[1] : found[0];
+        CHECK(on_comb(even, c, 2.0 * d, 1.0));
+        CHECK(on_comb(odd, c + d, 2.0 * d, 1.0));
+        CHECK(even.lines_found + odd.lines_found >= drawn * 8 / 10);
+    }
+}
+
+// Every line carrying a ladder of ripple sidebands, as on the owner's 80 m
+// comb: the comb comes back with the ripple and the orders to cancel, and the
+// sidebands do not come back as combs of their own.
+TEST_CASE("comb detections report a comb's ripple sidebands with it", "[comb][detect]")
+{
+    for (std::uint64_t seed = 800; seed < 804; ++seed) {
+        INFO("seed " << seed);
+        Scene scene(seed);
+        const double d = 31'578.9 / kHzPerBin;
+        const double c = 45.2 + 0.13 * static_cast<double>(seed - 800);
+        const double ripple = 3.4;  // bins: 498 Hz at 146.5 Hz a bin
+        const double levels[] = {-12.0, -16.0};
+        const auto k_lo = static_cast<std::int64_t>(std::ceil((20.0 - c) / d));
+        const auto k_hi = static_cast<std::int64_t>(std::floor((kBins - 20.0 - c) / d));
+        for (std::int64_t k = k_lo; k <= k_hi; ++k) {
+            const double x = c + static_cast<double>(k) * d;
+            scene.line(x, 22.0);
+            for (int m = 1; m <= 2; ++m) {
+                scene.line(x + m * ripple, 22.0 + levels[m - 1]);
+                scene.line(x - m * ripple, 22.0 + levels[m - 1]);
+            }
+        }
+        const std::vector<CombEstimate> found = run_all(scene.render());
+        std::string seen;
+        for (const CombEstimate& f : found) {
+            seen += std::format("[offset {:.1f} spacing {:.2f} ripple {:.1f} orders {}] ", f.offset_hz,
+                                f.spacing_hz, f.ripple_hz, f.sideband_orders);
+        }
+        INFO("found " << seen);
+        // The comb, as one grid or its halves, every estimate on it.
+        REQUIRE_FALSE(found.empty());
+        for (const CombEstimate& f : found) {
+            CHECK((on_comb(f, c, d, 2.0) || on_comb(f, c, 2.0 * d, 2.0) ||
+                   on_comb(f, c + d, 2.0 * d, 2.0)));
+            CHECK(std::abs(f.ripple_hz - ripple * kHzPerBin) < 0.3 * kHzPerBin);
+            CHECK(f.sideband_orders > 0);
+        }
     }
 }
 
@@ -436,14 +482,20 @@ TEST_CASE("comb detections find an unrelated comb beside the first", "[comb][det
         scene.comb(37.31, d_a, 10.0, 15.0);
         scene.comb(80.9, d_b, 6.0, 9.0);
         const std::vector<CombEstimate> found = run_all(scene.render());
-        bool a = false;
-        bool b = false;
-        for (const CombEstimate& f : found) {
-            a = a || on_comb(f, 37.31, d_a, 1.0);
-            b = b || on_comb(f, 80.9, d_b, 1.0);
-        }
-        CHECK(a);
-        CHECK(b);
+        // Each comb, whole or as its two halves.
+        auto held = [&](double c, double d) {
+            bool whole = false;
+            bool even = false;
+            bool odd = false;
+            for (const CombEstimate& f : found) {
+                whole = whole || on_comb(f, c, d, 1.0);
+                even = even || on_comb(f, c, 2.0 * d, 1.0);
+                odd = odd || on_comb(f, c + d, 2.0 * d, 1.0);
+            }
+            return whole || (even && odd);
+        };
+        CHECK(held(37.31, d_a));
+        CHECK(held(80.9, d_b));
         CHECK(found.size() <= dsp::kCombMaxCombs);
     }
 }

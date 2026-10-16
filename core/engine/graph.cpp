@@ -121,6 +121,7 @@
 #include <utility>
 
 #include "core/dsp/comb_cancel.h"
+#include "core/dsp/comb_spectrum.h"
 #include "core/dsp/convert.h"
 #include "core/dsp/impulse_excision.h"
 #include "core/dsp/pfb_branch_reference.h"
@@ -1021,21 +1022,24 @@ struct Graph::Impl {
     std::atomic<std::uint64_t> comb_detections{0};
     std::atomic<std::uint64_t> comb_detections_found{0};
 
-    // DETECTION, OFF THE SAMPLE PATH. The completion thread folds each
-    // spectrum frame it delivers into a linear average (comb_avg_*, completion
-    // thread only). Once the average spans a second of source time it hands
-    // a copy to the detection thread through comb_job_power and
-    // comb_job_state, and starts a new average. The detection thread runs
-    // detect_comb and leaves its answer in comb_result for the recording
-    // thread, which hands it to the tracker at its next block.
+    // DETECTION, OFF THE SAMPLE PATH. The recording thread copies a run of
+    // raw source samples, kCombSpectrumFrames transforms' worth, contiguous,
+    // about once a second of source time (comb_tap_*, recording thread only),
+    // and hands it to the detection thread through comb_job_samples and
+    // comb_job_state. The detection thread averages its own fine spectrum
+    // from them (core/dsp/comb_spectrum.h, which says why the display
+    // spectrum is too coarse), runs detect_combs, and leaves its answer in
+    // comb_result for the recording thread, which hands it to the bank at its
+    // next block. The samples are taken before the cancellation, so every
+    // comb is seen every time and the bank drops the ones it already holds.
     //
     // Two single-slot handoffs, each with one writer and one reader, and an
     // atomic that says whose turn it is; no lock on either side:
     //
-    //   comb_job_*     completion thread writes while comb_job_state is
+    //   comb_job_*     recording thread writes while comb_job_state is
     //                  kCombJobIdle, then stores kCombJobReady; the detection
     //                  thread reads while it is kCombJobReady and stores
-    //                  kCombJobIdle when finished. A window that completes
+    //                  kCombJobIdle when finished. A run that completes
     //                  while a detection is still running is dropped and
     //                  counted in comb_windows_dropped; the next one follows a
     //                  second later.
@@ -1044,24 +1048,27 @@ struct Graph::Impl {
     //                  is true and clears it. A result that finds the slot
     //                  still full is dropped the same way.
     //
-    // Every job and result carries the retune epoch it was averaged under, so
-    // a spectrum measured before a retune never reaches the tracker after it.
+    // Every job and result carries the retune epoch it was taken under, so
+    // samples from before a retune never reach the bank after it.
     static constexpr std::uint32_t kCombJobIdle = 0;
     static constexpr std::uint32_t kCombJobReady = 1;
     static constexpr std::uint32_t kCombJobStop = 2;
 
-    std::vector<double> comb_avg_sum;
-    std::uint64_t comb_avg_frames = 0;
-    dsp::SampleIndex comb_avg_first = 0;
-    dsp::SampleIndex comb_avg_last = 0;
-    std::uint64_t comb_avg_epoch = 0;
-    bool comb_avg_running = false;
+    std::vector<dsp::Complex32> comb_tap;
+    std::size_t comb_tap_fill = 0;
+    dsp::SampleIndex comb_tap_next = 0;   // the sample a contiguous run continues at
+    dsp::SampleIndex comb_tap_first = 0;  // where the run being filled began
+    dsp::SampleIndex comb_tap_due = 0;    // the earliest a new run may begin
+    std::uint64_t comb_tap_epoch = 0;
 
-    std::vector<float> comb_job_power;
+    std::vector<dsp::Complex32> comb_job_samples;
     dsp::SampleRate comb_job_rate = 0;
     std::uint64_t comb_job_epoch = 0;
     std::atomic<std::uint32_t> comb_job_state{kCombJobIdle};
 
+    // Detection thread only.
+    dsp::CombSpectrumAverager comb_averager;
+    std::vector<float> comb_power;
     struct CombResult {
         std::vector<dsp::CombEstimate> estimates;
         std::uint64_t epoch = 0;
@@ -1069,10 +1076,6 @@ struct Graph::Impl {
     CombResult comb_result;
     std::atomic<bool> comb_result_full{false};
     std::atomic<std::uint64_t> comb_windows_dropped{0};
-
-    // log2(10) / 10: a decibel value times this is the base-two exponent of
-    // its linear power.
-    static constexpr float kDbToLog2 = 0.33219280948873623F;
 
     // Recording thread: where a slot's projections land when read back.
     std::vector<dsp::Complex32> comb_projection_scratch;
@@ -1087,6 +1090,7 @@ struct Graph::Impl {
     // Read once at prepare; the detection thread is the only writer.
     std::string comb_dump_prefix;
     std::uint64_t comb_dumps = 0;
+    std::uint64_t comb_view_dumps = 0;
 
     // A second specialization of core/shaders/spectrum.comp, at one channel
     // and the passband's own transform size.
@@ -1625,82 +1629,96 @@ struct Graph::Impl {
         comb_samples_cancelled.fetch_add(plan.count, std::memory_order_relaxed);
     }
 
-    // The completion thread, for one spectrum frame. Folds it into the
-    // detection's average and, once that spans a second of source time, hands
-    // it to the detection thread.
-    void fold_comb_spectrum(std::span<const float> power_db, dsp::SampleIndex frame_start) {
+    // The recording thread, for one source block. Copies it into the run the
+    // detection's spectrum is taken from, as float I/Q at any consistent
+    // scale, and hands the run over once it is full.
+    void tap_comb_samples(const source::SourceBlock& block) {
         if (!comb_on.load(std::memory_order_acquire) || !comb_detector.joinable()) {
-            comb_avg_running = false;
+            comb_tap_fill = 0;
             return;
         }
         const std::uint64_t epoch = comb_epoch.load(std::memory_order_acquire);
-        if (!comb_avg_running || epoch != comb_avg_epoch ||
-            comb_avg_sum.size() != power_db.size()) {
-            comb_avg_sum.assign(power_db.size(), 0.0);
-            comb_avg_frames = 0;
-            comb_avg_first = frame_start;
-            comb_avg_epoch = epoch;
-            comb_avg_running = true;
+        const dsp::SampleIndex start = block.stamp.start;
+        if (epoch != comb_tap_epoch || start != comb_tap_next) {
+            // A retune or a hole: a transform across it would smear both sides.
+            comb_tap_fill = 0;
+            comb_tap_epoch = epoch;
         }
-        // Ten frames a second is plenty for an average over one, and folding
-        // every frame would spend a power per bin per frame on this thread.
-        const auto fold_every = static_cast<dsp::SampleIndex>(config.source_rate / 10);
-        if (comb_avg_frames == 0 || frame_start < comb_avg_last ||
-            frame_start - comb_avg_last >= fold_every) {
-            for (std::size_t i = 0; i < power_db.size(); ++i) {
-                comb_avg_sum[i] += static_cast<double>(std::exp2(power_db[i] * kDbToLog2));
+        comb_tap_next = start + static_cast<dsp::SampleIndex>(block.sample_count);
+        if (comb_tap_fill == 0) {
+            if (start < comb_tap_due) {
+                return;
             }
-            ++comb_avg_frames;
-            comb_avg_last = frame_start;
+            comb_tap_first = start;
         }
 
-        if (frame_start < comb_avg_first ||
-            frame_start - comb_avg_first < static_cast<dsp::SampleIndex>(config.source_rate)) {
+        const std::size_t want =
+            static_cast<std::size_t>(comb_averager.points()) * dsp::kCombSpectrumFrames;
+        comb_tap.resize(want);
+        const std::size_t take = std::min(block.sample_count, want - comb_tap_fill);
+        decode_for_comb(block, take, std::span(comb_tap).subspan(comb_tap_fill, take));
+        comb_tap_fill += take;
+        if (comb_tap_fill < want) {
             return;
         }
-
-        if (comb_avg_frames == 0) {
-            return;
-        }
-
-        // The frame is M * N / 2 bins covering exactly the source rate, but
-        // its bin zero sits half a coarse channel below -rate / 2
-        // (SpectrumGeometry::bin_zero_hz), so DC is not at bins / 2, where
-        // detect_comb wants it. A sampled band is periodic, so rotating the
-        // frame until the bin centred on DC lands at bins / 2 gives the same
-        // spectrum on detect_comb's axis, at a rate of bins * bin width.
-        const SpectrumGeometry& g = geometry.spectrum;
-        const std::size_t bins = comb_avg_sum.size();
-        const double bin_width = g.bin_width_hz();
-        if (bin_width <= 0.0) {
-            comb_avg_running = false;
-            return;
-        }
-        const auto dc_bin = static_cast<std::int64_t>(std::llround(-g.bin_zero_hz() / bin_width));
-        const auto half = static_cast<std::int64_t>(bins / 2);
-        const auto period = static_cast<std::int64_t>(bins);
-        const std::int64_t shift = ((dc_bin - half) % period + period) % period;
-        const auto rate = static_cast<dsp::SampleRate>(
-            std::llround(static_cast<double>(bins) * bin_width));
+        comb_tap_fill = 0;
+        comb_tap_due = comb_tap_first + static_cast<dsp::SampleIndex>(config.source_rate);
 
         if (comb_job_state.load(std::memory_order_acquire) == kCombJobIdle) {
-            comb_job_power.resize(bins);
-            const double scale = 1.0 / static_cast<double>(comb_avg_frames);
-            for (std::size_t i = 0; i < bins; ++i) {
-                const auto from =
-                    static_cast<std::size_t>((static_cast<std::int64_t>(i) + shift) % period);
-                comb_job_power[i] = static_cast<float>(comb_avg_sum[from] * scale);
-            }
-            comb_job_rate = rate;
+            std::swap(comb_tap, comb_job_samples);
+            comb_job_rate = config.source_rate;
             comb_job_epoch = epoch;
             comb_job_state.store(kCombJobReady, std::memory_order_release);
             comb_job_state.notify_one();
         } else {
             comb_windows_dropped.fetch_add(1, std::memory_order_relaxed);
         }
-        comb_avg_running = false;
     }
 
+    // The first `count` samples of a block as float I/Q. The scale differs by
+    // format and does not matter: detection reads heights over a local floor.
+    static void decode_for_comb(const source::SourceBlock& block, std::size_t count,
+                                std::span<dsp::Complex32> out) {
+        const auto* b = reinterpret_cast<const unsigned char*>(block.bytes.data());
+        switch (block.format) {
+            case source::SampleFormat::Cu8:
+                for (std::size_t i = 0; i < count; ++i) {
+                    out[i] = {static_cast<float>(b[2 * i]) - 127.5F,
+                              static_cast<float>(b[2 * i + 1]) - 127.5F};
+                }
+                return;
+            case source::SampleFormat::Cs8:
+                for (std::size_t i = 0; i < count; ++i) {
+                    out[i] = {static_cast<float>(static_cast<signed char>(b[2 * i])),
+                              static_cast<float>(static_cast<signed char>(b[2 * i + 1]))};
+                }
+                return;
+            case source::SampleFormat::Cs16:
+                for (std::size_t i = 0; i < count; ++i) {
+                    std::int16_t iq[2];
+                    std::memcpy(iq, b + 4 * i, sizeof iq);
+                    out[i] = {static_cast<float>(iq[0]), static_cast<float>(iq[1])};
+                }
+                return;
+            case source::SampleFormat::Cs24:
+                for (std::size_t i = 0; i < count; ++i) {
+                    const unsigned char* p = b + 6 * i;
+                    auto s24 = [](const unsigned char* q) {
+                        const std::uint32_t u = static_cast<std::uint32_t>(q[0]) |
+                                                (static_cast<std::uint32_t>(q[1]) << 8) |
+                                                (static_cast<std::uint32_t>(q[2]) << 16);
+                        // Into the top of a word and back, to carry the sign.
+                        return static_cast<float>(static_cast<std::int32_t>(u << 8) >> 8);
+                    };
+                    out[i] = {s24(p), s24(p + 3)};
+                }
+                return;
+            case source::SampleFormat::Cf32:
+            default:
+                std::memcpy(out.data(), b, count * sizeof(dsp::Complex32));
+                return;
+        }
+    }
     // The detection thread. Waits for a job, runs it, leaves the answer.
     void run_comb_detector() {
         for (;;) {
@@ -1712,15 +1730,22 @@ struct Graph::Impl {
             if (state != kCombJobReady) {
                 continue;
             }
+            for (std::size_t at = 0; at + comb_averager.points() <= comb_job_samples.size();
+                 at += comb_averager.points()) {
+                comb_averager.add(std::span<const dsp::Complex32>(comb_job_samples)
+                                      .subspan(at, comb_averager.points()));
+            }
+            comb_power = comb_averager.take();
             dsp::CombSpectrum spectrum;
-            spectrum.power = dsp::ConstRealSpan(comb_job_power.data(), comb_job_power.size());
+            spectrum.power = dsp::ConstRealSpan(comb_power.data(), comb_power.size());
             spectrum.rate = comb_job_rate;
+
             if (!comb_dump_prefix.empty()) {
                 const std::string name = std::format("{}.{}.{}.f32", comb_dump_prefix,
                                                      comb_dumps++, comb_job_rate);
                 if (std::FILE* file = std::fopen(name.c_str(), "wb"); file != nullptr) {
-                    (void)std::fwrite(comb_job_power.data(), sizeof(float),
-                                      comb_job_power.size(), file);
+                    (void)std::fwrite(comb_power.data(), sizeof(float), comb_power.size(),
+                                      file);
                     std::fclose(file);
                 }
             }
@@ -2623,9 +2648,20 @@ struct Graph::Impl {
         // spectrum_frames is the other number and deliberately counts
         // something else: frames the device produced, whether or not anyone
         // was listening, which is what a stats reader wants.
-        spectrum_frames.fetch_add(1, std::memory_order_relaxed);
+        const std::uint64_t produced = spectrum_frames.fetch_add(1, std::memory_order_relaxed);
 
-        fold_comb_spectrum(values, frame.spectrum_start);
+        // Under REVENANT_COMB_DUMP, every twentieth frame as raw dB floats,
+        // <prefix>.view.<n>.f32: the spectrum after the cancellation, which is
+        // what the waterfall shows and what says whether the lines went, where
+        // the detection's dumps are taken before it. Completion thread only.
+        if (!comb_dump_prefix.empty() && produced % 20 == 0) {
+            const std::string name =
+                std::format("{}.view.{}.f32", comb_dump_prefix, comb_view_dumps++);
+            if (std::FILE* file = std::fopen(name.c_str(), "wb"); file != nullptr) {
+                (void)std::fwrite(values.data(), sizeof(float), values.size(), file);
+                std::fclose(file);
+            }
+        }
 
         if (frame.spectrum_sink == nullptr || !*frame.spectrum_sink) {
             return {};
@@ -3712,6 +3748,10 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
             static_cast<std::size_t>(dsp::kCombMaxLines) * dsp::kCombMaxSubBlocks,
             dsp::Complex32{});
         impl.comb_bank = dsp::CombBank(impl.config.source_rate);
+        // Sized once here, before the detection thread starts; the recording
+        // thread reads its size and only the detection thread uses it.
+        impl.comb_averager =
+            dsp::CombSpectrumAverager(dsp::comb_spectrum_points(impl.config.source_rate));
         if (const char* dump = std::getenv("REVENANT_COMB_DUMP"); dump != nullptr) {
             impl.comb_dump_prefix = dump;
         }
@@ -4685,6 +4725,8 @@ Status Graph::on_block(const source::SourceBlock& block) {
             return std::unexpected(with_context(copy_status.error(), "Graph::on_block staging"));
         }
     }
+
+    impl.tap_comb_samples(block);
 
     // How many output blocks this dispatch can produce. Block m needs input up
     // to m*D and down to m*D - (N - 1); both bounds are checked rather than

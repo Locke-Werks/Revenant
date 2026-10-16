@@ -109,6 +109,15 @@ constexpr double kMinOccupancy = 0.4;
 constexpr double kSplitBins = 0.25;
 constexpr double kSplitHz = 25.0;
 
+// A parity holding under this share of its slots is empty: the grid is the
+// other parity's at twice the spacing. Well under kMinOccupancy, so a comb's
+// weak edges do not read as a missing half.
+constexpr double kEmptyParity = 0.15;
+
+// A peak this close to a taken grid's line is that line: the grid fit's own
+// final tolerance.
+constexpr double kTakenBins = 0.6;
+
 struct Peak {
     double x = 0.0;       // centre, bins
     double height = 0.0;  // dB above floor
@@ -501,6 +510,125 @@ void match(const std::vector<Peak>& peaks, double c, double d, double tolerance,
     return estimate;
 }
 
+// A comb's modulation sidebands. A switcher whose supply ripples puts a ladder
+// of sidebands at multiples of the ripple frequency either side of every line
+// (on the owner's HF comb, 2026-10-16: about 118 Hz apart, the first pair 11.5
+// dB under the carrier, the second 17, then a phase-noise pedestal near 25).
+// Each order is a comb at the same spacing, offset by a fixed amount, which
+// the tracker cancels as it does any comb; the carrier alone is three
+// quarters of a line's power, and the waterfall's bins hold the first pair
+// too, so cancelling only the carrier barely changes what is seen.
+//
+// Measured from the comb's own lines stacked on their peaks and averaged, so
+// a sideband a single line could not show above the floor stands out of the
+// average. Up to kSidebandOrders each side, nearest first, each standing
+// kSidebandOverPedestalDb over the stack's median.
+constexpr int kSidebandOrders = 6;
+constexpr double kSidebandOverPedestalDb = 6.0;
+
+// Orders the tracker cancels, of the kSidebandOrders taken out of the search.
+// On the owner's 80 m comb the rungs at 59.5 Hz steps stand 19, 12, 23 and 17
+// dB under the carrier, then 25 and below into a pedestal near 30: four
+// orders take the ladder down to the pedestal. Each order costs two slots per
+// line.
+constexpr std::int32_t kTrackedOrders = 4;
+constexpr double kSidebandReachHz = 1'500.0;
+
+[[nodiscard]] std::vector<Fit> sideband_grids(const Fit& grid, const std::vector<Peak>& peaks,
+                                              const std::vector<double>& db, SampleRate rate,
+                                              double& ripple_bins)
+{
+    std::vector<Fit> out;
+    ripple_bins = 0.0;
+    const auto n = static_cast<std::int64_t>(db.size());
+    const double hz_per_bin = static_cast<double>(rate) / static_cast<double>(n);
+    const auto reach = static_cast<std::int64_t>(
+        std::min(kSidebandReachHz / hz_per_bin, 0.45 * grid.d));
+    if (reach < 4 || grid.which.size() < kCombMinLines) {
+        return out;
+    }
+    std::vector<double> stack(static_cast<std::size_t>(2 * reach + 1), 0.0);
+    std::size_t lines = 0;
+    for (const std::size_t j : grid.which) {
+        const auto centre = static_cast<std::int64_t>(std::lround(peaks[j].x));
+        if (centre - reach < 0 || centre + reach >= n) {
+            continue;
+        }
+        const double top = db[static_cast<std::size_t>(centre)];
+        for (std::int64_t o = -reach; o <= reach; ++o) {
+            stack[static_cast<std::size_t>(o + reach)] +=
+                std::pow(10.0, (db[static_cast<std::size_t>(centre + o)] - top) / 10.0);
+        }
+        ++lines;
+    }
+    if (lines < kCombMinLines) {
+        return out;
+    }
+    std::vector<double> profile(stack.size());
+    for (std::size_t i = 0; i < stack.size(); ++i) {
+        profile[i] = 10.0 * std::log10(std::max(stack[i] / static_cast<double>(lines), 1e-30));
+    }
+    // The lower quartile, not the median: with a short reach at a coarse
+    // resolution the ladder itself can fill half the window.
+    std::vector<double> sorted = profile;
+    const double pedestal = percentile(sorted, 0.25);
+
+    // The first sideband each side, nearest the carrier and standing clear
+    // of the pedestal; their mean distance is the ripple frequency, and the
+    // higher orders, which sink into the pedestal in the average while still
+    // standing out beside the strongest lines, are taken at its multiples.
+    double first[2] = {0.0, 0.0};
+    double level[2] = {0.0, 0.0};
+    for (const int side : {1, -1}) {
+        // From two bins out, past the carrier's own window response.
+        for (std::int64_t o = 2; o < reach; ++o) {
+            const auto i = static_cast<std::size_t>(reach + side * o);
+            const double v = profile[i];
+            if (v < profile[i - 1] || v < profile[i + 1] ||
+                v - pedestal < kSidebandOverPedestalDb) {
+                continue;
+            }
+            const double a = profile[i - 1];
+            const double c = profile[i + 1];
+            const double curvature = a - 2.0 * v + c;
+            const double shift =
+                curvature < 0.0 ? std::clamp(0.5 * (a - c) / curvature, -0.5, 0.5) : 0.0;
+            first[side > 0 ? 0 : 1] = static_cast<double>(o) + side * shift;
+            level[side > 0 ? 0 : 1] = v;
+            break;
+        }
+    }
+    // Ripple modulation puts its sidebands in pairs, the same distance either
+    // side. One side alone, or a lopsided pair, is a neighbouring line or
+    // another family's sideband, not this comb's.
+    if (!(first[0] > 0.0 && first[1] > 0.0) || std::abs(first[0] - first[1]) > 1.0) {
+        return out;
+    }
+    const double ripple = 0.5 * (first[0] + first[1]);
+    ripple_bins = ripple;
+    for (int m = 1; m <= kSidebandOrders; ++m) {
+        for (const int side : {1, -1}) {
+            // The first order where it was measured, the rest at multiples.
+            const double measured = first[side > 0 ? 0 : 1];
+            const double distance = m == 1 && measured > 0.0 ? measured : m * ripple;
+            if (distance >= static_cast<double>(reach)) {
+                continue;
+            }
+            Fit sideband = grid;
+            sideband.c += side * distance;
+            const double rel = m == 1 && measured > 0.0 ? level[side > 0 ? 0 : 1]
+                                                         : pedestal;
+            for (double& h : sideband.heights) {
+                h += rel;
+            }
+            sideband.ks.clear();
+            sideband.which.clear();
+            out.push_back(std::move(sideband));
+        }
+    }
+    return out;
+}
+
 [[nodiscard]] double line_power(const Fit& fit)
 {
     double sum = 0.0;
@@ -603,33 +731,117 @@ Expected<std::vector<CombEstimate>> detect_combs(const CombSpectrum& spectrum)
         // grid holds only the middle of the span and each half's own grid is
         // what reaches the rest. A true single comb's halves agree with it and
         // it stays whole.
+        // Each pending grid carries whether it is already a half of another.
         std::vector<Fit> pending{*fit};
+        std::vector<bool> pending_half{false};
         std::vector<Fit> done;
         while (!pending.empty()) {
             Fit grid = std::move(pending.back());
+            const bool is_half = pending_half.back();
             pending.pop_back();
+            pending_half.pop_back();
             std::optional<Fit> even = parity_fit(grid, peaks, false);
             std::optional<Fit> odd = parity_fit(grid, peaks, true);
-            if (even) {
-                even = fit_grid(peaks, even->d, even->c);
+            // The refit reaches lines the joint grid missed, and from a poor
+            // start can also wander onto other peaks and keep fewer: it is
+            // taken only when it holds more lines than the half did.
+            for (std::optional<Fit>* half : {&even, &odd}) {
+                if (*half) {
+                    std::optional<Fit> refit = fit_grid(peaks, (*half)->d, (*half)->c);
+                    if (refit && refit->found > (*half)->found) {
+                        *half = std::move(refit);
+                    }
+                }
             }
-            if (odd) {
-                odd = fit_grid(peaks, odd->d, odd->c);
+
+            // One parity mostly empty: the grid is the other parity's, at
+            // twice the spacing. On the 80 m capture of 2026-10-16 a strong
+            // 31578.86 Hz family stood on the even lines of a 15789 Hz grid
+            // and a faint family 73 Hz off its odd ones, two bins at 36.6 Hz,
+            // so no odd line matched; reported at 15789 Hz the comb had the
+            // tracker subtract a tone 73 Hz from every faint line, which put
+            // a new line beside each instead of removing one.
+            const auto parity_slots = static_cast<double>(grid.k_hi - grid.k_lo + 1) / 2.0;
+            auto count = [](const std::optional<Fit>& half) {
+                return half ? static_cast<double>(half->found) : 0.0;
+            };
+            auto occupied = [&](const std::optional<Fit>& half) {
+                return half && half->found >= kCombMinLines &&
+                       count(half) >= kMinOccupancy * parity_slots;
+            };
+            const bool even_empty = count(even) < kEmptyParity * parity_slots;
+            const bool odd_empty = count(odd) < kEmptyParity * parity_slots;
+            if (even_empty != odd_empty && occupied(even_empty ? odd : even)) {
+                pending.push_back(std::move(even_empty ? *odd : *even));
+                pending_half.push_back(is_half);
+                continue;
             }
+            // At the top only, one half there and the other thin: the thin
+            // one is a second family near the half grid, which the search
+            // finds next on its own grid. Marked a half, so it is not halved
+            // again for weak edges.
+            if (!is_half && occupied(even) != occupied(odd)) {
+                pending.push_back(std::move(occupied(even) ? *even : *odd));
+                pending_half.push_back(true);
+                continue;
+            }
+
+            // A comb is always held as its two halves when both are there.
+            // Two sources at one spacing can sit almost on each other's half
+            // grid for a while and then walk apart: on the 80 m capture the
+            // offset between the families went from a few hertz to 73 Hz in
+            // seconds, and a tracker holding both as one grid is then wrong
+            // for half its lines. A half is an exact model of every other
+            // line of a true single comb, so nothing is lost by splitting
+            // one. Below the first level a half is split again only when its
+            // own halves disagree with it.
             const bool room = found.size() + done.size() + pending.size() + 2 <= kCombMaxCombs;
-            if (room && even && odd && even->found >= kCombMinLines &&
-                odd->found >= kCombMinLines &&
-                std::max(misplaced(grid, *even, 0), misplaced(grid, *odd, 1)) > split_bins) {
+            const bool disagree =
+                even && odd && std::max(misplaced(grid, *even, 0), misplaced(grid, *odd, 1)) > split_bins;
+            if (room && occupied(even) && occupied(odd) && (!is_half || disagree)) {
                 pending.push_back(std::move(*even));
+                pending_half.push_back(true);
                 pending.push_back(std::move(*odd));
+                pending_half.push_back(true);
             } else {
                 done.push_back(std::move(grid));
             }
         }
+        // Every peak on a taken grid leaves the search, matched or not: a line
+        // the fit missed would otherwise come back next time round as the
+        // same comb at a sub-grid of it, and be cancelled twice.
+        auto take_grid = [&](const Fit& grid) {
+            for (std::size_t j = 0; j < peaks.size(); ++j) {
+                const double k = std::round((peaks[j].x - grid.c) / grid.d);
+                if (k >= static_cast<double>(grid.k_lo) && k <= static_cast<double>(grid.k_hi) &&
+                    std::abs(peaks[j].x - grid.c - k * grid.d) < kTakenBins) {
+                    taken[j] = true;
+                }
+            }
+        };
+        // Each comb with its modulation sidebands. The sidebands go to the
+        // tracker as part of the comb, ripple_hz and sideband_orders, and
+        // leave the search so they do not come back as combs of their own:
+        // on the 80 m capture a strong family's first sidebands stood higher
+        // than a second, weaker family and were found ahead of it, and a
+        // tracker started on a sideband comb is pulled onto the carriers a
+        // hundred hertz away.
+        const double hz_per_bin = static_cast<double>(spectrum.rate) / static_cast<double>(n);
         for (const Fit& grid : done) {
-            found.push_back({to_estimate(grid, n, spectrum.rate), line_power(grid)});
+            double ripple_bins = 0.0;
+            const std::vector<Fit> sides = sideband_grids(grid, peaks, *db, spectrum.rate, ripple_bins);
+            CombEstimate estimate = to_estimate(grid, n, spectrum.rate);
+            if (ripple_bins > 0.0) {
+                estimate.ripple_hz = ripple_bins * hz_per_bin;
+                estimate.sideband_orders = kTrackedOrders;
+            }
+            found.push_back({estimate, line_power(grid)});
             for (const std::size_t j : grid.which) {
                 taken[j] = true;
+            }
+            take_grid(grid);
+            for (const Fit& side : sides) {
+                take_grid(side);
             }
         }
         std::vector<Peak> rest;

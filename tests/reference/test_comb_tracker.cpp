@@ -21,12 +21,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <deque>
+#include <format>
 #include <functional>
 #include <map>
 #include <memory>
 #include <numbers>
 #include <random>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "core/dsp/comb_cancel.h"
@@ -502,8 +504,9 @@ TEST_CASE("comb tracker: reset, re-detection and trimming", "[comb][tracker]")
     const CombBlockPlan plan = wide.plan(0, kBlock);
     REQUIRE(plan.lines.size() == dsp::kCombMaxLines);
     const auto st = wide.status();
-    CHECK(st.comb.k_lo == (3500 - 256) / 2);
-    CHECK(st.comb.k_hi == (3500 - 256) / 2 + 255);
+    constexpr auto kMax = static_cast<std::int32_t>(dsp::kCombMaxLines);
+    CHECK(st.comb.k_lo == (3500 - kMax) / 2);
+    CHECK(st.comb.k_hi == (3500 - kMax) / 2 + kMax - 1);
     CHECK(plan.sub_blocks == 16);
     CHECK_FALSE(plan.subtract);
 }
@@ -707,62 +710,99 @@ TEST_CASE("comb bank: two interleaved switchers are both locked and cancelled", 
     CHECK(all.lines_cancelled == sa.lines_cancelled + sb.lines_cancelled);
 }
 
-// The owner's HF dumps at 36.6 Hz a bin: a 15789.4 Hz comb and its supply-
-// ripple sideband comb 100.7 Hz below, a few dB under, found as two combs at
-// one spacing. Each tracker's projections carry the other comb's lines a
-// hundred hertz away; both must still lock and cancel.
-TEST_CASE("comb bank: a comb and its ripple sideband comb are both cancelled", "[comb][tracker]")
+// A comb whose every line carries ripple sidebands one ripple either side, as
+// on the owner's 80 m comb (rungs every 59.5 Hz). The carriers and each
+// sideband order are simulated as combs of their own, summed, so each
+// projection holds the others' leakage the way the kernel's would. The
+// tracker starts half a hertz off the ripple and must follow it and cancel
+// the sidebands with the carriers.
+TEST_CASE("comb tracker: cancels ripple sidebands with their carriers", "[comb][tracker]")
 {
-    const std::uint64_t seed = 0x51DEBA2DULL;
-    std::printf("comb bank sideband: seed %llu\n", static_cast<unsigned long long>(seed));
+    const std::uint64_t seed = 0x51DE5EEDULL;
+    std::printf("comb tracker sidebands: seed %llu\n", static_cast<unsigned long long>(seed));
     INFO("seed " << seed);
-    Sim a;
-    Sim b;
-    a.rng.seed(seed);
-    b.rng.seed(seed + 1);
-    auto spacing = [](double t) { return 15789.4 + 0.1 * std::sin(kTwoPi * t / 11.0); };
-    a.truth.spacing = spacing;
-    a.truth.offset = [](double t) { return 2707.0 + 1.0 * std::sin(kTwoPi * t / 19.0); };
-    b.truth.spacing = spacing;
-    b.truth.offset = [](double t) { return 2707.0 - 100.7 + 1.0 * std::sin(kTwoPi * t / 19.0); };
-    populate(a, -40, 40, 16.0, 26.0, 0);
-    populate(b, -40, 40, 12.0, 22.0, 0);
-    b.noise_power = 0.0;
+    auto ripple = [](double t) { return 59.5 + 0.1 * std::sin(kTwoPi * t / 7.0); };
+    auto offset = [](double t) { return 2707.0 + 1.0 * std::sin(kTwoPi * t / 19.0); };
+    auto spacing = [](double t) { return 31578.9 + 0.05 * std::sin(kTwoPi * t / 11.0); };
 
-    dsp::CombBank bank(kRate);
-    const std::vector<CombEstimate> found{estimate_of(a.truth, -40, 40, 20.0, 0.05),
-                                          estimate_of(b.truth, -40, 40, -15.0, -0.05)};
-    bank.detected(found);
-    REQUIRE(bank.trackers().size() == 2);
+    Sim carrier;
+    Sim upper;
+    Sim lower;
+    carrier.rng.seed(seed);
+    upper.rng.seed(seed + 1);
+    lower.rng.seed(seed + 2);
+    carrier.truth.spacing = spacing;
+    carrier.truth.offset = offset;
+    upper.truth.spacing = spacing;
+    upper.truth.offset = [=](double t) { return offset(t) + ripple(t); };
+    lower.truth.spacing = spacing;
+    lower.truth.offset = [=](double t) { return offset(t) - ripple(t); };
+    populate(carrier, -20, 20, 24.0, 30.0, 0);
+    populate(upper, -20, 20, 12.0, 18.0, 0);
+    populate(lower, -20, 20, 12.0, 18.0, 0);
+    upper.noise_power = 0.0;
+    lower.noise_power = 0.0;
 
+    CombTracker tracker(kRate);
+    CombEstimate estimate = estimate_of(carrier.truth, -20, 20, 10.0, 0.02);
+    estimate.ripple_hz = ripple(0.0) + 0.5;
+    estimate.sideband_orders = 1;
+    tracker.detected(estimate);
+    REQUIRE(tracker.lines() == 41 * 3);
+
+    std::vector<Sim*> sims{&carrier, &upper, &lower};
     std::deque<std::pair<CombBlockPlan, std::vector<dsp::Complex32>>> in_flight;
+    auto step_all = [&] {
+        const dsp::SampleIndex start = carrier.block * kBlock;
+        for (Sim* sim : sims) {
+            ++sim->block;
+        }
+        CombBlockPlan plan = tracker.plan(start, kBlock);
+        std::vector<dsp::Complex32> proj;
+        if (!plan.lines.empty()) {
+            for (Sim* sim : sims) {
+                const std::vector<dsp::Complex32> part = synthesise(*sim, plan);
+                if (proj.empty()) {
+                    proj = part;
+                } else {
+                    for (std::size_t i = 0; i < proj.size(); ++i) {
+                        proj[i] += part[i];
+                    }
+                }
+            }
+        }
+        in_flight.emplace_back(std::move(plan), std::move(proj));
+        while (in_flight.size() > carrier.frames_in_flight) {
+            auto& [old_plan, old_proj] = in_flight.front();
+            if (!old_plan.lines.empty()) {
+                tracker.observe(CombObservation{old_plan.start, old_plan.count,
+                                                old_plan.sub_blocks, old_proj});
+            }
+            in_flight.pop_front();
+        }
+    };
+
     int locked_at = -1;
     for (int blk = 0; blk < 200 && locked_at < 0; ++blk) {
-        bank_step(a, b, bank, in_flight);
-        if (bank.trackers()[0].status().lock == CombLock::kLocked &&
-            bank.trackers()[1].status().lock == CombLock::kLocked) {
+        step_all();
+        if (tracker.status().lock == CombLock::kLocked) {
             locked_at = blk + 1;
         }
     }
-    INFO("both locked at block " << locked_at);
+    INFO("locked at block " << locked_at);
     REQUIRE(locked_at > 0);
-    for (int blk = 0; blk < 400; ++blk) {
-        bank_step(a, b, bank, in_flight);
-        if (blk % 36 == 0) {
-            bank.detected(found);
-        }
+    for (int blk = 0; blk < 300; ++blk) {
+        step_all();
     }
-    REQUIRE(bank.trackers().size() == 2);
-    const auto sa = bank.trackers()[0].status();
-    const auto sb = bank.trackers()[1].status();
-    std::printf("  locked at %d; comb %u lines %.1f dB; sideband %u lines %.1f dB\n", locked_at,
-                sa.lines_cancelled, sa.suppression_db, sb.lines_cancelled, sb.suppression_db);
-    CHECK(sa.lock == CombLock::kLocked);
-    CHECK(sb.lock == CombLock::kLocked);
-    CHECK(sa.lines_cancelled >= 75);
-    CHECK(sb.lines_cancelled >= 75);
-    CHECK(sa.suppression_db > 10.0F);
-    CHECK(sb.suppression_db > 8.0F);
+    const double t = static_cast<double>(carrier.block) * kBlock / 2.4e6;
+    const auto status = tracker.status();
+    std::printf("  locked at %d; %u of %u lines cancelled, ripple %.3f Hz against %.3f\n",
+                locked_at, status.lines_cancelled, tracker.lines(), tracker.ripple_hz(),
+                ripple(t));
+    CHECK(status.lock == CombLock::kLocked);
+    CHECK(std::abs(tracker.ripple_hz() - ripple(t)) < 0.2);
+    // Carriers and sidebands nearly all cancelled.
+    CHECK(status.lines_cancelled >= 41 * 3 * 9 / 10);
 }
 
 TEST_CASE("comb tracker: folds finer sub-blocks into the ones it planned", "[comb][tracker]")

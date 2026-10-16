@@ -38,6 +38,12 @@ namespace {
 // detection of what that tracker holds, at another spacing or a sub-grid.
 constexpr double kOverlapFraction = 0.25;
 
+// How close a detected line must be to a held one to be that line. A
+// detection from the fine spectrum places a line to a few hertz, a coarser
+// one to tens; a mains-ripple sideband sits 59.5 Hz from its carrier and is a
+// different line.
+constexpr double kSameLineHz = 45.0;
+
 constexpr std::size_t kMaxSplits = 32;
 
 }  // namespace
@@ -55,22 +61,27 @@ void CombBank::detected(std::span<const CombEstimate> estimates)
     if (rate_ <= 0) {
         return;
     }
-    std::vector<const CombEstimate*> fresh;
-    for (const CombEstimate& estimate : estimates) {
-        if (estimate.line_count() < kCombMinLines || !(estimate.spacing_hz > 0.0)) {
-            continue;
-        }
-        bool held = false;
+    // Held is checked again as each tracker starts, against every running
+    // tracker including the ones this call started: a line subtracted twice
+    // is a line put back at full strength in antiphase, and on the 80 m
+    // capture of 2026-10-16 the detector handed one comb over as several
+    // sub-grids of itself, which without this cancelled each line three to
+    // five times and left them louder than before.
+    auto held = [this](const CombEstimate& estimate) {
         for (const CombTracker& tracker : trackers_) {
-            if (tracker.active() &&
-                (tracker.agrees(estimate) || tracker.overlap(estimate) > kOverlapFraction)) {
-                held = true;
-                break;
+            // Not agrees(): its 150 Hz allowance is for a coarse detection
+            // restarting one tracker, and would take a sideband comb for its
+            // carrier's.
+            if (tracker.active() && tracker.overlap(estimate, kSameLineHz) > kOverlapFraction) {
+                return true;
             }
         }
-        // Two estimates of one detection never overlap each other: the
-        // detector removes a comb's peaks before looking for the next.
-        if (!held) {
+        return false;
+    };
+    std::vector<const CombEstimate*> fresh;
+    for (const CombEstimate& estimate : estimates) {
+        if (estimate.line_count() >= kCombMinLines && estimate.spacing_hz > 0.0 &&
+            !held(estimate)) {
             fresh.push_back(&estimate);
         }
     }
@@ -88,14 +99,31 @@ void CombBank::detected(std::span<const CombEstimate> estimates)
     for (const CombTracker& tracker : trackers_) {
         used += tracker.lines();
     }
+    // What a comb asks for: its lines, each with its sidebands.
+    auto need = [](const CombEstimate& e) {
+        const auto orders = static_cast<std::uint32_t>(std::max(e.sideband_orders, 0));
+        return e.line_count() * (2 * orders + 1);
+    };
     for (std::size_t i = 0; i < fresh.size(); ++i) {
         if (trackers_.size() >= kCombMaxCombs || used >= kCombMaxLines) {
             break;
         }
+        // Strongest first takes what it needs if the rest still fit, and an
+        // even share of what is free otherwise.
+        const std::uint32_t free = kCombMaxLines - used;
+        std::uint32_t rest = 0;
+        for (std::size_t j = i + 1; j < fresh.size(); ++j) {
+            rest += need(*fresh[j]);
+        }
         const auto left = static_cast<std::uint32_t>(fresh.size() - i);
-        const std::uint32_t share = (kCombMaxLines - used) / left;
+        const std::uint32_t even = free / left;
+        const std::uint32_t room = rest < free ? free - rest : 0;
+        const std::uint32_t share = std::min(need(*fresh[i]), std::max(even, room));
         if (share < kCombMinLines) {
             break;
+        }
+        if (held(*fresh[i])) {
+            continue;
         }
         CombTracker tracker(rate_, share);
         tracker.detected(*fresh[i]);
@@ -117,6 +145,26 @@ CombBlockPlan CombBank::plan(SampleIndex start, std::uint32_t count)
     out.start = start;
     out.count = count;
     out.sub_blocks = 1;
+
+    // Two trackers that have come to hold the same lines: the later one goes.
+    // Overlap is checked at start too, but a tracker started beside a much
+    // stronger comb can be pulled onto it during acquisition, whose pull-in
+    // is a few hundred hertz, and then cancels lines another already does.
+    bool merged = false;
+    for (std::size_t j = trackers_.size(); j-- > 1;) {
+        const CombStatus later = trackers_[j].status();
+        for (std::size_t i = 0; i < j; ++i) {
+            if (trackers_[i].active() && trackers_[j].active() &&
+                trackers_[i].overlap(later.comb, kSameLineHz) > kOverlapFraction) {
+                trackers_.erase(trackers_.begin() + static_cast<std::ptrdiff_t>(j));
+                merged = true;
+                break;
+            }
+        }
+    }
+    if (merged) {
+        splits_.clear();
+    }
 
     std::vector<CombBlockPlan> plans;
     plans.reserve(trackers_.size());
