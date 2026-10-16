@@ -996,7 +996,7 @@ struct Graph::Impl {
     // switched and the range the stage follows jumps), whether the stage ran
     // on the previous block, and the retune epoch the tracker was last reset
     // at.
-    dsp::CombTracker comb_tracker;
+    dsp::CombBank comb_bank;
     dsp::SampleIndex comb_next = 0;
     bool comb_was_on = false;
     std::uint64_t comb_tracker_epoch = 0;
@@ -1063,7 +1063,7 @@ struct Graph::Impl {
     std::atomic<std::uint32_t> comb_job_state{kCombJobIdle};
 
     struct CombResult {
-        std::optional<dsp::CombEstimate> estimate;
+        std::vector<dsp::CombEstimate> estimates;
         std::uint64_t epoch = 0;
     };
     CombResult comb_result;
@@ -1487,7 +1487,7 @@ struct Graph::Impl {
         observation.count = count;
         observation.sub_blocks = frame.comb_observed_sub_blocks;
         observation.projections = projections;
-        comb_tracker.observe(observation);
+        comb_bank.observe(observation);
     }
 
     // Recording thread. Takes a finished detection if one is waiting.
@@ -1498,24 +1498,20 @@ struct Graph::Impl {
         const CombResult result = comb_result;
         comb_result_full.store(false, std::memory_order_release);
         if (result.epoch != comb_epoch.load(std::memory_order_acquire) ||
-            !result.estimate.has_value()) {
+            result.estimates.empty()) {
             return;
         }
-        // Fed only while the tracker has nothing. The detection's spectrum is
-        // measured after the cancellation, so once the stage is cancelling it
-        // sees what is left of the comb, and handing that back would restart
-        // acquisition on a comb the tracker already holds; the tracker reports
-        // a comb it has stopped fitting as lost, and then this picks it up
-        // afresh. While acquiring, a detection a second later would restart a
-        // pull-in that may need longer than that.
-        const dsp::CombLock lock = comb_tracker.status().lock;
-        if (lock == dsp::CombLock::kIdle || lock == dsp::CombLock::kLost) {
-            comb_tracker.detected(*result.estimate);
-        }
+        // Every detection goes to the bank, which drops what its trackers
+        // already hold. The detection's spectrum is measured after the
+        // cancellation, so once a comb is being cancelled the detector sees
+        // what is left: the other combs, which is how a second comb beside a
+        // locked one is picked up, and a remnant of the locked one, which the
+        // bank recognises by its lines and ignores.
+        comb_bank.detected(result.estimates);
     }
 
     void publish_comb_status() {
-        const dsp::CombStatus status = comb_tracker.status();
+        const dsp::CombStatus status = comb_bank.status();
         comb_lines_cancelled.store(status.lines_cancelled, std::memory_order_relaxed);
         comb_suppression_db.store(status.suppression_db, std::memory_order_relaxed);
         comb_drift.store(status.spacing_drift_hz_per_s, std::memory_order_relaxed);
@@ -1536,14 +1532,14 @@ struct Graph::Impl {
         const std::uint64_t epoch = comb_epoch.load(std::memory_order_acquire);
         if (!on) {
             if (comb_was_on) {
-                comb_tracker.reset();
+                comb_bank.reset();
                 publish_comb_status();
             }
             comb_was_on = false;
             return std::nullopt;
         }
         if (!comb_was_on || epoch != comb_tracker_epoch) {
-            comb_tracker.reset();
+            comb_bank.reset();
             comb_tracker_epoch = epoch;
         }
         comb_was_on = true;
@@ -1556,7 +1552,7 @@ struct Graph::Impl {
         }
         comb_next = end;
         dsp::CombBlockPlan plan =
-            comb_tracker.plan(start, static_cast<std::uint32_t>(end - start));
+            comb_bank.plan(start, static_cast<std::uint32_t>(end - start));
         publish_comb_status();
         if (plan.lines.empty() || plan.count == 0) {
             return std::nullopt;
@@ -1728,13 +1724,13 @@ struct Graph::Impl {
                     std::fclose(file);
                 }
             }
-            auto found = dsp::detect_comb(spectrum);
+            auto found = dsp::detect_combs(spectrum);
             comb_detections.fetch_add(1, std::memory_order_relaxed);
-            if (found && found->has_value()) {
+            if (found && !found->empty()) {
                 comb_detections_found.fetch_add(1, std::memory_order_relaxed);
             }
             if (found && !comb_result_full.load(std::memory_order_acquire)) {
-                comb_result.estimate = *found;
+                comb_result.estimates = std::move(*found);
                 comb_result.epoch = comb_job_epoch;
                 comb_result_full.store(true, std::memory_order_release);
             } else if (found) {
@@ -3715,7 +3711,7 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         impl.comb_projection_scratch.assign(
             static_cast<std::size_t>(dsp::kCombMaxLines) * dsp::kCombMaxSubBlocks,
             dsp::Complex32{});
-        impl.comb_tracker = dsp::CombTracker(impl.config.source_rate);
+        impl.comb_bank = dsp::CombBank(impl.config.source_rate);
         if (const char* dump = std::getenv("REVENANT_COMB_DUMP"); dump != nullptr) {
             impl.comb_dump_prefix = dump;
         }

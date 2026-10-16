@@ -121,6 +121,15 @@ inline constexpr std::uint32_t kCombTableSize = 1U << kCombTableLog2;
 // the sub-block length sets its pull-in range: +/- rate / (2 * sub-block).
 inline constexpr std::uint32_t kCombMaxSubBlocks = 16;
 
+// The most combs cancelled at once, sharing kCombMaxLines between them. The
+// owner's HF comb (2026-10-12 dumps) is a 15789.4 Hz comb plus its supply-
+// ripple sideband comb 100.7 Hz below, at the same spacing: two grids, which
+// one affine model cannot hold together, so it locked to one and left every
+// other visible line standing. Each is its own comb here. Interleaved sources
+// whose lines share a grid only roughly are split by detect_combs the same
+// way. Four leaves room for an unrelated comb beside such a pair.
+inline constexpr std::uint32_t kCombMaxCombs = 4;
+
 // ---------------------------------------------------------------------------
 // Detection
 // ---------------------------------------------------------------------------
@@ -159,6 +168,16 @@ struct CombSpectrum {
 // No comb in the spectrum is std::nullopt, not an error. An error is a
 // spectrum that cannot be read: empty, rate not positive, too few bins.
 [[nodiscard]] Expected<std::optional<CombEstimate>> detect_comb(const CombSpectrum& spectrum);
+
+// Every comb in the spectrum, at most kCombMaxCombs, strongest first by the
+// summed power of its found lines. A grid whose even and odd lines, each
+// fitted as a grid of its own, sit more than a quarter bin from where the
+// joint grid puts them is two sources interleaved, and is reported as the two
+// halves at twice the spacing, each split again by the same test. A true
+// single comb's halves agree with it and it is reported whole. After each
+// comb is taken its peaks are removed and the rest searched again. An empty
+// vector is no comb.
+[[nodiscard]] Expected<std::vector<CombEstimate>> detect_combs(const CombSpectrum& spectrum);
 
 // ---------------------------------------------------------------------------
 // The kernels' contract
@@ -255,7 +274,10 @@ struct CombStatus {
 
 // One block's projections, as read back from the project pass of block
 // `start`. Line-major, lines * sub_blocks, the lines being exactly those the
-// tracker handed out for that block, in that order.
+// tracker handed out for that block, in that order. sub_blocks may be a
+// multiple of what the tracker planned: a projection is a sum over samples, so
+// adjacent sub-blocks add exactly into a longer one, and the tracker folds
+// them. That is how one dispatch serves trackers that want different lengths.
 struct CombObservation {
     SampleIndex start = 0;
     std::uint32_t count = 0;
@@ -281,7 +303,8 @@ struct CombBlockPlan {
 class CombTracker {
 public:
     CombTracker() = default;
-    explicit CombTracker(SampleRate rate);
+    // max_lines is the tracker's share of kCombMaxLines.
+    explicit CombTracker(SampleRate rate, std::uint32_t max_lines = kCombMaxLines);
 
     // Forget everything; the next detection starts acquisition again. Called
     // on every retune and source change.
@@ -299,6 +322,22 @@ public:
     [[nodiscard]] CombBlockPlan plan(SampleIndex start, std::uint32_t count);
 
     [[nodiscard]] CombStatus status() const;
+
+    // Acquiring or locked: holding a comb.
+    [[nodiscard]] bool active() const
+    {
+        return lock_ == CombLock::kAcquiring || lock_ == CombLock::kLocked;
+    }
+
+    // The estimate describes the comb this tracker holds.
+    [[nodiscard]] bool agrees(const CombEstimate& estimate) const;
+
+    // Fraction of the estimate's lines within kAgreeHz of one of this
+    // tracker's lines: a detection of lines already owned, at another
+    // spacing, would subtract them twice.
+    [[nodiscard]] double overlap(const CombEstimate& estimate) const;
+
+    [[nodiscard]] std::uint32_t lines() const { return static_cast<std::uint32_t>(lines_.size()); }
 
 private:
     // Value members only; the tracker is copyable so a test can fork it.
@@ -350,7 +389,6 @@ private:
     enum class Stage : std::uint8_t { kFrequency, kPhase };
 
     void start_acquisition(const CombEstimate& estimate);
-    [[nodiscard]] bool agrees(const CombEstimate& estimate) const;
     void advance_to(SampleIndex index);
     void correct(SampleIndex at, double dc_phase, double dc_freq, double dc_rate,
                  double dd_phase, double dd_freq, double dd_rate);
@@ -358,6 +396,7 @@ private:
     [[nodiscard]] double line_snr(const Line& line, std::uint32_t count) const;
 
     SampleRate rate_ = 0;
+    std::uint32_t max_lines_ = kCombMaxLines;
     CombLock lock_ = CombLock::kIdle;
     Stage stage_ = Stage::kFrequency;
     std::uint64_t generation_ = 0;
@@ -384,6 +423,45 @@ private:
     bool wide_ = true;                 // short sub-blocks, for the widest pull-in
     std::uint32_t bad_blocks_ = 0;     // consecutive blocks failing the lock test
     bool seed_pending_ = false;
+};
+
+// Up to kCombMaxCombs trackers behind one tracker's interface, so the graph
+// dispatches one project and one subtract pass for all of them. A plan is the
+// trackers' plans concatenated, at the largest sub-block count any of them
+// asked for; an observation is split back by the line counts handed out for
+// that block and each tracker folds the sub-blocks to its own.
+//
+// Detections are matched, not replayed: an estimate a running tracker agrees
+// with, or whose lines mostly sit on a running tracker's lines, is already
+// held and is dropped; anything else starts in a free tracker, idle or lost,
+// with an even share of the slots no running tracker holds.
+class CombBank {
+public:
+    CombBank() = default;
+    explicit CombBank(SampleRate rate);
+
+    void reset();
+    void detected(std::span<const CombEstimate> estimates);
+    void observe(const CombObservation& observation);
+    [[nodiscard]] CombBlockPlan plan(SampleIndex start, std::uint32_t count);
+
+    // Locked if any comb is; lines and suppression over all of them; the comb
+    // reported is the one cancelling the most lines.
+    [[nodiscard]] CombStatus status() const;
+
+    [[nodiscard]] std::span<const CombTracker> trackers() const { return trackers_; }
+
+private:
+    struct Split {
+        SampleIndex start = 0;
+        std::uint32_t sub_blocks = 1;
+        std::vector<std::uint32_t> lines;          // per tracker
+        std::vector<std::uint32_t> tracker_sub;    // per tracker, as planned
+    };
+
+    SampleRate rate_ = 0;
+    std::vector<CombTracker> trackers_;
+    std::vector<Split> splits_;
 };
 
 }  // namespace revenant::dsp

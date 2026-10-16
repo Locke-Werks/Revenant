@@ -341,13 +341,16 @@ std::uint32_t pick_sub_blocks(std::uint32_t count, SampleRate rate, bool wide)
 
 }  // namespace
 
-CombTracker::CombTracker(SampleRate rate) : rate_(rate) {}
+CombTracker::CombTracker(SampleRate rate, std::uint32_t max_lines)
+    : rate_(rate), max_lines_(std::clamp<std::uint32_t>(max_lines, 1, kCombMaxLines))
+{
+}
 
 void CombTracker::reset()
 {
     const SampleRate rate = rate_;
     const std::uint64_t generation = generation_ + 1;
-    *this = CombTracker(rate);
+    *this = CombTracker(rate, max_lines_);
     generation_ = generation;
 }
 
@@ -387,11 +390,39 @@ bool CombTracker::agrees(const CombEstimate& estimate) const
     return std::abs(err_c) < kAgreeHz && std::abs(estimate.spacing_hz - d) * half_span < kAgreeHz;
 }
 
+double CombTracker::overlap(const CombEstimate& estimate) const
+{
+    if (!active() || lines_.empty() || estimate.line_count() == 0) {
+        return 0.0;
+    }
+    const double rate = static_cast<double>(rate_);
+    const double c = anchored_ ? signed_of(c_.freq) * rate : initial_offset_hz_;
+    const double d = anchored_ ? signed_of(d_.freq) * rate : initial_spacing_hz_;
+    if (!(d > 0.0)) {
+        return 0.0;
+    }
+    std::int32_t lo = lines_.front().k;
+    std::int32_t hi = lines_.front().k;
+    for (const Line& line : lines_) {
+        lo = std::min(lo, line.k);
+        hi = std::max(hi, line.k);
+    }
+    std::uint32_t on = 0;
+    for (std::int32_t k = estimate.k_lo; k <= estimate.k_hi; ++k) {
+        const double f = estimate.offset_hz + k * estimate.spacing_hz;
+        const double j = std::round((f - c) / d);
+        if (j >= lo && j <= hi && std::abs(f - (c + j * d)) < kAgreeHz) {
+            ++on;
+        }
+    }
+    return static_cast<double>(on) / static_cast<double>(estimate.line_count());
+}
+
 void CombTracker::start_acquisition(const CombEstimate& estimate)
 {
     const SampleRate rate = rate_;
     const std::uint64_t generation = generation_ + 1;
-    *this = CombTracker(rate);
+    *this = CombTracker(rate, max_lines_);
     generation_ = generation;
 
     lock_ = CombLock::kAcquiring;
@@ -402,9 +433,9 @@ void CombTracker::start_acquisition(const CombEstimate& estimate)
     range_lo_ = estimate.k_lo;
     range_hi_ = estimate.k_hi;
 
-    // The central kCombMaxLines of the range.
+    // The central max_lines_ of the range.
     const std::int64_t total = static_cast<std::int64_t>(estimate.line_count());
-    const std::int64_t take = std::min<std::int64_t>(total, kCombMaxLines);
+    const std::int64_t take = std::min<std::int64_t>(total, max_lines_);
     const std::int64_t first = estimate.k_lo + (total - take) / 2;
     lines_.reserve(static_cast<std::size_t>(take));
     for (std::int64_t i = 0; i < take; ++i) {
@@ -577,11 +608,26 @@ void CombTracker::observe(const CombObservation& observation)
     records_.erase(records_.begin(), it + 1);
 
     const std::uint32_t S = record.sub_blocks;
-    if (record.generation != generation_ || observation.count != record.count ||
-        observation.sub_blocks != S ||
-        observation.projections.size() != record.lines.size() * static_cast<std::size_t>(S) ||
+    const std::uint32_t given = observation.sub_blocks;
+    if (record.generation != generation_ || observation.count != record.count || S == 0 ||
+        given < S || given % S != 0 ||
+        observation.projections.size() != record.lines.size() * static_cast<std::size_t>(given) ||
         record.count == 0) {
         return;
+    }
+    // Finer sub-blocks than planned, from a dispatch shared with a tracker
+    // that wanted them: adjacent ones add exactly into the planned length.
+    std::vector<Complex32> folded;
+    std::span<const Complex32> projections = observation.projections;
+    if (given != S) {
+        const std::uint32_t group = given / S;
+        folded.assign(record.lines.size() * static_cast<std::size_t>(S), Complex32{});
+        for (std::size_t i = 0; i < folded.size(); ++i) {
+            for (std::uint32_t g = 0; g < group; ++g) {
+                folded[i] += projections[i * group + g];
+            }
+        }
+        projections = folded;
     }
 
     const double N = static_cast<double>(record.count);
@@ -613,7 +659,7 @@ void CombTracker::observe(const CombObservation& observation)
             continue;  // the slot was given to another line since
         }
         Line& line = lines_[planned.slot];
-        const auto proj = observation.projections.subspan(i * S, S);
+        const auto proj = projections.subspan(i * S, S);
 
         Cd D{};
         Cd P{};

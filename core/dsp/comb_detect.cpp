@@ -98,6 +98,17 @@ constexpr double kCandidateFraction = 0.5;  // of the largest S
 constexpr double kKeepFraction = 0.9;       // of the best fit's lines
 constexpr double kMinOccupancy = 0.4;
 
+// A half is split off when its own grid puts its end lines this far from the
+// joint grid: a quarter of a bin, which is well over the centres' error
+// averaged along a half's least-squares line, and at the finer resolutions no
+// less than kSplitHz. On the owner's HF dumps at 36.6 Hz a bin, the 100.7 Hz
+// ripple sidebands beside every line pull peak centres about, and one
+// switcher's halves came out 11 Hz apart at the ends of the span; two sources
+// a hundred hertz off half a spacing, or a few hertz apart in spacing across
+// thirty lines, are far beyond it.
+constexpr double kSplitBins = 0.25;
+constexpr double kSplitHz = 25.0;
+
 struct Peak {
     double x = 0.0;       // centre, bins
     double height = 0.0;  // dB above floor
@@ -110,6 +121,8 @@ struct Fit {
     std::int64_t k_hi = -1;
     std::uint32_t found = 0;
     std::vector<double> heights;
+    std::vector<std::int64_t> ks;     // per found line
+    std::vector<std::size_t> which;   // the peak each found line is
 };
 
 [[nodiscard]] double percentile(std::vector<double>& values, double p)
@@ -295,47 +308,17 @@ void match(const std::vector<Peak>& peaks, double c, double d, double tolerance,
     for (const std::size_t j : which) {
         fit.heights.push_back(peaks[j].height);
     }
+    fit.ks = ks;
+    fit.which = which;
     return fit;
 }
 
-}  // namespace
-
-Expected<std::optional<CombEstimate>> detect_comb(const CombSpectrum& spectrum)
+// The best grid among the peaks, by the phase-coherence search and the
+// largest-d rule in the header comment, or nothing.
+[[nodiscard]] std::optional<Fit> best_grid(const std::vector<Peak>& peaks)
 {
-    const std::size_t n = spectrum.power.size();
-    if (n == 0) {
-        return fail("comb detection: the spectrum is empty");
-    }
-    if (spectrum.rate <= 0) {
-        return fail(std::format("comb detection: a rate of {} is not positive", spectrum.rate));
-    }
-    if (n < kMinBins) {
-        return fail(std::format("comb detection: {} bins is fewer than the {} it needs", n,
-                                kMinBins));
-    }
-
-    // A zero bin is legitimate (a filter's stopband, a quiet simulation) and
-    // becomes a very low dB value rather than minus infinity.
-    std::vector<double> db(n);
-    float largest = 0.0F;
-    for (std::size_t i = 0; i < n; ++i) {
-        const float p = spectrum.power[i];
-        if (!std::isfinite(p) || p < 0.0F) {
-            return fail(std::format("comb detection: bin {} holds {}, not a power", i, p));
-        }
-        largest = std::max(largest, p);
-    }
-    if (largest <= 0.0F) {
-        return std::optional<CombEstimate>{};
-    }
-    const double tiny = static_cast<double>(largest) * 1e-30;
-    for (std::size_t i = 0; i < n; ++i) {
-        db[i] = 10.0 * std::log10(std::max(static_cast<double>(spectrum.power[i]), tiny));
-    }
-
-    const std::vector<Peak> peaks = find_peaks(db);
     if (peaks.size() < kCombMinLines) {
-        return std::optional<CombEstimate>{};
+        return std::nullopt;
     }
 
     // S(f) on a grid a quarter of its main lobe wide, each peak's phasor
@@ -345,7 +328,7 @@ Expected<std::optional<CombEstimate>> detect_comb(const CombSpectrum& spectrum)
     const double f_lo = static_cast<double>(kCombMinLines - 1) / extent;
     const double f_hi = 1.0 / kMinSpacingBins;
     if (!(f_lo < f_hi)) {
-        return std::optional<CombEstimate>{};
+        return std::nullopt;
     }
     const double df = 0.25 / extent;
     const auto steps = static_cast<std::size_t>((f_hi - f_lo) / df) + 1;
@@ -414,7 +397,7 @@ Expected<std::optional<CombEstimate>> detect_comb(const CombSpectrum& spectrum)
         fits.push_back(std::move(*fit));
     }
     if (fits.empty()) {
-        return std::optional<CombEstimate>{};
+        return std::nullopt;
     }
 
     std::uint32_t best_found = 0;
@@ -431,26 +414,238 @@ Expected<std::optional<CombEstimate>> detect_comb(const CombSpectrum& spectrum)
             chosen = &fit;
         }
     }
+    return *chosen;
+}
 
-    // Renumber so k = 0 is the line nearest DC.
+// The lines of `fit` whose k has parity `odd`, refitted by least squares as a
+// grid of their own at about twice the spacing. Each sub-comb gets its own c
+// and d because two interleaved sources do not share a spacing exactly.
+[[nodiscard]] std::optional<Fit> parity_fit(const Fit& fit, const std::vector<Peak>& peaks,
+                                            bool odd)
+{
+    Fit out;
+    double sj = 0.0;
+    double sx = 0.0;
+    double sjj = 0.0;
+    double sjx = 0.0;
+    for (std::size_t i = 0; i < fit.ks.size(); ++i) {
+        const std::int64_t k = fit.ks[i];
+        if (((k % 2) != 0) != odd) {
+            continue;
+        }
+        // Floor division, so negative k keep their place on the half grid.
+        const std::int64_t j = (k - (odd ? 1 : 0) - (k < 0 ? 1 : 0)) / 2;
+        const double x = peaks[fit.which[i]].x;
+        out.ks.push_back(j);
+        out.which.push_back(fit.which[i]);
+        out.heights.push_back(fit.heights[i]);
+        const auto jd = static_cast<double>(j);
+        sj += jd;
+        sx += x;
+        sjj += jd * jd;
+        sjx += jd * x;
+    }
+    out.found = static_cast<std::uint32_t>(out.ks.size());
+    if (out.found < kCombMinLines) {
+        return std::nullopt;
+    }
+    const auto m = static_cast<double>(out.found);
+    const double det = m * sjj - sj * sj;
+    if (det <= 0.0) {
+        return std::nullopt;
+    }
+    out.d = (m * sjx - sj * sx) / det;
+    out.c = (sx - out.d * sj) / m;
+    if (!(out.d > 0.0)) {
+        return std::nullopt;
+    }
+    out.k_lo = std::ranges::min(out.ks);
+    out.k_hi = std::ranges::max(out.ks);
+    return out;
+}
+
+// How far, in bins, a half's own grid puts its end lines from where the joint
+// grid puts them. Half line j is joint line 2 j + parity; both grids are
+// straight lines in k, so the ends are the worst of it.
+[[nodiscard]] double misplaced(const Fit& joint, const Fit& half, std::int64_t parity)
+{
+    double worst = 0.0;
+    for (const std::int64_t j : {half.k_lo, half.k_hi}) {
+        const auto jd = static_cast<double>(j);
+        const auto k = static_cast<double>(2 * j + parity);
+        worst = std::max(worst, std::abs(half.c + jd * half.d - (joint.c + k * joint.d)));
+    }
+    return worst;
+}
+
+// A fit as an estimate, renumbered so k = 0 is the line nearest DC.
+[[nodiscard]] CombEstimate to_estimate(const Fit& fit, std::size_t n, SampleRate rate)
+{
     const double dc = static_cast<double>(n / 2);
-    const double k0 = std::round((dc - chosen->c) / chosen->d);
-    const double c = chosen->c + k0 * chosen->d;
+    const double k0 = std::round((dc - fit.c) / fit.d);
+    const double c = fit.c + k0 * fit.d;
     const auto shift = static_cast<std::int64_t>(k0);
 
-    const double hz_per_bin = static_cast<double>(spectrum.rate) / static_cast<double>(n);
+    const double hz_per_bin = static_cast<double>(rate) / static_cast<double>(n);
     CombEstimate estimate;
     estimate.offset_hz = (c - dc) * hz_per_bin;
-    estimate.spacing_hz = chosen->d * hz_per_bin;
-    estimate.k_lo = static_cast<std::int32_t>(chosen->k_lo - shift);
-    estimate.k_hi = static_cast<std::int32_t>(chosen->k_hi - shift);
-    estimate.lines_found = chosen->found;
-    std::vector<double> heights = chosen->heights;
+    estimate.spacing_hz = fit.d * hz_per_bin;
+    estimate.k_lo = static_cast<std::int32_t>(fit.k_lo - shift);
+    estimate.k_hi = static_cast<std::int32_t>(fit.k_hi - shift);
+    estimate.lines_found = fit.found;
+    std::vector<double> heights = fit.heights;
     std::ranges::sort(heights);
     const std::size_t h = heights.size();
     estimate.median_height_db = static_cast<float>(
         h % 2 == 1 ? heights[h / 2] : 0.5 * (heights[h / 2 - 1] + heights[h / 2]));
-    return std::optional<CombEstimate>{estimate};
+    return estimate;
+}
+
+[[nodiscard]] double line_power(const Fit& fit)
+{
+    double sum = 0.0;
+    for (const double h : fit.heights) {
+        sum += std::pow(10.0, h / 10.0);
+    }
+    return sum;
+}
+
+// The spectrum in dB, or the reason it cannot be read. Empty when the
+// spectrum is all zero.
+[[nodiscard]] Expected<std::vector<double>> spectrum_db(const CombSpectrum& spectrum)
+{
+    const std::size_t n = spectrum.power.size();
+    if (n == 0) {
+        return fail("comb detection: the spectrum is empty");
+    }
+    if (spectrum.rate <= 0) {
+        return fail(std::format("comb detection: a rate of {} is not positive", spectrum.rate));
+    }
+    if (n < kMinBins) {
+        return fail(std::format("comb detection: {} bins is fewer than the {} it needs", n,
+                                kMinBins));
+    }
+
+    // A zero bin is legitimate (a filter's stopband, a quiet simulation) and
+    // becomes a very low dB value rather than minus infinity.
+    float largest = 0.0F;
+    for (std::size_t i = 0; i < n; ++i) {
+        const float p = spectrum.power[i];
+        if (!std::isfinite(p) || p < 0.0F) {
+            return fail(std::format("comb detection: bin {} holds {}, not a power", i, p));
+        }
+        largest = std::max(largest, p);
+    }
+    if (largest <= 0.0F) {
+        return std::vector<double>{};
+    }
+    std::vector<double> db(n);
+    const double tiny = static_cast<double>(largest) * 1e-30;
+    for (std::size_t i = 0; i < n; ++i) {
+        db[i] = 10.0 * std::log10(std::max(static_cast<double>(spectrum.power[i]), tiny));
+    }
+    return db;
+}
+
+}  // namespace
+
+Expected<std::optional<CombEstimate>> detect_comb(const CombSpectrum& spectrum)
+{
+    auto db = spectrum_db(spectrum);
+    if (!db) {
+        return std::unexpected(db.error());
+    }
+    if (db->empty()) {
+        return std::optional<CombEstimate>{};
+    }
+    const std::optional<Fit> fit = best_grid(find_peaks(*db));
+    if (!fit) {
+        return std::optional<CombEstimate>{};
+    }
+    return std::optional<CombEstimate>{to_estimate(*fit, db->size(), spectrum.rate)};
+}
+
+Expected<std::vector<CombEstimate>> detect_combs(const CombSpectrum& spectrum)
+{
+    auto db = spectrum_db(spectrum);
+    if (!db) {
+        return std::unexpected(db.error());
+    }
+    std::vector<CombEstimate> out;
+    if (db->empty()) {
+        return out;
+    }
+    const std::size_t n = db->size();
+
+    struct Found {
+        CombEstimate estimate;
+        double power = 0.0;
+    };
+    std::vector<Found> found;
+    const double split_bins = std::max(
+        kSplitBins, kSplitHz * static_cast<double>(n) / static_cast<double>(spectrum.rate));
+    std::vector<Peak> peaks = find_peaks(*db);
+    while (found.size() < kCombMaxCombs) {
+        const std::optional<Fit> fit = best_grid(peaks);
+        if (!fit) {
+            break;
+        }
+        std::vector<bool> taken(peaks.size(), false);
+        for (const std::size_t j : fit->which) {
+            taken[j] = true;
+        }
+
+        // A grid is split into its even and odd lines when the halves, each
+        // fitted on its own, do not sit where the grid puts them, and the
+        // halves are looked at the same way in turn. Each half is refitted
+        // against every peak from its own grid: two sources whose spacings
+        // differ by a few hertz walk apart by that much per line, so the joint
+        // grid holds only the middle of the span and each half's own grid is
+        // what reaches the rest. A true single comb's halves agree with it and
+        // it stays whole.
+        std::vector<Fit> pending{*fit};
+        std::vector<Fit> done;
+        while (!pending.empty()) {
+            Fit grid = std::move(pending.back());
+            pending.pop_back();
+            std::optional<Fit> even = parity_fit(grid, peaks, false);
+            std::optional<Fit> odd = parity_fit(grid, peaks, true);
+            if (even) {
+                even = fit_grid(peaks, even->d, even->c);
+            }
+            if (odd) {
+                odd = fit_grid(peaks, odd->d, odd->c);
+            }
+            const bool room = found.size() + done.size() + pending.size() + 2 <= kCombMaxCombs;
+            if (room && even && odd && even->found >= kCombMinLines &&
+                odd->found >= kCombMinLines &&
+                std::max(misplaced(grid, *even, 0), misplaced(grid, *odd, 1)) > split_bins) {
+                pending.push_back(std::move(*even));
+                pending.push_back(std::move(*odd));
+            } else {
+                done.push_back(std::move(grid));
+            }
+        }
+        for (const Fit& grid : done) {
+            found.push_back({to_estimate(grid, n, spectrum.rate), line_power(grid)});
+            for (const std::size_t j : grid.which) {
+                taken[j] = true;
+            }
+        }
+        std::vector<Peak> rest;
+        for (std::size_t j = 0; j < peaks.size(); ++j) {
+            if (!taken[j]) {
+                rest.push_back(peaks[j]);
+            }
+        }
+        peaks = std::move(rest);
+    }
+
+    std::ranges::stable_sort(found, [](const Found& l, const Found& r) { return l.power > r.power; });
+    for (const Found& f : found) {
+        out.push_back(f.estimate);
+    }
+    return out;
 }
 
 }  // namespace revenant::dsp

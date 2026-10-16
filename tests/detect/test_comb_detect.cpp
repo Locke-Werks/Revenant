@@ -13,9 +13,13 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <format>
 #include <numbers>
 #include <optional>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "core/dsp/comb_cancel.h"
@@ -325,4 +329,172 @@ TEST_CASE("comb detection refuses a spectrum it cannot read", "[comb][detect]")
     CHECK_FALSE(detect_comb(CombSpectrum{bad, kRate}).has_value());
     bad[17] = INFINITY;
     CHECK_FALSE(detect_comb(CombSpectrum{bad, kRate}).has_value());
+    CHECK_FALSE(dsp::detect_combs(CombSpectrum{bad, kRate}).has_value());
+}
+
+namespace {
+
+[[nodiscard]] std::vector<CombEstimate> run_all(const std::vector<float>& power)
+{
+    auto result = dsp::detect_combs(CombSpectrum{power, kRate});
+    REQUIRE(result.has_value());
+    return *result;
+}
+
+// Whether `found` lies on the comb c + k d bins with spacing within `hz`.
+[[nodiscard]] bool on_comb(const CombEstimate& found, double c, double d, double hz)
+{
+    const double spacing = d * kHzPerBin;
+    const double dc = static_cast<double>(kBins / 2);
+    const double offset = (c - dc) * kHzPerBin;
+    const double k = std::round((found.offset_hz - offset) / spacing);
+    return std::abs(found.spacing_hz - spacing) < hz &&
+           std::abs(found.offset_hz - (offset + k * spacing)) < 0.2 * kHzPerBin;
+}
+
+}  // namespace
+
+// The owner's HF comb, 2026-10-12: two switchers near 31.58 kHz, a few hertz
+// apart in spacing, whose lines interleave to look like one comb at 15.79 kHz.
+// Each is reported as its own comb, at its own spacing.
+TEST_CASE("comb detections separate two interleaved switchers", "[comb][detect]")
+{
+    for (std::uint64_t seed = 300; seed < 308; ++seed) {
+        INFO("seed " << seed);
+        Scene scene(seed);
+        const double d_a = 31'574.0 / kHzPerBin;
+        const double d_b = 31'579.5 / kHzPerBin;
+        const double c_a = 41.3 + 0.07 * static_cast<double>(seed - 300);
+        const double c_b = c_a + 15'790.0 / kHzPerBin;
+        scene.comb(c_a, d_a, 9.0, 14.0);
+        scene.comb(c_b, d_b, 5.0, 9.0);
+        const std::vector<CombEstimate> found = run_all(scene.render());
+        std::string seen;
+        for (const CombEstimate& f : found) {
+            seen += std::format("[offset {:.1f} spacing {:.2f} k {}..{} lines {}] ", f.offset_hz,
+                                f.spacing_hz, f.k_lo, f.k_hi, f.lines_found);
+        }
+        INFO("found " << seen);
+        REQUIRE(found.size() >= 2);
+        // Strongest first.
+        CHECK(on_comb(found[0], c_a, d_a, 2.0));
+        CHECK(on_comb(found[1], c_b, d_b, 2.0));
+        CHECK(found[0].lines_found >= 50);
+        CHECK(found[1].lines_found >= 50);
+    }
+}
+
+// A single comb's even and odd lines sit on its grid, so it stays one comb.
+TEST_CASE("comb detections keep a single comb whole", "[comb][detect]")
+{
+    for (std::uint64_t seed = 400; seed < 408; ++seed) {
+        INFO("seed " << seed);
+        Scene scene(seed);
+        const double d = 14'000.0 / kHzPerBin;
+        const double c = 37.31 + 0.11 * static_cast<double>(seed - 400);
+        const std::uint32_t drawn = scene.comb(c, d, 6.0, 15.0);
+        const std::vector<CombEstimate> found = run_all(scene.render());
+        REQUIRE(found.size() == 1);
+        CHECK(on_comb(found[0], c, d, 1.0));
+        CHECK(found[0].lines_found >= drawn * 8 / 10);
+    }
+}
+
+// Two sources at one spacing, the second offset a hundred hertz from half of
+// it, as on the owner's HF dumps: the joint grid at half the spacing misplaces
+// every other line by that much, which is the test that splits it.
+TEST_CASE("comb detections separate interleaved combs offset from half a spacing",
+          "[comb][detect]")
+{
+    for (std::uint64_t seed = 700; seed < 706; ++seed) {
+        INFO("seed " << seed);
+        Scene scene(seed);
+        const double d = 31'578.9 / kHzPerBin;
+        const double c_a = 45.2 + 0.13 * static_cast<double>(seed - 700);
+        const double c_b = c_a + (15'789.45 + 100.0) / kHzPerBin;
+        scene.comb(c_a, d, 9.0, 14.0);
+        scene.comb(c_b, d, 8.0, 13.0);
+        const std::vector<CombEstimate> found = run_all(scene.render());
+        bool a = false;
+        bool b = false;
+        for (const CombEstimate& f : found) {
+            a = a || on_comb(f, c_a, d, 2.0);
+            b = b || on_comb(f, c_b, d, 2.0);
+        }
+        CHECK(a);
+        CHECK(b);
+    }
+}
+
+TEST_CASE("comb detections find an unrelated comb beside the first", "[comb][detect]")
+{
+    for (std::uint64_t seed = 500; seed < 504; ++seed) {
+        INFO("seed " << seed);
+        Scene scene(seed);
+        const double d_a = 14'000.0 / kHzPerBin;
+        const double d_b = 22'930.0 / kHzPerBin;
+        scene.comb(37.31, d_a, 10.0, 15.0);
+        scene.comb(80.9, d_b, 6.0, 9.0);
+        const std::vector<CombEstimate> found = run_all(scene.render());
+        bool a = false;
+        bool b = false;
+        for (const CombEstimate& f : found) {
+            a = a || on_comb(f, 37.31, d_a, 1.0);
+            b = b || on_comb(f, 80.9, d_b, 1.0);
+        }
+        CHECK(a);
+        CHECK(b);
+        CHECK(found.size() <= dsp::kCombMaxCombs);
+    }
+}
+
+// Spectra dumped by the engine under REVENANT_COMB_DUMP (core/engine/graph.cpp),
+// named <prefix>.<n>.<rate>.f32, replayed through detect_combs and printed.
+// REVENANT_COMB_SPECTRA lists the files, separated by semicolons. Unset, the
+// case does nothing: it is for looking at a real capture, not a regression.
+TEST_CASE("comb detections on dumped spectra", "[comb][detect]")
+{
+    const char* list = std::getenv("REVENANT_COMB_SPECTRA");
+    if (list == nullptr) {
+        return;
+    }
+    std::string rest = list;
+    while (!rest.empty()) {
+        const std::size_t cut = rest.find(';');
+        const std::string path = rest.substr(0, cut);
+        rest = cut == std::string::npos ? std::string{} : rest.substr(cut + 1);
+        if (path.empty()) {
+            continue;
+        }
+        // The rate is the last dotted field before the extension.
+        const std::size_t ext = path.rfind('.');
+        const std::size_t dot = path.rfind('.', ext - 1);
+        REQUIRE(ext != std::string::npos);
+        REQUIRE(dot != std::string::npos);
+        const auto rate = static_cast<dsp::SampleRate>(std::stoll(path.substr(dot + 1, ext - dot - 1)));
+        std::FILE* file = std::fopen(path.c_str(), "rb");
+        REQUIRE(file != nullptr);
+        std::vector<float> power;
+        float value = 0.0F;
+        while (std::fread(&value, sizeof value, 1, file) == 1) {
+            power.push_back(value);
+        }
+        std::fclose(file);
+        auto found = dsp::detect_combs(CombSpectrum{power, rate});
+        REQUIRE(found.has_value());
+        std::printf("%s: %zu bins, %zu combs\n", path.c_str(), power.size(), found->size());
+        for (const CombEstimate& f : *found) {
+            std::printf("  offset %10.1f Hz  spacing %9.2f Hz  k %4d..%-4d  %3u lines  median %.1f dB\n",
+                        f.offset_hz, f.spacing_hz, f.k_lo, f.k_hi, f.lines_found,
+                        static_cast<double>(f.median_height_db));
+        }
+    }
+}
+
+TEST_CASE("comb detections find nothing where there is no comb", "[comb][detect]")
+{
+    Scene scene(600);
+    CHECK(run_all(scene.render()).empty());
+    const std::vector<float> zero(kBins, 0.0F);
+    CHECK(run_all(zero).empty());
 }

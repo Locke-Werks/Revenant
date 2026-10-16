@@ -26,6 +26,7 @@
 #include <memory>
 #include <numbers>
 #include <random>
+#include <span>
 #include <vector>
 
 #include "core/dsp/comb_cancel.h"
@@ -585,4 +586,222 @@ TEST_CASE("comb tracker: planned phases are the model's, exact across blocks", "
         // rounding of the two anchors plus double error in `expected`.
         CHECK(std::abs(err) < 1.0e-6);
     }
+}
+
+namespace {
+
+// Two combs in one capture: each sim synthesises its own comb's share of the
+// projections against the bank's whole plan, and the shares add. Noise comes
+// from `a` alone, so the floor is one floor.
+void bank_step(Sim& a, Sim& b, dsp::CombBank& bank,
+               std::deque<std::pair<CombBlockPlan, std::vector<dsp::Complex32>>>& in_flight)
+{
+    const dsp::SampleIndex start = a.block * kBlock;
+    ++a.block;
+    ++b.block;
+    CombBlockPlan plan = bank.plan(start, kBlock);
+    std::vector<dsp::Complex32> proj;
+    if (!plan.lines.empty()) {
+        proj = synthesise(a, plan);
+        const std::vector<dsp::Complex32> other = synthesise(b, plan);
+        for (std::size_t i = 0; i < proj.size(); ++i) {
+            proj[i] += other[i];
+        }
+    } else {
+        const double rate = static_cast<double>(kRate);
+        const double t = (static_cast<double>(start) + kBlock / 2.0) / rate;
+        for (Sim* sim : {&a, &b}) {
+            sim->truth.phase_c = wrap(sim->truth.phase_c + sim->truth.offset(t) * kBlock / rate);
+            sim->truth.phase_d = wrap(sim->truth.phase_d + sim->truth.spacing(t) * kBlock / rate);
+        }
+    }
+    in_flight.emplace_back(std::move(plan), std::move(proj));
+    while (in_flight.size() > a.frames_in_flight) {
+        auto& [old_plan, old_proj] = in_flight.front();
+        if (!old_plan.lines.empty()) {
+            CombObservation obs;
+            obs.start = old_plan.start;
+            obs.count = old_plan.count;
+            obs.sub_blocks = old_plan.sub_blocks;
+            obs.projections = old_proj;
+            bank.observe(obs);
+        }
+        in_flight.pop_front();
+    }
+}
+
+}  // namespace
+
+// The owner's HF comb, 2026-10-12: two switchers near 31.58 kHz whose lines
+// interleave, spacings a few hertz apart and wandering independently. One
+// affine model follows one of them; the bank holds each as its own comb and
+// cancels both.
+TEST_CASE("comb bank: two interleaved switchers are both locked and cancelled", "[comb][tracker]")
+{
+    const std::uint64_t seed = 0xB4A2C0ULL;
+    std::printf("comb bank: seed %llu\n", static_cast<unsigned long long>(seed));
+    INFO("seed " << seed);
+    Sim a;
+    Sim b;
+    a.rng.seed(seed);
+    b.rng.seed(seed + 1);
+    b.noise_power = 0.0;
+    a.truth.spacing = [](double t) { return 31574.0 + 0.2 * std::sin(kTwoPi * t / 13.0); };
+    a.truth.offset = [](double t) { return -9876.5 + 1.5 * std::sin(kTwoPi * t / 21.0); };
+    b.truth.spacing = [](double t) { return 31579.5 + 0.25 * std::sin(kTwoPi * t / 9.0); };
+    b.truth.offset = [](double t) { return -9876.5 + 15790.0 + 2.0 * std::sin(kTwoPi * t / 17.0); };
+    populate(a, -30, 30, 14.0, 25.0, 0);
+    // b's amplitudes are scaled for a's noise floor.
+    b.noise_power = 1.0;
+    populate(b, -30, 30, 10.0, 18.0, 0);
+    b.noise_power = 0.0;
+
+    dsp::CombBank bank(kRate);
+    const std::vector<CombEstimate> found{estimate_of(a.truth, -30, 30, 40.0, 0.1),
+                                          estimate_of(b.truth, -30, 30, -30.0, -0.1)};
+    bank.detected(found);
+    REQUIRE(bank.trackers().size() == 2);
+
+    std::deque<std::pair<CombBlockPlan, std::vector<dsp::Complex32>>> in_flight;
+    int locked_at = -1;
+    for (int blk = 0; blk < 200 && locked_at < 0; ++blk) {
+        bank_step(a, b, bank, in_flight);
+        if (bank.trackers()[0].status().lock == CombLock::kLocked &&
+            bank.trackers()[1].status().lock == CombLock::kLocked) {
+            locked_at = blk + 1;
+        }
+    }
+    INFO("both locked at block " << locked_at);
+    REQUIRE(locked_at > 0);
+
+    // Detections a second apart while cancelling hand back what is already
+    // held, at its own spacing and at the joint one; none may start a third.
+    CombEstimate joint = estimate_of(a.truth, -60, 60, 0.0, 0.0);
+    joint.spacing_hz = 0.5 * (a.truth.spacing(0.0) + b.truth.spacing(0.0)) / 2.0;
+    for (int blk = 0; blk < 400; ++blk) {
+        bank_step(a, b, bank, in_flight);
+        if (blk % 36 == 0) {
+            bank.detected(found);
+            bank.detected(std::span<const CombEstimate>(&joint, 1));
+        }
+    }
+    REQUIRE(bank.trackers().size() == 2);
+    const double t = static_cast<double>(a.block) * kBlock / 2.4e6;
+    const auto sa = bank.trackers()[0].status();
+    const auto sb = bank.trackers()[1].status();
+    std::printf("  locked at %d; a %u lines %.1f dB spacing err %.3f Hz; b %u lines %.1f dB spacing "
+                "err %.3f Hz\n",
+                locked_at, sa.lines_cancelled, sa.suppression_db,
+                sa.comb.spacing_hz - a.truth.spacing(t), sb.lines_cancelled, sb.suppression_db,
+                sb.comb.spacing_hz - b.truth.spacing(t));
+    CHECK(sa.lock == CombLock::kLocked);
+    CHECK(sb.lock == CombLock::kLocked);
+    CHECK(std::abs(sa.comb.spacing_hz - a.truth.spacing(t)) < 0.05);
+    CHECK(std::abs(sb.comb.spacing_hz - b.truth.spacing(t)) < 0.05);
+    CHECK(sa.lines_cancelled >= 55);
+    CHECK(sb.lines_cancelled >= 55);
+    CHECK(sa.suppression_db > 10.0F);
+    CHECK(sb.suppression_db > 8.0F);
+    const auto all = bank.status();
+    CHECK(all.lock == CombLock::kLocked);
+    CHECK(all.lines_cancelled == sa.lines_cancelled + sb.lines_cancelled);
+}
+
+// The owner's HF dumps at 36.6 Hz a bin: a 15789.4 Hz comb and its supply-
+// ripple sideband comb 100.7 Hz below, a few dB under, found as two combs at
+// one spacing. Each tracker's projections carry the other comb's lines a
+// hundred hertz away; both must still lock and cancel.
+TEST_CASE("comb bank: a comb and its ripple sideband comb are both cancelled", "[comb][tracker]")
+{
+    const std::uint64_t seed = 0x51DEBA2DULL;
+    std::printf("comb bank sideband: seed %llu\n", static_cast<unsigned long long>(seed));
+    INFO("seed " << seed);
+    Sim a;
+    Sim b;
+    a.rng.seed(seed);
+    b.rng.seed(seed + 1);
+    auto spacing = [](double t) { return 15789.4 + 0.1 * std::sin(kTwoPi * t / 11.0); };
+    a.truth.spacing = spacing;
+    a.truth.offset = [](double t) { return 2707.0 + 1.0 * std::sin(kTwoPi * t / 19.0); };
+    b.truth.spacing = spacing;
+    b.truth.offset = [](double t) { return 2707.0 - 100.7 + 1.0 * std::sin(kTwoPi * t / 19.0); };
+    populate(a, -40, 40, 16.0, 26.0, 0);
+    populate(b, -40, 40, 12.0, 22.0, 0);
+    b.noise_power = 0.0;
+
+    dsp::CombBank bank(kRate);
+    const std::vector<CombEstimate> found{estimate_of(a.truth, -40, 40, 20.0, 0.05),
+                                          estimate_of(b.truth, -40, 40, -15.0, -0.05)};
+    bank.detected(found);
+    REQUIRE(bank.trackers().size() == 2);
+
+    std::deque<std::pair<CombBlockPlan, std::vector<dsp::Complex32>>> in_flight;
+    int locked_at = -1;
+    for (int blk = 0; blk < 200 && locked_at < 0; ++blk) {
+        bank_step(a, b, bank, in_flight);
+        if (bank.trackers()[0].status().lock == CombLock::kLocked &&
+            bank.trackers()[1].status().lock == CombLock::kLocked) {
+            locked_at = blk + 1;
+        }
+    }
+    INFO("both locked at block " << locked_at);
+    REQUIRE(locked_at > 0);
+    for (int blk = 0; blk < 400; ++blk) {
+        bank_step(a, b, bank, in_flight);
+        if (blk % 36 == 0) {
+            bank.detected(found);
+        }
+    }
+    REQUIRE(bank.trackers().size() == 2);
+    const auto sa = bank.trackers()[0].status();
+    const auto sb = bank.trackers()[1].status();
+    std::printf("  locked at %d; comb %u lines %.1f dB; sideband %u lines %.1f dB\n", locked_at,
+                sa.lines_cancelled, sa.suppression_db, sb.lines_cancelled, sb.suppression_db);
+    CHECK(sa.lock == CombLock::kLocked);
+    CHECK(sb.lock == CombLock::kLocked);
+    CHECK(sa.lines_cancelled >= 75);
+    CHECK(sb.lines_cancelled >= 75);
+    CHECK(sa.suppression_db > 10.0F);
+    CHECK(sb.suppression_db > 8.0F);
+}
+
+TEST_CASE("comb tracker: folds finer sub-blocks into the ones it planned", "[comb][tracker]")
+{
+    // The same block observed at the planned sub-blocks and at four times as
+    // many, summed in fours, must leave two forks of the tracker identical.
+    Sim sim;
+    sim.rng.seed(77);
+    sim.truth.spacing = [](double) { return 12000.0; };
+    sim.truth.offset = [](double) { return 3000.0; };
+    populate(sim, -10, 10, 15.0, 20.0, 0);
+    CombTracker tracker(kRate);
+    tracker.detected(estimate_of(sim.truth, -10, 10, 0.0, 0.0));
+    // Locked, the tracker plans its long sub-blocks, four to a block.
+    REQUIRE(run_to_lock(sim, tracker, 120) > 0);
+    const dsp::SampleIndex start = sim.block * kBlock;
+    const CombBlockPlan plan = tracker.plan(start, kBlock);
+    REQUIRE(plan.sub_blocks * 4 <= dsp::kCombMaxSubBlocks);
+
+    CombBlockPlan fine = plan;
+    fine.sub_blocks = plan.sub_blocks * 4;
+    Sim copy = sim;
+    const std::vector<dsp::Complex32> fine_proj = synthesise(copy, fine);
+    std::vector<dsp::Complex32> coarse(plan.lines.size() * plan.sub_blocks);
+    for (std::size_t i = 0; i < coarse.size(); ++i) {
+        for (std::size_t g = 0; g < 4; ++g) {
+            coarse[i] += fine_proj[i * 4 + g];
+        }
+    }
+    CombTracker x = tracker;
+    CombTracker y = tracker;
+    x.observe(CombObservation{start, kBlock, plan.sub_blocks, coarse});
+    y.observe(CombObservation{start, kBlock, fine.sub_blocks, fine_proj});
+    const CombBlockPlan px = x.plan(start + kBlock, kBlock);
+    const CombBlockPlan py = y.plan(start + kBlock, kBlock);
+    REQUIRE(px.lines.size() == py.lines.size());
+    for (std::size_t i = 0; i < px.lines.size(); ++i) {
+        CHECK(px.lines[i].step == py.lines[i].step);
+        CHECK(px.lines[i].phase0 == py.lines[i].phase0);
+    }
+    CHECK(x.status().comb.spacing_hz == y.status().comb.spacing_hz);
 }
