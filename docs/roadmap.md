@@ -6,7 +6,7 @@
 | M1 | The engine: the GPU channelizer, receivers, demodulators and the wideband detector, with fifty receivers on one 20 MHz grid faster than realtime | Done |
 | M2 | The graphical client, a separate process over Cap'n Proto, drawing the spectrum and waterfall at monitor refresh within its frame budget | Done, 2026-09-27 |
 | M3 | The first public release, v0.1.0: a signed installer, with the corresponding sources on the same release page | Done, 2026-09-27 |
-| M4 | Rolling capture of the band, and search over what it stored. This is the reason the design exists | In progress |
+| M4 | Rolling capture of the band, and search over what it stored. This is the reason the design exists | Done, 2026-10-16 |
 | M5 | Device support beyond the RTL-SDR, in the order below | Next |
 | After M5 | More than one radio at a time, and the modes `docs/modes.md` lists as not done | Not ordered |
 

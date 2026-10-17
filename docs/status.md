@@ -1,9 +1,9 @@
 # Status
 
-M1, M2 and M3 are done: v0.1.0, the first public release, shipped on
+M1 to M4 are done: v0.1.0, the first public release, shipped on
 2026-09-27, and the release page has every one since. M4, the rolling
-capture, is in progress: recording, retention, search and replay work from
-the command line.
+capture, was done on 2026-10-16: recording, retention, search and replay work
+from the command line and the client. M5, device support, is next.
 There are two things to run: a command line, and a Qt client that reaches a
 running engine over a socket.
 

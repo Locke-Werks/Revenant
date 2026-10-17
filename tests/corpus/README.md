@@ -37,10 +37,14 @@ The harness in `tools/bench` reads these and skips, loudly, any entry whose
 data file is not present locally, so a developer without the corpus still gets
 a green synthetic run and an explicit list of what went untested.
 
-Arrives with extraction, which needs the rolling capture to extract from: the
-README's roadmap numbers that M4, and nothing of it is built. Empty until then,
-on purpose. Nothing in `tools/bench` reads a manifest yet, so the harness above
-is the design and not code.
+Extraction exists: `revenant-capture extract` cuts whole segments out of the
+rolling capture, which shipped as M4. The corpus is still empty and nothing in
+`tools/bench` reads a manifest yet, so the harness above is the design and not
+code. Issue #4 tracks it.
+
+WHAT THIS PARAGRAPH USED TO SAY, until 2026-10-16: "Arrives with extraction,
+which needs the rolling capture to extract from: the README's roadmap numbers
+that M4, and nothing of it is built."
 
 WHAT THIS LINE USED TO SAY: "Arrives: M5, alongside extraction." M5 was the
 time machine's number in the plan this directory was written from. The
