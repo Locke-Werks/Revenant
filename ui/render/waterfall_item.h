@@ -199,6 +199,10 @@ class WaterfallItem : public QQuickItem {
     Q_PROPERTY(qulonglong hoveredCaption READ hoveredCaption NOTIFY hoveredCaptionChanged)
     Q_PROPERTY(QString hoveredCaptionText READ hoveredCaptionText NOTIFY hoveredCaptionChanged)
 
+    // The caption under the pointer has stopped and grown to its whole text,
+    // so the hover card would only say it again: qml/SpanView.qml hides it.
+    Q_PROPERTY(bool captionFrozen READ captionFrozen NOTIFY hoveredCaptionChanged)
+
 public:
     explicit WaterfallItem(QQuickItem* parent = nullptr);
 
@@ -226,6 +230,7 @@ public:
 
     [[nodiscard]] qulonglong hoveredCaption() const { return hovered_caption_; }
     [[nodiscard]] QString hoveredCaptionText() const;
+    [[nodiscard]] bool captionFrozen() const { return captions_.frozen() != 0; }
 
 signals:
     void linkChanged();
@@ -345,6 +350,11 @@ private:
 
     // The caption under a point, and the hover that follows it.
     void setHoveredCaption(std::uint64_t serial);
+
+    // Stops the caption under the pointer and lays out its whole text large,
+    // or, for zero, lets it go back to the waterfall. render/caption_layout.h
+    // has what a freeze does to the caption itself.
+    void freezeCaption(std::uint64_t serial);
     void hoverAt(QPointF position);
 
     // The newest row, which is the top of the display. The cursor decrements,
@@ -469,6 +479,15 @@ private:
     std::uint64_t caption_feed_seen_ = 0;
     std::uint64_t hovered_caption_ = 0;
     double caption_line_height_ = 14.0;
+
+    // The frozen caption's whole text at the larger size, laid out when it
+    // froze, and the plate that holds it.
+    std::vector<std::unique_ptr<QTextLayout>> frozen_layouts_;
+    double frozen_line_height_ = 20.0;
+    double frozen_width_ = 0.0;
+    double frozen_height_ = 0.0;
+    // Counts the freezes, so the scene graph knows its text node is stale.
+    std::uint64_t frozen_generation_ = 0;
 
     // Where the pointer was last seen over the item, so a caption scrolling
     // under a pointer that has not moved is found under it.

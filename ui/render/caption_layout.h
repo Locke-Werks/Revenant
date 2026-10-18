@@ -354,6 +354,10 @@ struct Caption {
 
     std::vector<std::string> lines;
 
+    // The transcript as the recogniser wrote it, before wrap_caption cut it
+    // to three lines: the enlarged plate under the pointer sets all of it.
+    std::string text;
+
     // The hover card's text, the whole transcript.
     std::string card;
 
@@ -367,6 +371,19 @@ struct Caption {
     bool held = false;
     std::uint64_t held_at = 0;
     std::uint64_t fade_samples = 0;
+
+    // Where the last layout put the plate, which is where a freeze keeps it.
+    // Also written by layout alone.
+    double placed_x = 0.0;
+    double placed_y = 0.0;
+
+    // The freeze, CaptionHistory::set_frozen. frozen_samples is the time the
+    // caption has spent frozen since its hold began, taken off the fade so
+    // the opacity stands still; frozen_mark is the newest row's end at the
+    // last layout while frozen, which the next one counts on from.
+    bool frozen = false;
+    std::uint64_t frozen_mark = 0;
+    std::uint64_t frozen_samples = 0;
 };
 
 // What the layout needs to know about the waterfall.
@@ -416,6 +433,9 @@ struct PlacedCaption {
     double opacity = 1.0;
     bool held = false;
 
+    // Under the pointer and standing still; see CaptionHistory::set_frozen.
+    bool frozen = false;
+
     int slot = -1;
     bool doubtful = false;
 
@@ -423,12 +443,21 @@ struct PlacedCaption {
     [[nodiscard]] bool has_elbow() const { return std::abs(elbow_to_y - leader_y) > 0.5; }
 };
 
-// The serial of the plate under (x, y), or zero.
+// The serial of the plate under (x, y), or zero. A frozen plate is drawn over
+// the rest, so it answers first wherever it covers another.
 [[nodiscard]] inline std::uint64_t caption_at(const std::vector<PlacedCaption>& placed, double x,
                                               double y)
 {
+    const auto inside = [x, y](const PlacedCaption& one) {
+        return x >= one.x && x <= one.x + one.width && y >= one.y && y <= one.y + one.height;
+    };
     for (const PlacedCaption& one : placed) {
-        if (x >= one.x && x <= one.x + one.width && y >= one.y && y <= one.y + one.height) {
+        if (one.frozen && inside(one)) {
+            return one.serial;
+        }
+    }
+    for (const PlacedCaption& one : placed) {
+        if (inside(one)) {
             return one.serial;
         }
     }
@@ -498,16 +527,51 @@ public:
     void add(Caption caption)
     {
         captions_.push_back(std::move(caption));
-        if (captions_.size() > kCaptionLimit) {
-            captions_.erase(captions_.begin(),
-                            captions_.begin() +
-                                static_cast<std::ptrdiff_t>(captions_.size() - kCaptionLimit));
+        // The oldest first, but never the one under the pointer: it goes
+        // when it is let go, like any other.
+        while (captions_.size() > kCaptionLimit) {
+            const auto oldest = std::find_if(captions_.begin(), captions_.end(),
+                                             [](const Caption& one) { return !one.frozen; });
+            captions_.erase(oldest);
         }
     }
 
     // A new stream, or a history thrown away: the rows these were pinned to
     // are gone, the same reason render/box_history.h's boxes go with them.
-    void clear() { captions_.clear(); }
+    void clear()
+    {
+        captions_.clear();
+        frozen_ = 0;
+    }
+
+    // THE CAPTION UNDER THE POINTER STANDS STILL, the owner's ask of
+    // 2026-10-17, so it can be read: it keeps the place the last layout gave
+    // it, its hold does not start, and its fade stops at the opacity it had.
+    // Zero lets it go. Let go, it rejoins its rows, or the hold if they have
+    // gone, and fades on from where it stopped. The plates that were stacked
+    // against it are laid out as if it were not there, since it is drawn
+    // over them.
+    void set_frozen(std::uint64_t serial)
+    {
+        if (frozen_ == serial) {
+            return;
+        }
+        for (Caption& caption : captions_) {
+            if (caption.serial == frozen_) {
+                caption.frozen = false;
+            }
+        }
+        frozen_ = 0;
+        for (Caption& caption : captions_) {
+            if (caption.serial == serial && serial != 0) {
+                caption.frozen = true;
+                caption.frozen_mark = last_now_;
+                frozen_ = serial;
+            }
+        }
+    }
+
+    [[nodiscard]] std::uint64_t frozen() const { return frozen_; }
 
     [[nodiscard]] const std::vector<Caption>& captions() const { return captions_; }
     [[nodiscard]] bool empty() const { return captions_.empty(); }
@@ -540,6 +604,7 @@ public:
             return placed;
         }
         const std::uint64_t now = newest.start + newest.count;
+        last_now_ = now;
         const int filled = caption_filled_rows(span_at, geometry.tall);
         const std::uint64_t oldest = span_at(filled - 1).start;
         const std::uint64_t crossing = std::max<std::uint64_t>(now - oldest, 1);
@@ -552,6 +617,11 @@ public:
         kept.reserve(captions_.size());
         for (Caption& caption : captions_) {
             const CaptionAnchor anchor = caption_anchor(span_at, geometry.tall, caption.source_end);
+            if (caption.frozen) {
+                placed.push_back(frozen_in_place(caption, anchor.place, now));
+                kept.push_back(std::move(caption));
+                continue;
+            }
             if (anchor.place == CaptionAnchorPlace::Beyond ||
                 anchor.place == CaptionAnchorPlace::Empty) {
                 continue;
@@ -572,8 +642,7 @@ public:
 
             double opacity = 1.0;
             if (caption.held && now > caption.held_at) {
-                opacity = 1.0 - static_cast<double>(now - caption.held_at) /
-                                    static_cast<double>(caption.fade_samples);
+                opacity = fade_opacity(caption, now);
             }
             if (opacity <= 0.0) {
                 continue;
@@ -608,7 +677,15 @@ public:
 
         stack(placed, h);
 
+        for (std::size_t i = 0; i < placed.size(); ++i) {
+            captions_[i].placed_x = placed[i].x;
+            captions_[i].placed_y = placed[i].y;
+        }
+
         for (PlacedCaption& one : placed) {
+            if (one.frozen) {
+                continue;
+            }
             const double row_y = one.y + first_line;
             if (one.held || one.place != CaptionAnchorPlace::Inside) {
                 one.leader_y = row_y;
@@ -631,6 +708,48 @@ public:
     }
 
 private:
+    // Through the hold, less the time spent frozen in it.
+    [[nodiscard]] static double fade_opacity(const Caption& caption, std::uint64_t now)
+    {
+        const std::uint64_t faded = now - caption.held_at - caption.frozen_samples;
+        return 1.0 - static_cast<double>(faded) / static_cast<double>(caption.fade_samples);
+    }
+
+    // A frozen caption where it was last put, at the opacity it had. Nothing
+    // here starts a hold or drops it, whatever its rows have done meanwhile;
+    // the time is counted so the fade, once it is let go, carries on from
+    // the same opacity. No leader: the plate no longer follows its rows.
+    static PlacedCaption frozen_in_place(Caption& caption, CaptionAnchorPlace place,
+                                         std::uint64_t now)
+    {
+        if (caption.held && now > caption.frozen_mark) {
+            caption.frozen_samples += now - std::max(caption.frozen_mark, caption.held_at);
+        }
+        caption.frozen_mark = now;
+
+        PlacedCaption one;
+        one.serial = caption.serial;
+        one.x = caption.placed_x;
+        one.y = caption.placed_y;
+        one.width = caption.box_width;
+        one.height = caption.box_height;
+        one.anchor_y = caption.placed_y;
+        one.place = place;
+        one.held = caption.held;
+        one.frozen = true;
+        one.opacity =
+            caption.held && now > caption.held_at ? std::clamp(fade_opacity(caption, now), 0.0, 1.0)
+                                                  : 1.0;
+        one.slot = caption.slot;
+        one.doubtful = caption.doubtful;
+        one.leader_from_x = one.x;
+        one.leader_to_x = one.x;
+        one.leader_y = one.y;
+        one.elbow_x = one.x;
+        one.elbow_to_y = one.y;
+        return one;
+    }
+
     // Two passes. Down from the top, newest first, each plate pushed below any
     // it would land on, which keeps every plate at or below its own row; then
     // up from the bottom, each plate pulled back inside the item and any it
@@ -639,9 +758,13 @@ private:
     // for want of room unless the item cannot hold them all.
     static void stack(std::vector<PlacedCaption>& placed, double height)
     {
-        std::vector<std::size_t> order(placed.size());
-        for (std::size_t i = 0; i < order.size(); ++i) {
-            order[i] = i;
+        // A frozen plate neither moves nor pushes: it is drawn over the rest.
+        std::vector<std::size_t> order;
+        order.reserve(placed.size());
+        for (std::size_t i = 0; i < placed.size(); ++i) {
+            if (!placed[i].frozen) {
+                order.push_back(i);
+            }
         }
         std::stable_sort(order.begin(), order.end(), [&placed](std::size_t a, std::size_t b) {
             if (placed[a].held != placed[b].held) {
@@ -696,6 +819,11 @@ private:
     }
 
     std::vector<Caption> captions_;
+    std::uint64_t frozen_ = 0;
+
+    // The newest row's end at the last layout, which a freeze starts its
+    // count from.
+    std::uint64_t last_now_ = 0;
 };
 
 }  // namespace revenant::ui

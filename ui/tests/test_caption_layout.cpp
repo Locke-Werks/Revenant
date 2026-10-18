@@ -491,6 +491,157 @@ TEST_CASE("nothing is placed on an empty history and nothing is lost")
 }
 
 // Rejects an unbounded history.
+// Rejects a freeze that only stops the plate drawing while the caption rides
+// on underneath, so the plate jumps when it is let go of having gone nowhere,
+// and one that lets the hold start under the pointer.
+TEST_CASE("a frozen caption keeps its place while the rows go on")
+{
+    Rows rows;
+    rows.advance(500);
+    CaptionHistory history;
+    history.add(caption(1, rows.end() - 100 * 1000, kLow, kHigh));  // row 100
+
+    auto out = history.layout(rows, geometry(rows));
+    REQUIRE(out.size() == 1);
+    const double x = out[0].x;
+    const double y = out[0].y;
+    CHECK(y == Approx(100.0 - kFirstLine));
+
+    history.set_frozen(1);
+    CHECK(history.frozen() == 1);
+    rows.advance(450);  // past where it would have held
+    out = history.layout(rows, geometry(rows));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].frozen);
+    CHECK(out[0].x == Approx(x));
+    CHECK(out[0].y == Approx(y));
+    CHECK_FALSE(out[0].held);
+    CHECK(out[0].opacity == Approx(1.0));
+    CHECK_FALSE(out[0].has_leader());
+}
+
+// Rejects a fade that keeps counting under the pointer, so a caption read for
+// long enough is gone the moment it is let go, and one that restarts from
+// full when it is let go.
+TEST_CASE("a frozen caption's fade stops, and carries on from there when let go")
+{
+    Rows rows;
+    rows.advance(500);
+    CaptionHistory history;
+    history.add(caption(1, rows.end() - 480 * 1000, kLow, kHigh));  // held at once
+
+    auto out = history.layout(rows, geometry(rows));
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0].held);
+
+    rows.advance(250);
+    out = history.layout(rows, geometry(rows));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].opacity == Approx(0.5));
+
+    history.set_frozen(1);
+    rows.advance(400);
+    out = history.layout(rows, geometry(rows));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].opacity == Approx(0.5));
+    CHECK(out[0].y == Approx(460.0));
+
+    history.set_frozen(0);
+    CHECK(history.frozen() == 0);
+    out = history.layout(rows, geometry(rows));
+    REQUIRE(out.size() == 1);
+    CHECK_FALSE(out[0].frozen);
+    CHECK(out[0].held);
+    CHECK(out[0].y == Approx(460.0));
+    CHECK(out[0].opacity == Approx(0.5));
+
+    rows.advance(125);
+    out = history.layout(rows, geometry(rows));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].opacity == Approx(0.25));
+
+    rows.advance(125);
+    out = history.layout(rows, geometry(rows));
+    CHECK(out.empty());
+}
+
+// Rejects a freeze that snaps a caption still on its rows to the hold, or
+// leaves it where it stopped, when it is let go.
+TEST_CASE("a caption let go rejoins its rows")
+{
+    Rows rows;
+    rows.advance(500);
+    CaptionHistory history;
+    history.add(caption(1, rows.end() - 100 * 1000, kLow, kHigh));
+    (void)history.layout(rows, geometry(rows));
+
+    history.set_frozen(1);
+    rows.advance(50);
+    auto out = history.layout(rows, geometry(rows));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].y == Approx(100.0 - kFirstLine));
+
+    history.set_frozen(0);
+    out = history.layout(rows, geometry(rows));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].y == Approx(150.0 - kFirstLine));
+    CHECK(out[0].leader_y == Approx(150.0));
+    CHECK(out[0].opacity == Approx(1.0));
+}
+
+// Rejects a freeze the fade, a lost anchor or the caption limit can end: the
+// caption under the pointer stays until the pointer leaves it.
+TEST_CASE("a frozen caption is never dropped while frozen")
+{
+    Rows rows;
+    rows.advance(500);
+    CaptionHistory history;
+    history.add(caption(1, rows.end() - 480 * 1000, kLow, kHigh));
+    (void)history.layout(rows, geometry(rows));
+    history.set_frozen(1);
+
+    rows.advance(5000);  // ten crossings, every row it knew gone
+    auto out = history.layout(rows, geometry(rows));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].serial == 1);
+    CHECK(out[0].opacity == Approx(1.0));
+
+    for (std::uint64_t serial = 2; serial <= kCaptionLimit + 6; ++serial) {
+        history.add(caption(serial, rows.end(), kLow, kHigh));
+    }
+    CHECK(history.captions().size() == kCaptionLimit);
+    CHECK(history.find(1) != nullptr);
+
+    history.set_frozen(0);
+    rows.advance(1);
+    out = history.layout(rows, geometry(rows));
+    CHECK(placed(out, 1) != nullptr);
+}
+
+// Rejects stacking that pushes the plates around a frozen one, or the frozen
+// one itself: it is drawn over the rest, and it answers the hit test first.
+TEST_CASE("a frozen plate neither stacks nor is stacked, and is hit first")
+{
+    Rows rows;
+    rows.advance(300);
+    CaptionHistory history;
+    history.add(caption(1, rows.end() - 110 * 1000, kLow, kHigh));  // row 110
+    history.add(caption(2, rows.end() - 100 * 1000, kLow, kHigh));  // row 100
+    auto out = history.layout(rows, geometry(rows));
+    REQUIRE(placed(out, 2) != nullptr);
+    const double newer_y = placed(out, 2)->y;
+
+    history.set_frozen(2);
+    out = history.layout(rows, geometry(rows));
+    const PlacedCaption* older = placed(out, 1);
+    const PlacedCaption* newer = placed(out, 2);
+    REQUIRE(older != nullptr);
+    REQUIRE(newer != nullptr);
+    CHECK(newer->y == Approx(newer_y));
+    CHECK(older->y == Approx(110.0 - kFirstLine));
+    CHECK(caption_at(out, newer->x + 1.0, older->y + 1.0) == 2);
+}
+
 TEST_CASE("past the limit the oldest caption goes first")
 {
     CaptionHistory history;

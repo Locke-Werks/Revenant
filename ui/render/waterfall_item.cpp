@@ -45,6 +45,17 @@ namespace {
     return font;
 }
 
+// The caption under the pointer, stopped and grown so its whole text can be
+// read: half as large again, and wider by as much, so it holds the lines the
+// waterfall's three cut off without becoming a column down the screen.
+[[nodiscard]] QFont frozen_caption_font()
+{
+    QFont font = caption_font();
+    font.setPixelSize(16);
+    return font;
+}
+constexpr std::size_t kFrozenCaptionColumns = 60;
+
 // Inside the plate, and the receiver's colour down its left edge, which with
 // the leader is what ties a caption to its strip in the rack.
 constexpr double kCaptionPadPx = 4.0;
@@ -129,6 +140,14 @@ public:
         QSGTransformNode* place = nullptr;
     };
     std::vector<CaptionText> caption_nodes;
+
+    // The frozen caption over all of them: its plate, then its whole text at
+    // the larger size, rebuilt at every freeze. Its small text node is not
+    // drawn meanwhile.
+    OverlayNode* frozen_quads = nullptr;
+    QSGNode* frozen_texts = nullptr;
+    std::uint64_t frozen_generation = 0;
+    CaptionText frozen;
 };
 
 // One contiguous run of ring rows, and where it lands on the display. A tile
@@ -482,6 +501,7 @@ void WaterfallItem::clearCaptions()
     captions_.clear();
     placed_captions_.clear();
     caption_layouts_.clear();
+    frozen_layouts_.clear();
     setHoveredCaption(0);
 }
 
@@ -498,6 +518,58 @@ void WaterfallItem::setHoveredCaption(std::uint64_t serial)
     }
     hovered_caption_ = serial;
     emit hoveredCaptionChanged();
+}
+
+void WaterfallItem::freezeCaption(std::uint64_t serial)
+{
+    if (captions_.frozen() == serial) {
+        return;
+    }
+    captions_.set_frozen(serial);
+    ++frozen_generation_;
+    frozen_layouts_.clear();
+    frozen_width_ = 0.0;
+    frozen_height_ = 0.0;
+
+    if (const Caption* caption = captions_.find(serial); caption != nullptr) {
+        // Every line of it, at the larger size, in as many columns as the
+        // item has room for up to kFrozenCaptionColumns.
+        const QFont font = frozen_caption_font();
+        const QFontMetricsF metrics(font);
+        frozen_line_height_ = metrics.height();
+        const double advance = std::max(1.0, metrics.horizontalAdvance(QLatin1Char('M')));
+        const double room =
+            width() - 2.0 * kCaptionMarginPx - 2.0 * kCaptionPadPx - kCaptionBarPx;
+        const auto fits = static_cast<std::size_t>(std::max(1.0, std::floor(room / advance)));
+        const std::vector<std::string> lines =
+            wrap_caption(caption->text, std::min(kFrozenCaptionColumns, fits),
+                         std::numeric_limits<std::size_t>::max());
+
+        double widest = 0.0;
+        for (const std::string& line : lines) {
+            const QString text = QString::fromStdString(line);
+            auto layout = std::make_unique<QTextLayout>(text, font);
+            layout->setCacheEnabled(true);
+            layout->beginLayout();
+            QTextLine text_line = layout->createLine();
+            if (text_line.isValid()) {
+                text_line.setPosition(QPointF(0.0, 0.0));
+            }
+            layout->endLayout();
+            widest = std::max(widest, metrics.horizontalAdvance(text));
+            frozen_layouts_.push_back(std::move(layout));
+        }
+        if (!frozen_layouts_.empty()) {
+            frozen_width_ = std::ceil(widest) + 2.0 * kCaptionPadPx + kCaptionBarPx;
+            frozen_height_ =
+                std::ceil(frozen_line_height_ * static_cast<double>(frozen_layouts_.size())) +
+                2.0 * kCaptionPadPx;
+        }
+    }
+
+    layoutCaptions();
+    emit hoveredCaptionChanged();
+    update();
 }
 
 void WaterfallItem::takeTranscripts()
@@ -522,6 +594,7 @@ void WaterfallItem::takeTranscripts()
         caption.slot = entry.slot;
         caption.doubtful = entry.transcript.confidence < kDoubtfulConfidence;
         caption.lines = wrap_caption(entry.transcript.text);
+        caption.text = entry.transcript.text;
         caption.card = entry.card;
         if (caption.lines.empty()) {
             continue;
@@ -591,6 +664,19 @@ void WaterfallItem::layoutCaptions()
     geometry.line_height_px = caption_line_height_;
     placed_captions_ = captions_.layout(span_at, geometry);
 
+    // The frozen plate grows to its whole text from where it stopped, and is
+    // kept inside the item, so a caption held at the bottom grows upward.
+    for (PlacedCaption& one : placed_captions_) {
+        if (!one.frozen || frozen_layouts_.empty()) {
+            continue;
+        }
+        one.width = frozen_width_;
+        one.height = frozen_height_;
+        one.x = std::max(kCaptionMarginPx,
+                         std::min(one.x, width() - kCaptionMarginPx - one.width));
+        one.y = std::max(0.0, std::min(one.y, height() - one.height));
+    }
+
     // The layout forgets what has faded out; the text laid out for it goes
     // with it.
     std::erase_if(caption_layouts_, [this](const auto& laid) {
@@ -598,8 +684,12 @@ void WaterfallItem::layoutCaptions()
     });
 
     // A caption scrolls under a pointer that has not moved, so the hover is
-    // asked again here rather than only when the pointer moves.
-    if (hovering_) {
+    // asked again here rather than only when the pointer moves. Not while one
+    // is frozen: it is under the pointer by construction, and a plate that
+    // grew past a still pointer has not been left.
+    if (captions_.frozen() != 0) {
+        setHoveredCaption(captions_.frozen());
+    } else if (hovering_) {
         setHoveredCaption(
             caption_at(placed_captions_, hover_position_.x(), hover_position_.y()));
     } else if (hovered_caption_ != 0 && captions_.find(hovered_caption_) == nullptr) {
@@ -1132,7 +1222,19 @@ void WaterfallItem::hoverAt(QPointF position)
 {
     // A plate is drawn over the boxes, so the pointer on a plate is on the
     // caption and not on whatever box is under it.
-    const std::uint64_t caption = caption_at(placed_captions_, position.x(), position.y());
+    std::uint64_t caption = caption_at(placed_captions_, position.x(), position.y());
+
+    // On a plate it stops and grows; off the grown plate it is let go. The
+    // test is against the grown plate, so the pointer is still on it while
+    // it grows out from under the pointer's first position.
+    if (caption != captions_.frozen()) {
+        freezeCaption(caption);
+        caption = caption_at(placed_captions_, position.x(), position.y());
+        if (caption != captions_.frozen()) {
+            // Let go, and what is under the pointer now is another plate.
+            freezeCaption(caption);
+        }
+    }
     setHoveredCaption(caption);
     setHovered(caption != 0 ? 0 : detection_at(boxes_, position.x()));
 }
@@ -1148,6 +1250,7 @@ void WaterfallItem::hoverMoveEvent(QHoverEvent* event)
 void WaterfallItem::hoverLeaveEvent(QHoverEvent* event)
 {
     hovering_ = false;
+    freezeCaption(0);
     setHoveredCaption(0);
     setHovered(0);
     event->accept();
@@ -1293,6 +1396,10 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
         node->appendChildNode(node->overlay);
         node->appendChildNode(node->caption_quads);
         node->appendChildNode(node->caption_texts);
+        node->frozen_quads = new OverlayNode;
+        node->frozen_texts = new QSGNode;
+        node->appendChildNode(node->frozen_quads);
+        node->appendChildNode(node->frozen_texts);
     }
     node->background->setRect(0.0, 0.0, w, h);
 
@@ -1405,6 +1512,7 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
     // scaled by the caption's fade; then the glyphs, which only move.
     std::vector<OverlayQuad> caption_quads;
     caption_quads.reserve(placed_captions_.size() * 4);
+    std::vector<OverlayQuad> frozen_quads;
     for (const PlacedCaption& one : placed_captions_) {
         if (!one.has_leader()) {
             continue;
@@ -1423,11 +1531,13 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
     for (const PlacedCaption& one : placed_captions_) {
         QColor plate = kCaptionPlate;
         plate.setAlpha(static_cast<int>(std::lround(kCaptionPlateAlpha * one.opacity)));
-        caption_quads.push_back(OverlayQuad{QRectF(one.x, one.y, one.width, one.height), plate});
-        caption_quads.push_back(OverlayQuad{QRectF(one.x, one.y, kCaptionBarPx, one.height),
-                                            caption_tie(one.slot, one.opacity, 255)});
+        std::vector<OverlayQuad>& into = one.frozen ? frozen_quads : caption_quads;
+        into.push_back(OverlayQuad{QRectF(one.x, one.y, one.width, one.height), plate});
+        into.push_back(OverlayQuad{QRectF(one.x, one.y, kCaptionBarPx, one.height),
+                                   caption_tie(one.slot, one.opacity, 255)});
     }
     node->caption_quads->setQuads(caption_quads);
+    node->frozen_quads->setQuads(frozen_quads);
 
     std::erase_if(node->caption_nodes, [&](const WaterfallNode::CaptionText& held) {
         const bool live = std::any_of(placed_captions_.begin(), placed_captions_.end(),
@@ -1474,8 +1584,50 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
         if (held->place->matrix() != at) {
             held->place->setMatrix(at);
         }
-        if (held->opacity->opacity() != one.opacity) {
-            held->opacity->setOpacity(one.opacity);
+        // The frozen one's small text stays out of sight under its large
+        // text, kept so letting go of it rebuilds nothing.
+        const double shown = one.frozen && !frozen_layouts_.empty() ? 0.0 : one.opacity;
+        if (held->opacity->opacity() != shown) {
+            held->opacity->setOpacity(shown);
+        }
+    }
+
+    // The frozen caption's large text, built again at each freeze since the
+    // layouts it points at are rebuilt then.
+    const auto frozen_one = std::find_if(placed_captions_.begin(), placed_captions_.end(),
+                                         [](const PlacedCaption& one) { return one.frozen; });
+    const bool frozen_drawn = frozen_one != placed_captions_.end() && !frozen_layouts_.empty();
+    if (node->frozen.opacity != nullptr &&
+        (!frozen_drawn || node->frozen_generation != frozen_generation_)) {
+        node->frozen_texts->removeChildNode(node->frozen.opacity);
+        delete node->frozen.opacity;
+        node->frozen = WaterfallNode::CaptionText{};
+    }
+    if (frozen_drawn) {
+        if (node->frozen.opacity == nullptr) {
+            QSGTextNode* text = window()->createTextNode();
+            text->setColor(frozen_one->doubtful ? kCaptionInkDim : kCaptionInk);
+            for (std::size_t line = 0; line < frozen_layouts_.size(); ++line) {
+                text->addTextLayout(QPointF(kCaptionPadPx + kCaptionBarPx,
+                                            kCaptionPadPx + frozen_line_height_ *
+                                                                static_cast<double>(line)),
+                                    frozen_layouts_[line].get());
+            }
+            auto* place = new QSGTransformNode;
+            place->appendChildNode(text);
+            auto* opacity = new QSGOpacityNode;
+            opacity->appendChildNode(place);
+            node->frozen_texts->appendChildNode(opacity);
+            node->frozen = WaterfallNode::CaptionText{frozen_one->serial, opacity, place};
+            node->frozen_generation = frozen_generation_;
+        }
+        QMatrix4x4 at;
+        at.translate(static_cast<float>(frozen_one->x), static_cast<float>(frozen_one->y));
+        if (node->frozen.place->matrix() != at) {
+            node->frozen.place->setMatrix(at);
+        }
+        if (node->frozen.opacity->opacity() != frozen_one->opacity) {
+            node->frozen.opacity->setOpacity(frozen_one->opacity);
         }
     }
 
