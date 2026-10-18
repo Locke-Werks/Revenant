@@ -221,8 +221,16 @@ TEST_CASE("the comb cancellation locks to a drifting comb and takes it out of th
     const std::string uri = "file:///" + path.generic_string() +
                             "?rate=" + std::to_string(kRate) + "&format=cf32&center=7100000";
 
+    // The stage-on run plays at realtime. Detection runs on its own thread at
+    // its own wall-clock speed, about once a second of source time, so an
+    // unthrottled replay outruns it: windows are dropped while it is busy, a
+    // run saw one to three detections in seven seconds instead of six, and
+    // where the lock landed in source time, and so how much of the measured
+    // window it covered, depended on the machine's load that moment. Paced,
+    // every window is detected and the lock lands at the same source time
+    // every run. The stage-off run has nothing on that thread and stays fast.
     const Run off = run_capture(uri, false);
-    const Run on = run_capture(uri, true);
+    const Run on = run_capture(uri + "&pace=1", true);
 
     std::printf("comb off: line height %.1f dB over %zu frames\n", off.line_height_db,
                 off.frames_measured);
