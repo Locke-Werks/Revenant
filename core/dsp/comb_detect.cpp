@@ -641,15 +641,21 @@ void take_grid(const std::vector<Peak>& peaks, const Fit& grid, std::vector<bool
     }
 }
 
-// A held comb, as the bank reports it, in bins: its own grid and, with a
-// ripple, one grid per sideband order either side, as many as the search
-// would have taken out with it had it been found here.
-[[nodiscard]] std::vector<Fit> held_grids(const CombEstimate& held, std::size_t n, SampleRate rate)
+// A held comb, as the bank reports it, in bins: its own grid and one grid per
+// sideband order either side, as many as the search would have taken out with
+// it had it been found here. With a tracked ripple the orders are at its
+// multiples, out to what sideband_grids reaches; without one, the ladder is
+// measured here from the peaks on the held grid, as sideband_grids does for a
+// comb found fresh, because a comb tracked bare still has its sidebands in a
+// spectrum taken before the cancellation.
+[[nodiscard]] std::vector<Fit> held_grids(const CombEstimate& held, const std::vector<Peak>& peaks,
+                                          const std::vector<double>& db, SampleRate rate)
 {
     std::vector<Fit> out;
     if (held.line_count() == 0) {
         return out;
     }
+    const std::size_t n = db.size();
     const double hz_per_bin = static_cast<double>(rate) / static_cast<double>(n);
     Fit grid;
     grid.c = static_cast<double>(n / 2) + held.offset_hz / hz_per_bin;
@@ -657,17 +663,46 @@ void take_grid(const std::vector<Peak>& peaks, const Fit& grid, std::vector<bool
     grid.k_lo = held.k_lo;
     grid.k_hi = grid.d > 0.0 ? held.k_hi : held.k_lo;
     out.push_back(grid);
-    if (held.ripple_hz > 0.0 && grid.d > 0.0) {
+    if (!(grid.d > 0.0)) {
+        return out;
+    }
+    if (held.ripple_hz > 0.0) {
+        const double reach_hz = std::min(kSidebandReachHz, 0.45 * held.spacing_hz);
         const int orders = std::max(kSidebandOrders, static_cast<int>(held.sideband_orders));
-        for (int m = 1; m <= orders; ++m) {
+        for (int m = 1; m <= orders && m * held.ripple_hz <= reach_hz; ++m) {
             for (const int side : {1, -1}) {
                 Fit sideband = grid;
                 sideband.c += side * m * held.ripple_hz / hz_per_bin;
                 out.push_back(sideband);
             }
         }
+        return out;
     }
+    // The held grid's own peaks, as a fit would have matched them.
+    Fit matched = grid;
+    match(peaks, grid.c, grid.d, kTakenBins, matched.ks, matched.which);
+    std::erase_if(matched.which, [&](std::size_t j) {
+        const double k = std::round((peaks[j].x - grid.c) / grid.d);
+        return k < static_cast<double>(grid.k_lo) || k > static_cast<double>(grid.k_hi);
+    });
+    matched.ks.clear();  // sideband_grids reads only the peaks
+    for (const std::size_t j : matched.which) {
+        matched.heights.push_back(peaks[j].height);
+    }
+    double ripple_bins = 0.0;
+    std::vector<Fit> sides = sideband_grids(matched, peaks, db, rate, ripple_bins);
+    out.insert(out.end(), sides.begin(), sides.end());
     return out;
+}
+
+// Whether a peak at x sits within tolerance_bins of a line of any grid.
+[[nodiscard]] bool on_any_line(double x, const std::vector<Fit>& grids, double tolerance_bins)
+{
+    return std::ranges::any_of(grids, [&](const Fit& g) {
+        const double k = g.d > 0.0 ? std::round((x - g.c) / g.d) : 0.0;
+        return k >= static_cast<double>(g.k_lo) && k <= static_cast<double>(g.k_hi) &&
+               std::abs(x - g.c - k * g.d) < tolerance_bins;
+    });
 }
 
 // The share of a found grid's positions that sit on a held comb's lines,
@@ -782,7 +817,7 @@ Expected<std::vector<CombEstimate>> detect_combs(const CombSpectrum& spectrum,
     std::vector<Fit> held;
     std::vector<Fit> held_carriers;
     for (const CombEstimate& estimate : active) {
-        std::vector<Fit> grids = held_grids(estimate, n, spectrum.rate);
+        std::vector<Fit> grids = held_grids(estimate, peaks, *db, spectrum.rate);
         if (grids.empty()) {
             continue;
         }
@@ -826,13 +861,24 @@ Expected<std::vector<CombEstimate>> detect_combs(const CombSpectrum& spectrum,
             break;
         }
         std::vector<bool> taken(peaks.size(), false);
-        for (const std::size_t j : fit->which) {
-            taken[j] = true;
-        }
         if (is_held(*fit)) {
-            take_grid(peaks, *fit, taken);
+            // Only the peaks that are a held comb's lines go: the fit may
+            // also have matched peaks of something else between them.
+            bool any = false;
+            for (std::size_t j = 0; j < peaks.size(); ++j) {
+                if (on_any_line(peaks[j].x, held, same_line_bins)) {
+                    taken[j] = true;
+                    any = true;
+                }
+            }
+            if (!any) {
+                break;  // nothing left to take, and the same grid would win again
+            }
             drop_taken(taken);
             continue;
+        }
+        for (const std::size_t j : fit->which) {
+            taken[j] = true;
         }
 
         // A grid is split into its even and odd lines when the halves, each
