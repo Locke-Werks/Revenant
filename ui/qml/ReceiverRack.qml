@@ -98,13 +98,14 @@ ColumnLayout {
             flat: true
             text: "clear"
             ink: Theme.inkDim
-            enabled: engineLink.rackCount > 0
+            enabled: engineLink.rackClearable || engineLink.autoDv
             onClicked: engineLink.clearReceivers()
 
             Tip {
                 visible: parent.hovered
-                text: engineLink.autoDv ? "remove every receiver and turn auto DV off"
-                                        : "remove every receiver"
+                text: engineLink.autoDv
+                      ? "remove every receiver and turn auto DV off; the trunk tracker stays held until auto DV is turned on and off again"
+                      : "remove every receiver the rack can remove"
             }
         }
 

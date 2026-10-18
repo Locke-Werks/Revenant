@@ -607,10 +607,19 @@ void EngineLink::removeRackReceiver(qulonglong key)
         removeReceiver();
         return;
     }
+    if (!drop_held_entry(key)) {
+        return;
+    }
+    post_audio_wants();
+    emit rackChanged();
+}
+
+bool EngineLink::drop_held_entry(std::uint64_t key)
+{
     // Not an adopted one: the plugin closes its own receivers, and the strip
     // offers no remove. drop_adopted_entry is how one leaves the rack.
     if (const RackEntry* entry = rack_.find(key); entry == nullptr || entry->adopted) {
-        return;
+        return false;
     }
     rack_.remove(key);
     std::erase_if(held_views_, [key](const auto& held) { return held.first == key; });
@@ -619,9 +628,7 @@ void EngineLink::removeRackReceiver(qulonglong key)
     op.kind = RackOp::Kind::RemoveHeld;
     op.key = key;
     post_rack_op(std::move(op));
-
-    post_audio_wants();
-    emit rackChanged();
+    return true;
 }
 
 void EngineLink::dismissReceiver(qulonglong key)
@@ -660,13 +667,18 @@ void EngineLink::clearReceivers()
 {
     // Off before anything goes, so spawn_dv_receivers cannot refill the rack
     // from under the loop. With it off there is no dismissal to record either.
+    // The hold auto DV put on plugin receivers stays: lifting it here would
+    // let the trunk tracker fill the rack straight back up with strips this
+    // cannot remove. Turning auto DV on and off again lifts it.
     if (auto_dv_) {
-        setAutoDv(false);
+        apply_auto_dv(false, false);
     }
 
     // A copy of the keys: every remove changes the rack. The pane goes last,
     // because removeReceiver focuses whatever took its place, and a pane moved
     // onto a receiver this loop still means to remove would be removed twice.
+    // The held ones go quietly and the rack is announced once, rather than
+    // the strips' Repeater being rebuilt for each of up to 64.
     std::vector<std::uint64_t> keys;
     for (const RackEntry& entry : rack_.entries()) {
         if (!entry.adopted && entry.key != pane_key_) {
@@ -674,14 +686,33 @@ void EngineLink::clearReceivers()
         }
     }
     for (const std::uint64_t key : keys) {
-        removeRackReceiver(key);
+        (void)drop_held_entry(key);
     }
+    rack_note_.clear();
     if (const RackEntry* pane = rack_.find(pane_key_); pane != nullptr && !pane->adopted) {
+        // Posts the audio wants and announces the rack itself.
         removeReceiver();
+        return;
     }
+    post_audio_wants();
+    emit rackChanged();
+}
+
+bool EngineLink::rackClearable() const
+{
+    if (auto_dv_) {
+        return true;
+    }
+    return std::any_of(rack_.entries().begin(), rack_.entries().end(),
+                       [](const RackEntry& entry) { return !entry.adopted; });
 }
 
 void EngineLink::setAutoDv(bool on)
+{
+    apply_auto_dv(on, true);
+}
+
+void EngineLink::apply_auto_dv(bool on, bool plugins_follow)
 {
     if (auto_dv_ == on) {
         return;
@@ -693,13 +724,16 @@ void EngineLink::setAutoDv(bool on)
 
     // Either auto DV or the trunk tracker, never both on one channel: on, the
     // engine closes the tracker's receivers and opens no more until it is off.
-    plugin_receivers_allowed_.store(!on, std::memory_order_release);
-    plugin_receivers_pending_.store(true, std::memory_order_release);
-    {
-        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
-        source_work_pending_ = true;
+    // clearReceivers turns auto DV off and keeps that hold; see there.
+    if (plugins_follow) {
+        plugin_receivers_allowed_.store(!on, std::memory_order_release);
+        plugin_receivers_pending_.store(true, std::memory_order_release);
+        {
+            const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+            source_work_pending_ = true;
+        }
+        supervisor_wake_.notify_all();
     }
-    supervisor_wake_.notify_all();
 
     // At once rather than at the next detection pass, so the switch answers
     // with the digital voice already on the span.

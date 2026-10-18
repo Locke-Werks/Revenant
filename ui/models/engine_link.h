@@ -1244,6 +1244,10 @@ class EngineLink : public QObject {
     Q_PROPERTY(int rackCount READ rackCount NOTIFY rackChanged)
     Q_PROPERTY(bool rackFull READ rackFull NOTIFY rackChanged)
 
+    // Whether clearReceivers has anything to do: a receiver it can remove, or
+    // auto DV to turn off.
+    Q_PROPERTY(bool rackClearable READ rackClearable NOTIFY rackChanged)
+
     // Automatic digital voice receivers: while on, every P25, DMR, D-STAR,
     // TETRA or M17 detection on a frequency no receiver covers gets a held
     // receiver of its own in the mode a click would set, and none is ever
@@ -2685,6 +2689,7 @@ public:
     [[nodiscard]] QVariantList rackEntries() const;
     [[nodiscard]] int rackCount() const { return static_cast<int>(rack_.size()); }
     [[nodiscard]] bool rackFull() const { return rack_.full(); }
+    [[nodiscard]] bool rackClearable() const;
     [[nodiscard]] qulonglong focusedKey() const { return pane_key_; }
     [[nodiscard]] int focusedSlot() const;
     [[nodiscard]] QString focusedLabel() const;
@@ -2737,7 +2742,8 @@ public:
     Q_INVOKABLE void dismissReceiver(qulonglong key);
 
     // Every receiver out of the rack at once, bar the plugin's adopted ones.
-    // Turns autoDv off first, or its next pass would open them all again.
+    // Turns autoDv off first, or its next pass would open them all again,
+    // and leaves its hold on plugin receivers in place.
     Q_INVOKABLE void clearReceivers();
 
     [[nodiscard]] bool autoDv() const { return auto_dv_; }
@@ -4066,6 +4072,15 @@ private:
     // says needs one, when autoDv is on. Qt thread, after each detection list
     // lands and when the switch goes on. rack_link.cpp.
     void spawn_dv_receivers();
+
+    // setAutoDv, and clearReceivers' way of turning it off: plugins_follow
+    // false leaves the hold on plugin receivers where it was.
+    void apply_auto_dv(bool on, bool plugins_follow);
+
+    // A held receiver out of the rack and the engine, with nothing announced:
+    // removeRackReceiver and clearReceivers announce it. False for one that
+    // is not there or is a plugin's.
+    bool drop_held_entry(std::uint64_t key);
 
     // Qt thread. Every receiver's band for the span's hit test, with whether
     // a click may focus it.
