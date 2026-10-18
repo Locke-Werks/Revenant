@@ -200,8 +200,11 @@ class WaterfallItem : public QQuickItem {
     Q_PROPERTY(QString hoveredCaptionText READ hoveredCaptionText NOTIFY hoveredCaptionChanged)
 
     // The caption under the pointer has stopped and grown to its whole text,
-    // so the hover card would only say it again: qml/SpanView.qml hides it.
+    // so the hover card would only say the text again: qml/SpanView.qml
+    // shows hoveredCaptionDetail instead, the card's first and last lines.
     Q_PROPERTY(bool captionFrozen READ captionFrozen NOTIFY hoveredCaptionChanged)
+    Q_PROPERTY(QString hoveredCaptionDetail READ hoveredCaptionDetail
+                   NOTIFY hoveredCaptionChanged)
 
 public:
     explicit WaterfallItem(QQuickItem* parent = nullptr);
@@ -230,6 +233,7 @@ public:
 
     [[nodiscard]] qulonglong hoveredCaption() const { return hovered_caption_; }
     [[nodiscard]] QString hoveredCaptionText() const;
+    [[nodiscard]] QString hoveredCaptionDetail() const;
     [[nodiscard]] bool captionFrozen() const { return captions_.frozen() != 0; }
 
 signals:
@@ -353,7 +357,8 @@ private:
 
     // Stops the caption under the pointer and lays out its whole text large,
     // or, for zero, lets it go back to the waterfall. render/caption_layout.h
-    // has what a freeze does to the caption itself.
+    // has what a freeze does to the caption itself. Neither announces nor
+    // redraws: the caller does, once, when the frozen caption changed.
     void freezeCaption(std::uint64_t serial);
     void hoverAt(QPointF position);
 

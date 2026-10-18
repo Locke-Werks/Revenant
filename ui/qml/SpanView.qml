@@ -445,8 +445,8 @@ ColumnLayout {
         // where the protocol said one, the whole text, and how sure and how
         // late the recogniser was. Only while the pointer is on a plate, and in
         // the waterfall's top right corner, where the detection card sits on
-        // the spectrum. Not while the caption is frozen: the plate itself has
-        // grown to the whole text then, and the card would repeat it.
+        // the spectrum. While the caption is frozen the plate itself has grown to
+        // the whole text, so the card keeps only its first and last lines.
         Rectangle {
             id: captionCard
 
@@ -454,8 +454,7 @@ ColumnLayout {
             anchors.top: parent.top
             anchors.rightMargin: 24
             anchors.topMargin: 6
-            visible: waterfall.hoveredCaption !== 0 && !waterfall.captionFrozen
-                     && captionText.text.length > 0
+            visible: waterfall.hoveredCaption !== 0 && captionText.text.length > 0
             width: Math.min(captionText.implicitWidth, 460) + 16
             height: captionText.implicitHeight + 10
             radius: Theme.radius
@@ -469,7 +468,8 @@ ColumnLayout {
                 x: 8
                 y: 5
                 width: Math.min(implicitWidth, 460)
-                text: waterfall.hoveredCaptionText
+                text: waterfall.captionFrozen ? waterfall.hoveredCaptionDetail
+                                              : waterfall.hoveredCaptionText
                 wrapMode: Text.WordWrap
                 color: Theme.ink
                 font.family: Theme.monoFont

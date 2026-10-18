@@ -511,6 +511,24 @@ QString WaterfallItem::hoveredCaptionText() const
     return caption == nullptr ? QString() : QString::fromStdString(caption->card);
 }
 
+QString WaterfallItem::hoveredCaptionDetail() const
+{
+    // The card less its middle line, which is the text: models/
+    // transcription.h's transcript_card_text writes who and where, the text,
+    // then how sure and how late, one line each.
+    const Caption* caption = captions_.find(hovered_caption_);
+    if (caption == nullptr) {
+        return {};
+    }
+    const std::string& card = caption->card;
+    const std::size_t first = card.find('\n');
+    const std::size_t last = card.rfind('\n', card.size() > 1 ? card.size() - 2 : 0);
+    if (first == std::string::npos || last == std::string::npos || last <= first) {
+        return QString::fromStdString(card);
+    }
+    return QString::fromStdString(card.substr(0, first) + card.substr(last));
+}
+
 void WaterfallItem::setHoveredCaption(std::uint64_t serial)
 {
     if (hovered_caption_ == serial) {
@@ -541,9 +559,13 @@ void WaterfallItem::freezeCaption(std::uint64_t serial)
         const double room =
             width() - 2.0 * kCaptionMarginPx - 2.0 * kCaptionPadPx - kCaptionBarPx;
         const auto fits = static_cast<std::size_t>(std::max(1.0, std::floor(room / advance)));
+        // As many lines as the item is tall, the last ending in an ellipsis
+        // when even that is not all of it.
+        const double tall = height() - 2.0 * kCaptionPadPx;
+        const auto rows = static_cast<std::size_t>(
+            std::max(1.0, std::floor(tall / std::max(1.0, frozen_line_height_))));
         const std::vector<std::string> lines =
-            wrap_caption(caption->text, std::min(kFrozenCaptionColumns, fits),
-                         std::numeric_limits<std::size_t>::max());
+            wrap_caption(caption->text, std::min(kFrozenCaptionColumns, fits), rows);
 
         double widest = 0.0;
         for (const std::string& line : lines) {
@@ -559,17 +581,21 @@ void WaterfallItem::freezeCaption(std::uint64_t serial)
             widest = std::max(widest, metrics.horizontalAdvance(text));
             frozen_layouts_.push_back(std::move(layout));
         }
+        // Never smaller than the plate it grew from, either way: the
+        // rewrap can take fewer lines than the three it replaces, and a
+        // plate that shrank from under the pointer would be left the moment
+        // it froze and frozen again the moment it was let go.
         if (!frozen_layouts_.empty()) {
-            frozen_width_ = std::ceil(widest) + 2.0 * kCaptionPadPx + kCaptionBarPx;
-            frozen_height_ =
+            frozen_width_ = std::max(caption->box_width,
+                                     std::ceil(widest) + 2.0 * kCaptionPadPx + kCaptionBarPx);
+            frozen_height_ = std::max(
+                caption->box_height,
                 std::ceil(frozen_line_height_ * static_cast<double>(frozen_layouts_.size())) +
-                2.0 * kCaptionPadPx;
+                    2.0 * kCaptionPadPx);
         }
     }
 
     layoutCaptions();
-    emit hoveredCaptionChanged();
-    update();
 }
 
 void WaterfallItem::takeTranscripts()
@@ -1222,6 +1248,7 @@ void WaterfallItem::hoverAt(QPointF position)
 {
     // A plate is drawn over the boxes, so the pointer on a plate is on the
     // caption and not on whatever box is under it.
+    const std::uint64_t was_frozen = captions_.frozen();
     std::uint64_t caption = caption_at(placed_captions_, position.x(), position.y());
 
     // On a plate it stops and grows; off the grown plate it is let go. The
@@ -1237,6 +1264,13 @@ void WaterfallItem::hoverAt(QPointF position)
     }
     setHoveredCaption(caption);
     setHovered(caption != 0 ? 0 : detection_at(boxes_, position.x()));
+
+    // Drawn again only for a freeze that changed hands, never for a move
+    // across the same frozen plate.
+    if (captions_.frozen() != was_frozen) {
+        emit hoveredCaptionChanged();
+        update();
+    }
 }
 
 void WaterfallItem::hoverMoveEvent(QHoverEvent* event)
@@ -1250,8 +1284,13 @@ void WaterfallItem::hoverMoveEvent(QHoverEvent* event)
 void WaterfallItem::hoverLeaveEvent(QHoverEvent* event)
 {
     hovering_ = false;
+    const bool was_frozen = captions_.frozen() != 0;
     freezeCaption(0);
     setHoveredCaption(0);
+    if (was_frozen) {
+        emit hoveredCaptionChanged();
+        update();
+    }
     setHovered(0);
     event->accept();
 }
