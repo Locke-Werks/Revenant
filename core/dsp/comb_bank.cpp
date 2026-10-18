@@ -34,15 +34,8 @@ namespace revenant::dsp {
 
 namespace {
 
-// An estimate whose lines sit this much on a running tracker's lines is a
-// detection of what that tracker holds, at another spacing or a sub-grid.
-constexpr double kOverlapFraction = 0.25;
-
-// How close a detected line must be to a held one to be that line. A
-// detection from the fine spectrum places a line to a few hertz, a coarser
-// one to tens; a mains-ripple sideband sits 59.5 Hz from its carrier and is a
-// different line.
-constexpr double kSameLineHz = 45.0;
+constexpr double kOverlapFraction = kCombOverlapFraction;
+constexpr double kSameLineHz = kCombSameLineHz;
 
 constexpr std::size_t kMaxSplits = 32;
 
@@ -229,6 +222,17 @@ void CombBank::observe(const CombObservation& observation)
         }
         row += n;
     }
+}
+
+std::vector<CombEstimate> CombBank::active_estimates() const
+{
+    std::vector<CombEstimate> out;
+    for (const CombTracker& tracker : trackers_) {
+        if (tracker.active()) {
+            out.push_back(tracker.estimate());
+        }
+    }
+    return out;
 }
 
 CombStatus CombBank::status() const

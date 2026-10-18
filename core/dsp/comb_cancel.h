@@ -133,6 +133,18 @@ inline constexpr std::uint32_t kCombMaxSubBlocks = 16;
 // line, 684 for the strong family's 76, which is what sizes kCombMaxLines.
 inline constexpr std::uint32_t kCombMaxCombs = 8;
 
+// An estimate whose lines sit this much on a held comb's lines is a detection
+// of what that comb already is, at another spacing or a sub-grid. Shared by
+// the bank, which drops such a detection, and by detect_combs, which does not
+// spend a pass on one.
+inline constexpr double kCombOverlapFraction = 0.25;
+
+// How close a detected line must be to a held one to be that line. A
+// detection from the fine spectrum places a line to a few hertz, a coarser
+// one to tens; a mains-ripple sideband sits 59.5 Hz from its carrier and is a
+// different line.
+inline constexpr double kCombSameLineHz = 45.0;
+
 // ---------------------------------------------------------------------------
 // Detection
 // ---------------------------------------------------------------------------
@@ -188,7 +200,17 @@ struct CombSpectrum {
 // single comb's halves agree with it and it is reported whole. After each
 // comb is taken its peaks are removed and the rest searched again. An empty
 // vector is no comb.
-[[nodiscard]] Expected<std::vector<CombEstimate>> detect_combs(const CombSpectrum& spectrum);
+//
+// `active` is what the bank already holds (CombBank::active_estimates). The
+// detection spectrum is taken before the cancellation, so a held comb stands
+// in it at full strength and would win the first passes, only to be dropped
+// by the bank as held, while a fresh weaker comb never got a pass. Every peak
+// on an active grid or its sidebands leaves the search first, and a grid that
+// still comes out mostly on an active comb is taken without counting toward
+// kCombMaxCombs, so the passes go to combs that are not yet cancelled. Empty
+// `active` is the search as it was.
+[[nodiscard]] Expected<std::vector<CombEstimate>> detect_combs(
+    const CombSpectrum& spectrum, std::span<const CombEstimate> active = {});
 
 // ---------------------------------------------------------------------------
 // The kernels' contract
@@ -353,6 +375,11 @@ public:
     // The tracked sideband ripple in hertz, zero for a bare comb.
     [[nodiscard]] double ripple_hz() const;
 
+    // The comb as currently tracked, over the whole range it was detected
+    // across and not only the lines holding slots, with its ripple and
+    // sideband orders: what detect_combs is told is already held.
+    [[nodiscard]] CombEstimate estimate() const;
+
 private:
     // Value members only; the tracker is copyable so a test can fork it.
 
@@ -473,6 +500,10 @@ public:
     [[nodiscard]] CombStatus status() const;
 
     [[nodiscard]] std::span<const CombTracker> trackers() const { return trackers_; }
+
+    // Every active tracker's current grid, CombTracker::estimate. A copy, so
+    // the recording thread can hand it to the detection thread.
+    [[nodiscard]] std::vector<CombEstimate> active_estimates() const;
 
 private:
     struct Split {

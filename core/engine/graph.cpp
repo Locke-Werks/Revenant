@@ -1062,6 +1062,10 @@ struct Graph::Impl {
     std::uint64_t comb_tap_epoch = 0;
 
     std::vector<dsp::Complex32> comb_job_samples;
+    // The bank's held combs as the job was handed over, a copy the recording
+    // thread writes with the samples and the detection thread reads with
+    // them, under the same turn: detect_combs spends its passes on the rest.
+    std::vector<dsp::CombEstimate> comb_job_active;
     dsp::SampleRate comb_job_rate = 0;
     std::uint64_t comb_job_epoch = 0;
     std::atomic<std::uint32_t> comb_job_state{kCombJobIdle};
@@ -1506,11 +1510,12 @@ struct Graph::Impl {
             return;
         }
         // Every detection goes to the bank, which drops what its trackers
-        // already hold. The detection's spectrum is measured after the
-        // cancellation, so once a comb is being cancelled the detector sees
-        // what is left: the other combs, which is how a second comb beside a
-        // locked one is picked up, and a remnant of the locked one, which the
-        // bank recognises by its lines and ignores.
+        // already hold. The detection's samples are tapped before the
+        // cancellation, so a held comb stands in its spectrum at full
+        // strength; the job carried the bank's held grids (comb_job_active)
+        // and detect_combs spent its passes on the others, which is how a
+        // second, weaker comb beside a locked one is picked up. The bank's
+        // own held check stays as the backstop for a comb started since.
         comb_bank.detected(result.estimates);
     }
 
@@ -1666,6 +1671,7 @@ struct Graph::Impl {
 
         if (comb_job_state.load(std::memory_order_acquire) == kCombJobIdle) {
             std::swap(comb_tap, comb_job_samples);
+            comb_job_active = comb_bank.active_estimates();
             comb_job_rate = config.source_rate;
             comb_job_epoch = epoch;
             comb_job_state.store(kCombJobReady, std::memory_order_release);
@@ -1749,7 +1755,7 @@ struct Graph::Impl {
                     std::fclose(file);
                 }
             }
-            auto found = dsp::detect_combs(spectrum);
+            auto found = dsp::detect_combs(spectrum, comb_job_active);
             comb_detections.fetch_add(1, std::memory_order_relaxed);
             if (found && !found->empty()) {
                 comb_detections_found.fetch_add(1, std::memory_order_relaxed);

@@ -500,6 +500,88 @@ TEST_CASE("comb detections find an unrelated comb beside the first", "[comb][det
     }
 }
 
+namespace {
+
+// A comb drawn at c + k d bins over the whole span, as the bank would report
+// a tracker holding it.
+[[nodiscard]] CombEstimate held_comb(double c, double d)
+{
+    const double dc = static_cast<double>(kBins / 2);
+    CombEstimate out;
+    out.offset_hz = line_nearest_dc(c, d);
+    out.spacing_hz = d * kHzPerBin;
+    const double c0 = dc + out.offset_hz / kHzPerBin;
+    out.k_lo = static_cast<std::int32_t>(std::ceil((2.0 - c0) / d));
+    out.k_hi = static_cast<std::int32_t>(std::floor((kBins - 3.0 - c0) / d));
+    return out;
+}
+
+}  // namespace
+
+// A comb the bank already holds stands in the detection spectrum at full
+// strength, because the samples are tapped before the cancellation. Marked
+// active, it is not reported again, in whole or as halves, and the weak comb
+// beside it is.
+TEST_CASE("comb detections skip a comb already held and find the fresh one", "[comb][detect]")
+{
+    for (std::uint64_t seed = 900; seed < 906; ++seed) {
+        INFO("seed " << seed);
+        Scene scene(seed);
+        const double d_a = 14'000.0 / kHzPerBin;
+        const double c_a = 37.31 + 0.05 * static_cast<double>(seed - 900);
+        const double d_b = 22'930.0 / kHzPerBin;
+        const double c_b = 80.9;
+        scene.comb(c_a, d_a, 12.0, 18.0);
+        scene.comb(c_b, d_b, 5.0, 8.0);
+        const std::vector<float> power = scene.render();
+
+        const std::vector<CombEstimate> active{held_comb(c_a, d_a)};
+        auto result = dsp::detect_combs(CombSpectrum{power, kRate}, active);
+        REQUIRE(result.has_value());
+        const std::vector<CombEstimate>& found = *result;
+        std::string seen;
+        for (const CombEstimate& f : found) {
+            seen += std::format("[offset {:.1f} spacing {:.2f} lines {}] ", f.offset_hz,
+                                f.spacing_hz, f.lines_found);
+        }
+        INFO("found " << seen);
+        REQUIRE_FALSE(found.empty());
+        bool b_whole = false;
+        bool b_even = false;
+        bool b_odd = false;
+        for (const CombEstimate& f : found) {
+            CHECK_FALSE(on_comb(f, c_a, d_a, 2.0));
+            CHECK_FALSE(on_comb(f, c_a, 2.0 * d_a, 2.0));
+            CHECK_FALSE(on_comb(f, c_a + d_a, 2.0 * d_a, 2.0));
+            b_whole = b_whole || on_comb(f, c_b, d_b, 1.0);
+            b_even = b_even || on_comb(f, c_b, 2.0 * d_b, 1.0);
+            b_odd = b_odd || on_comb(f, c_b + d_b, 2.0 * d_b, 1.0);
+        }
+        CHECK((b_whole || (b_even && b_odd)));
+    }
+}
+
+// Nothing held changes nothing.
+TEST_CASE("comb detections with no held comb are what they were", "[comb][detect]")
+{
+    for (std::uint64_t seed = 910; seed < 914; ++seed) {
+        INFO("seed " << seed);
+        Scene scene(seed);
+        scene.comb(37.31, 14'000.0 / kHzPerBin, 10.0, 15.0);
+        scene.comb(80.9, 22'930.0 / kHzPerBin, 6.0, 9.0);
+        const std::vector<float> power = scene.render();
+        const std::vector<CombEstimate> plain = run_all(power);
+        auto empty = dsp::detect_combs(CombSpectrum{power, kRate}, {});
+        REQUIRE(empty.has_value());
+        REQUIRE(empty->size() == plain.size());
+        for (std::size_t i = 0; i < plain.size(); ++i) {
+            CHECK(plain[i].offset_hz == (*empty)[i].offset_hz);
+            CHECK(plain[i].spacing_hz == (*empty)[i].spacing_hz);
+            CHECK(plain[i].lines_found == (*empty)[i].lines_found);
+        }
+    }
+}
+
 // Spectra dumped by the engine under REVENANT_COMB_DUMP (core/engine/graph.cpp),
 // named <prefix>.<n>.<rate>.f32, replayed through detect_combs and printed.
 // REVENANT_COMB_SPECTRA lists the files, separated by semicolons. Unset, the
@@ -536,6 +618,16 @@ TEST_CASE("comb detections on dumped spectra", "[comb][detect]")
         REQUIRE(found.has_value());
         std::printf("%s: %zu bins, %zu combs\n", path.c_str(), power.size(), found->size());
         for (const CombEstimate& f : *found) {
+            std::printf("  offset %10.1f Hz  spacing %9.2f Hz  k %4d..%-4d  %3u lines  median %.1f dB\n",
+                        f.offset_hz, f.spacing_hz, f.k_lo, f.k_hi, f.lines_found,
+                        static_cast<double>(f.median_height_db));
+        }
+        // Again with the first run's combs held, as the bank would hold them
+        // once they were tracked: what is left is what the passes now go to.
+        auto fresh = dsp::detect_combs(CombSpectrum{power, rate}, *found);
+        REQUIRE(fresh.has_value());
+        std::printf("  with those held: %zu new combs\n", fresh->size());
+        for (const CombEstimate& f : *fresh) {
             std::printf("  offset %10.1f Hz  spacing %9.2f Hz  k %4d..%-4d  %3u lines  median %.1f dB\n",
                         f.offset_hz, f.spacing_hz, f.k_lo, f.k_hi, f.lines_found,
                         static_cast<double>(f.median_height_db));

@@ -394,6 +394,26 @@ double CombTracker::ripple_hz() const
     return anchored_ ? signed_of(r_.freq) * static_cast<double>(rate_) : initial_ripple_hz_;
 }
 
+CombEstimate CombTracker::estimate() const
+{
+    CombEstimate out;
+    if (!active()) {
+        return out;
+    }
+    const double rate = static_cast<double>(rate_);
+    out.offset_hz = anchored_ ? signed_of(c_.freq) * rate : initial_offset_hz_;
+    out.spacing_hz = anchored_ ? signed_of(d_.freq) * rate : initial_spacing_hz_;
+    out.k_lo = range_lo_;
+    out.k_hi = range_hi_;
+    for (const Line& line : lines_) {
+        out.k_lo = std::min(out.k_lo, line.k);
+        out.k_hi = std::max(out.k_hi, line.k);
+    }
+    out.ripple_hz = ripple_hz();
+    out.sideband_orders = orders_;
+    return out;
+}
+
 bool CombTracker::agrees(const CombEstimate& estimate) const
 {
     if (!anchored_) {
