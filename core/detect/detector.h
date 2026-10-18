@@ -103,6 +103,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -521,12 +522,14 @@ struct Track {
     // a probe has called it a bare carrier (Unmodulated, not double
     // sideband), it is narrow, it has been continuous for
     // refine::kContinuousSeconds with no held spell and at most one keyup on
-    // its emitter, and its level from frame to frame is steady. Or, at once,
-    // lo_spur: a narrow carrier at a baseband offset where one stood before
-    // the front end retuned, which a station cannot do and a local
-    // oscillator or clock product inside the receiver does. A probe naming
-    // any other family takes either away. This only removes energy; nothing
-    // is decoded.
+    // its emitter, and its level from frame to frame is steady. Or, as soon
+    // as its level is steady, lo_spur: a narrow carrier at a baseband offset
+    // where a carrier that passed this rule stood before the front end
+    // retuned, with that old frequency now empty, which a station cannot do
+    // and a local oscillator or clock product inside the receiver does. A
+    // probe naming any other family takes either away, and the detector
+    // reports that as a withdrawal (Detector::withdrawn_spurs). This only
+    // removes energy; nothing is decoded.
     bool spur = false;
     bool lo_spur = false;
 
@@ -1252,8 +1255,11 @@ public:
 
     // Whether a carrier stood within kLoSpurToleranceHz of `baseband` with the
     // source tuned at least kLoSpurMinRetuneHz away from `centre`: the same
-    // offset at a different absolute frequency.
-    [[nodiscard]] bool stayed_at(dsp::Hertz baseband, dsp::Hertz centre) const;
+    // offset at a different absolute frequency, and one where nothing now
+    // stands (`occupied` false), since a station seen there before the
+    // retune would still be there.
+    [[nodiscard]] bool stayed_at(dsp::Hertz baseband, dsp::Hertz centre,
+                                 const std::function<bool(dsp::Hertz)>& occupied) const;
 
     void forget_older_than(dsp::SampleIndex now, dsp::SampleIndex forget_samples);
 
@@ -1375,6 +1381,11 @@ public:
     [[nodiscard]] const SpurBook& spur_book() const { return spur_book_; }
     void adopt_spur_book(const SpurBook& book) { spur_book_ = book; }
 
+    // Spurs the latest decision took back while the carrier is still there,
+    // because a probe named another family or it began to key or fade:
+    // absolute frequencies, for the engine to stop cancelling.
+    [[nodiscard]] std::span<const dsp::Hertz> withdrawn_spurs() const { return withdrawn_; }
+
 private:
     Detector() = default;
 
@@ -1408,6 +1419,11 @@ private:
     // Sets Track::spur and Track::lo_spur on every track, and notes narrow
     // carriers in spur_book_. The rule is on Track::spur.
     void mark_spurs(dsp::SampleIndex now);
+
+    // Whether a spur this detector named, and has not withdrawn, sits at
+    // this frequency: one presumed cancelled, whose dropping out is not a
+    // key-up and whose remnant's level means nothing.
+    [[nodiscard]] bool cancelling(dsp::Hertz center) const;
     void update_channel(Track& track) const;
 
     // Folds a recorded probe into the track's refinement and its emitter's.
@@ -1568,6 +1584,12 @@ private:
     // voice channel builds evidence over its keyups. core/detect/refine.h.
     refine::EmitterBook emitters_;
     SpurBook spur_book_;
+    struct Named {
+        dsp::Hertz center = 0;
+        dsp::SampleIndex last = 0;
+    };
+    std::vector<Named> cancelling_;
+    std::vector<dsp::Hertz> withdrawn_;
     DetectorStats stats_{};
 };
 

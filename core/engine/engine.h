@@ -2037,13 +2037,19 @@ public:
     // Off lets go of every spur held.
     [[nodiscard]] virtual Status set_spur_cancel(bool on);
 
-    // The spurs the wideband detector names now, as baseband offsets from
-    // the source's centre. Any thread; the recording thread takes them at its
-    // next block, leaves out any within an open receiver's passband, and
-    // starts a tracker on each it does not already hold. A spur missing from
-    // a later call is kept until its tracker loses lock: cancelled, it is no
-    // longer there for the detector to name.
-    [[nodiscard]] virtual Status set_spurs(std::span<const dsp::Hertz> baseband);
+    // The spurs the wideband detector names now, and those it has withdrawn
+    // while the carrier is still there, as baseband offsets from
+    // `source_center`, the centre the detector measured them against. A
+    // list stamped with any other centre than the source's own is from
+    // before a retune and is refused. Any thread; the recording thread takes
+    // them at its next block, leaves out any within an open receiver's
+    // passband, lets go of the withdrawn, and starts a tracker on each named
+    // one it does not already hold. A spur merely missing from a later call
+    // is kept until its tracker loses lock: cancelled, it is no longer there
+    // for the detector to name.
+    [[nodiscard]] virtual Status set_spurs(std::span<const dsp::Hertz> baseband,
+                                           std::span<const dsp::Hertz> withdrawn,
+                                           dsp::Hertz source_center);
 
 protected:
     Engine() = default;
@@ -2127,7 +2133,8 @@ inline Status Engine::set_spur_cancel(bool) {
                 "CombEstimate::spur existed");
 }
 
-inline Status Engine::set_spurs(std::span<const dsp::Hertz>) {
+inline Status Engine::set_spurs(std::span<const dsp::Hertz>, std::span<const dsp::Hertz>,
+                                dsp::Hertz) {
     return fail("this engine has no spur cancelling: it was written before "
                 "CombEstimate::spur existed");
 }

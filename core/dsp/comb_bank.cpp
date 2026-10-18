@@ -10,8 +10,11 @@
 // SPURS. A spur is a tracker of one line beside the combs, at most
 // kCombMaxSpurs of them, each taking one slot from what the combs leave. They
 // do not count toward kCombMaxCombs and are left out of status(). Combs have
-// first claim on the slots, and a spur on a line a comb holds is let go, so no
-// line is subtracted twice.
+// first claim on the slots: a comb that starts takes back what it needs from
+// the newest spurs. A spur on any line a comb plans, sidebands included, is
+// let go, so no line is subtracted twice. A spur that is lost, dropped or
+// withdrawn is not taken again for kSpurHoldOffSeconds, so a spur that will
+// not hold does not start a tracker every decision.
 //
 // SUB-BLOCKS. Each tracker picks its own sub-block count: short ones while it
 // pulls in, long ones once it has the comb within a hertz or so, because a
@@ -22,9 +25,10 @@
 // the finer projections it is handed back into its own.
 //
 // ORDER. The trackers' lines are concatenated in tracker order, and the split
-// recorded per block start is what hands each tracker its own rows of the
-// observation, so a tracker started or lost between plan and observation is
-// still given exactly the rows it planned, or none.
+// recorded per block start names each row run by the id of the tracker that
+// planned it, so a tracker started, lost or dropped between plan and
+// observation leaves every other tracker its own rows, and blocks in flight
+// survive a change to the set of trackers.
 //
 // PROVENANCE, per docs/clean-room.md: this project's own.
 
@@ -32,6 +36,7 @@
 #include <cmath>
 #include <cstdint>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "core/dsp/comb_cancel.h"
@@ -45,6 +50,9 @@ constexpr double kSameLineHz = kCombSameLineHz;
 
 constexpr std::size_t kMaxSplits = 32;
 
+// How long a spur that went is kept from starting again.
+constexpr double kSpurHoldOffSeconds = 3.0;
+
 }  // namespace
 
 CombBank::CombBank(SampleRate rate) : rate_(rate) {}
@@ -53,6 +61,31 @@ void CombBank::reset()
 {
     trackers_.clear();
     splits_.clear();
+    hold_off_.clear();
+}
+
+void CombBank::add(CombTracker tracker)
+{
+    tracker.set_id(next_id_++);
+    trackers_.push_back(std::move(tracker));
+}
+
+void CombBank::hold_off(const CombTracker& tracker)
+{
+    const auto samples =
+        static_cast<SampleIndex>(kSpurHoldOffSeconds * static_cast<double>(std::max<SampleRate>(rate_, 1)));
+    hold_off_.push_back({tracker.detected_offset_hz(), now_ + samples});
+}
+
+void CombBank::erase_spurs_if(const std::function<bool(const CombTracker&)>& drop)
+{
+    std::erase_if(trackers_, [&](const CombTracker& tracker) {
+        if (!tracker.spur() || !drop(tracker)) {
+            return false;
+        }
+        hold_off(tracker);
+        return true;
+    });
 }
 
 void CombBank::detected(std::span<const CombEstimate> estimates)
@@ -70,8 +103,10 @@ void CombBank::detected(std::span<const CombEstimate> estimates)
         for (const CombTracker& tracker : trackers_) {
             // Not agrees(): its 150 Hz allowance is for a coarse detection
             // restarting one tracker, and would take a sideband comb for its
-            // carrier's.
-            if (tracker.active() && tracker.overlap(estimate, kSameLineHz) > kOverlapFraction) {
+            // carrier's. Spurs are not counted: one line of a comb's is not
+            // the comb.
+            if (!tracker.spur() && tracker.active() &&
+                tracker.overlap(estimate, kSameLineHz) > kOverlapFraction) {
                 return true;
             }
         }
@@ -88,35 +123,23 @@ void CombBank::detected(std::span<const CombEstimate> estimates)
         return;
     }
 
-    // A tracker that is not running gives its slots back. The set of trackers
-    // changes here, so blocks in flight can no longer be split by position:
-    // they are let go, which each tracker meets as one dropped block.
-    bool changed =
-        std::erase_if(trackers_, [](const CombTracker& tracker) { return !tracker.active(); }) > 0;
+    // A comb tracker that is not running gives its slots back.
+    std::erase_if(trackers_,
+                  [](const CombTracker& tracker) { return !tracker.spur() && !tracker.active(); });
 
+    // Combs have first claim: the slots spurs hold count as free here, and a
+    // comb that starts takes them back below.
     std::uint32_t used = 0;
     for (const CombTracker& tracker : trackers_) {
-        used += tracker.lines();
+        if (!tracker.spur()) {
+            used += tracker.lines();
+        }
     }
     // What a comb asks for: its lines, each with its sidebands.
     auto need = [](const CombEstimate& e) {
         const auto orders = static_cast<std::uint32_t>(std::max(e.sideband_orders, 0));
         return e.line_count() * (2 * orders + 1);
     };
-    // Combs have first claim on the slots: spurs give theirs back, newest
-    // first, until the fresh combs fit. A spur still there is offered again
-    // with the detector's next decision and takes whatever is left.
-    std::uint32_t wanted = 0;
-    for (const CombEstimate* estimate : fresh) {
-        wanted += need(*estimate);
-    }
-    for (std::size_t j = trackers_.size(); j-- > 0 && used + wanted > kCombMaxLines;) {
-        if (trackers_[j].spur()) {
-            used -= trackers_[j].lines();
-            trackers_.erase(trackers_.begin() + static_cast<std::ptrdiff_t>(j));
-            changed = true;
-        }
-    }
     auto combs = [this] {
         return static_cast<std::size_t>(std::ranges::count_if(
             trackers_, [](const CombTracker& tracker) { return !tracker.spur(); }));
@@ -148,11 +171,21 @@ void CombBank::detected(std::span<const CombEstimate> estimates)
             continue;
         }
         used += tracker.lines();
-        trackers_.push_back(std::move(tracker));
-        changed = true;
-    }
-    if (changed) {
-        splits_.clear();
+        add(std::move(tracker));
+
+        // Only now, for a comb that started: the newest spurs give back what
+        // it took.
+        std::uint32_t total = 0;
+        for (const CombTracker& t : trackers_) {
+            total += t.lines();
+        }
+        for (std::size_t j = trackers_.size(); j-- > 0 && total > kCombMaxLines;) {
+            if (trackers_[j].spur()) {
+                total -= trackers_[j].lines();
+                hold_off(trackers_[j]);
+                trackers_.erase(trackers_.begin() + static_cast<std::ptrdiff_t>(j));
+            }
+        }
     }
 }
 
@@ -162,41 +195,37 @@ CombBlockPlan CombBank::plan(SampleIndex start, std::uint32_t count)
     out.start = start;
     out.count = count;
     out.sub_blocks = 1;
+    now_ = start;
+    std::erase_if(hold_off_, [&](const HoldOff& h) { return h.until <= now_; });
+
+    // A spur that lost its line goes, and is held off.
+    erase_spurs_if([](const CombTracker& tracker) { return !tracker.active(); });
 
     // Two trackers that have come to hold the same lines: the later one goes.
     // Overlap is checked at start too, but a tracker started beside a much
     // stronger comb can be pulled onto it during acquisition, whose pull-in
     // is a few hundred hertz, and then cancels lines another already does.
-    bool merged = false;
     for (std::size_t j = trackers_.size(); j-- > 1;) {
+        if (trackers_[j].spur()) {
+            continue;
+        }
         const CombStatus later = trackers_[j].status();
         for (std::size_t i = 0; i < j; ++i) {
-            if (trackers_[i].active() && trackers_[j].active() &&
+            if (!trackers_[i].spur() && trackers_[i].active() && trackers_[j].active() &&
                 trackers_[i].overlap(later.comb, kSameLineHz) > kOverlapFraction) {
                 trackers_.erase(trackers_.begin() + static_cast<std::ptrdiff_t>(j));
-                merged = true;
                 break;
             }
         }
     }
-    // A spur on a line some comb has come to hold, whichever started first:
-    // the spur goes, so the line is subtracted once.
-    for (std::size_t j = trackers_.size(); j-- > 0;) {
-        if (!trackers_[j].spur()) {
-            continue;
-        }
-        const CombEstimate spur = trackers_[j].estimate();
-        const bool on_comb = std::ranges::any_of(trackers_, [&](const CombTracker& tracker) {
-            return !tracker.spur() && tracker.active() && tracker.overlap(spur, kSameLineHz) > 0.0;
+    // A spur on a line some comb has come to hold, its sidebands included,
+    // whichever started first: the spur goes, so the line is subtracted once.
+    erase_spurs_if([this](const CombTracker& spur) {
+        const double at = spur.estimate().offset_hz;
+        return std::ranges::any_of(trackers_, [&](const CombTracker& tracker) {
+            return !tracker.spur() && tracker.holds_frequency(at, kSameLineHz);
         });
-        if (on_comb) {
-            trackers_.erase(trackers_.begin() + static_cast<std::ptrdiff_t>(j));
-            merged = true;
-        }
-    }
-    if (merged) {
-        splits_.clear();
-    }
+    });
 
     std::vector<CombBlockPlan> plans;
     plans.reserve(trackers_.size());
@@ -208,9 +237,9 @@ CombBlockPlan CombBank::plan(SampleIndex start, std::uint32_t count)
     Split split;
     split.start = start;
     split.sub_blocks = out.sub_blocks;
-    for (const CombBlockPlan& plan : plans) {
-        split.lines.push_back(static_cast<std::uint32_t>(plan.lines.size()));
-        split.tracker_sub.push_back(plan.sub_blocks);
+    for (std::size_t t = 0; t < plans.size(); ++t) {
+        const CombBlockPlan& plan = plans[t];
+        split.rows.push_back(Row{trackers_[t].id(), static_cast<std::uint32_t>(plan.lines.size())});
         out.subtract = out.subtract || plan.subtract;
         out.lines.insert(out.lines.end(), plan.lines.begin(), plan.lines.end());
     }
@@ -239,27 +268,28 @@ void CombBank::observe(const CombObservation& observation)
         return;
     }
     std::size_t total = 0;
-    for (const std::uint32_t n : split.lines) {
-        total += n;
+    for (const Row& r : split.rows) {
+        total += r.lines;
     }
     if (observation.projections.size() != total * S) {
         return;
     }
-    if (split.lines.size() != trackers_.size()) {
-        return;
-    }
     std::size_t row = 0;
-    for (std::size_t t = 0; t < trackers_.size(); ++t) {
-        const std::uint32_t n = split.lines[t];
-        if (n > 0) {
-            CombObservation part;
-            part.start = observation.start;
-            part.count = observation.count;
-            part.sub_blocks = S;
-            part.projections = observation.projections.subspan(row * S, static_cast<std::size_t>(n) * S);
-            trackers_[t].observe(part);
+    for (const Row& r : split.rows) {
+        if (r.lines > 0) {
+            auto owner = std::ranges::find_if(
+                trackers_, [&](const CombTracker& tracker) { return tracker.id() == r.id; });
+            if (owner != trackers_.end()) {
+                CombObservation part;
+                part.start = observation.start;
+                part.count = observation.count;
+                part.sub_blocks = S;
+                part.projections =
+                    observation.projections.subspan(row * S, static_cast<std::size_t>(r.lines) * S);
+                owner->observe(part);
+            }
         }
-        row += n;
+        row += r.lines;
     }
 }
 
@@ -268,8 +298,7 @@ void CombBank::spurs(std::span<const CombEstimate> estimates)
     if (rate_ <= 0) {
         return;
     }
-    bool changed =
-        std::erase_if(trackers_, [](const CombTracker& tracker) { return !tracker.active(); }) > 0;
+    erase_spurs_if([](const CombTracker& tracker) { return !tracker.active(); });
     std::uint32_t used = 0;
     std::uint32_t held_spurs = 0;
     for (const CombTracker& tracker : trackers_) {
@@ -283,11 +312,15 @@ void CombBank::spurs(std::span<const CombEstimate> estimates)
         if (held_spurs >= kCombMaxSpurs || used >= kCombMaxLines) {
             break;
         }
-        // On a comb's line, or a spur already held: the line is cancelled.
+        const double at = estimate.offset_hz;
+        const bool waiting = std::ranges::any_of(
+            hold_off_, [&](const HoldOff& h) { return std::abs(h.offset_hz - at) < kSameLineHz; });
+        // On any line a comb plans, sidebands included, or a spur already
+        // held: the line is cancelled.
         const bool held = std::ranges::any_of(trackers_, [&](const CombTracker& tracker) {
-            return tracker.active() && tracker.overlap(estimate, kSameLineHz) > 0.0;
+            return tracker.holds_frequency(at, kSameLineHz);
         });
-        if (held) {
+        if (waiting || held) {
             continue;
         }
         CombTracker tracker(rate_, 1);
@@ -297,34 +330,30 @@ void CombBank::spurs(std::span<const CombEstimate> estimates)
         }
         used += tracker.lines();
         ++held_spurs;
-        trackers_.push_back(std::move(tracker));
-        changed = true;
-    }
-    if (changed) {
-        splits_.clear();
+        add(std::move(tracker));
     }
 }
 
-void CombBank::drop_spurs_near(std::span<const double> frequencies_hz, double guard_hz)
+void CombBank::withdraw_spurs(std::span<const double> frequencies_hz)
 {
-    const std::size_t erased = std::erase_if(trackers_, [&](const CombTracker& tracker) {
-        if (!tracker.spur()) {
-            return false;
-        }
-        const double at = tracker.estimate().offset_hz;
+    erase_spurs_if([&](const CombTracker& tracker) {
+        const double at = tracker.detected_offset_hz();
         return std::ranges::any_of(frequencies_hz,
-                                   [&](double f) { return std::abs(f - at) <= guard_hz; });
+                                   [&](double f) { return std::abs(f - at) < kSameLineHz; });
     });
-    if (erased > 0) {
-        splits_.clear();
-    }
+}
+
+void CombBank::drop_spurs_in(std::span<const SpurBand> bands)
+{
+    erase_spurs_if([&](const CombTracker& tracker) {
+        const double at = tracker.detected_offset_hz();
+        return std::ranges::any_of(bands, [&](const SpurBand& b) { return b.contains(at); });
+    });
 }
 
 void CombBank::drop_spurs()
 {
-    if (std::erase_if(trackers_, [](const CombTracker& tracker) { return tracker.spur(); }) > 0) {
-        splits_.clear();
-    }
+    erase_spurs_if([](const CombTracker&) { return true; });
 }
 
 std::uint32_t CombBank::spurs_cancelled() const

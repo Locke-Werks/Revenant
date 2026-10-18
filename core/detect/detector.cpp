@@ -662,10 +662,19 @@ void SpurBook::note(dsp::Hertz baseband, dsp::Hertz centre, dsp::SampleIndex now
     entries_.push_back(Entry{baseband, centre, now});
 }
 
-bool SpurBook::stayed_at(dsp::Hertz baseband, dsp::Hertz centre) const {
+bool SpurBook::stayed_at(dsp::Hertz baseband, dsp::Hertz centre,
+                         const std::function<bool(dsp::Hertz)>& occupied) const {
     return std::ranges::any_of(entries_, [&](const Entry& entry) {
         return std::abs(static_cast<double>(entry.centre - centre)) >= kLoSpurMinRetuneHz &&
-               std::abs(static_cast<double>(entry.baseband - baseband)) <= kLoSpurToleranceHz;
+               std::abs(static_cast<double>(entry.baseband - baseband)) <= kLoSpurToleranceHz &&
+               !occupied(entry.baseband + entry.centre);
+    });
+}
+
+bool Detector::cancelling(dsp::Hertz center) const {
+    const double near = std::max(kLoSpurToleranceHz, geometry_.bin_width_hz());
+    return std::ranges::any_of(cancelling_, [&](const Named& named) {
+        return std::abs(static_cast<double>(named.center - center)) <= near;
     });
 }
 
@@ -678,7 +687,26 @@ void SpurBook::forget_older_than(dsp::SampleIndex now, dsp::SampleIndex forget_s
 void Detector::mark_spurs(dsp::SampleIndex now) {
     const double rate = static_cast<double>(std::max<dsp::SampleRate>(1, config_.source_rate));
     const double widest = std::max(kSpurMaxBandwidthHz, kSpurMaxBins * geometry_.bin_width_hz());
+    withdrawn_.clear();
+
+    // Whether a live track stands at an absolute frequency now.
+    const auto occupied = [&](dsp::Hertz at) {
+        return std::ranges::any_of(all_, [&](const Track& other) {
+            return other.state == TrackState::Live &&
+                   std::abs(static_cast<double>(other.center - at)) <=
+                       kLoSpurToleranceHz + 0.5 * static_cast<double>(other.bandwidth);
+        });
+    };
+    const auto withdraw = [&](const Track& track) {
+        withdrawn_.push_back(track.center);
+        std::erase_if(cancelling_, [&](const Named& named) {
+            return std::abs(static_cast<double>(named.center - track.center)) <=
+                   std::max(kLoSpurToleranceHz, geometry_.bin_width_hz());
+        });
+    };
+
     for (Track& track : all_) {
+        const bool was = track.spur;
         // A probe that named a family other than a bare carrier rules it out,
         // whatever else it looks like. Unknown is no answer yet.
         const bool carrier = track.classification == Classification::Unmodulated &&
@@ -690,18 +718,17 @@ void Detector::mark_spurs(dsp::SampleIndex now) {
         if (!(carrier || unnamed) || !narrow) {
             track.spur = false;
             track.lo_spur = false;
+            if (was && track.state != TrackState::Pending) {
+                withdraw(track);
+            }
             continue;
         }
         if (track.state != TrackState::Live) {
-            // Held or merged: whatever it was, it is not there to cancel now.
+            // Held or merged: not there to name now. Not a withdrawal: a spur
+            // being cancelled goes quiet because it is being cancelled.
             track.spur = false;
             continue;
         }
-
-        if (!track.lo_spur && spur_book_.stayed_at(baseband, config_.source_center)) {
-            track.lo_spur = true;
-        }
-        spur_book_.note(baseband, config_.source_center, now);
 
         std::uint32_t keyups = 0;
         if (const refine::EmitterMemory* emitter = emitters_.find(track.emitter);
@@ -713,10 +740,43 @@ void Detector::mark_spurs(dsp::SampleIndex now) {
                              age_seconds >= refine::kContinuousSeconds;
         const bool steady =
             track.level_frames >= kSpurMinFrames && track.level_sigma_db() <= kSpurLevelSigmaDb;
-        track.spur = track.lo_spur || (carrier && unkeyed && steady);
+        const bool by_rule = carrier && unkeyed && steady;
+
+        // Only a carrier that has already passed the rule is remembered, and
+        // an offset matches only where the old sighting's frequency stands
+        // empty now: a station seen there before the retune is still there.
+        if (!track.lo_spur && steady &&
+            spur_book_.stayed_at(baseband, config_.source_center, occupied)) {
+            track.lo_spur = true;
+        }
+        if (by_rule) {
+            spur_book_.note(baseband, config_.source_center, now);
+        }
+
+        // What is left of a spur being cancelled is measured through the
+        // cancellation and proves nothing about keying or level; only a
+        // probe's family, above, takes it back.
+        const bool kept = was && cancelling(track.center);
+        track.spur = kept || by_rule || (track.lo_spur && steady);
+        if (was && !track.spur) {
+            withdraw(track);
+        }
+        if (track.spur) {
+            auto named = std::ranges::find_if(cancelling_, [&](const Named& n) {
+                return std::abs(static_cast<double>(n.center - track.center)) <=
+                       std::max(kLoSpurToleranceHz, geometry_.bin_width_hz());
+            });
+            if (named == cancelling_.end()) {
+                cancelling_.push_back(Named{track.center, now});
+            } else {
+                named->last = now;
+            }
+        }
     }
-    spur_book_.forget_older_than(
-        now, static_cast<dsp::SampleIndex>(kSpurMemorySeconds * rate));
+    const auto forget = static_cast<dsp::SampleIndex>(kSpurMemorySeconds * rate);
+    spur_book_.forget_older_than(now, forget);
+    std::erase_if(cancelling_,
+                  [&](const Named& n) { return now > n.last && now - n.last > forget; });
 }
 
 void Detector::decide(dsp::SampleIndex now, double elapsed_seconds) {
@@ -1735,6 +1795,13 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
             // the one place a track sees a candidate's arrays before the next
             // decision overwrites them.
             track.shape = candidate.shape;
+            // A level over other bins is another quantity: start it again.
+            if (track.level_bins_known && (track.level_first_bin != candidate.first_bin ||
+                                           track.level_last_bin != candidate.last_bin)) {
+                track.level_frames = 0;
+                track.level_mean_db = 0.0;
+                track.level_m2 = 0.0;
+            }
             track.level_first_bin = candidate.first_bin;
             track.level_last_bin = candidate.last_bin;
             track.level_bins_known = true;
@@ -1769,7 +1836,9 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
 
         const bool merged = track.state == TrackState::Merged;
         if (!merged) {
-            if (track.state == TrackState::Live) {
+            // A spur being cancelled drops out because it is cancelled,
+            // which is not a key-up and must not disqualify it.
+            if (track.state == TrackState::Live && !cancelling(track.center)) {
                 ++track.held_spells;
             }
             ++track.misses;
@@ -1849,7 +1918,8 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
             continue;
         }
         if (refine::EmitterMemory* emitter = emitters_.find(track.emitter); emitter != nullptr) {
-            if (now > emitter->last_live && now - emitter->last_live > keyup_gap) {
+            if (now > emitter->last_live && now - emitter->last_live > keyup_gap &&
+                !cancelling(track.center)) {
                 ++emitter->keyups;
             }
             emitter->last_live = now;

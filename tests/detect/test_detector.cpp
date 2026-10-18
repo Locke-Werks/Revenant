@@ -2677,14 +2677,27 @@ TEST_CASE("a carrier that stays at its baseband offset across a retune is a spur
     constexpr dsp::Hertz kRetune = 50'000;
     const auto bins = static_cast<std::size_t>(kRetune / 1000);
 
+    // Before the retune, a carrier that passes the rule, so it is remembered.
     Scene before(-90.0, kSeed);
     auto first = detect::Detector::create(base_config(), before.geometry());
     REQUIRE(first);
-    before.set({spur_carrier(20.0)});
-    run_for(*first, before, 2.0);
-    REQUIRE(find_near(*first, before.frequency_of(kSpurBin), 3000) != nullptr);
+    const detect::Track* was = run_spur_scene(
+        *first, before, 7.5, [](double) { return std::vector<Emitter>{spur_carrier(20.0)}; },
+        carrier_finding(false));
+    REQUIRE(was != nullptr);
+    REQUIRE(was->spur);
     const detect::SpurBook book = first->spur_book();
     REQUIRE(book.size() > 0);
+
+    // An unprobed carrier never passed the rule and is not remembered.
+    {
+        Scene quiet(-90.0, kSeed + 2);
+        auto unprobed = detect::Detector::create(base_config(), quiet.geometry());
+        REQUIRE(unprobed);
+        quiet.set({spur_carrier(20.0)});
+        run_for(*unprobed, quiet, 7.5);
+        CHECK(unprobed->spur_book().size() == 0);
+    }
 
     detect::DetectorConfig retuned = base_config();
     retuned.source_center = kRetune;
@@ -2720,4 +2733,54 @@ TEST_CASE("a carrier that stays at its baseband offset across a retune is a spur
         CHECK_FALSE(track->lo_spur);
         CHECK_FALSE(track->spur);
     }
+    SECTION("the old frequency still occupied: a station, and another carrier at the offset") {
+        // The carrier seen before the retune is still on its frequency, so a
+        // second carrier landing on its old offset proves nothing.
+        Scene after(-90.0, kSeed + 1);
+        auto second = detect::Detector::create(retuned, after.geometry());
+        REQUIRE(second);
+        second->adopt_spur_book(book);
+        after.set({spur_carrier(20.0), Emitter{.centre_bin = kSpurBin - bins,
+                                               .width_bins = 1,
+                                               .snr_2500_db = 20.0,
+                                               .steady = true}});
+        run_for(*second, after, 1.5);
+        const detect::Track* track =
+            find_near(*second, after.frequency_of(kSpurBin) + kRetune, 3000);
+        INFO(describe(*second));
+        REQUIRE(track != nullptr);
+        CHECK_FALSE(track->lo_spur);
+        CHECK_FALSE(track->spur);
+    }
+}
+
+// A spur a probe later names as something else, while it is still there, is
+// withdrawn so the engine stops cancelling it.
+TEST_CASE("a spur a probe renames is withdrawn", "[detect][spur]") {
+    constexpr std::uint64_t kSeed = 5155;
+    INFO("seed " << kSeed);
+    Scene scene(-90.0, kSeed);
+    auto made = detect::Detector::create(base_config(), scene.geometry());
+    REQUIRE(made);
+    detect::Detector& detector = *made;
+    const detect::Track* track = run_spur_scene(
+        detector, scene, 7.5, [](double) { return std::vector<Emitter>{spur_carrier(20.0)}; },
+        carrier_finding(false));
+    REQUIRE(track != nullptr);
+    REQUIRE(track->spur);
+    const dsp::Hertz where = track->center;
+    REQUIRE(detector.record_probe(track->id, finding(detect::Classification::Fsk, 0.9, 0.0, true)));
+
+    bool withdrawn = false;
+    const auto frames = static_cast<std::size_t>(std::llround(0.5 / kFrameSeconds));
+    for (std::size_t i = 0; i < frames && !withdrawn; ++i) {
+        REQUIRE(detector.consume(scene.next()));
+        for (const dsp::Hertz gone : detector.withdrawn_spurs()) {
+            withdrawn = withdrawn || std::abs(gone - where) < 1000;
+        }
+    }
+    CHECK(withdrawn);
+    track = find_near(detector, where, 3000);
+    REQUIRE(track != nullptr);
+    CHECK_FALSE(track->spur);
 }

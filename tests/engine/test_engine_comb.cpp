@@ -296,7 +296,15 @@ struct SpurRun {
     std::size_t frames_measured = 0;
 };
 
-[[nodiscard]] SpurRun run_spur_capture(const std::string& uri, bool spur_on, bool receiver) {
+// Where a receiver sits for a run: none; tuned on the spur; or tuned 5 kHz
+// below it, 3 kHz wide by its bandwidth but with a passband stated from
+// +4 kHz to +6 kHz, which covers the spur though half the bandwidth does not.
+enum class Listener : std::uint8_t { kNone, kOnSpur, kPassband };
+
+constexpr dsp::Hertz kSpurSourceCenter = 7'100'000;
+
+[[nodiscard]] SpurRun run_spur_capture(const std::string& uri, bool spur_on, Listener receiver,
+                                       dsp::Hertz stamp = kSpurSourceCenter) {
     engine::EngineConfig config;
     config.channels = kChannels;
     config.taps_per_branch = 17;
@@ -314,15 +322,25 @@ struct SpurRun {
     const auto opened = eng.open_source(uri);
     INFO(test::message_of(opened));
     REQUIRE(opened.has_value());
-    if (receiver) {
+    const auto spur_at = static_cast<dsp::Hertz>(std::llround(kSpurHz));
+    if (receiver != Listener::kNone) {
         engine::VrxParams params;
-        params.center = static_cast<dsp::Hertz>(std::llround(kSpurHz));
+        params.center = spur_at;
+        if (receiver == Listener::kPassband) {
+            params.demod = engine::Demod::Usb;
+            params.center = spur_at - 5'000;
+            params.bandwidth = 3'000;
+            params.passband_low = 4'000;
+            params.passband_high = 6'000;
+        }
         const auto added = eng.add_vrx(params);
         INFO(test::message_of(added));
         REQUIRE(added.has_value());
     }
-    const dsp::Hertz spurs[] = {static_cast<dsp::Hertz>(std::llround(kSpurHz))};
-    REQUIRE(eng.set_spurs(spurs).has_value());
+    const dsp::Hertz spurs[] = {spur_at};
+    const auto named = eng.set_spurs(spurs, {}, stamp);
+    // A list stamped with another centre is refused.
+    REQUIRE(named.has_value() == (stamp == kSpurSourceCenter));
 
     std::mutex lock;
     SpurRun out;
@@ -386,17 +404,28 @@ TEST_CASE("a spur named to the engine is cancelled, and not under a receiver",
     const std::string uri = "file:///" + path.generic_string() +
                             "?rate=" + std::to_string(kRate) + "&format=cf32&center=7100000";
 
-    const SpurRun off = run_spur_capture(uri, false, false);
-    const SpurRun on = run_spur_capture(uri, true, false);
-    const SpurRun listened = run_spur_capture(uri, true, true);
+    const SpurRun off = run_spur_capture(uri, false, Listener::kNone);
+    const SpurRun on = run_spur_capture(uri, true, Listener::kNone);
+    const SpurRun listened = run_spur_capture(uri, true, Listener::kOnSpur);
+    const SpurRun passband = run_spur_capture(uri, true, Listener::kPassband);
+    const SpurRun stale = run_spur_capture(uri, true, Listener::kNone, kSpurSourceCenter - 50'000);
     std::printf("spur off: %.1f dB; on: %.1f dB, %u cancelled; under a receiver: %.1f dB, %u "
-                "cancelled\n",
+                "cancelled; in an offset passband: %.1f dB, %u cancelled; stale centre: %.1f "
+                "dB, %u cancelled\n",
                 off.height_db, on.height_db, on.comb.spurs_cancelled, listened.height_db,
-                listened.comb.spurs_cancelled);
+                listened.comb.spurs_cancelled, passband.height_db, passband.comb.spurs_cancelled,
+                stale.height_db, stale.comb.spurs_cancelled);
 
     REQUIRE(off.frames_measured > 0);
     REQUIRE(on.frames_measured > 0);
     REQUIRE(listened.frames_measured > 0);
+    // The receiver's stated passband is what is protected, not half its
+    // bandwidth about its centre.
+    CHECK(passband.comb.spurs_cancelled == 0);
+    CHECK(passband.height_db > off.height_db - 1.0);
+    // A list measured against the centre before a retune cancels nothing.
+    CHECK(stale.comb.spurs_cancelled == 0);
+    CHECK(stale.height_db > off.height_db - 1.0);
     CHECK(off.height_db > 15.0);
     CHECK_FALSE(off.comb.spurs_on);
     CHECK(on.comb.spurs_on);

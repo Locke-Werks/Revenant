@@ -370,8 +370,10 @@ void CombTracker::reset()
 {
     const SampleRate rate = rate_;
     const std::uint64_t generation = generation_ + 1;
+    const std::uint64_t id = id_;
     *this = CombTracker(rate, max_lines_);
     generation_ = generation;
+    id_ = id;
 }
 
 double CombTracker::line_snr(const Line& line, std::uint32_t count) const
@@ -435,6 +437,21 @@ CombEstimate CombTracker::estimate() const
         out.k_hi = 0;
     }
     return out;
+}
+
+bool CombTracker::holds_frequency(double frequency_hz, double tolerance_hz) const
+{
+    if (!active()) {
+        return false;
+    }
+    const double rate = static_cast<double>(rate_);
+    const double c = anchored_ ? signed_of(c_.freq) * rate : initial_offset_hz_;
+    const double d = spur_ ? 0.0 : (anchored_ ? signed_of(d_.freq) * rate : initial_spacing_hz_);
+    const double r = ripple_hz();
+    return std::ranges::any_of(lines_, [&](const Line& line) {
+        const double f = c + static_cast<double>(line.k) * d + static_cast<double>(line.m) * r;
+        return std::abs(f - frequency_hz) < tolerance_hz;
+    });
 }
 
 bool CombTracker::agrees(const CombEstimate& estimate) const
@@ -513,8 +530,10 @@ void CombTracker::start_acquisition(const CombEstimate& estimate)
 {
     const SampleRate rate = rate_;
     const std::uint64_t generation = generation_ + 1;
+    const std::uint64_t id = id_;
     *this = CombTracker(rate, max_lines_);
     generation_ = generation;
+    id_ = id;
 
     lock_ = CombLock::kAcquiring;
     stage_ = Stage::kFrequency;

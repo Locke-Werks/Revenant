@@ -1798,11 +1798,23 @@ public:
         return {};
     }
 
-    [[nodiscard]] Status set_spurs(std::span<const dsp::Hertz> baseband) override {
+    [[nodiscard]] Status set_spurs(std::span<const dsp::Hertz> baseband,
+                                   std::span<const dsp::Hertz> withdrawn,
+                                   dsp::Hertz source_center) override {
         const std::scoped_lock lifecycle(lifecycle_lock_);
-        if (graph_ != nullptr) {
-            graph_->set_spurs(baseband);
+        if (graph_ == nullptr) {
+            return {};
         }
+        // The epoch first, then the centre: a retune landing between the two
+        // moves the epoch after the centre, so the graph refuses the list.
+        const std::uint64_t epoch = graph_->spur_epoch();
+        const dsp::Hertz now = std::atomic_ref(info_.source_center).load();
+        if (now != source_center) {
+            return fail(std::format("spurs measured against a centre of {} Hz, and the source "
+                                    "is at {} Hz: a list from before a retune",
+                                    source_center, now));
+        }
+        graph_->set_spurs(baseband, withdrawn, epoch);
         return {};
     }
 

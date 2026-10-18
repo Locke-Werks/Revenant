@@ -1001,10 +1001,56 @@ TEST_CASE("comb bank: holds a spur in one slot and drops it for a receiver", "[c
     // Not a comb, so not in the comb's status.
     CHECK(bank.status().lock == CombLock::kIdle);
 
-    const double far[] = {100'000.0};
-    bank.drop_spurs_near(far, 1'000.0);
+    const dsp::CombBank::SpurBand far[] = {{99'000.0, 101'000.0}};
+    bank.drop_spurs_in(far);
     CHECK(bank.trackers().size() == 1);
-    const double near[] = {41'000.0};
-    bank.drop_spurs_near(near, 1'000.0);
+    const dsp::CombBank::SpurBand listened[] = {{40'000.0, 42'000.0}};
+    bank.drop_spurs_in(listened);
     CHECK(bank.trackers().empty());
+
+    // Just dropped: offered again at once, it waits out the hold-off.
+    bank.spurs(std::span<const CombEstimate>(&spur, 1));
+    CHECK(bank.trackers().empty());
+    for (int blk = 0; blk < 120; ++blk) {
+        (void)bank.plan(static_cast<dsp::SampleIndex>(blk) * kBlock, kBlock);
+    }
+    bank.spurs(std::span<const CombEstimate>(&spur, 1));
+    CHECK(bank.trackers().size() == 1);
+
+    // Withdrawn by the detector while the carrier is still there: let go.
+    const double gone[] = {spur.offset_hz + 10.0};
+    bank.withdraw_spurs(gone);
+    CHECK(bank.trackers().empty());
+}
+
+// A spur on a comb's ripple sideband is a line the comb already subtracts.
+TEST_CASE("comb bank: a spur on a comb's sideband line is not started", "[comb][tracker][spur]")
+{
+    dsp::CombBank bank(kRate);
+    CombEstimate comb;
+    comb.offset_hz = 2'707.0;
+    comb.spacing_hz = 31'578.9;
+    comb.k_lo = -10;
+    comb.k_hi = 10;
+    comb.lines_found = 21;
+    comb.ripple_hz = 59.5;
+    comb.sideband_orders = 2;
+    bank.detected(std::span<const CombEstimate>(&comb, 1));
+    REQUIRE(bank.trackers().size() == 1);
+    REQUIRE(bank.trackers()[0].holds_frequency(comb.offset_hz + 3 * comb.spacing_hz + 2 * 59.5,
+                                               1.0));
+
+    CombEstimate spur;
+    spur.offset_hz = comb.offset_hz + 3 * comb.spacing_hz + 2 * 59.5 + 5.0;
+    spur.k_lo = 0;
+    spur.k_hi = 0;
+    spur.lines_found = 1;
+    spur.spur = true;
+    bank.spurs(std::span<const CombEstimate>(&spur, 1));
+    CHECK(bank.trackers().size() == 1);
+
+    // Off every line, it is.
+    spur.offset_hz = comb.offset_hz + 3.5 * comb.spacing_hz;
+    bank.spurs(std::span<const CombEstimate>(&spur, 1));
+    CHECK(bank.trackers().size() == 2);
 }

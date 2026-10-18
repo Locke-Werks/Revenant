@@ -687,7 +687,13 @@ public:
     // Spur cancelling, Engine::set_spur_cancel and Engine::set_spurs. Any
     // thread; the recording thread takes both at its next block.
     void set_spur_cancel(bool on);
-    void set_spurs(std::span<const dsp::Hertz> baseband);
+
+    // The epoch a spur list is stamped with: read it before checking the
+    // list's source centre, and hand it to set_spurs, which refuses a list
+    // whose epoch a retune has since moved on.
+    [[nodiscard]] std::uint64_t spur_epoch() const;
+    void set_spurs(std::span<const dsp::Hertz> baseband, std::span<const dsp::Hertz> withdrawn,
+                   std::uint64_t epoch);
 
     // The source's centre moved. Any thread. The comb tracker is reset at the
     // next block and the detection's averaging starts again, because a comb

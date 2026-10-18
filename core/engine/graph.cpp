@@ -1014,7 +1014,8 @@ struct Graph::Impl {
     // changed. spur_taken and spurs_cancelled are the recording thread's.
     std::atomic<bool> spur_on{true};
     std::mutex spur_lock;
-    std::vector<dsp::Hertz> spur_list;  // spur_lock
+    std::vector<dsp::Hertz> spur_list;       // spur_lock
+    std::vector<dsp::Hertz> spur_withdrawn;  // spur_lock, gathered until taken
     std::atomic<std::uint64_t> spur_generation{0};
     std::uint64_t spur_taken = 0;
     std::atomic<std::uint32_t> spurs_cancelled{0};
@@ -1532,51 +1533,68 @@ struct Graph::Impl {
         comb_bank.detected(result.estimates);
     }
 
-    // Recording thread. How far either side of an open receiver's centre a
-    // spur is left alone: half its bandwidth, which covers its passband, and
-    // kSpurGuardHz beyond, which covers a carrier an operator has tuned a
-    // beat note off.
+    // Recording thread. How far beyond an open receiver's passband a spur is
+    // left alone: kSpurGuardHz covers a carrier an operator has tuned a beat
+    // note off, just outside the edge.
     static constexpr double kSpurGuardHz = 300.0;
 
-    // Recording thread. Takes the detector's latest spurs if they changed,
-    // and lets go of any spur an open receiver has come to listen to.
+    // Recording thread. The baseband ranges open receivers listen to: each
+    // receiver's resolved passband, centre + low to centre + high, widened by
+    // kSpurGuardHz either side. A receiver whose passband cannot be resolved
+    // falls back to half its bandwidth either side of its centre.
+    [[nodiscard]] std::vector<dsp::CombBank::SpurBand> listened_bands() const {
+        std::vector<dsp::CombBank::SpurBand> out;
+        out.reserve(active.size());
+        for (const auto& slot : active) {
+            if (slot->role == VrxRole::Probe) {
+                continue;
+            }
+            const VrxParams& params = slot->recording_params;
+            const auto centre = static_cast<double>(params.center);
+            if (const auto passband = dsp::resolve_passband(params); passband) {
+                out.push_back({centre + static_cast<double>(passband->low) - kSpurGuardHz,
+                               centre + static_cast<double>(passband->high) + kSpurGuardHz});
+            } else {
+                const double half = 0.5 * static_cast<double>(params.bandwidth) + kSpurGuardHz;
+                out.push_back({centre - half, centre + half});
+            }
+        }
+        return out;
+    }
+
+    // Recording thread. Lets go of any spur an open receiver has come to
+    // listen to, of any the detector withdrew, and takes the detector's
+    // latest spurs if they changed. A spur is judged by the offset the
+    // detector named, both here and in CombBank::drop_spurs_in.
     void take_spurs() {
         if (!spur_on.load(std::memory_order_acquire)) {
             comb_bank.drop_spurs();
             spurs_cancelled.store(0, std::memory_order_relaxed);
             return;
         }
-        // Each receiver's centre, and its own guard, since bandwidths differ.
-        std::vector<std::pair<double, double>> listened;
-        listened.reserve(active.size());
-        for (const auto& slot : active) {
-            if (slot->role == VrxRole::Probe) {
-                continue;
-            }
-            const VrxParams& params = slot->recording_params;
-            listened.emplace_back(static_cast<double>(params.center),
-                                  0.5 * static_cast<double>(params.bandwidth) + kSpurGuardHz);
-        }
-        for (const auto& [centre, guard] : listened) {
-            const double at[] = {centre};
-            comb_bank.drop_spurs_near(at, guard);
-        }
+        const std::vector<dsp::CombBank::SpurBand> listened = listened_bands();
+        comb_bank.drop_spurs_in(listened);
 
         const std::uint64_t generation = spur_generation.load(std::memory_order_acquire);
         if (generation != spur_taken) {
             spur_taken = generation;
             std::vector<dsp::Hertz> offsets;
+            std::vector<dsp::Hertz> withdrawn;
             {
                 const std::scoped_lock held(spur_lock);
                 offsets = spur_list;
+                withdrawn.swap(spur_withdrawn);
             }
+            std::vector<double> gone;
+            gone.reserve(withdrawn.size());
+            for (const dsp::Hertz f : withdrawn) {
+                gone.push_back(static_cast<double>(f));
+            }
+            comb_bank.withdraw_spurs(gone);
             std::vector<dsp::CombEstimate> estimates;
             for (const dsp::Hertz offset : offsets) {
                 const auto f = static_cast<double>(offset);
-                const bool listening = std::ranges::any_of(listened, [&](const auto& l) {
-                    return std::abs(f - l.first) <= l.second;
-                });
-                if (listening) {
+                if (std::ranges::any_of(listened, [&](const auto& b) { return b.contains(f); })) {
                     continue;
                 }
                 dsp::CombEstimate spur;
@@ -1591,6 +1609,7 @@ struct Graph::Impl {
         }
         spurs_cancelled.store(comb_bank.spurs_cancelled(), std::memory_order_relaxed);
     }
+
 
     void publish_comb_status() {
         const dsp::CombStatus status = comb_bank.status();
@@ -1617,6 +1636,7 @@ struct Graph::Impl {
                 comb_bank.reset();
                 publish_comb_status();
             }
+            spurs_cancelled.store(0, std::memory_order_relaxed);
             comb_was_on = false;
             return std::nullopt;
         }
@@ -4806,8 +4826,6 @@ Status Graph::on_block(const source::SourceBlock& block) {
         }
     }
 
-    impl.tap_comb_samples(block);
-
     // How many output blocks this dispatch can produce. Block m needs input up
     // to m*D and down to m*D - (N - 1); both bounds are checked rather than
     // assumed, because the lower one is exactly what a lapped Lossy consumer
@@ -4857,6 +4875,10 @@ Status Graph::on_block(const source::SourceBlock& block) {
     const std::optional<dsp::CombBlockPlan> comb = impl.plan_comb_cancel(
         block.stamp.start,
         block.stamp.start + static_cast<dsp::SampleIndex>(block.sample_count));
+
+    // After the plan, so the held combs handed to the detection with this run
+    // of samples include any tracker this block's plan just started.
+    impl.tap_comb_samples(block);
 
     std::uint32_t block_count = 0;
     if (channel_limit > first_block * decimation) {
@@ -5324,26 +5346,39 @@ void Graph::set_spur_cancel(bool on) {
     impl_->spur_on.store(on, std::memory_order_release);
 }
 
-void Graph::set_spurs(std::span<const dsp::Hertz> baseband) {
+std::uint64_t Graph::spur_epoch() const {
+    return impl_->comb_epoch.load(std::memory_order_acquire);
+}
+
+void Graph::set_spurs(std::span<const dsp::Hertz> baseband, std::span<const dsp::Hertz> withdrawn,
+                      std::uint64_t epoch) {
     Impl& impl = *impl_;
     {
+        // Under the lock note_source_retune moves the epoch under, so a list
+        // stamped before a retune is either refused here or cleared there.
         const std::scoped_lock held(impl.spur_lock);
+        if (epoch != impl.comb_epoch.load(std::memory_order_acquire)) {
+            return;
+        }
         impl.spur_list.assign(baseband.begin(), baseband.end());
+        impl.spur_withdrawn.insert(impl.spur_withdrawn.end(), withdrawn.begin(), withdrawn.end());
     }
     impl.spur_generation.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void Graph::note_source_retune() {
     Impl& impl = *impl_;
-    impl.comb_epoch.fetch_add(1, std::memory_order_acq_rel);
-    // A list named before the retune: an external carrier has moved, and the
-    // detector names spurs afresh from the new centre.
-    {
-        const std::scoped_lock held(impl.spur_lock);
-        impl.spur_list.clear();
-    }
+    // The spur list first, then the epoch, both under the lock set_spurs
+    // checks the epoch under: a list named before the retune measured an
+    // external carrier where it no longer is, and the detector names spurs
+    // afresh from the new centre.
+    const std::scoped_lock held(impl.spur_lock);
+    impl.spur_list.clear();
+    impl.spur_withdrawn.clear();
     impl.spur_generation.fetch_add(1, std::memory_order_acq_rel);
+    impl.comb_epoch.fetch_add(1, std::memory_order_acq_rel);
 }
+
 
 CombCancelStatus Graph::comb_cancel() const {
     const Impl& impl = *impl_;

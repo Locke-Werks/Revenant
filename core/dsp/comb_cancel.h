@@ -85,6 +85,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <vector>
@@ -395,6 +396,21 @@ public:
     // Holding a single spur rather than a comb (CombEstimate::spur).
     [[nodiscard]] bool spur() const { return spur_; }
 
+    // The offset the detection that started it named, before any tracking:
+    // the frequency a spur is judged by when deciding whether a receiver is
+    // listening to it, the same one the request was filtered on.
+    [[nodiscard]] double detected_offset_hz() const { return initial_offset_hz_; }
+
+    // Whether any slot this tracker plans, sidebands included, sits within
+    // tolerance_hz of the frequency: what a spur must not be started on, or
+    // the line is subtracted twice.
+    [[nodiscard]] bool holds_frequency(double frequency_hz, double tolerance_hz) const;
+
+    // An identity the bank gives it, kept across reset and restarts, so the
+    // bank can find a tracker's rows in an observation by who planned them.
+    void set_id(std::uint64_t id) { id_ = id; }
+    [[nodiscard]] std::uint64_t id() const { return id_; }
+
 private:
     // Value members only; the tracker is copyable so a test can fork it.
 
@@ -463,6 +479,7 @@ private:
     // asks a spur for one.
     bool spur_ = false;
     std::uint32_t min_lines_ = kCombMinLines;
+    std::uint64_t id_ = 0;
     CombLock lock_ = CombLock::kIdle;
     Stage stage_ = Stage::kFrequency;
     std::uint64_t generation_ = 0;
@@ -519,12 +536,25 @@ public:
     // the slots combs leave free. A spur missing from a later call is NOT let
     // go: once it is cancelled the wideband detector no longer sees it, so
     // its absence says nothing. A spur tracker ends when it loses lock, which
-    // it measures on the raw line, or by drop_spurs_near or drop_spurs.
+    // it measures on the raw line, when the detector withdraws it, or by
+    // drop_spurs_in or drop_spurs. A spur that went is not started again for
+    // a few seconds.
     void spurs(std::span<const CombEstimate> estimates);
 
-    // Lets go of every spur within guard_hz of one of these baseband
-    // frequencies: an open receiver tuned there is listening to it.
-    void drop_spurs_near(std::span<const double> frequencies_hz, double guard_hz);
+    // Lets go of every spur within kCombSameLineHz of one of these offsets:
+    // the detector has stopped calling the carrier there a spur while it is
+    // still there, because a probe named a family or it began to key.
+    void withdraw_spurs(std::span<const double> frequencies_hz);
+
+    // A baseband range an open receiver is listening to, edges included.
+    struct SpurBand {
+        double low_hz = 0.0;
+        double high_hz = 0.0;
+        [[nodiscard]] bool contains(double f) const { return f >= low_hz && f <= high_hz; }
+    };
+
+    // Lets go of every spur whose detected offset lies in one of the bands.
+    void drop_spurs_in(std::span<const SpurBand> bands);
     void drop_spurs();
 
     // Spur trackers locked and cancelling.
@@ -542,16 +572,32 @@ public:
     [[nodiscard]] std::vector<CombEstimate> active_estimates() const;
 
 private:
+    // One tracker's run of rows in a block's observation.
+    struct Row {
+        std::uint64_t id = 0;
+        std::uint32_t lines = 0;
+    };
     struct Split {
         SampleIndex start = 0;
         std::uint32_t sub_blocks = 1;
-        std::vector<std::uint32_t> lines;          // per tracker
-        std::vector<std::uint32_t> tracker_sub;    // per tracker, as planned
+        std::vector<Row> rows;  // in plan order
     };
+    // A spur that went, kept from starting again until `until`.
+    struct HoldOff {
+        double offset_hz = 0.0;
+        SampleIndex until = 0;
+    };
+
+    void add(CombTracker tracker);
+    void hold_off(const CombTracker& tracker);
+    void erase_spurs_if(const std::function<bool(const CombTracker&)>& drop);
 
     SampleRate rate_ = 0;
     std::vector<CombTracker> trackers_;
     std::vector<Split> splits_;
+    std::vector<HoldOff> hold_off_;
+    std::uint64_t next_id_ = 1;
+    SampleIndex now_ = 0;  // the latest block planned
 };
 
 }  // namespace revenant::dsp

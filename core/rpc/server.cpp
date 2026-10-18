@@ -4870,6 +4870,8 @@ void ServerImpl::sigid_consume(const DetectSlot& slot) {
     // go: Engine::set_spurs takes the engine's lifecycle lock, which a retune
     // holds while it comes here for detect_lock_.
     std::optional<std::vector<dsp::Hertz>> spurs;
+    std::vector<dsp::Hertz> spurs_withdrawn;
+    dsp::Hertz spur_centre = 0;
     {
         std::scoped_lock held(detect_lock_);
         if (!detector_.has_value() ||
@@ -4917,18 +4919,24 @@ void ServerImpl::sigid_consume(const DetectSlot& slot) {
             // Kept here as well as in the detector, which a retune rebuilds:
             // the memory is what sees an offset survive one.
             spur_book_ = detector_->spur_book();
+            const dsp::Hertz centre = detector_->config().source_center;
             spurs.emplace();
+            spur_centre = centre;
             for (const detect::Track& track : detector_->tracks()) {
                 if (track.spur) {
-                    spurs->push_back(track.center - detector_->config().source_center);
+                    spurs->push_back(track.center - centre);
                 }
+            }
+            for (const dsp::Hertz gone : detector_->withdrawn_spurs()) {
+                spurs_withdrawn.push_back(gone - centre);
             }
         }
     }
     if (spurs.has_value()) {
-        // Refused only by an engine without the stage, which has nothing to
-        // cancel them with.
-        static_cast<void>(engine_.set_spurs(*spurs));
+        // Refused by an engine without the stage, which has nothing to cancel
+        // them with, and for a list measured before a retune, which the next
+        // detector replaces.
+        static_cast<void>(engine_.set_spurs(*spurs, spurs_withdrawn, spur_centre));
     }
 
     // THE BUDGET, on a source running on a clock and not otherwise: an
