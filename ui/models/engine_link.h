@@ -2736,6 +2736,10 @@ public:
     // is turned on afresh.
     Q_INVOKABLE void dismissReceiver(qulonglong key);
 
+    // Every receiver out of the rack at once, bar the plugin's adopted ones.
+    // Turns autoDv off first, or its next pass would open them all again.
+    Q_INVOKABLE void clearReceivers();
+
     [[nodiscard]] bool autoDv() const { return auto_dv_; }
     void setAutoDv(bool on);
 

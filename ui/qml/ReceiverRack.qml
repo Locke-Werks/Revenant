@@ -92,6 +92,22 @@ ColumnLayout {
             }
         }
 
+        // Every receiver at once. Turns auto DV off as well, or it would open
+        // the digital voice ones again at its next pass.
+        RButton {
+            flat: true
+            text: "clear"
+            ink: Theme.inkDim
+            enabled: engineLink.rackCount > 0
+            onClicked: engineLink.clearReceivers()
+
+            Tip {
+                visible: parent.hovered
+                text: engineLink.autoDv ? "remove every receiver and turn auto DV off"
+                                        : "remove every receiver"
+            }
+        }
+
         // Out into a window of their own, for a second screen, or back into
         // the main window. The window's close button docks them as well.
         RButton {

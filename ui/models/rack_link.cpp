@@ -656,6 +656,31 @@ void EngineLink::dismissReceiver(qulonglong key)
     }
 }
 
+void EngineLink::clearReceivers()
+{
+    // Off before anything goes, so spawn_dv_receivers cannot refill the rack
+    // from under the loop. With it off there is no dismissal to record either.
+    if (auto_dv_) {
+        setAutoDv(false);
+    }
+
+    // A copy of the keys: every remove changes the rack. The pane goes last,
+    // because removeReceiver focuses whatever took its place, and a pane moved
+    // onto a receiver this loop still means to remove would be removed twice.
+    std::vector<std::uint64_t> keys;
+    for (const RackEntry& entry : rack_.entries()) {
+        if (!entry.adopted && entry.key != pane_key_) {
+            keys.push_back(entry.key);
+        }
+    }
+    for (const std::uint64_t key : keys) {
+        removeRackReceiver(key);
+    }
+    if (const RackEntry* pane = rack_.find(pane_key_); pane != nullptr && !pane->adopted) {
+        removeReceiver();
+    }
+}
+
 void EngineLink::setAutoDv(bool on)
 {
     if (auto_dv_ == on) {
