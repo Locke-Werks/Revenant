@@ -37,6 +37,7 @@ ColumnLayout {
         pivotRow.slider.value = ScaleSettings.waterfallPivot
         fitRow.slider.value = ScaleSettings.spectrumRangeFit
         smoothSlider.value = ScaleSettings.spectrumSmoothing
+        captionZoomRow.slider.value = ScaleSettings.captionZoom
     }
 
     Component.onCompleted: sync()
@@ -380,6 +381,18 @@ ColumnLayout {
             ScaleSettings.spectrumFloorSmoothing = checked
             checked = Qt.binding(() => ScaleSettings.spectrumFloorSmoothing)
         }
+    }
+
+    FitRow {
+        id: captionZoomRow
+        label: "caption hover zoom"
+        minimum: ScaleSettings.minCaptionZoom
+        maximum: ScaleSettings.maxCaptionZoom
+        lowLabel: "none"
+        highLabel: "large"
+        tip: "How much a transcript caption on the waterfall grows when the pointer stops on it. "
+             + "At none it keeps its resting size and only unfolds to its whole text."
+        onMoved: (value) => ScaleSettings.captionZoom = value
     }
 
     Rule {}

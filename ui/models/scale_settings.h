@@ -48,8 +48,18 @@ class ScaleSettings : public QObject {
                    NOTIFY spectrumSmoothingChanged)
     Q_PROPERTY(bool spectrumFloorSmoothing READ spectrumFloorSmoothing
                    WRITE setSpectrumFloorSmoothing NOTIFY spectrumSmoothingChanged)
+    Q_PROPERTY(double captionZoom READ captionZoom WRITE setCaptionZoom NOTIFY captionZoomChanged)
+    Q_PROPERTY(double minCaptionZoom READ minCaptionZoom CONSTANT)
+    Q_PROPERTY(double maxCaptionZoom READ maxCaptionZoom CONSTANT)
 
 public:
+    // The hovered caption's growth over its resting 11 px. 1 is none; the
+    // default is the 16 px it was fixed at before this was a setting, and the
+    // most is three times that.
+    static constexpr double kMinCaptionZoom = 1.0;
+    static constexpr double kDefaultCaptionZoom = 16.0 / 11.0;
+    static constexpr double kMaxCaptionZoom = 3.0 * kDefaultCaptionZoom;
+
     explicit ScaleSettings(QObject* parent = nullptr) : QObject(parent)
     {
         const QSettings store;
@@ -64,6 +74,23 @@ public:
         spectrum_smoothing_ = clamp_smoothing(
             store.value(settings::kSpectrumSmoothing, kDefaultSmoothDecaySeconds).toDouble());
         spectrum_floor_smoothing_ = store.value(settings::kSpectrumFloorSmoothing, true).toBool();
+        caption_zoom_ =
+            clamp_caption_zoom(store.value(settings::kCaptionZoom, kDefaultCaptionZoom).toDouble());
+    }
+
+    [[nodiscard]] double captionZoom() const { return caption_zoom_; }
+    [[nodiscard]] static double minCaptionZoom() { return kMinCaptionZoom; }
+    [[nodiscard]] static double maxCaptionZoom() { return kMaxCaptionZoom; }
+
+    void setCaptionZoom(double value)
+    {
+        value = clamp_caption_zoom(value);
+        if (value == caption_zoom_) {
+            return;
+        }
+        caption_zoom_ = value;
+        QSettings().setValue(settings::kCaptionZoom, value);
+        emit captionZoomChanged();
     }
 
     [[nodiscard]] double waterfallContrast() const { return waterfall_contrast_; }
@@ -196,8 +223,15 @@ signals:
     void waterfallPivotChanged();
     void spectrumRangeFitChanged();
     void spectrumSmoothingChanged();
+    void captionZoomChanged();
 
 private:
+    [[nodiscard]] static double clamp_caption_zoom(double value)
+    {
+        return value == value ? std::clamp(value, kMinCaptionZoom, kMaxCaptionZoom)
+                              : kDefaultCaptionZoom;
+    }
+
     // Written as it happens, like the volume: a pin is one event an operator
     // made, not a stream of them.
     void store(const ScalePins& next)
@@ -243,6 +277,7 @@ private:
     double spectrum_range_fit_ = 0.0;
     double spectrum_smoothing_ = kDefaultSmoothDecaySeconds;
     bool spectrum_floor_smoothing_ = true;
+    double caption_zoom_ = kDefaultCaptionZoom;
 };
 
 }  // namespace revenant::ui

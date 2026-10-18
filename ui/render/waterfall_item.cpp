@@ -46,12 +46,13 @@ namespace {
 }
 
 // The caption under the pointer, stopped and grown so its whole text can be
-// read: half as large again, and wider by as much, so it holds the lines the
-// waterfall's three cut off without becoming a column down the screen.
-[[nodiscard]] QFont frozen_caption_font()
+// read: by the operator's zoom, half as large again by default, and wider by
+// as much, so it holds the lines the waterfall's three cut off without
+// becoming a column down the screen.
+[[nodiscard]] QFont frozen_caption_font(double zoom)
 {
     QFont font = caption_font();
-    font.setPixelSize(16);
+    font.setPixelSize(std::max(1, static_cast<int>(std::lround(font.pixelSize() * zoom))));
     return font;
 }
 constexpr std::size_t kFrozenCaptionColumns = 60;
@@ -251,6 +252,13 @@ void WaterfallItem::setMapPins(ScaleSettings* pins)
                 &WaterfallItem::onPinsChanged);
         connect(map_pins_, &ScaleSettings::waterfallPivotChanged, this,
                 &WaterfallItem::onPinsChanged);
+        // A caption held while the zoom moves is grown again at the new size.
+        connect(map_pins_, &ScaleSettings::captionZoomChanged, this, [this] {
+            if (const std::uint64_t held = captions_.frozen(); held != 0) {
+                captions_.set_frozen(0);
+                freezeCaption(held);
+            }
+        });
     }
     onPinsChanged();
     emit mapPinsChanged();
@@ -552,7 +560,8 @@ void WaterfallItem::freezeCaption(std::uint64_t serial)
     if (const Caption* caption = captions_.find(serial); caption != nullptr) {
         // Every line of it, at the larger size, in as many columns as the
         // item has room for up to kFrozenCaptionColumns.
-        const QFont font = frozen_caption_font();
+        const QFont font = frozen_caption_font(
+            map_pins_ == nullptr ? ScaleSettings::kDefaultCaptionZoom : map_pins_->captionZoom());
         const QFontMetricsF metrics(font);
         frozen_line_height_ = metrics.height();
         const double advance = std::max(1.0, metrics.horizontalAdvance(QLatin1Char('M')));

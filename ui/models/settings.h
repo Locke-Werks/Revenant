@@ -127,6 +127,10 @@ inline constexpr QLatin1StringView kSpectrumRangeFit{"display/spectrumRangeFit"}
 inline constexpr QLatin1StringView kSpectrumSmoothing{"display/spectrumSmoothing"};
 inline constexpr QLatin1StringView kSpectrumFloorSmoothing{"display/spectrumFloorSmoothing"};
 
+// How much a transcript caption on the waterfall grows when the pointer stops
+// on it, as a multiple of its resting size. See ScaleSettings.
+inline constexpr QLatin1StringView kCaptionZoom{"display/captionZoom"};
+
 // The bookmark list, as one JSON array in one value rather than a QSettings
 // array of groups.
 //
