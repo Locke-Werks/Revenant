@@ -131,6 +131,14 @@
 // known; extrapolating k far outside the fitted range multiplies the spacing
 // error by k.
 //
+// A SPUR (CombEstimate::spur) is the same machinery on one line: k = 0 only,
+// d held at zero, no sidebands, and every count that asks a comb for
+// kCombMinLines asks it for one. The fits are then that line's own error with
+// nothing left over, so the phase residual is zero by construction and lock
+// rests on the other three tests: the innovation pulled in, the line standing
+// out, and the frequency error. It is lost when the carrier goes, because its
+// projection reads the raw line.
+//
 // SUPPRESSION is measured from the projections themselves. The project pass
 // reads the raw samples, so for a block planned with subtract on, P / count
 // minus the planned amplitude is the line's residual after subtract: both are
@@ -269,6 +277,15 @@ Fit fit_affine(const std::vector<double>& k, const std::vector<double>& y,
     for (std::size_t i = 0; i < k.size(); ++i) {
         sw += w[i];
         sk += w[i] * k[i];
+    }
+    // One line, a spur's: the common error is that line's own, there is no
+    // slope to fit and nothing left over. A comb never reaches here with one
+    // line counted, since every use asks for kCombMinLines.
+    if (k.size() == 1 && sw > 0.0) {
+        fit.at_zero = y[0];
+        fit.centroid_value = y[0];
+        fit.used = 1;
+        return fit;
     }
     if (k.size() < 2 || sw <= 0.0) {
         return fit;
@@ -411,11 +428,26 @@ CombEstimate CombTracker::estimate() const
     }
     out.ripple_hz = ripple_hz();
     out.sideband_orders = orders_;
+    out.spur = spur_;
+    if (spur_) {
+        out.spacing_hz = 0.0;
+        out.k_lo = 0;
+        out.k_hi = 0;
+    }
     return out;
 }
 
 bool CombTracker::agrees(const CombEstimate& estimate) const
 {
+    if (spur_ || estimate.spur) {
+        // A spur agrees only with a spur, and only on its own line.
+        if (!(spur_ && estimate.spur)) {
+            return false;
+        }
+        const double c = anchored_ ? signed_of(c_.freq) * static_cast<double>(rate_)
+                                   : initial_offset_hz_;
+        return std::abs(estimate.offset_hz - c) < kCombSameLineHz;
+    }
     if (!anchored_) {
         // Nothing planned yet: compare against the estimate acquisition began from.
         const double d = initial_spacing_hz_;
@@ -448,6 +480,15 @@ double CombTracker::overlap(const CombEstimate& estimate, double tolerance_hz) c
     const double rate = static_cast<double>(rate_);
     const double c = anchored_ ? signed_of(c_.freq) * rate : initial_offset_hz_;
     const double d = anchored_ ? signed_of(d_.freq) * rate : initial_spacing_hz_;
+    if (spur_) {
+        std::uint32_t on = 0;
+        for (std::int32_t k = estimate.k_lo; k <= estimate.k_hi; ++k) {
+            if (std::abs(estimate.offset_hz + k * estimate.spacing_hz - c) < tolerance_hz) {
+                ++on;
+            }
+        }
+        return static_cast<double>(on) / static_cast<double>(estimate.line_count());
+    }
     if (!(d > 0.0)) {
         return 0.0;
     }
@@ -482,10 +523,17 @@ void CombTracker::start_acquisition(const CombEstimate& estimate)
     initial_spacing_hz_ = estimate.spacing_hz;
     range_lo_ = estimate.k_lo;
     range_hi_ = estimate.k_hi;
+    spur_ = estimate.spur;
+    min_lines_ = spur_ ? 1U : kCombMinLines;
+    if (spur_) {
+        initial_spacing_hz_ = 0.0;
+        range_lo_ = 0;
+        range_hi_ = 0;
+    }
 
     // Sidebands only with a ripple to put them at, and only as many orders as
     // leave room for kCombMinLines carriers.
-    if (estimate.ripple_hz > 0.0 && estimate.sideband_orders > 0) {
+    if (!spur_ && estimate.ripple_hz > 0.0 && estimate.sideband_orders > 0) {
         orders_ = std::min<std::int32_t>(
             estimate.sideband_orders,
             static_cast<std::int32_t>((max_lines_ / kCombMinLines - 1) / 2));
@@ -495,9 +543,9 @@ void CombTracker::start_acquisition(const CombEstimate& estimate)
 
     // The central max_lines_ of the range, each carrier followed by its
     // sidebands, -orders_ to +orders_.
-    const std::int64_t total = static_cast<std::int64_t>(estimate.line_count());
+    const std::int64_t total = spur_ ? 1 : static_cast<std::int64_t>(estimate.line_count());
     const std::int64_t take = std::min<std::int64_t>(total, max_lines_ / per_line);
-    const std::int64_t first = estimate.k_lo + (total - take) / 2;
+    const std::int64_t first = range_lo_ + (total - take) / 2;
     lines_.reserve(static_cast<std::size_t>(take * per_line));
     for (std::int64_t i = 0; i < take; ++i) {
         for (std::int32_t m = -orders_; m <= orders_; ++m) {
@@ -513,10 +561,16 @@ void CombTracker::start_acquisition(const CombEstimate& estimate)
 
 void CombTracker::detected(const CombEstimate& estimate)
 {
-    if (rate_ <= 0 || estimate.line_count() < kCombMinLines || !(estimate.spacing_hz > 0.0)) {
+    if (rate_ <= 0) {
         return;
     }
-    if ((lock_ == CombLock::kLocked || lock_ == CombLock::kAcquiring) && agrees(estimate)) {
+    if (estimate.spur ? estimate.line_count() != 1
+                      : (estimate.line_count() < kCombMinLines || !(estimate.spacing_hz > 0.0))) {
+        return;
+    }
+    // A running tracker holds what it holds: a comb is not restarted as a
+    // spur, nor a spur as a comb.
+    if (active() && (spur_ != estimate.spur || agrees(estimate))) {
         return;
     }
     start_acquisition(estimate);
@@ -890,7 +944,7 @@ void CombTracker::observe(const CombObservation& observation)
         }
     }
     const Fit ffit = fit_affine(ks, ys, ws);
-    const bool enough = ffit.used >= kCombMinLines;
+    const bool enough = ffit.used >= min_lines_;
     const double freq_error_per_block =
         (std::abs(ffit.centroid_value) + ffit.half_span_value) * T;
 
@@ -939,7 +993,7 @@ void CombTracker::observe(const CombObservation& observation)
         const double alpha = 1.0 - rho * rho * rho;
         const double beta = 1.5 * (1.0 - rho) * (1.0 - rho) * (1.0 + rho);
         const double gamma = (1.0 - rho) * (1.0 - rho) * (1.0 - rho);
-        if (pfit.used >= kCombMinLines) {
+        if (pfit.used >= min_lines_) {
             const double ec = pfit.at_zero;
             const double ed = pfit.slope;
             correct(record.mid, alpha * ec, beta * ec / T, gamma * ec / (T * T), alpha * ed,
@@ -952,7 +1006,7 @@ void CombTracker::observe(const CombObservation& observation)
         // sideband leaks into a short sub-block at nearly its own level, and
         // across a whole block about 22 dB down.
         double ripple_error = 0.0;
-        if (orders_ > 0 && pfit.used >= kCombMinLines) {
+        if (orders_ > 0 && pfit.used >= min_lines_) {
             double swy = 0.0;
             double sww = 0.0;
             std::uint32_t used = 0;
@@ -968,7 +1022,7 @@ void CombTracker::observe(const CombObservation& observation)
                 sww += m.snr * mm * mm;
                 ++used;
             }
-            if (used >= kCombMinLines && sww > 0.0) {
+            if (used >= min_lines_ && sww > 0.0) {
                 ripple_error = swy / sww;
                 correct_ripple(record.mid, alpha * ripple_error, beta * ripple_error / T,
                                gamma * ripple_error / (T * T));
@@ -978,7 +1032,7 @@ void CombTracker::observe(const CombObservation& observation)
         for (const Measured& m : measured) {
             Line& line = lines_[m.slot];
             const double fitted =
-                (pfit.used >= kCombMinLines ? pfit.at_zero + pfit.slope * m.k : 0.0) +
+                (pfit.used >= min_lines_ ? pfit.at_zero + pfit.slope * m.k : 0.0) +
                 static_cast<double>(m.m) * ripple_error;
             const Cd target = m.a_meas * std::polar(1.0, -kTwoPi * fitted);
             if (!line.seeded) {
@@ -992,12 +1046,12 @@ void CombTracker::observe(const CombObservation& observation)
         }
 
         const double residual_rad = pfit.rms * kTwoPi;
-        const bool fits = pfit.used >= kCombMinLines;
+        const bool fits = pfit.used >= min_lines_;
         const double innovation_cycles = std::abs(pfit.centroid_value) + pfit.half_span_value;
-        const bool good = fits && residual_rad < kLockRad && strong >= kCombMinLines &&
+        const bool good = fits && residual_rad < kLockRad && strong >= min_lines_ &&
                           innovation_cycles < kLockInnovationCycles &&
                           freq_error_per_block < kPhaseFallbackCyclesPerBlock;
-        const bool bad = !fits || residual_rad > kLostRad || strong < kCombMinLines ||
+        const bool bad = !fits || residual_rad > kLostRad || strong < min_lines_ ||
                          freq_error_per_block > kPhaseFallbackCyclesPerBlock;
         if (lock_ == CombLock::kAcquiring) {
             settle_blocks_ = good ? settle_blocks_ + 1 : 0;

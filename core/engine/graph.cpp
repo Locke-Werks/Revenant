@@ -1006,6 +1006,19 @@ struct Graph::Impl {
     std::atomic<bool> comb_on{true};
     std::atomic<std::uint64_t> comb_epoch{0};
 
+    // SPURS. The switch, and the detector's latest list of spurs as baseband
+    // offsets, written by set_spurs on whatever thread runs the wideband
+    // detector and read by the recording thread when spur_generation moves.
+    // A mutex rather than a handoff slot: the list is small, written about
+    // ten times a second, and the recording thread only locks it when it has
+    // changed. spur_taken and spurs_cancelled are the recording thread's.
+    std::atomic<bool> spur_on{true};
+    std::mutex spur_lock;
+    std::vector<dsp::Hertz> spur_list;  // spur_lock
+    std::atomic<std::uint64_t> spur_generation{0};
+    std::uint64_t spur_taken = 0;
+    std::atomic<std::uint32_t> spurs_cancelled{0};
+
     // The tracker's status as the recording thread last published it. Field
     // by field, for the reason FrontEndCorrectionStatus gives: only a person
     // reads these.
@@ -1519,6 +1532,66 @@ struct Graph::Impl {
         comb_bank.detected(result.estimates);
     }
 
+    // Recording thread. How far either side of an open receiver's centre a
+    // spur is left alone: half its bandwidth, which covers its passband, and
+    // kSpurGuardHz beyond, which covers a carrier an operator has tuned a
+    // beat note off.
+    static constexpr double kSpurGuardHz = 300.0;
+
+    // Recording thread. Takes the detector's latest spurs if they changed,
+    // and lets go of any spur an open receiver has come to listen to.
+    void take_spurs() {
+        if (!spur_on.load(std::memory_order_acquire)) {
+            comb_bank.drop_spurs();
+            spurs_cancelled.store(0, std::memory_order_relaxed);
+            return;
+        }
+        // Each receiver's centre, and its own guard, since bandwidths differ.
+        std::vector<std::pair<double, double>> listened;
+        listened.reserve(active.size());
+        for (const auto& slot : active) {
+            if (slot->role == VrxRole::Probe) {
+                continue;
+            }
+            const VrxParams& params = slot->recording_params;
+            listened.emplace_back(static_cast<double>(params.center),
+                                  0.5 * static_cast<double>(params.bandwidth) + kSpurGuardHz);
+        }
+        for (const auto& [centre, guard] : listened) {
+            const double at[] = {centre};
+            comb_bank.drop_spurs_near(at, guard);
+        }
+
+        const std::uint64_t generation = spur_generation.load(std::memory_order_acquire);
+        if (generation != spur_taken) {
+            spur_taken = generation;
+            std::vector<dsp::Hertz> offsets;
+            {
+                const std::scoped_lock held(spur_lock);
+                offsets = spur_list;
+            }
+            std::vector<dsp::CombEstimate> estimates;
+            for (const dsp::Hertz offset : offsets) {
+                const auto f = static_cast<double>(offset);
+                const bool listening = std::ranges::any_of(listened, [&](const auto& l) {
+                    return std::abs(f - l.first) <= l.second;
+                });
+                if (listening) {
+                    continue;
+                }
+                dsp::CombEstimate spur;
+                spur.offset_hz = f;
+                spur.k_lo = 0;
+                spur.k_hi = 0;
+                spur.lines_found = 1;
+                spur.spur = true;
+                estimates.push_back(spur);
+            }
+            comb_bank.spurs(estimates);
+        }
+        spurs_cancelled.store(comb_bank.spurs_cancelled(), std::memory_order_relaxed);
+    }
+
     void publish_comb_status() {
         const dsp::CombStatus status = comb_bank.status();
         comb_lines_cancelled.store(status.lines_cancelled, std::memory_order_relaxed);
@@ -1553,6 +1626,7 @@ struct Graph::Impl {
         }
         comb_was_on = true;
         take_comb_detection();
+        take_spurs();
 
         start = std::max(start, comb_next);
         if (end <= start) {
@@ -5246,8 +5320,29 @@ void Graph::set_comb_cancel(bool on) {
     impl_->comb_on.store(on, std::memory_order_release);
 }
 
+void Graph::set_spur_cancel(bool on) {
+    impl_->spur_on.store(on, std::memory_order_release);
+}
+
+void Graph::set_spurs(std::span<const dsp::Hertz> baseband) {
+    Impl& impl = *impl_;
+    {
+        const std::scoped_lock held(impl.spur_lock);
+        impl.spur_list.assign(baseband.begin(), baseband.end());
+    }
+    impl.spur_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
 void Graph::note_source_retune() {
-    impl_->comb_epoch.fetch_add(1, std::memory_order_acq_rel);
+    Impl& impl = *impl_;
+    impl.comb_epoch.fetch_add(1, std::memory_order_acq_rel);
+    // A list named before the retune: an external carrier has moved, and the
+    // detector names spurs afresh from the new centre.
+    {
+        const std::scoped_lock held(impl.spur_lock);
+        impl.spur_list.clear();
+    }
+    impl.spur_generation.fetch_add(1, std::memory_order_acq_rel);
 }
 
 CombCancelStatus Graph::comb_cancel() const {
@@ -5267,6 +5362,8 @@ CombCancelStatus Graph::comb_cancel() const {
         impl.comb_median_height_db.load(std::memory_order_relaxed);
     out.detections = impl.comb_detections.load(std::memory_order_relaxed);
     out.detections_found = impl.comb_detections_found.load(std::memory_order_relaxed);
+    out.spurs_on = impl.spur_on.load(std::memory_order_acquire);
+    out.spurs_cancelled = impl.spurs_cancelled.load(std::memory_order_relaxed);
     return out;
 }
 

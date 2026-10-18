@@ -3748,6 +3748,14 @@ interface Session {
     captureSearch @39 (query :CaptureQuery) -> (result :CaptureSearchResult);
     captureOccupancy @40 (request :CaptureOccupancyRequest)
         -> (buckets :List(CaptureBucket));
+
+    # Switches spur cancelling (EngineConfig::spur_cancel), by the rules
+    # setCombCancel gives: engine-wide, on by default, carried across a change
+    # of source. The wideband detector names unkeyed carriers spurs and the
+    # comb stage cancels each with a tracker of one line, never on a
+    # frequency an open receiver is tuned to. Off lets go of every spur held.
+    # An older engine refuses it as unimplemented.
+    setSpurCancel @41 (on :Bool) -> ();
 }
 
 # One closed segment of the rolling capture. Segments still being written are

@@ -1744,6 +1744,11 @@ class EngineLink : public QObject {
     Q_PROPERTY(QString combText READ combText NOTIFY combStatusChanged)
     Q_PROPERTY(bool combLocked READ combLocked NOTIFY combStatusChanged)
 
+    // Spur cancelling beside it, by the same rules, remembered under
+    // kSpurCancel: unkeyed carriers the detector names spurs, cancelled by
+    // the comb stage one line each, never where a receiver is tuned.
+    Q_PROPERTY(bool spurCancel READ spurCancel WRITE setSpurCancel NOTIFY spurCancelChanged)
+
     // The engine's rolling capture, read off the same SourceStats poll, in
     // the words models/capture_note.h gives it. captureText is empty with the
     // capture off; captureFault is true only while the writer is dropping
@@ -3031,6 +3036,11 @@ public:
         return comb_wanted_.load(std::memory_order_acquire);
     }
     void setCombCancel(bool on);
+    [[nodiscard]] bool spurCancel() const
+    {
+        return spur_wanted_.load(std::memory_order_acquire);
+    }
+    void setSpurCancel(bool on);
     [[nodiscard]] QString combText() const { return comb_text_; }
     [[nodiscard]] bool combLocked() const { return comb_locked_; }
     [[nodiscard]] QString captureText() const { return capture_text_; }
@@ -3251,6 +3261,7 @@ signals:
 
     void impulseExcisionChanged();
     void combCancelChanged();
+    void spurCancelChanged();
     void combStatusChanged();
     void captureStatusChanged();
     void captureHitsChanged();
@@ -4400,6 +4411,7 @@ private:
     // Supervisor thread. Sends the excision switch when one is pending.
     void apply_impulse_excision();
     void apply_comb_cancel();
+    void apply_spur_cancel();
     void apply_plugin_receivers();
 
     // ---- the recording's pace --------------------------------------------
@@ -5257,6 +5269,11 @@ private:
     std::atomic<bool> comb_wanted_{true};
     std::atomic<bool> comb_set_{false};
     std::atomic<bool> comb_pending_{false};
+
+    // The spur switch, by the same three.
+    std::atomic<bool> spur_wanted_{true};
+    std::atomic<bool> spur_set_{false};
+    std::atomic<bool> spur_pending_{false};
 
     // Auto DV and the P25 trunk tracker are one or the other: while auto DV
     // is on the engine is told plugins may not open receivers. What is

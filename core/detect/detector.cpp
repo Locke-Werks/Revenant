@@ -584,6 +584,7 @@ Status Detector::consume(const engine::SpectrumFrame& frame) {
     // time constant comes out at ninety-two frames' worth instead of seven.
     weight_ += alpha * (1.0 - weight_);
     accumulate(frame, weight_ > 0.0 ? std::min(1.0, alpha / weight_) : 1.0);
+    measure_levels(frame);
     ++stats_.frames;
 
     samples_since_decision_ += delta;
@@ -623,6 +624,99 @@ void Detector::accumulate(const engine::SpectrumFrame& frame, double alpha) {
         const double linear = static_cast<double>(std::exp2(power[i] * kDbToLog2));
         average_[i] += alpha * (linear - average_[i]);
     }
+}
+
+void Detector::measure_levels(const engine::SpectrumFrame& frame) {
+    const std::span<const float> power = frame.power_db;
+    for (Track& track : all_) {
+        if (track.state != TrackState::Live || !track.level_bins_known ||
+            track.level_last_bin >= power.size()) {
+            continue;
+        }
+        double sum = 0.0;
+        for (std::uint32_t i = track.level_first_bin; i <= track.level_last_bin; ++i) {
+            sum += static_cast<double>(std::exp2(power[i] * kDbToLog2));
+        }
+        const double level = 10.0 * std::log10(std::max(sum, 1e-30));
+        ++track.level_frames;
+        const double delta = level - track.level_mean_db;
+        track.level_mean_db += delta / static_cast<double>(track.level_frames);
+        track.level_m2 += delta * (level - track.level_mean_db);
+    }
+}
+
+void SpurBook::note(dsp::Hertz baseband, dsp::Hertz centre, dsp::SampleIndex now) {
+    for (Entry& entry : entries_) {
+        if (entry.centre == centre &&
+            std::abs(static_cast<double>(entry.baseband - baseband)) <= kLoSpurToleranceHz) {
+            entry.baseband = baseband;
+            entry.last_seen = now;
+            return;
+        }
+    }
+    if (entries_.size() >= kCapacity) {
+        // The longest unseen goes.
+        const auto oldest = std::ranges::min_element(entries_, {}, &Entry::last_seen);
+        entries_.erase(oldest);
+    }
+    entries_.push_back(Entry{baseband, centre, now});
+}
+
+bool SpurBook::stayed_at(dsp::Hertz baseband, dsp::Hertz centre) const {
+    return std::ranges::any_of(entries_, [&](const Entry& entry) {
+        return std::abs(static_cast<double>(entry.centre - centre)) >= kLoSpurMinRetuneHz &&
+               std::abs(static_cast<double>(entry.baseband - baseband)) <= kLoSpurToleranceHz;
+    });
+}
+
+void SpurBook::forget_older_than(dsp::SampleIndex now, dsp::SampleIndex forget_samples) {
+    std::erase_if(entries_, [&](const Entry& entry) {
+        return now > entry.last_seen && now - entry.last_seen > forget_samples;
+    });
+}
+
+void Detector::mark_spurs(dsp::SampleIndex now) {
+    const double rate = static_cast<double>(std::max<dsp::SampleRate>(1, config_.source_rate));
+    const double widest = std::max(kSpurMaxBandwidthHz, kSpurMaxBins * geometry_.bin_width_hz());
+    for (Track& track : all_) {
+        // A probe that named a family other than a bare carrier rules it out,
+        // whatever else it looks like. Unknown is no answer yet.
+        const bool carrier = track.classification == Classification::Unmodulated &&
+                             !track.classification_double_sideband;
+        const bool unnamed = track.classification == Classification::Unknown;
+        const dsp::Hertz baseband = track.center - config_.source_center;
+        const bool narrow = static_cast<double>(track.bandwidth) <= widest &&
+                            std::abs(static_cast<double>(baseband)) > kSpurDcGuardHz;
+        if (!(carrier || unnamed) || !narrow) {
+            track.spur = false;
+            track.lo_spur = false;
+            continue;
+        }
+        if (track.state != TrackState::Live) {
+            // Held or merged: whatever it was, it is not there to cancel now.
+            track.spur = false;
+            continue;
+        }
+
+        if (!track.lo_spur && spur_book_.stayed_at(baseband, config_.source_center)) {
+            track.lo_spur = true;
+        }
+        spur_book_.note(baseband, config_.source_center, now);
+
+        std::uint32_t keyups = 0;
+        if (const refine::EmitterMemory* emitter = emitters_.find(track.emitter);
+            emitter != nullptr) {
+            keyups = emitter->keyups;
+        }
+        const double age_seconds = static_cast<double>(now - track.first_seen) / rate;
+        const bool unkeyed = track.held_spells == 0 && keyups <= 1 &&
+                             age_seconds >= refine::kContinuousSeconds;
+        const bool steady =
+            track.level_frames >= kSpurMinFrames && track.level_sigma_db() <= kSpurLevelSigmaDb;
+        track.spur = track.lo_spur || (carrier && unkeyed && steady);
+    }
+    spur_book_.forget_older_than(
+        now, static_cast<dsp::SampleIndex>(kSpurMemorySeconds * rate));
 }
 
 void Detector::decide(dsp::SampleIndex now, double elapsed_seconds) {
@@ -1641,6 +1735,9 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
             // the one place a track sees a candidate's arrays before the next
             // decision overwrites them.
             track.shape = candidate.shape;
+            track.level_first_bin = candidate.first_bin;
+            track.level_last_bin = candidate.last_bin;
+            track.level_bins_known = true;
 
             ++track.hits;
             track.misses = 0;
@@ -1707,6 +1804,9 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
         track.snr_2500_db = candidate.snr_2500_db;
         track.margin_confidence = candidate.margin_confidence;
         track.shape = candidate.shape;
+        track.level_first_bin = candidate.first_bin;
+        track.level_last_bin = candidate.last_bin;
+        track.level_bins_known = true;
         track.confidence = config_.confidence_rise;
         track.first_seen = now;
         track.last_seen = now;
@@ -1759,6 +1859,7 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
         now, static_cast<dsp::SampleIndex>(
                  refine::kEmitterMemorySeconds *
                  static_cast<double>(std::max<dsp::SampleRate>(1, config_.source_rate))));
+    mark_spurs(now);
 
     tracks_.clear();
     for (const Track& track : all_) {

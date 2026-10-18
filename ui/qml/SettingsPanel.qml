@@ -455,6 +455,19 @@ ColumnLayout {
         }
     }
 
+    // Engine-wide, beside the comb: a carrier the detector finds unkeyed,
+    // steady and bare, or one that keeps its offset when the radio retunes,
+    // is cancelled one line at a time by the same stage. Never where a
+    // receiver is tuned. Remembered; models/settings.h, kSpurCancel.
+    RCheckBox {
+        text: "cancel spurs (unkeyed carriers)"
+        checked: engineLink.spurCancel
+        onToggled: {
+            engineLink.spurCancel = checked
+            checked = Qt.binding(() => engineLink.spurCancel)
+        }
+    }
+
     Rule {}
 
     SectionTitle { text: "speech" }

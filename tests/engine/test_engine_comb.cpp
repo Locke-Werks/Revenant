@@ -258,3 +258,152 @@ TEST_CASE("the comb cancellation locks to a drifting comb and takes it out of th
     CHECK(on.line_height_db < off.line_height_db - 10.0);
     CHECK(on.line_height_db < 6.0);
 }
+
+// SPURS, end to end: one constant tone over the same noise, named a spur
+// through Engine::set_spurs as the wideband detector would name it, and
+// cancelled by a tracker of one line. Then the same with a receiver tuned to
+// it, which the spur cancelling must leave alone.
+namespace {
+
+constexpr double kSpurSeconds = 5.0;
+constexpr double kSpurMeasureFrom = 3.0;
+constexpr double kSpurHz = 23'456.7;
+
+[[nodiscard]] std::vector<dsp::Complex32> render_spur_capture() {
+    const auto count = static_cast<std::size_t>(kSpurSeconds * static_cast<double>(kRate));
+    std::vector<dsp::Complex32> out(count);
+    std::mt19937_64 random(kSeed + 1);
+    std::normal_distribution<double> noise(0.0, kNoiseRms);
+    constexpr std::size_t kStride = 256;
+    const auto rate = static_cast<double>(kRate);
+    const std::complex<double> step = std::polar(1.0, 2.0 * std::numbers::pi * kSpurHz / rate);
+    for (std::size_t base = 0; base < count; base += kStride) {
+        const double cycles = kSpurHz * static_cast<double>(base) / rate;
+        std::complex<double> phasor =
+            std::polar(kLineAmplitude, 2.0 * std::numbers::pi * (cycles - std::floor(cycles)));
+        for (std::size_t n = base; n < std::min(count, base + kStride); ++n) {
+            out[n] = dsp::Complex32(static_cast<float>(noise(random) + phasor.real()),
+                                    static_cast<float>(noise(random) + phasor.imag()));
+            phasor *= step;
+        }
+    }
+    return out;
+}
+
+struct SpurRun {
+    engine::CombCancelStatus comb{};
+    double height_db = 0.0;
+    std::size_t frames_measured = 0;
+};
+
+[[nodiscard]] SpurRun run_spur_capture(const std::string& uri, bool spur_on, bool receiver) {
+    engine::EngineConfig config;
+    config.channels = kChannels;
+    config.taps_per_branch = 17;
+    config.ring_seconds = 0.5;
+    config.block_samples = 32'768;
+    config.spectrum_transform = kTransform;
+    config.comb_cancel = true;
+    config.spur_cancel = spur_on;
+    config.gpu_index = -1;
+
+    auto created = engine::Engine::create(config);
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+    const auto opened = eng.open_source(uri);
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+    if (receiver) {
+        engine::VrxParams params;
+        params.center = static_cast<dsp::Hertz>(std::llround(kSpurHz));
+        const auto added = eng.add_vrx(params);
+        INFO(test::message_of(added));
+        REQUIRE(added.has_value());
+    }
+    const dsp::Hertz spurs[] = {static_cast<dsp::Hertz>(std::llround(kSpurHz))};
+    REQUIRE(eng.set_spurs(spurs).has_value());
+
+    std::mutex lock;
+    SpurRun out;
+    double height_sum = 0.0;
+    std::vector<float> sorted;
+    const auto attached =
+        eng.set_spectrum_sink([&](const engine::SpectrumFrame& frame) -> Status {
+            const double t = static_cast<double>(frame.start) / static_cast<double>(kRate);
+            if (t < kSpurMeasureFrom) {
+                return {};
+            }
+            const std::lock_guard<std::mutex> guard(lock);
+            sorted.assign(frame.power_db.begin(), frame.power_db.end());
+            std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+            const double median = sorted[sorted.size() / 2];
+            const auto bin = static_cast<std::ptrdiff_t>(std::lround(
+                (kSpurHz - frame.geometry.bin_zero_hz()) / frame.geometry.bin_width_hz()));
+            if (bin >= 0 && bin < static_cast<std::ptrdiff_t>(frame.power_db.size())) {
+                height_sum += frame.power_db[static_cast<std::size_t>(bin)] - median;
+                ++out.frames_measured;
+            }
+            return {};
+        });
+    INFO(test::message_of(attached));
+    REQUIRE(attached.has_value());
+
+    const auto ran = eng.run();
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+
+    out.comb = eng.graph_conditions().comb_cancel;
+    out.height_db = out.frames_measured == 0 ? 0.0
+                                             : height_sum / static_cast<double>(out.frames_measured);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("a spur named to the engine is cancelled, and not under a receiver",
+          "[gpu][engine][comb][spur]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    const std::vector<dsp::Complex32> capture = render_spur_capture();
+    const std::filesystem::path path = test::unique_temp_path("revenant_test_spur", ".cf32");
+    {
+        std::FILE* file = std::fopen(path.string().c_str(), "wb");
+        REQUIRE(file != nullptr);
+        const std::size_t wrote =
+            std::fwrite(capture.data(), sizeof(dsp::Complex32), capture.size(), file);
+        std::fclose(file);
+        REQUIRE(wrote == capture.size());
+    }
+    struct Remove {
+        std::filesystem::path path;
+        ~Remove() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } remove{path};
+    const std::string uri = "file:///" + path.generic_string() +
+                            "?rate=" + std::to_string(kRate) + "&format=cf32&center=7100000";
+
+    const SpurRun off = run_spur_capture(uri, false, false);
+    const SpurRun on = run_spur_capture(uri, true, false);
+    const SpurRun listened = run_spur_capture(uri, true, true);
+    std::printf("spur off: %.1f dB; on: %.1f dB, %u cancelled; under a receiver: %.1f dB, %u "
+                "cancelled\n",
+                off.height_db, on.height_db, on.comb.spurs_cancelled, listened.height_db,
+                listened.comb.spurs_cancelled);
+
+    REQUIRE(off.frames_measured > 0);
+    REQUIRE(on.frames_measured > 0);
+    REQUIRE(listened.frames_measured > 0);
+    CHECK(off.height_db > 15.0);
+    CHECK_FALSE(off.comb.spurs_on);
+    CHECK(on.comb.spurs_on);
+    CHECK(on.comb.spurs_cancelled == 1);
+    CHECK(on.height_db < off.height_db - 15.0);
+    // The comb's own status does not report a spur as a comb.
+    CHECK(on.comb.status.lock == dsp::CombLock::kIdle);
+    CHECK(listened.comb.spurs_cancelled == 0);
+    CHECK(listened.height_db > off.height_db - 1.0);
+}

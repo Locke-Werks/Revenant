@@ -845,3 +845,166 @@ TEST_CASE("comb tracker: folds finer sub-blocks into the ones it planned", "[com
     }
     CHECK(x.status().comb.spacing_hz == y.status().comb.spacing_hz);
 }
+
+// A spur, CombEstimate::spur: one line, tracked and subtracted through the
+// kernels' twins on real samples, with a keyed CW signal 200 Hz above it and
+// noise. The spur is to come down by 30 dB; the CW is to come through as it
+// went in, which is checked against the CW and noise synthesised without the
+// spur, so the measurement does not have to see past the spur's own leakage.
+TEST_CASE("comb tracker: a single-line spur tracker removes the tone and spares CW beside it",
+          "[comb][tracker][spur]")
+{
+    const std::uint64_t seed = 0x5B0B5ULL;
+    std::printf("spur tracker: seed %llu\n", static_cast<unsigned long long>(seed));
+    INFO("seed " << seed);
+    std::mt19937_64 rng(seed);
+    std::normal_distribution<double> gauss(0.0, std::sqrt(0.5));
+
+    constexpr double kSpurHz = 41'234.5;
+    constexpr double kCwHz = kSpurHz + 200.0;
+    constexpr double rate = static_cast<double>(kRate);
+    // 40 dB over the noise in a block's resolution, and the CW 10 dB under it.
+    // The depth is noise limited, about the spur's own SNR in a block less
+    // what the amplitude average buys back, so a 30 dB spur comes down by
+    // about as much as it stands up.
+    const double spur_amp = std::sqrt(10'000.0 / kBlock);
+    const double cw_amp = spur_amp / std::sqrt(10.0);
+
+    CombEstimate spur;
+    spur.offset_hz = kSpurHz + 4.0;  // a detection a few hertz off
+    spur.k_lo = 0;
+    spur.k_hi = 0;
+    spur.lines_found = 1;
+    spur.spur = true;
+    CombTracker tracker(kRate, 1);
+    tracker.detected(spur);
+    REQUIRE(tracker.active());
+    REQUIRE(tracker.spur());
+    REQUIRE(tracker.lines() == 1);
+
+    const std::vector<dsp::Complex32> table = dsp::comb_table();
+    std::vector<dsp::Complex32> raw(kBlock);
+    std::vector<dsp::Complex32> without(kBlock);  // CW and noise, no spur
+    std::vector<dsp::Complex32> cleaned(kBlock);
+    std::vector<dsp::Complex32> removed(kBlock);
+    std::vector<dsp::Complex32> proj(dsp::kCombMaxSubBlocks);
+    std::uint64_t n_total = 0;
+    const double spur_phase0 = 0.3;
+
+    // A tone at f from sample n0, by recursion from its exact phase there: in
+    // double the drift over a block is far under anything measured here.
+    auto phasor_at = [&](double f, std::uint64_t n0, double phase0) {
+        const double cycles = f * static_cast<double>(n0) / rate + phase0;
+        return std::polar(1.0, kTwoPi * (cycles - std::floor(cycles)));
+    };
+    // Projection of a buffer onto a tone at f over the block starting at n0.
+    auto project = [&](const std::vector<dsp::Complex32>& x, double f, std::uint64_t n0) {
+        Cd z = std::conj(phasor_at(f, n0, 0.0));
+        const Cd r = std::polar(1.0, -kTwoPi * f / rate);
+        Cd sum{};
+        for (std::uint32_t n = 0; n < kBlock; ++n) {
+            sum += Cd{x[n].real(), x[n].imag()} * z;
+            z *= r;
+        }
+        return sum / static_cast<double>(kBlock);
+    };
+
+    double spur_before = 0.0;
+    double spur_after = 0.0;
+    double cw_power = 0.0;
+    double cw_error = 0.0;
+    int locked_at = -1;
+    for (int blk = 0; blk < 240; ++blk) {
+        const dsp::SampleIndex start = n_total;
+        Cd s_z = phasor_at(kSpurHz, start, spur_phase0) * spur_amp;
+        Cd c_z = phasor_at(kCwHz, start, 0.0) * cw_amp;
+        const Cd s_r = std::polar(1.0, kTwoPi * kSpurHz / rate);
+        const Cd c_r = std::polar(1.0, kTwoPi * kCwHz / rate);
+        // Key down for 60 ms in every 120: 20 WPM dits.
+        for (std::uint32_t n = 0; n < kBlock; ++n) {
+            const double t = static_cast<double>(start + n) / rate;
+            const bool key = std::fmod(t, 0.12) < 0.06;
+            const Cd noise{gauss(rng), gauss(rng)};
+            const Cd s = s_z;
+            const Cd c = key ? c_z : Cd{};
+            s_z *= s_r;
+            c_z *= c_r;
+            const Cd w = c + noise;
+            without[n] = dsp::Complex32{static_cast<float>(w.real()), static_cast<float>(w.imag())};
+            const Cd x = w + s;
+            raw[n] = dsp::Complex32{static_cast<float>(x.real()), static_cast<float>(x.imag())};
+        }
+        n_total += kBlock;
+
+        const CombBlockPlan plan = tracker.plan(start, kBlock);
+        REQUIRE(plan.lines.size() == 1);
+        dsp::CombParams params;
+        params.ring_mask = kBlock - 1;
+        params.first = 0;
+        params.count = kBlock;
+        params.lines = 1;
+        params.sub_blocks = plan.sub_blocks;
+        params.removed_mask = kBlock - 1;
+        REQUIRE(dsp::reference_comb_project(params, raw, plan.lines, table, proj));
+        tracker.observe(CombObservation{start, kBlock, plan.sub_blocks,
+                                        std::span<const dsp::Complex32>(proj.data(),
+                                                                        plan.sub_blocks)});
+        if (locked_at < 0 && tracker.status().lock == CombLock::kLocked) {
+            locked_at = blk + 1;
+        }
+        if (!plan.subtract) {
+            continue;
+        }
+        REQUIRE(dsp::reference_comb_subtract(params, raw, plan.lines, table, cleaned, removed));
+        if (blk < 140) {
+            continue;  // settling
+        }
+        spur_before += std::norm(project(raw, kSpurHz, start) - project(without, kSpurHz, start));
+        spur_after += std::norm(project(cleaned, kSpurHz, start) - project(without, kSpurHz, start));
+        const Cd cw_in = project(without, kCwHz, start);
+        const Cd cw_out = project(cleaned, kCwHz, start);
+        cw_power += std::norm(cw_in);
+        cw_error += std::norm(cw_out - cw_in);
+    }
+    INFO("locked at block " << locked_at);
+    REQUIRE(locked_at > 0);
+    REQUIRE(spur_after > 0.0);
+    const double suppression_db = 10.0 * std::log10(spur_before / spur_after);
+    const double cw_change_db = 10.0 * std::log10(cw_power / std::max(cw_error, 1e-30));
+    std::printf("  locked at %d; spur down %.1f dB; CW disturbed %.1f dB under itself\n",
+                locked_at, suppression_db, cw_change_db);
+    CHECK(tracker.status().lock == CombLock::kLocked);
+    CHECK(suppression_db >= 30.0);
+    // What the subtraction did to the CW is at least 30 dB under the CW.
+    CHECK(cw_change_db >= 30.0);
+}
+
+// A spur is held in the bank beside a comb, in one slot, and let go when a
+// receiver comes to listen to it.
+TEST_CASE("comb bank: holds a spur in one slot and drops it for a receiver", "[comb][tracker][spur]")
+{
+    dsp::CombBank bank(kRate);
+    CombEstimate spur;
+    spur.offset_hz = 41'234.5;
+    spur.k_lo = 0;
+    spur.k_hi = 0;
+    spur.lines_found = 1;
+    spur.spur = true;
+    bank.spurs(std::span<const CombEstimate>(&spur, 1));
+    REQUIRE(bank.trackers().size() == 1);
+    CHECK(bank.trackers()[0].spur());
+    CHECK(bank.trackers()[0].lines() == 1);
+
+    // Offered again: already held.
+    bank.spurs(std::span<const CombEstimate>(&spur, 1));
+    CHECK(bank.trackers().size() == 1);
+    // Not a comb, so not in the comb's status.
+    CHECK(bank.status().lock == CombLock::kIdle);
+
+    const double far[] = {100'000.0};
+    bank.drop_spurs_near(far, 1'000.0);
+    CHECK(bank.trackers().size() == 1);
+    const double near[] = {41'000.0};
+    bank.drop_spurs_near(near, 1'000.0);
+    CHECK(bank.trackers().empty());
+}

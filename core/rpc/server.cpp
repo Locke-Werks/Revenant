@@ -2018,6 +2018,12 @@ private:
     // the operator had chosen.
     std::optional<double> detection_threshold_db_;  // detect_lock_
 
+    // The detector's baseband-offset memory (detect::SpurBook), copied out at
+    // each decision and handed to the next detector, for the same reason the
+    // threshold outlives it: a retune throws the detector away, and seeing a
+    // carrier keep its offset across a retune is what the memory is for.
+    detect::SpurBook spur_book_;  // detect_lock_
+
     // THE SIGID LANE, which is where the detector and tier two run.
     //
     // Until 2026-09-23 on_frame fed the detector itself, on the engine's
@@ -3284,6 +3290,13 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> setSpurCancel(SetSpurCancelContext context) override {
+        if (auto set = owner_.engine().set_spur_cancel(context.getParams().getOn()); !set) {
+            return to_exception(set.error());
+        }
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> captureCatalog(CaptureCatalogContext context) override {
         const auto params = context.getParams();
         return owner_.capture_catalog(params.getFromNs(), params.getToNs())
@@ -3785,6 +3798,7 @@ Status ServerImpl::ensure_detector() {
         return std::unexpected(with_context(made.error(), "building the wideband detector"));
     }
     detector_ = std::move(*made);
+    detector_->adopt_spur_book(spur_book_);
     annotator_.emplace([this](dsp::SampleIndex start, const capture::Annotation& annotation,
                               std::uint64_t track_id) {
         engine_.add_capture_annotation(start, annotation, track_id);
@@ -4852,6 +4866,10 @@ void ServerImpl::sigid_consume(const DetectSlot& slot) {
     }
     const std::uint64_t cpu_began = this_thread_cpu_ns();
 
+    // This decision's spurs, handed to the engine after detect_lock_ is let
+    // go: Engine::set_spurs takes the engine's lifecycle lock, which a retune
+    // holds while it comes here for detect_lock_.
+    std::optional<std::vector<dsp::Hertz>> spurs;
     {
         std::scoped_lock held(detect_lock_);
         if (!detector_.has_value() ||
@@ -4895,7 +4913,22 @@ void ServerImpl::sigid_consume(const DetectSlot& slot) {
                                     detector_->config().confidence_threshold);
             }
             publish_detections_locked();
+
+            // Kept here as well as in the detector, which a retune rebuilds:
+            // the memory is what sees an offset survive one.
+            spur_book_ = detector_->spur_book();
+            spurs.emplace();
+            for (const detect::Track& track : detector_->tracks()) {
+                if (track.spur) {
+                    spurs->push_back(track.center - detector_->config().source_center);
+                }
+            }
         }
+    }
+    if (spurs.has_value()) {
+        // Refused only by an engine without the stage, which has nothing to
+        // cancel them with.
+        static_cast<void>(engine_.set_spurs(*spurs));
     }
 
     // THE BUDGET, on a source running on a clock and not otherwise: an

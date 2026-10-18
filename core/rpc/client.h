@@ -354,6 +354,9 @@ public:
     // SourceStats carries whether it is on and what its tracker reports.
     [[nodiscard]] virtual Status set_comb_cancel(bool on) = 0;
 
+    // Spur cancelling beside it, engine-wide and on by default.
+    [[nodiscard]] virtual Status set_spur_cancel(bool on) = 0;
+
     // Whether engine plugins may open receivers, engine-wide and allowed by
     // default. Refusing removes every receiver a plugin holds. The client's
     // auto DV refuses it so it and the P25 trunk tracker never share a channel.

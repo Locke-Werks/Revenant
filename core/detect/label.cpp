@@ -85,6 +85,18 @@ const char* label_kind_name(LabelKind kind) {
 }
 
 TrackLabel label_track(const Track& track) {
+    // Ahead of the refinement, which would call a bare carrier CW: a spur is
+    // a carrier with no keying, and the name says why it is being cancelled.
+    if (track.spur) {
+        TrackLabel out;
+        out.kind = LabelKind::AnalogModulation;
+        out.name = "spur";
+        out.confidence = track.classification == Classification::Unmodulated
+                             ? track.classification_confidence
+                             : 1.0;
+        out.may_drive = true;
+        return out;
+    }
     if (TrackLabel refined = refined_label(track); refined.confirmed_depth > 0) {
         return refined;
     }

@@ -7,6 +7,12 @@
 // splits the budget and a comb found later takes what remains. A tracker
 // keeps its share until it is lost; trimming inside it is the tracker's own.
 //
+// SPURS. A spur is a tracker of one line beside the combs, at most
+// kCombMaxSpurs of them, each taking one slot from what the combs leave. They
+// do not count toward kCombMaxCombs and are left out of status(). Combs have
+// first claim on the slots, and a spur on a line a comb holds is let go, so no
+// line is subtracted twice.
+//
 // SUB-BLOCKS. Each tracker picks its own sub-block count: short ones while it
 // pulls in, long ones once it has the comb within a hertz or so, because a
 // comb with supply-ripple sidebands needs the long ones to lock at all
@@ -73,8 +79,8 @@ void CombBank::detected(std::span<const CombEstimate> estimates)
     };
     std::vector<const CombEstimate*> fresh;
     for (const CombEstimate& estimate : estimates) {
-        if (estimate.line_count() >= kCombMinLines && estimate.spacing_hz > 0.0 &&
-            !held(estimate)) {
+        if (!estimate.spur && estimate.line_count() >= kCombMinLines &&
+            estimate.spacing_hz > 0.0 && !held(estimate)) {
             fresh.push_back(&estimate);
         }
     }
@@ -97,8 +103,26 @@ void CombBank::detected(std::span<const CombEstimate> estimates)
         const auto orders = static_cast<std::uint32_t>(std::max(e.sideband_orders, 0));
         return e.line_count() * (2 * orders + 1);
     };
+    // Combs have first claim on the slots: spurs give theirs back, newest
+    // first, until the fresh combs fit. A spur still there is offered again
+    // with the detector's next decision and takes whatever is left.
+    std::uint32_t wanted = 0;
+    for (const CombEstimate* estimate : fresh) {
+        wanted += need(*estimate);
+    }
+    for (std::size_t j = trackers_.size(); j-- > 0 && used + wanted > kCombMaxLines;) {
+        if (trackers_[j].spur()) {
+            used -= trackers_[j].lines();
+            trackers_.erase(trackers_.begin() + static_cast<std::ptrdiff_t>(j));
+            changed = true;
+        }
+    }
+    auto combs = [this] {
+        return static_cast<std::size_t>(std::ranges::count_if(
+            trackers_, [](const CombTracker& tracker) { return !tracker.spur(); }));
+    };
     for (std::size_t i = 0; i < fresh.size(); ++i) {
-        if (trackers_.size() >= kCombMaxCombs || used >= kCombMaxLines) {
+        if (combs() >= kCombMaxCombs || used >= kCombMaxLines) {
             break;
         }
         // Strongest first takes what it needs if the rest still fit, and an
@@ -153,6 +177,21 @@ CombBlockPlan CombBank::plan(SampleIndex start, std::uint32_t count)
                 merged = true;
                 break;
             }
+        }
+    }
+    // A spur on a line some comb has come to hold, whichever started first:
+    // the spur goes, so the line is subtracted once.
+    for (std::size_t j = trackers_.size(); j-- > 0;) {
+        if (!trackers_[j].spur()) {
+            continue;
+        }
+        const CombEstimate spur = trackers_[j].estimate();
+        const bool on_comb = std::ranges::any_of(trackers_, [&](const CombTracker& tracker) {
+            return !tracker.spur() && tracker.active() && tracker.overlap(spur, kSameLineHz) > 0.0;
+        });
+        if (on_comb) {
+            trackers_.erase(trackers_.begin() + static_cast<std::ptrdiff_t>(j));
+            merged = true;
         }
     }
     if (merged) {
@@ -224,6 +263,77 @@ void CombBank::observe(const CombObservation& observation)
     }
 }
 
+void CombBank::spurs(std::span<const CombEstimate> estimates)
+{
+    if (rate_ <= 0) {
+        return;
+    }
+    bool changed =
+        std::erase_if(trackers_, [](const CombTracker& tracker) { return !tracker.active(); }) > 0;
+    std::uint32_t used = 0;
+    std::uint32_t held_spurs = 0;
+    for (const CombTracker& tracker : trackers_) {
+        used += tracker.lines();
+        held_spurs += tracker.spur() ? 1U : 0U;
+    }
+    for (const CombEstimate& estimate : estimates) {
+        if (!estimate.spur || estimate.line_count() != 1) {
+            continue;
+        }
+        if (held_spurs >= kCombMaxSpurs || used >= kCombMaxLines) {
+            break;
+        }
+        // On a comb's line, or a spur already held: the line is cancelled.
+        const bool held = std::ranges::any_of(trackers_, [&](const CombTracker& tracker) {
+            return tracker.active() && tracker.overlap(estimate, kSameLineHz) > 0.0;
+        });
+        if (held) {
+            continue;
+        }
+        CombTracker tracker(rate_, 1);
+        tracker.detected(estimate);
+        if (!tracker.active()) {
+            continue;
+        }
+        used += tracker.lines();
+        ++held_spurs;
+        trackers_.push_back(std::move(tracker));
+        changed = true;
+    }
+    if (changed) {
+        splits_.clear();
+    }
+}
+
+void CombBank::drop_spurs_near(std::span<const double> frequencies_hz, double guard_hz)
+{
+    const std::size_t erased = std::erase_if(trackers_, [&](const CombTracker& tracker) {
+        if (!tracker.spur()) {
+            return false;
+        }
+        const double at = tracker.estimate().offset_hz;
+        return std::ranges::any_of(frequencies_hz,
+                                   [&](double f) { return std::abs(f - at) <= guard_hz; });
+    });
+    if (erased > 0) {
+        splits_.clear();
+    }
+}
+
+void CombBank::drop_spurs()
+{
+    if (std::erase_if(trackers_, [](const CombTracker& tracker) { return tracker.spur(); }) > 0) {
+        splits_.clear();
+    }
+}
+
+std::uint32_t CombBank::spurs_cancelled() const
+{
+    return static_cast<std::uint32_t>(std::ranges::count_if(trackers_, [](const CombTracker& t) {
+        return t.spur() && t.status().lock == CombLock::kLocked;
+    }));
+}
+
 std::vector<CombEstimate> CombBank::active_estimates() const
 {
     std::vector<CombEstimate> out;
@@ -242,6 +352,9 @@ CombStatus CombBank::status() const
     std::uint32_t best_cancelled = 0;
     bool any = false;
     for (const CombTracker& tracker : trackers_) {
+        if (tracker.spur()) {
+            continue;
+        }
         const CombStatus s = tracker.status();
         if (s.lock == CombLock::kIdle) {
             continue;

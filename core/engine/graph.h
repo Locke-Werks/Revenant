@@ -684,6 +684,11 @@ public:
     void set_comb_cancel(bool on);
     [[nodiscard]] CombCancelStatus comb_cancel() const;
 
+    // Spur cancelling, Engine::set_spur_cancel and Engine::set_spurs. Any
+    // thread; the recording thread takes both at its next block.
+    void set_spur_cancel(bool on);
+    void set_spurs(std::span<const dsp::Hertz> baseband);
+
     // The source's centre moved. Any thread. The comb tracker is reset at the
     // next block and the detection's averaging starts again, because a comb
     // measured at the old centre says nothing reliable about the new one.

@@ -100,6 +100,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -514,6 +515,37 @@ struct Track {
     // The track this one was merged into, while state is Merged. Zero
     // otherwise.
     std::uint64_t merged_into = 0;
+
+    // A SPUR: an unkeyed carrier the engine may cancel (EngineConfig::
+    // spur_cancel). Set at each decision by the rule in Detector::mark_spurs:
+    // a probe has called it a bare carrier (Unmodulated, not double
+    // sideband), it is narrow, it has been continuous for
+    // refine::kContinuousSeconds with no held spell and at most one keyup on
+    // its emitter, and its level from frame to frame is steady. Or, at once,
+    // lo_spur: a narrow carrier at a baseband offset where one stood before
+    // the front end retuned, which a station cannot do and a local
+    // oscillator or clock product inside the receiver does. A probe naming
+    // any other family takes either away. This only removes energy; nothing
+    // is decoded.
+    bool spur = false;
+    bool lo_spur = false;
+
+    // The fine bins of the candidate last assigned, and the track's level
+    // over them in each frame since, in dB, as a running mean and sum of
+    // squared deviations (Welford). The detector's own average is a second
+    // long and smooths keyed CW at 20 WPM into something nearly as steady as
+    // a carrier; one frame is tens of milliseconds and sees every key-up.
+    std::uint32_t level_first_bin = 0;
+    std::uint32_t level_last_bin = 0;
+    bool level_bins_known = false;
+    std::uint32_t level_frames = 0;
+    double level_mean_db = 0.0;
+    double level_m2 = 0.0;
+
+    // The standard deviation of that level, dB, zero under two frames.
+    [[nodiscard]] double level_sigma_db() const {
+        return level_frames < 2 ? 0.0 : std::sqrt(level_m2 / static_cast<double>(level_frames - 1));
+    }
 
     [[nodiscard]] constexpr dsp::SampleIndex age_samples() const {
         return last_seen - first_seen;
@@ -1207,6 +1239,58 @@ struct DetectorStats {
     std::uint64_t residual_parts_degenerate = 0;
 };
 
+// Narrow carriers by their BASEBAND offset and the source centre they were
+// seen at, for Track::lo_spur. Carried by whoever owns the detector across the
+// rebuild a retune causes (Detector::spur_book, Detector::adopt_spur_book),
+// because a retune is the one event this memory exists to see across.
+class SpurBook {
+public:
+    static constexpr std::size_t kCapacity = 256;
+
+    // A narrow carrier at `baseband` with the source at `centre`.
+    void note(dsp::Hertz baseband, dsp::Hertz centre, dsp::SampleIndex now);
+
+    // Whether a carrier stood within kLoSpurToleranceHz of `baseband` with the
+    // source tuned at least kLoSpurMinRetuneHz away from `centre`: the same
+    // offset at a different absolute frequency.
+    [[nodiscard]] bool stayed_at(dsp::Hertz baseband, dsp::Hertz centre) const;
+
+    void forget_older_than(dsp::SampleIndex now, dsp::SampleIndex forget_samples);
+
+    [[nodiscard]] std::size_t size() const { return entries_.size(); }
+
+private:
+    struct Entry {
+        dsp::Hertz baseband = 0;
+        dsp::Hertz centre = 0;
+        dsp::SampleIndex last_seen = 0;
+    };
+    std::vector<Entry> entries_;
+};
+
+// The spur rule's numbers, Detector::mark_spurs.
+//
+// A spur is a line, so a track wider than kSpurMaxBandwidthHz, or than
+// kSpurMaxBins on a grid too coarse to resolve that, is not one. Its
+// level from frame to frame has a standard deviation under kSpurLevelSigmaDb
+// over at least kSpurMinFrames frames: a carrier ten dB over the floor in a bin
+// scatters by under a decibel, keyed CW drops to the floor at every key-up and
+// a fading carrier swings by its fade. Within kSpurDcGuardHz of DC is the front
+// end's own business, core/dsp/front_end_correction.h.
+inline constexpr double kSpurMaxBandwidthHz = 500.0;
+inline constexpr double kSpurMaxBins = 3.0;
+inline constexpr double kSpurLevelSigmaDb = 1.5;
+inline constexpr std::uint32_t kSpurMinFrames = 50;
+inline constexpr double kSpurDcGuardHz = 500.0;
+
+// Two sightings are one baseband offset within kLoSpurToleranceHz, and two
+// tunings are different when their centres differ by kLoSpurMinRetuneHz, far
+// more than a station could be mistaken across. kSpurMemorySeconds of source
+// time is how long a sighting is kept.
+inline constexpr double kLoSpurToleranceHz = 30.0;
+inline constexpr double kLoSpurMinRetuneHz = 2'000.0;
+inline constexpr double kSpurMemorySeconds = 300.0;
+
 class Detector {
 public:
     [[nodiscard]] static Expected<Detector> create(const DetectorConfig& config,
@@ -1286,6 +1370,11 @@ public:
     // How many emitters the refinement memory holds, for tests and stats.
     [[nodiscard]] std::size_t remembered_emitters() const { return emitters_.size(); }
 
+    // The baseband-offset memory behind Track::lo_spur, to hand to the
+    // detector built after a retune.
+    [[nodiscard]] const SpurBook& spur_book() const { return spur_book_; }
+    void adopt_spur_book(const SpurBook& book) { spur_book_ = book; }
+
 private:
     Detector() = default;
 
@@ -1312,6 +1401,13 @@ private:
     void reject_residual(double elapsed_seconds);
 
     void update_tracks(dsp::SampleIndex now, double elapsed_seconds);
+
+    // Each live track's level in this frame, into Track::level_*.
+    void measure_levels(const engine::SpectrumFrame& frame);
+
+    // Sets Track::spur and Track::lo_spur on every track, and notes narrow
+    // carriers in spur_book_. The rule is on Track::spur.
+    void mark_spurs(dsp::SampleIndex now);
     void update_channel(Track& track) const;
 
     // Folds a recorded probe into the track's refinement and its emitter's.
@@ -1471,6 +1567,7 @@ private:
     // Refinements by frequency across tracks, so a repeater or a trunked
     // voice channel builds evidence over its keyups. core/detect/refine.h.
     refine::EmitterBook emitters_;
+    SpurBook spur_book_;
     DetectorStats stats_{};
 };
 

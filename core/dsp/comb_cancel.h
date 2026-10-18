@@ -145,6 +145,11 @@ inline constexpr double kCombOverlapFraction = 0.25;
 // different line.
 inline constexpr double kCombSameLineHz = 45.0;
 
+// The most spurs (CombEstimate::spur) cancelled at once, each a tracker of one
+// line drawn from the kCombMaxLines combs leave free. Combs have first claim:
+// a comb that needs the slots takes them back from the spurs.
+inline constexpr std::uint32_t kCombMaxSpurs = 16;
+
 // ---------------------------------------------------------------------------
 // Detection
 // ---------------------------------------------------------------------------
@@ -173,6 +178,13 @@ struct CombEstimate {
     // waterfall's bins. Zero orders is a bare comb.
     double ripple_hz = 0.0;
     std::int32_t sideband_orders = 0;
+
+    // A single unkeyed carrier rather than a comb: one line at offset_hz,
+    // k_lo == k_hi == 0, spacing_hz zero, exempt from kCombMinLines. The
+    // wideband detector names these (detect::Track::spur) and the bank holds
+    // each in a tracker of one line, which locks to it in frequency and phase
+    // and subtracts it exactly as it does a comb's line.
+    bool spur = false;
 
     [[nodiscard]] std::uint32_t line_count() const
     {
@@ -380,6 +392,9 @@ public:
     // sideband orders: what detect_combs is told is already held.
     [[nodiscard]] CombEstimate estimate() const;
 
+    // Holding a single spur rather than a comb (CombEstimate::spur).
+    [[nodiscard]] bool spur() const { return spur_; }
+
 private:
     // Value members only; the tracker is copyable so a test can fork it.
 
@@ -444,6 +459,10 @@ private:
 
     SampleRate rate_ = 0;
     std::uint32_t max_lines_ = kCombMaxLines;
+    // A spur is one line, so every count that asks a comb for kCombMinLines
+    // asks a spur for one.
+    bool spur_ = false;
+    std::uint32_t min_lines_ = kCombMinLines;
     CombLock lock_ = CombLock::kIdle;
     Stage stage_ = Stage::kFrequency;
     std::uint64_t generation_ = 0;
@@ -495,8 +514,25 @@ public:
     void observe(const CombObservation& observation);
     [[nodiscard]] CombBlockPlan plan(SampleIndex start, std::uint32_t count);
 
+    // Spurs to hold (CombEstimate::spur), each started in a tracker of one
+    // line unless a running tracker already holds it, up to kCombMaxSpurs and
+    // the slots combs leave free. A spur missing from a later call is NOT let
+    // go: once it is cancelled the wideband detector no longer sees it, so
+    // its absence says nothing. A spur tracker ends when it loses lock, which
+    // it measures on the raw line, or by drop_spurs_near or drop_spurs.
+    void spurs(std::span<const CombEstimate> estimates);
+
+    // Lets go of every spur within guard_hz of one of these baseband
+    // frequencies: an open receiver tuned there is listening to it.
+    void drop_spurs_near(std::span<const double> frequencies_hz, double guard_hz);
+    void drop_spurs();
+
+    // Spur trackers locked and cancelling.
+    [[nodiscard]] std::uint32_t spurs_cancelled() const;
+
     // Locked if any comb is; lines and suppression over all of them; the comb
-    // reported is the one cancelling the most lines.
+    // reported is the one cancelling the most lines. Spurs are left out, and
+    // counted by spurs_cancelled.
     [[nodiscard]] CombStatus status() const;
 
     [[nodiscard]] std::span<const CombTracker> trackers() const { return trackers_; }

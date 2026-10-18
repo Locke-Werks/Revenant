@@ -1429,6 +1429,7 @@ public:
     [[nodiscard]] Status set_detection_threshold(double threshold_db) override;
     [[nodiscard]] Status set_impulse_excision(bool on) override;
     [[nodiscard]] Status set_comb_cancel(bool on) override;
+    [[nodiscard]] Status set_spur_cancel(bool on) override;
     [[nodiscard]] Status set_plugin_receivers(bool allowed) override;
 
     [[nodiscard]] Status subscribe_spectrum(std::uint32_t every_nth,
@@ -2150,6 +2151,14 @@ Status ClientImpl::set_impulse_excision(bool on) {
 Status ClientImpl::set_comb_cancel(bool on) {
     return on_loop("set_comb_cancel", [on](LoopState& state) {
         auto request = state.session.setCombCancelRequest();
+        request.setOn(on);
+        return request.send().ignoreResult();
+    });
+}
+
+Status ClientImpl::set_spur_cancel(bool on) {
+    return on_loop("set_spur_cancel", [on](LoopState& state) {
+        auto request = state.session.setSpurCancelRequest();
         request.setOn(on);
         return request.send().ignoreResult();
     });

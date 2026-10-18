@@ -50,14 +50,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <numbers>
 #include <print>
 #include <random>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "core/detect/detector.h"
+#include "core/detect/label.h"
 #include "core/detect/tier_two.h"
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
@@ -106,6 +109,11 @@ struct Emitter {
     std::size_t centre_bin = 0;
     std::size_t width_bins = 1;
     double snr_2500_db = 20.0;
+
+    // A carrier of constant power rather than a noise-like signal: its power
+    // is added to the bin after the noise is drawn instead of being drawn
+    // with it, so frame to frame it scatters only by the noise under it.
+    bool steady = false;
 };
 
 // Produces frames of a scene, one at a time, advancing the sample index.
@@ -123,10 +131,12 @@ public:
           seed_(seed) {
         power_db_.assign(kBins, 0.0F);
         mean_.assign(kBins, noise_mean_);
+        steady_.assign(kBins, 0.0);
     }
 
     void set(std::vector<Emitter> emitters) {
         std::fill(mean_.begin(), mean_.end(), noise_mean_);
+        std::fill(steady_.begin(), steady_.end(), 0.0);
         for (const Emitter& emitter : emitters) {
             // Total signal power from the SNR in the reference bandwidth.
             // The noise power spectral density is the per-bin mean over the
@@ -136,9 +146,10 @@ public:
                                  detect::kReferenceBandwidthHz / bin_width();
             const double per_bin = total / static_cast<double>(emitter.width_bins);
             const std::size_t first = emitter.centre_bin - emitter.width_bins / 2;
+            std::vector<double>& into = emitter.steady ? steady_ : mean_;
             for (std::size_t i = 0; i < emitter.width_bins; ++i) {
                 if (first + i < kBins) {
-                    mean_[first + i] += per_bin;
+                    into[first + i] += per_bin;
                 }
             }
         }
@@ -148,7 +159,8 @@ public:
 
     [[nodiscard]] engine::SpectrumFrame next() {
         for (std::size_t i = 0; i < kBins; ++i) {
-            power_db_[i] = static_cast<float>(10.0 * std::log10(mean_[i] * exponential()));
+            power_db_[i] =
+                static_cast<float>(10.0 * std::log10(mean_[i] * exponential() + steady_[i]));
         }
 
         engine::SpectrumFrame frame;
@@ -190,6 +202,7 @@ private:
 
     std::vector<float> power_db_;
     std::vector<double> mean_;
+    std::vector<double> steady_;
     dsp::SampleIndex index_ = 0;
     std::uint64_t sequence_ = 0;
 };
@@ -2527,4 +2540,184 @@ TEST_CASE("a track born on a remembered emitter inherits its refinement",
     REQUIRE(track != nullptr);
     CHECK(track->refinement.observations == 2);
     CHECK(track->refinement.deepest() == detect::refine::Node::Nfm);
+}
+
+// ---- spurs: an unkeyed carrier, and what is not one ------------------------
+//
+// Detector::mark_spurs, against carriers whose keying and level are chosen.
+// Each runs seven and a half seconds, past refine::kContinuousSeconds, with a
+// probe recorded once the track exists, as tier two would: the family is
+// written by hand so the rule is what is under test, not the characteriser.
+
+namespace {
+
+constexpr std::size_t kSpurBin = 700;
+
+// "PARIS " in units of a dit, '=' key down: fifty units, the word a speed is
+// counted in, so at 20 WPM a unit is 60 ms.
+constexpr std::string_view kParis = "=.===.===.=...=.===...=.===.=...=.=...=.=.=.......";
+
+// Feeds `seconds` of frames with the emitters `at` gives for each frame's
+// time, probing the track at kSpurBin once, as soon as it exists, with
+// `probe`. Returns the track there at the end, or nullptr.
+template <class At>
+const detect::Track* run_spur_scene(detect::Detector& detector, Scene& scene, double seconds,
+                                    const At& at, const detect::ProbeFinding& probe) {
+    const auto frames = static_cast<std::size_t>(std::llround(seconds / kFrameSeconds));
+    const dsp::Hertz where = scene.frequency_of(kSpurBin) + detector.config().source_center;
+    bool probed = false;
+    for (std::size_t i = 0; i < frames; ++i) {
+        const double t = static_cast<double>(i) * kFrameSeconds;
+        scene.set(at(t));
+        auto fed = detector.consume(scene.next());
+        if (!fed) {
+            FAIL("consume refused a frame: " << fed.error().message);
+        }
+        if (!probed && t > 1.0) {
+            if (const detect::Track* track = find_near(detector, where, 3000); track != nullptr) {
+                REQUIRE(detector.record_probe(track->id, probe));
+                probed = true;
+            }
+        }
+    }
+    return find_near(detector, where, 3000);
+}
+
+[[nodiscard]] detect::ProbeFinding carrier_finding(bool double_sideband) {
+    detect::ProbeFinding out = finding(detect::Classification::Unmodulated, 0.9, 0.0, true);
+    out.double_sideband = double_sideband;
+    return out;
+}
+
+[[nodiscard]] Emitter spur_carrier(double snr_db) {
+    return Emitter{.centre_bin = kSpurBin, .width_bins = 1, .snr_2500_db = snr_db, .steady = true};
+}
+
+}  // namespace
+
+TEST_CASE("a constant carrier is a spur", "[detect][spur]") {
+    constexpr std::uint64_t kSeed = 5150;
+    INFO("seed " << kSeed);
+    Scene scene(-90.0, kSeed);
+    auto made = detect::Detector::create(base_config(), scene.geometry());
+    REQUIRE(made);
+    const detect::Track* track = run_spur_scene(
+        *made, scene, 7.5, [](double) { return std::vector<Emitter>{spur_carrier(20.0)}; },
+        carrier_finding(false));
+    INFO(describe(*made));
+    REQUIRE(track != nullptr);
+    INFO("level sigma " << track->level_sigma_db() << " dB over " << track->level_frames
+                        << " frames, held spells " << track->held_spells);
+    CHECK(track->spur);
+    CHECK_FALSE(track->lo_spur);
+    CHECK(std::string(detect::label_track(*track).name) == "spur");
+}
+
+TEST_CASE("keyed CW at 20 WPM is not a spur", "[detect][spur]") {
+    constexpr std::uint64_t kSeed = 5151;
+    INFO("seed " << kSeed);
+    Scene scene(-90.0, kSeed);
+    auto made = detect::Detector::create(base_config(), scene.geometry());
+    REQUIRE(made);
+    const auto keyed = [](double t) {
+        const auto unit = static_cast<std::size_t>(std::floor(t / 0.06)) % kParis.size();
+        return kParis[unit] == '=' ? std::vector<Emitter>{spur_carrier(20.0)}
+                                   : std::vector<Emitter>{};
+    };
+    const detect::Track* track = run_spur_scene(*made, scene, 7.5, keyed, carrier_finding(false));
+    INFO(describe(*made));
+    REQUIRE(track != nullptr);
+    INFO("level sigma " << track->level_sigma_db() << " dB over " << track->level_frames
+                        << " frames, held spells " << track->held_spells);
+    CHECK_FALSE(track->spur);
+}
+
+TEST_CASE("a slowly fading carrier is not a spur", "[detect][spur]") {
+    constexpr std::uint64_t kSeed = 5152;
+    INFO("seed " << kSeed);
+    Scene scene(-90.0, kSeed);
+    auto made = detect::Detector::create(base_config(), scene.geometry());
+    REQUIRE(made);
+    const auto fading = [](double t) {
+        return std::vector<Emitter>{
+            spur_carrier(22.0 + 6.0 * std::sin(2.0 * std::numbers::pi * t / 4.0))};
+    };
+    const detect::Track* track = run_spur_scene(*made, scene, 7.5, fading, carrier_finding(false));
+    INFO(describe(*made));
+    REQUIRE(track != nullptr);
+    INFO("level sigma " << track->level_sigma_db() << " dB over " << track->level_frames
+                        << " frames");
+    CHECK_FALSE(track->spur);
+}
+
+TEST_CASE("an AM carrier is not a spur", "[detect][spur]") {
+    constexpr std::uint64_t kSeed = 5153;
+    INFO("seed " << kSeed);
+    Scene scene(-90.0, kSeed);
+    auto made = detect::Detector::create(base_config(), scene.geometry());
+    REQUIRE(made);
+    // The carrier is as steady as a spur's; what rules it out is the probe
+    // hearing sidebands.
+    const detect::Track* track = run_spur_scene(
+        *made, scene, 7.5, [](double) { return std::vector<Emitter>{spur_carrier(20.0)}; },
+        carrier_finding(true));
+    INFO(describe(*made));
+    REQUIRE(track != nullptr);
+    CHECK_FALSE(track->spur);
+    CHECK(std::string(detect::label_track(*track).name) != "spur");
+}
+
+// A carrier that keeps its baseband offset when the front end retunes is the
+// receiver's own, and is a spur at once, unprobed. One that keeps its absolute
+// frequency is a station.
+TEST_CASE("a carrier that stays at its baseband offset across a retune is a spur",
+          "[detect][spur]") {
+    constexpr std::uint64_t kSeed = 5154;
+    INFO("seed " << kSeed);
+    constexpr dsp::Hertz kRetune = 50'000;
+    const auto bins = static_cast<std::size_t>(kRetune / 1000);
+
+    Scene before(-90.0, kSeed);
+    auto first = detect::Detector::create(base_config(), before.geometry());
+    REQUIRE(first);
+    before.set({spur_carrier(20.0)});
+    run_for(*first, before, 2.0);
+    REQUIRE(find_near(*first, before.frequency_of(kSpurBin), 3000) != nullptr);
+    const detect::SpurBook book = first->spur_book();
+    REQUIRE(book.size() > 0);
+
+    detect::DetectorConfig retuned = base_config();
+    retuned.source_center = kRetune;
+
+    SECTION("same baseband offset after the retune") {
+        Scene after(-90.0, kSeed + 1);
+        auto second = detect::Detector::create(retuned, after.geometry());
+        REQUIRE(second);
+        second->adopt_spur_book(book);
+        after.set({spur_carrier(20.0)});
+        run_for(*second, after, 1.5);
+        const detect::Track* track =
+            find_near(*second, after.frequency_of(kSpurBin) + kRetune, 3000);
+        INFO(describe(*second));
+        REQUIRE(track != nullptr);
+        CHECK(track->lo_spur);
+        CHECK(track->spur);
+    }
+    SECTION("same absolute frequency after the retune") {
+        Scene after(-90.0, kSeed + 1);
+        auto second = detect::Detector::create(retuned, after.geometry());
+        REQUIRE(second);
+        second->adopt_spur_book(book);
+        after.set({Emitter{.centre_bin = kSpurBin - bins,
+                           .width_bins = 1,
+                           .snr_2500_db = 20.0,
+                           .steady = true}});
+        run_for(*second, after, 1.5);
+        const detect::Track* track =
+            find_near(*second, after.frequency_of(kSpurBin - bins) + kRetune, 3000);
+        INFO(describe(*second));
+        REQUIRE(track != nullptr);
+        CHECK_FALSE(track->lo_spur);
+        CHECK_FALSE(track->spur);
+    }
 }

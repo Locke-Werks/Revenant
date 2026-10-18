@@ -340,6 +340,13 @@ struct EngineConfig {
     // runs, and the choice carries across a change of source.
     bool comb_cancel = true;
 
+    // Spur cancelling: the comb stage's trackers, one line each, on the
+    // unkeyed carriers the wideband detector names spurs (detect::Track::spur)
+    // and hands over through Engine::set_spurs. On by default, inert without
+    // the comb stage, and never on a frequency an open receiver is tuned to.
+    // Engine::set_spur_cancel changes it while the engine runs.
+    bool spur_cancel = true;
+
     // The rolling capture, core/capture/writer.h. Nothing, the default, writes
     // nothing. When set, every stream run() starts gets a SegmentWriter of its
     // own with a fresh stream epoch, fed from the source's sink ahead of the
@@ -772,6 +779,11 @@ struct CombCancelStatus {
     // Detections run since the source opened, and those that found a comb.
     std::uint64_t detections = 0;
     std::uint64_t detections_found = 0;
+
+    // The spur cancelling beside it (Engine::set_spur_cancel): whether it is
+    // on, and how many single-line spur trackers are locked and cancelling.
+    bool spurs_on = false;
+    std::uint32_t spurs_cancelled = 0;
 };
 
 // A device's calibration as the engine holds it, and what the engine has
@@ -2021,6 +2033,18 @@ public:
     // set_impulse_excision. What it is doing rides on graph_conditions().
     [[nodiscard]] virtual Status set_comb_cancel(bool on);
 
+    // Switches spur cancelling, EngineConfig::spur_cancel, by the same rules.
+    // Off lets go of every spur held.
+    [[nodiscard]] virtual Status set_spur_cancel(bool on);
+
+    // The spurs the wideband detector names now, as baseband offsets from
+    // the source's centre. Any thread; the recording thread takes them at its
+    // next block, leaves out any within an open receiver's passband, and
+    // starts a tracker on each it does not already hold. A spur missing from
+    // a later call is kept until its tracker loses lock: cancelled, it is no
+    // longer there for the detector to name.
+    [[nodiscard]] virtual Status set_spurs(std::span<const dsp::Hertz> baseband);
+
 protected:
     Engine() = default;
 
@@ -2096,6 +2120,16 @@ inline Status Engine::set_impulse_excision(bool) {
 inline Status Engine::set_comb_cancel(bool) {
     return fail("this engine has no comb cancellation: it was written before "
                 "core/dsp/comb_cancel.h existed");
+}
+
+inline Status Engine::set_spur_cancel(bool) {
+    return fail("this engine has no spur cancelling: it was written before "
+                "CombEstimate::spur existed");
+}
+
+inline Status Engine::set_spurs(std::span<const dsp::Hertz>) {
+    return fail("this engine has no spur cancelling: it was written before "
+                "CombEstimate::spur existed");
 }
 
 inline void Engine::drop_audio_fanouts() {

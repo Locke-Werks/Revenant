@@ -188,6 +188,7 @@ public:
         pace_.store(config.pace, std::memory_order_release);
         impulse_excision_.store(config.impulse_excision, std::memory_order_release);
         comb_cancel_.store(config.comb_cancel, std::memory_order_release);
+        spur_cancel_.store(config.spur_cancel, std::memory_order_release);
 
         gpu::Context::Options options;
         options.device_index = config.gpu_index;
@@ -558,6 +559,7 @@ public:
                                          stored.settings.iq_correction);
         graph_->set_impulse_excision(impulse_excision_.load(std::memory_order_acquire));
         graph_->set_comb_cancel(comb_cancel_.load(std::memory_order_acquire));
+        graph_->set_spur_cancel(spur_cancel_.load(std::memory_order_acquire));
 
         source_ = std::move(source);
         capabilities_ = source_->capabilities();
@@ -1787,6 +1789,23 @@ public:
         return {};
     }
 
+    [[nodiscard]] Status set_spur_cancel(bool on) override {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        spur_cancel_.store(on, std::memory_order_release);
+        if (graph_ != nullptr) {
+            graph_->set_spur_cancel(on);
+        }
+        return {};
+    }
+
+    [[nodiscard]] Status set_spurs(std::span<const dsp::Hertz> baseband) override {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        if (graph_ != nullptr) {
+            graph_->set_spurs(baseband);
+        }
+        return {};
+    }
+
     [[nodiscard]] EngineLoad load() const override {
         EngineLoad out;
         if (graph_ == nullptr || scheduler_ == nullptr) {
@@ -1931,6 +1950,7 @@ private:
     // or before the first one is the one the next graph is built with.
     std::atomic<bool> impulse_excision_{true};
     std::atomic<bool> comb_cancel_{true};
+    std::atomic<bool> spur_cancel_{true};
     EngineInfo info_{};
     std::string clamp_note_;
 
