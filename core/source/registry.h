@@ -84,6 +84,7 @@ struct SourceDescriptor {
 //   file:///C:/captures/hf.cf32?rate=2400000&format=cf32&center=7100000
 //   synthetic:wideband?rate=20000000&emitters=64&seed=20260918
 //   rtlsdr://00000001
+//   hackrf://0000000000000000a06063c8234e925f?freq=144.8M&rate=10M&gain=32
 //
 // Query parameters are backend-specific and an unknown one is an error rather
 // than being ignored, because a typo in a rate silently producing the default

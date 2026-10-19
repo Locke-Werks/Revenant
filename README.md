@@ -112,8 +112,9 @@ work and are not tested. The integrated Radeon in a Ryzen 9 7950X is not
 supported: its driver corrupts the spectrum kernel, as
 [docs/status.md](docs/status.md) says.
 
-An SDR device, optionally: an RTL-SDR v3 works today, through librtlsdr. The
-synthetic wideband source and the file source need no hardware at all and are
+An SDR device, optionally: an RTL-SDR v3 works today, through librtlsdr. A
+HackRF One or Pro opens receive-only through libhackrf, as `hackrf://<serial>`;
+that backend has not yet been run against a device. The synthetic wideband source and the file source need no hardware at all and are
 what the conformance suite runs against, so the engine is fully exercisable
 without a radio.
 
@@ -195,6 +196,7 @@ Licensing and provenance:
 
 - [docs/clean-room.md](docs/clean-room.md), the clean-room policy and its one exception
 - [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md), why the RTL-SDR settled the licence
+- [docs/hackrf-provenance.md](docs/hackrf-provenance.md), the libhackrf pin and its overlay port
 - [docs/license.md](docs/license.md), how the project came to be GPL-3.0
 - [docs/rds-first-decode.md](docs/rds-first-decode.md), the first decode of an off-air signal
 - [CONTRIBUTING.md](CONTRIBUTING.md) and [CLA.md](CLA.md), contributing and the contributor agreement

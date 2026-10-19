@@ -16,7 +16,7 @@ sampling for HF, plus the synthetic and file sources.
 
 | # | Radio | Why here | Approach | Work |
 | --- | --- | --- | --- | --- |
-| 1 | HackRF One and Pro | Large install base, small documented protocol, BSD-3 host library | Link libhackrf, receive only | Low |
+| 1 | HackRF One and Pro | Large install base, small documented protocol, BSD-3 host library | Link libhackrf, receive only. In progress: backend built, not yet run on a device | Low |
 | 2 | SDRplay RSP1B, RSPdx-R2, RSPduo | Among the most widely owned receivers; no open driver exists for current models | Load the SDRplay API at runtime if the user installed it; never shipped | Medium |
 | 3 | rtl_tcp and SpyServer clients | Remote RTL-SDR and Airspy servers that already exist in large numbers | Network clients written from the protocols | Low |
 | 4 | Airspy R2 and Mini, HydraSDR RFOne | Established 12-bit receivers that share one USB protocol | Own driver on the BSD protocol code, IQ conversion on the GPU | Medium |

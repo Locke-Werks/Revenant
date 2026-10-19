@@ -17,6 +17,10 @@ find_package(Threads REQUIRED)
 # against. docs/rtlsdr-provenance.md has the finding.
 find_package(rtlsdr CONFIG REQUIRED)
 
+# libhackrf, BSD-3-Clause, built from vcpkg-overlays/hackrf because the
+# registry has no port. docs/hackrf-provenance.md has the pin.
+find_package(hackrf CONFIG REQUIRED)
+
 # characterise/ is the waveform characteriser: what a signal IS, without
 # decoding it. It reads complex baseband rather than the power spectrum,
 # because symbol rate, modulation order, tone structure and frame period are
@@ -191,6 +195,7 @@ add_library(revenant_core STATIC
     source/clock_model.cpp
     source/corrected_source.cpp
     source/file_source.cpp
+    source/hackrf_source.cpp
     source/json.cpp
     source/registry.cpp
     source/rtlsdr_source.cpp
@@ -224,6 +229,9 @@ endif()
 target_link_libraries(revenant_core PRIVATE
     $<IF:$<TARGET_EXISTS:rtlsdr::rtlsdr>,rtlsdr::rtlsdr,rtlsdr::rtlsdr_static>
 )
+
+# PRIVATE for the same reason: hackrf.h is source/hackrf_source.cpp's alone.
+target_link_libraries(revenant_core PRIVATE HackRF::hackrf)
 
 revenant_add_shaders(revenant_core
     TARGET_ENV vulkan1.3

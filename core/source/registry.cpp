@@ -34,6 +34,7 @@
 #include "core/capture/capture_source.h"
 #include "core/capture/catalog.h"
 #include "core/source/file_source.h"
+#include "core/source/hackrf_source.h"
 #include "core/source/rtlsdr_source.h"
 #include "core/source/synthetic_source.h"
 
@@ -75,10 +76,11 @@ struct Backend {
     std::string_view default_name;
 };
 
-constexpr std::array<Backend, 4> kBackends{
+constexpr std::array<Backend, 5> kBackends{
     Backend{"synthetic", "a synthesised wideband scene", Listing::Constant, "synthetic:wideband",
             "Synthetic wideband scene"},
     Backend{"rtlsdr", "an RTL-SDR dongle on USB", Listing::Probed, "", ""},
+    Backend{"hackrf", "a HackRF One or HackRF Pro on USB, receive only", Listing::Probed, "", ""},
     Backend{"file", "a recorded IQ file: raw, SigMF, or WAV with an auxi chunk", Listing::Named,
             "", ""},
     Backend{"capture", "a rolling capture root, replayed from a wall-clock time",
@@ -1111,6 +1113,70 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     return config;
 }
 
+// hackrf://<serial>?freq=&rate=&gain=&amp=
+//
+// Always a serial. A HackRF's is unique and burned in, so the index form the
+// rtlsdr URI carries for dongles that all ship as "00000001" has nothing to
+// solve here, and an index would name a different radio after a replug.
+[[nodiscard]] Expected<HackrfSourceConfig> hackrf_config_of(const ParsedUri& uri)
+{
+    if (uri.body.empty()) {
+        return fail("a hackrf URI needs a device: hackrf://<serial>, as the device list shows it. "
+                    "There is no default, for the reason an rtlsdr URI has none.");
+    }
+
+    auto query = Query::parse(uri.query);
+    if (!query) {
+        return std::unexpected(query.error());
+    }
+    auto rate = query->frequency("rate", kHackrfDefaultRate);
+    if (!rate) {
+        return std::unexpected(rate.error());
+    }
+    auto freq = query->frequency("freq", 0);
+    if (!freq) {
+        return std::unexpected(freq.error());
+    }
+    auto gain = query->text("gain", "");
+    if (!gain) {
+        return std::unexpected(gain.error());
+    }
+    auto amp = query->boolean("amp", false);
+    if (!amp) {
+        return std::unexpected(amp.error());
+    }
+    const bool freq_given = query->present("freq");
+    if (auto clean = query->reject_unknown("hackrf"); !clean) {
+        return std::unexpected(clean.error());
+    }
+
+    HackrfSourceConfig config;
+    config.uri = uri.original;
+    config.serial = uri.body;
+    config.rate = *rate;
+    config.center_given = freq_given;
+    config.center_hz = *freq;
+    config.amp = *amp;
+
+    if (!gain->empty()) {
+        double db = 0.0;
+        const char* first = gain->data();
+        const char* last = first + gain->size();
+        const auto parsed = std::from_chars(first, last, db);
+        if (parsed.ec != std::errc{} || parsed.ptr != last || !std::isfinite(db)) {
+            return fail(std::format(
+                "gain='{}' is not a number of decibels. The HackRF has no automatic gain; the "
+                "figure is split across its LNA and VGA, and leaving gain off asks for {} dB.",
+                *gain, kHackrfDefaultGainDb));
+        }
+        config.gain_db = db;
+    }
+
+    // Not validated here: a listing describes hackrf://<serial> with no freq=,
+    // and describing needs none. open_hackrf_source validates.
+    return config;
+}
+
 [[nodiscard]] Expected<SourceCapabilities> describe_uri(std::string_view uri)
 {
     auto parsed = split_uri(uri);
@@ -1148,6 +1214,18 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
             return std::unexpected(with_context(config.error(), std::string(uri)));
         }
         auto caps = describe_rtlsdr_source(*config);
+        if (!caps) {
+            return std::unexpected(with_context(caps.error(), std::string(uri)));
+        }
+        return caps;
+    }
+
+    if (parsed->scheme == "hackrf") {
+        auto config = hackrf_config_of(*parsed);
+        if (!config) {
+            return std::unexpected(with_context(config.error(), std::string(uri)));
+        }
+        auto caps = describe_hackrf_source(*config);
         if (!caps) {
             return std::unexpected(with_context(caps.error(), std::string(uri)));
         }
@@ -1202,6 +1280,22 @@ Expected<std::vector<SourceDescriptor>> enumerate_sources()
             }
 
             case Listing::Probed: {
+                if (backend.scheme == "hackrf") {
+                    auto hackrfs = enumerate_hackrf_devices();
+                    if (!hackrfs) {
+                        return std::unexpected(
+                            with_context(hackrfs.error(), "listing HackRF devices"));
+                    }
+                    for (const HackrfDevice& device : *hackrfs) {
+                        SourceDescriptor descriptor;
+                        // By serial, which is_listing_of spells the same way.
+                        descriptor.uri = std::format("{}://{}", backend.scheme, device.serial);
+                        descriptor.display_name = std::format("{} {}", device.name, device.serial);
+                        descriptor.backend = std::string(backend.scheme);
+                        out.push_back(std::move(descriptor));
+                    }
+                    break;
+                }
                 auto attached = enumerate_rtlsdr_devices();
                 if (!attached) {
                     return std::unexpected(
@@ -1268,6 +1362,10 @@ Expected<std::vector<SourceCapabilities>> describe_sources()
 
 bool is_listing_of(const SourceCapabilities& listed, const SourceCapabilities& open)
 {
+    // A HackRF is listed by serial and has no index.
+    if (open.backend == "hackrf" && listed.backend == open.backend && !open.serial.empty()) {
+        return listed.uri == std::format("hackrf://{}", open.serial);
+    }
     if (!open.device_index || listed.backend != open.backend) {
         return false;
     }
@@ -1327,6 +1425,18 @@ Expected<std::unique_ptr<Source>> open_source(std::string_view uri)
             return std::unexpected(with_context(config.error(), std::string(uri)));
         }
         auto opened = open_rtlsdr_source(*config);
+        if (!opened) {
+            return std::unexpected(with_context(opened.error(), std::string(uri)));
+        }
+        return opened;
+    }
+
+    if (parsed->scheme == "hackrf") {
+        auto config = hackrf_config_of(*parsed);
+        if (!config) {
+            return std::unexpected(with_context(config.error(), std::string(uri)));
+        }
+        auto opened = open_hackrf_source(*config);
         if (!opened) {
             return std::unexpected(with_context(opened.error(), std::string(uri)));
         }
