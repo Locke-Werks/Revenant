@@ -76,8 +76,9 @@ struct MixSlot {
     float gain = 1.0F;
 
     // The receiver is wfm. A wfm stream at or above kMultiplexRateHz is the
-    // multiplex rather than programme audio, and is filtered to 15 kHz and
-    // de-emphasised on the way in. See Deemphasis.
+    // multiplex rather than programme audio, and is decoded to stereo where
+    // it carries a pilot, filtered to 15 kHz and de-emphasised on the way in.
+    // See StereoDecoder and Deemphasis.
     bool wfm = false;
 };
 
@@ -183,6 +184,15 @@ private:
         bool copyable = false;
         Resampler resampler;
         Deemphasis deemphasis;
+
+        // A mono multiplex is decoded to two channels as it is read, so
+        // history, rendered and the mix all see it as stereo; width() says
+        // which. raw holds the frames read from the ring before decoding.
+        StereoDecoder stereo;
+        bool decoded = false;
+        std::vector<float> raw;
+
+        [[nodiscard]] int width() const { return decoded ? 2 : format.channel_count; }
 
         // Where the next output frame reads, as an absolute index into the
         // stream, fractional between input frames.

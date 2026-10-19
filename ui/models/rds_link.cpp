@@ -106,9 +106,10 @@ void EngineLink::setRdsWanted(bool wanted)
         adopt_rds_services(false);
 
         // AND THE RECEIVER GOES BACK TO PROGRAMME AUDIO. 171000 is the
-        // multiplex, which the window can only play as mono, filtered and
-        // de-emphasised by audio/audio_mix.h, so a receiver left at it has
-        // lost its stereo. Leaving it would make this switch a control with a
+        // multiplex, which audio/audio_mix.h decodes to stereo where it
+        // carries a pilot, filters and de-emphasises, and is still not the
+        // receiver the operator asked for. (It used to say "which the window
+        // can only play as mono", until that decoder.) Leaving it would make this switch a control with a
         // permanent side effect, discoverable only by listening afterwards.
         // The cost is one more audio restart, which is what the switch going
         // on already paid. WHAT THIS USED TO SAY: "171000 is the multiplex,

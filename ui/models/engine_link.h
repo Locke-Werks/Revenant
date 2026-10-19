@@ -1397,9 +1397,15 @@ class EngineLink : public QObject {
     // this window answers without asking.
     //
     // THE RATE IS PUT BACK WHEN THE SWITCH GOES OFF. 171000 is the multiplex,
-    // which the window can only play as mono programme audio, so a receiver
-    // left there has lost its stereo, and the switch would have a permanent
-    // side effect nobody asked for. While the switch is on the pane says so.
+    // which the window plays filtered to 15 kHz and decodes to stereo only
+    // where it finds a pilot, so a receiver left there is not the receiver
+    // the operator asked for, and the switch would have a permanent side
+    // effect nobody asked for. While the switch is on the pane says so.
+    //
+    // WHAT THE PARAGRAPH ABOVE USED TO SAY, until audio/audio_mix.h decoded
+    // stereo from a wfm multiplex for GitHub issue #1: "which the window can
+    // only play as mono programme audio, so a receiver left there has lost
+    // its stereo".
     //
     // WHAT THIS PARAGRAPH USED TO SAY: "171000 is the multiplex and not
     // programme audio, so a receiver left there is one nobody can listen to",

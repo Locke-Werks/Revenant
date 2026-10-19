@@ -73,6 +73,10 @@ void AudioMix::prepare(Stream& stream, RingFormat format, bool multiplex)
         stream.resampler.configure(format.sample_rate, out_rate_, 0.0, 0.0,
                                    EqualRates::interpolate);
     }
+    // A multiplex arriving as two channels was decoded already, or is not a
+    // multiplex anyone sent; either way it is left as it came.
+    stream.decoded = multiplex && format.channel_count == 1;
+    stream.stereo.configure(format.sample_rate);
     stream.deemphasis.configure(out_rate_);
     stream.placed = false;
     stream.history.clear();
@@ -100,7 +104,7 @@ double AudioMix::step_of(const Stream& stream, double ratio)
 
 FrameSource AudioMix::render(Stream& stream, AudioRing& ring, std::size_t count, double ratio)
 {
-    const int channels = stream.format.channel_count;
+    const int channels = stream.width();
     const auto width = static_cast<std::size_t>(channels);
     stream.rendered.assign(count * width, 0.0F);
     if (count == 0) {
@@ -165,13 +169,26 @@ FrameSource AudioMix::render(Stream& stream, AudioRing& ring, std::size_t count,
     if (hi >= 0 && static_cast<std::uint64_t>(hi) >= end) {
         const auto need = static_cast<std::size_t>(static_cast<std::uint64_t>(hi) - end + 1);
         stream.history.resize((held + need) * width, 0.0F);
-        const ReadResult read =
-            ring.read_at(&stream.history[held * width], need, end, stream.format);
-        if (read.format_moved) {
-            std::fill(stream.history.begin() + static_cast<std::ptrdiff_t>(held * width),
-                      stream.history.end(), 0.0F);
+        if (stream.decoded) {
+            // Frames reach the decoder once each and in order, since only
+            // frames past the end of history are ever read; a jump after a
+            // placement is one discontinuity the loop rides through.
+            stream.raw.assign(need, 0.0F);
+            const ReadResult read = ring.read_at(stream.raw.data(), need, end, stream.format);
+            if (read.format_moved) {
+                std::fill(stream.raw.begin(), stream.raw.end(), 0.0F);
+            }
+            stream.stereo.process(stream.raw.data(), need, &stream.history[held * width]);
+            source = read.last_source;
+        } else {
+            const ReadResult read =
+                ring.read_at(&stream.history[held * width], need, end, stream.format);
+            if (read.format_moved) {
+                std::fill(stream.history.begin() + static_cast<std::ptrdiff_t>(held * width),
+                          stream.history.end(), 0.0F);
+            }
+            source = read.last_source;
         }
-        source = read.last_source;
         held += need;
     }
 
@@ -272,7 +289,7 @@ MixPull AudioMix::pull(std::span<AudioRing* const> rings, const MixControl& cont
         // WHAT THIS USED TO SAY: "its position for a copy, and otherwise".
         // A copy holds the frames behind its playhead too since the drift
         // trim, so the end of what it holds is the next frame for both.
-        const auto width = static_cast<std::size_t>(head.format.channel_count);
+        const auto width = static_cast<std::size_t>(head.width());
         const double oldest = static_cast<double>(lead_snap.head_index);
         bool hole = false;
         if (head.history.empty()) {
@@ -335,7 +352,7 @@ MixPull AudioMix::pull(std::span<AudioRing* const> rings, const MixControl& cont
     result.frames_played = count;
 
     auto mix_in = [&](Stream& stream, const MixSlot& slot) {
-        const int channels = stream.format.channel_count;
+        const int channels = stream.width();
         if (stream.multiplex) {
             stream.deemphasis.process(stream.rendered.data(), count, channels);
         }

@@ -161,6 +161,102 @@ TEST_CASE("a wfm multiplex is played as programme audio", "[audio][mix]")
     CHECK(pilot < 1e-4);
 }
 
+namespace {
+
+constexpr std::uint32_t kMultiplex = 171'000;
+
+// A broadcast FM multiplex: L+R, a pilot at `pilot` of full deviation, and
+// L-R on a 38 kHz DSB-SC subcarrier at twice the pilot's phase. The pilot
+// is put a little off 19 kHz and off zero phase, so the loop has to find it.
+[[nodiscard]] double multiplex_at(std::uint64_t index, double pilot)
+{
+    const double t = static_cast<double>(index) / static_cast<double>(kMultiplex);
+    const double left = std::sin(2.0 * std::numbers::pi * 1'000.0 * t);
+    const double right = std::sin(2.0 * std::numbers::pi * 2'500.0 * t);
+    const double phase = 2.0 * std::numbers::pi * 19'000.4 * t + 0.7;
+    return 0.4 * (left + right) + 0.4 * (left - right) * std::sin(2.0 * phase) +
+           pilot * std::sin(phase);
+}
+
+// Two seconds of the multiplex through a stereo device, and the last tenth
+// of a second of what came out.
+[[nodiscard]] std::vector<float> decode(const std::vector<float>& multiplex)
+{
+    Rack rack;
+    rack.slots[0] = MixSlot{.heard = true, .wfm = true};
+    rack.rings[0].write(chunk_of(0, multiplex, kMultiplex));
+
+    AudioMix mix(kDevice, 2);
+    std::vector<float> out;
+    for (int i = 0; i < 19; ++i) {
+        static_cast<void>(rack.pull(mix, 0, out, 4'800));
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("a wfm multiplex with a pilot is decoded to stereo", "[audio][mix]")
+{
+    // REJECTS: playing the multiplex as mono, which is what the mix did and
+    // what GitHub issue #1 is about, and a difference demodulated off the
+    // pilot's phase, which leaks each channel into the other. L is 1 kHz and
+    // R 2.5 kHz, so each one's level in the other channel is the separation.
+    const auto multiplex = signal(0, 2 * kMultiplex, [](std::uint64_t n) {
+        return multiplex_at(n, 0.09);
+    });
+    const std::vector<float> out = decode(multiplex);
+
+    const double left_in_left = amplitude_of(out, 2, 0, 1'000.0, kDevice);
+    const double left_in_right = amplitude_of(out, 2, 1, 1'000.0, kDevice);
+    const double right_in_right = amplitude_of(out, 2, 1, 2'500.0, kDevice);
+    const double right_in_left = amplitude_of(out, 2, 0, 2'500.0, kDevice);
+    const double separation_1k = 20.0 * std::log10(left_in_left / left_in_right);
+    const double separation_2k5 = 20.0 * std::log10(right_in_right / right_in_left);
+    INFO("1 kHz " << left_in_left << " / " << left_in_right << " = " << separation_1k
+                  << " dB, 2.5 kHz " << right_in_right << " / " << right_in_left << " = "
+                  << separation_2k5 << " dB");
+    CHECK(separation_1k > 25.0);
+    CHECK(separation_2k5 > 25.0);
+    // 0.8 through 75 us of de-emphasis at 1 kHz, which is 0.9 of it.
+    CHECK(left_in_left > 0.68);
+    CHECK(left_in_left < 0.76);
+}
+
+TEST_CASE("a wfm multiplex with no pilot is two identical channels", "[audio][mix]")
+{
+    // REJECTS: demodulating a difference that is not there, off a loop
+    // locked to nothing, which puts noise and the programme's own 38 kHz
+    // content into L and R unequally. With no pilot the two channels are the
+    // same samples, bit for bit, which is how a consumer tells mono apart.
+    const auto multiplex = signal(0, 2 * kMultiplex, [](std::uint64_t n) {
+        return multiplex_at(n, 0.0);
+    });
+    const std::vector<float> out = decode(multiplex);
+
+    bool identical = true;
+    for (std::size_t n = 0; n + 1 < out.size(); n += 2) {
+        identical = identical && out[n] == out[n + 1];
+    }
+    CHECK(identical);
+    CHECK(amplitude_of(out, 2, 0, 1'000.0, kDevice) > 0.3);
+}
+
+TEST_CASE("a silent wfm multiplex decodes to silence", "[audio][mix]")
+{
+    // REJECTS: a lock measure divided by the multiplex's level, which is
+    // zero here, and a loop error normalised by a pilot amplitude of zero.
+    const std::vector<float> out = decode(std::vector<float>(2 * kMultiplex, 0.0F));
+    bool finite = true;
+    double peak = 0.0;
+    for (const float sample : out) {
+        finite = finite && std::isfinite(sample);
+        peak = std::max(peak, std::abs(static_cast<double>(sample)));
+    }
+    CHECK(finite);
+    CHECK(peak == 0.0);
+}
+
 TEST_CASE("a mono receiver is heard under a stereo lead", "[audio][mix]")
 {
     // REJECTS: leaving out a ring whose channel count is not the lead's,

@@ -2406,3 +2406,11 @@ retired: 2026-09-21
 commit: "Add the spectral primitives the characteriser measures against"
 instead: The root project builds nine *_tests targets on 2026-10-03, ui/ a tenth;
     python scripts/check_modal_dialogs.py lists them.
+
+phrase: which the window can only play as mono
+phrase: only a wfm receiver opened at 114000 S/s or above plays the multiplex in mono
+retired: 2026-10-18
+commit: "Decode FM stereo from a wfm multiplex in the mix"
+instead: audio/audio_mix.h decodes a wfm multiplex to stereo off its 19 kHz pilot
+    (StereoDecoder in audio/mix_stages.h), and plays it as two identical
+    channels only when there is no pilot.
