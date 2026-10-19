@@ -1491,6 +1491,19 @@ wire, from the same code: `core/capture/catalog.h` for the list and
   sample spends the start of the transmission on the detector's integration
   and a decoder's lock. At most 10000 hits are sent; `matched` says
   how many there were.
+- `decoder` and `decoded` find a capture by who was in it. The server writes
+  an annotation with generator `revenant-decode` for each identifier a
+  decoder reports (talkgroup, source, MMSI, callsign and the like), one per
+  sighting, extended while the same receiver keeps hearing it and closed
+  after 10 s without it, on a retune or receiver removal, or when the stream
+  ends. Only while the engine records. `decoder` is a decoder's name,
+  case-insensitive; non-empty keeps only that decoder's annotations.
+  `decoded` is a list of `DecodedTerm {key, value}`, all of which must match
+  one of the annotation's identifiers, case-insensitive. Values are text, an
+  integer in decimal. A hit carries the same two fields back, empty on a
+  detector annotation. The span is placed by when the message reached the
+  server, so its edges are good to within one decode chunk.
+  `captureOccupancy`'s filter takes both as well.
 - `captureOccupancy` cuts a time range into buckets and answers, for a band,
   the share of each bucket something was present in, the share a segment
   covered at all, and how many annotations touched it. A bucket with nothing

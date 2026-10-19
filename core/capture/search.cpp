@@ -370,9 +370,7 @@ void append_number(std::string& out, std::string_view key, double value)
     out += std::format(",\n            \"core:sample_count\": {}", annotation.sample_count);
     out += std::format(",\n            \"core:freq_lower_edge\": {}", annotation.freq_lower);
     out += std::format(",\n            \"core:freq_upper_edge\": {}", annotation.freq_upper);
-    out += std::format(",\n            \"core:label\": {}",
-                       escaped(annotation.family.empty() ? std::string_view("signal")
-                                                         : std::string_view(annotation.family)));
+    out += std::format(",\n            \"core:label\": {}", escaped(annotation_label(annotation)));
     out += std::format(",\n            \"core:generator\": {}", escaped(generator));
     append_number(out, "revenant:confidence", annotation.confidence);
     append_number(out, "revenant:peak_db", annotation.peak_db);
@@ -382,6 +380,17 @@ void append_number(std::string& out, std::string_view key, double value)
     }
     if (track_id != 0) {
         out += std::format(",\n            \"revenant:track_id\": {}", track_id);
+    }
+    if (!annotation.decoder.empty()) {
+        out += std::format(",\n            \"revenant:decoder\": {}", escaped(annotation.decoder));
+        out += ",\n            \"revenant:decoded\": {";
+        bool first = true;
+        for (const auto& [key, value] : annotation.decoded) {
+            out += std::format("{}{}: {}", first ? "" : ", ", escaped(key), escaped(value));
+            first = false;
+        }
+        out += "}";
+        out += std::format(",\n            \"revenant:messages\": {}", annotation.messages);
     }
     out += "\n        }";
     return out;
@@ -583,6 +592,38 @@ struct Edit {
     return at;
 }
 
+// revenant:decoded, an object of identifier to string. A number where a
+// string belongs is taken as its text rather than refused, since an
+// identifier written by another tool as 366123456 is still that identifier.
+[[nodiscard]] Expected<std::vector<std::pair<std::string, std::string>>> decoded_of(
+    const Scanner& scanner, Span object)
+{
+    auto members = scanner.members(object);
+    if (!members) {
+        return std::unexpected(with_context(members.error(), "revenant:decoded"));
+    }
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const auto& [key_span, value_span] : *members) {
+        auto key = scanner.string(key_span);
+        if (!key) {
+            return std::unexpected(key.error());
+        }
+        const std::string_view raw = scanner.raw(value_span);
+        if (raw.front() == '"') {
+            auto text = scanner.string(value_span);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            out.emplace_back(std::move(*key), std::move(*text));
+        } else if (raw.front() == '{' || raw.front() == '[') {
+            return fail(std::format("revenant:decoded '{}' is not a string", *key));
+        } else {
+            out.emplace_back(std::move(*key), std::string(raw));
+        }
+    }
+    return out;
+}
+
 [[nodiscard]] Expected<StoredAnnotation> annotation_of(const Scanner& scanner, Span entry,
                                                        std::size_t index)
 {
@@ -631,6 +672,12 @@ struct Edit {
             take(as_string(), out.annotation.family);
         } else if (*key == "revenant:track_id") {
             take(integer_of<std::uint64_t>(raw, *key), out.track_id);
+        } else if (*key == "revenant:decoder") {
+            take(as_string(), out.annotation.decoder);
+        } else if (*key == "revenant:messages") {
+            take(integer_of<std::uint32_t>(raw, *key), out.annotation.messages);
+        } else if (*key == "revenant:decoded") {
+            take(decoded_of(scanner, value_span), out.annotation.decoded);
         }
         if (!read) {
             return std::unexpected(with_context(read.error(), std::format("annotation {}", index)));
@@ -678,6 +725,17 @@ struct Edit {
     if (!family_lowered.empty() &&
         lowered(a.family).find(family_lowered) == std::string::npos) {
         return false;
+    }
+    if (!query.decoder.empty() && lowered(a.decoder) != lowered(query.decoder)) {
+        return false;
+    }
+    for (const auto& [key, value] : query.decoded) {
+        const bool found = std::ranges::any_of(a.decoded, [&](const auto& field) {
+            return lowered(field.first) == lowered(key) && lowered(field.second) == lowered(value);
+        });
+        if (!found) {
+            return false;
+        }
     }
     return true;
 }
@@ -1026,6 +1084,9 @@ std::vector<Hit> run_query(std::span<const IndexedSegment> segments, const Query
             hit.family = a.family;
             hit.generator = stored.generator;
             hit.track_id = stored.track_id;
+            hit.decoder = a.decoder;
+            hit.decoded = a.decoded;
+            hit.messages = a.messages;
             hits.push_back(std::move(hit));
         }
     }

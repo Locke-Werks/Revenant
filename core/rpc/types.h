@@ -27,6 +27,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -1671,6 +1672,9 @@ struct CaptureQuery {
     std::string generator;
     // Zero is the server's cap.
     std::uint32_t limit = 0;
+    std::string decoder;
+    // ANDed key=value terms.
+    std::vector<std::pair<std::string, std::string>> decoded;
 };
 
 struct CaptureHit {
@@ -1686,6 +1690,8 @@ struct CaptureHit {
     std::uint64_t track_id = 0;
     // For Client::open_source as it stands.
     std::string replay_uri;
+    std::string decoder;
+    std::vector<std::pair<std::string, std::string>> decoded;
 };
 
 struct CaptureSearchResult {

@@ -1463,6 +1463,8 @@ public:
             sink = [this, graph, writer](const source::SourceBlock& block) {
                 follow_block_center(block);
                 writer->consume(block, capture_center_for(block));
+                capture_index_.store(block.stamp.start + block.sample_count,
+                                     std::memory_order_relaxed);
                 return graph->on_block(block);
             };
         }
@@ -1525,6 +1527,13 @@ public:
         return {};
     }
 
+    [[nodiscard]] std::optional<dsp::SampleIndex> capture_stream_index() const override {
+        if (!capture_live_.load(std::memory_order_acquire)) {
+            return std::nullopt;
+        }
+        return capture_index_.load(std::memory_order_relaxed);
+    }
+
     [[nodiscard]] std::optional<capture::WriterStats> capture_stats() const override {
         const std::scoped_lock held(capture_lock_);
         if (writer_ != nullptr) {
@@ -1569,6 +1578,8 @@ public:
         }
 
         capture_pending_.store(false, std::memory_order_release);
+        capture_index_.store(0, std::memory_order_relaxed);
+        capture_live_.store(true, std::memory_order_release);
         capture_center_.store(std::atomic_ref(info_.source_center).load(),
                               std::memory_order_release);
 
@@ -1589,6 +1600,7 @@ public:
             const std::scoped_lock held(capture_lock_);
             writer = std::move(writer_);
         }
+        capture_live_.store(false, std::memory_order_release);
         if (writer == nullptr) {
             return;
         }
@@ -2086,6 +2098,12 @@ private:
     // capture_center_ is the delivery thread's alone once a stream runs.
     std::atomic<dsp::Hertz> capture_center_{0};
     std::atomic<bool> capture_pending_{false};
+
+    // capture_stream_index's answer: the end of the last block handed to the
+    // writer, stored by the delivery thread and read by decode lanes, which
+    // must not take capture_lock_ per message.
+    std::atomic<dsp::SampleIndex> capture_index_{0};
+    std::atomic<bool> capture_live_{false};
     std::atomic<dsp::Hertz> capture_retune_center_{0};
     std::atomic<dsp::SampleIndex> capture_retune_before_{0};
     std::atomic<dsp::SampleIndex> capture_retune_after_{0};

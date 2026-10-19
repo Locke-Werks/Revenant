@@ -3837,6 +3837,20 @@ struct CaptureQuery {
     # The most hits sent. Zero is the server's cap, 10000, which is also the
     # most it will send whatever is asked.
     limit @10 :UInt32;
+
+    # Exact and case-insensitive, "p25p1", "ais" and so on. Non-empty keeps
+    # only annotations the live decoders wrote ("revenant-decode").
+    decoder @11 :Text;
+
+    # Every term must match one of the annotation's identifiers, key and
+    # value case-insensitive. Empty is no filter.
+    decoded @12 :List(DecodedTerm);
+}
+
+# One decoded identifier, "mmsi" = "366123456" or "talkgroup" = "101".
+struct DecodedTerm {
+    key @0 :Text;
+    value @1 :Text;
 }
 
 struct CaptureHit {
@@ -3856,6 +3870,11 @@ struct CaptureHit {
     # capture:// over the root, from the hit's start to its end, at pace=1,
     # ready for openSource.
     replayUri @10 :Text;
+
+    # The decoder and the identifiers it saw over the hit, empty on a
+    # detector annotation.
+    decoder @11 :Text;
+    decoded @12 :List(DecodedTerm);
 }
 
 struct CaptureSearchResult {

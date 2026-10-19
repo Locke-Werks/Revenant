@@ -482,7 +482,7 @@ std::string render_meta(const MetaFields& fields)
         json.key("core:freq_upper_edge");
         json.value(static_cast<std::int64_t>(a.freq_upper));
         json.key("core:label");
-        json.value(a.family.empty() ? std::string_view("signal") : std::string_view(a.family));
+        json.value(annotation_label(a));
         json.key("core:generator");
         json.value(entry.generator);
         json.key("revenant:confidence");
@@ -498,6 +498,19 @@ std::string render_meta(const MetaFields& fields)
         if (entry.track_id) {
             json.key("revenant:track_id");
             json.value(*entry.track_id);
+        }
+        if (!a.decoder.empty()) {
+            json.key("revenant:decoder");
+            json.value(a.decoder);
+            json.key("revenant:decoded");
+            json.open_object();
+            for (const auto& [name, text] : a.decoded) {
+                json.key(name);
+                json.value(text);
+            }
+            json.close_object();
+            json.key("revenant:messages");
+            json.value(std::uint64_t{a.messages});
         }
         json.close_object();
     }
@@ -1006,6 +1019,11 @@ void SegmentWriter::close_segment(std::string_view reason)
                 entry.annotation.sample_start = part->start - first;
                 entry.annotation.sample_count = part->count;
                 entry.track_id = pending.track_id;
+                // A decoder's identifiers arrive through the same queue as the
+                // detector's tracks and are told apart by carrying a decoder.
+                if (!pending.annotation.decoder.empty()) {
+                    entry.generator = std::string(kDecodeGenerator);
+                }
                 fields.annotations.push_back(std::move(entry));
             }
             // The rest carries on into the next segment. A part that lay
@@ -1092,7 +1110,9 @@ void SegmentWriter::route_annotations()
                 stored.annotation = pending.annotation;
                 stored.annotation.sample_start = part->start - it->first;
                 stored.annotation.sample_count = part->count;
-                stored.generator = std::string(kDetectGenerator);
+                stored.generator = std::string(pending.annotation.decoder.empty()
+                                                   ? kDetectGenerator
+                                                   : kDecodeGenerator);
                 stored.track_id = pending.track_id.value_or(0);
                 late[static_cast<std::size_t>(it - closed_.begin())].push_back(
                     std::move(stored));

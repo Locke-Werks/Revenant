@@ -1759,7 +1759,7 @@ class EngineLink : public QObject {
 
     // The capture panel's list: the last searchCapture's hits as rows from
     // models/capture_browser.h, newest first, each a map of time, duration,
-    // frequency, label, confidence and uri. captureSearchBusy is true from the
+    // frequency, label, confidence, decoded and uri. captureSearchBusy is true from the
     // ask until the answer; captureSearchFault is the engine's refusal in its
     // own words. Implemented in capture_link.cpp.
     Q_PROPERTY(QVariantList captureHits READ captureHits NOTIFY captureHitsChanged)
@@ -2142,9 +2142,14 @@ public:
     // it is "low:high" as parse_capture_band reads it, and text it cannot
     // read is a fault without a search. On the supervisor, because a search
     // reads the capture's index from disk. See capture_link.cpp.
+    //
+    // decoder is a decoder's name, "any" taking every hit; decoded is parse_decoded_terms's key=value terms, all of
+    // which a hit must carry, and text it cannot read is a fault as well.
     Q_INVOKABLE void searchCapture(const QString& window = QStringLiteral("1 h"),
                                    const QString& band = QString(),
-                                   const QString& minDuration = QStringLiteral("any"));
+                                   const QString& minDuration = QStringLiteral("any"),
+                                   const QString& decoder = QStringLiteral("any"),
+                                   const QString& decoded = QString());
 
     // Opens what the picker composed, closing whatever is open first.
     //
@@ -4399,6 +4404,9 @@ private:
     double want_capture_high_hz_ = 0.0;           // guarded by capture_search_mutex_
     std::int64_t want_capture_window_ns_ = 0;     // guarded by capture_search_mutex_
     std::int64_t want_capture_min_ns_ = 0;        // guarded by capture_search_mutex_
+    std::string want_capture_decoder_;            // guarded by capture_search_mutex_
+    std::vector<std::pair<std::string, std::string>>
+        want_capture_decoded_;                    // guarded by capture_search_mutex_
     bool handover_has_capture_hits_ = false;      // guarded by capture_search_mutex_
     QVariantList handover_capture_hits_;          // guarded by capture_search_mutex_
     QVariantList handover_capture_occupancy_;     // guarded by capture_search_mutex_

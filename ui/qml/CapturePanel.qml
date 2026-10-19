@@ -33,6 +33,12 @@ ColumnLayout {
     property string windowLabel: "1 h"
     property string minDuration: "any"
 
+    // The decoders whose identifiers the engine writes into the capture.
+    // "any" is no filter; a named one keeps only that decoder's hits.
+    readonly property var decoders:
+        ["any", "p25p1", "dmr", "ais", "ax25", "m17", "pocsag", "dstar", "tetra"]
+    property string decoder: "any"
+
     // Called when the popover opens, so the list is never older than the
     // last time the operator looked.
     function opened() {
@@ -40,7 +46,8 @@ ColumnLayout {
     }
 
     function search() {
-        engineLink.searchCapture(panel.windowLabel, bandField.text, panel.minDuration)
+        engineLink.searchCapture(panel.windowLabel, bandField.text, panel.minDuration,
+                                 panel.decoder, decodedField.text)
     }
 
     spacing: 8
@@ -109,6 +116,53 @@ ColumnLayout {
             onPicked: (option) => {
                 panel.minDuration = option
                 panel.search()
+            }
+        }
+    }
+
+    // Who was heard rather than what: a decoder, and identifiers it decoded.
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        Label {
+            text: "decoded by"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        RComboBox {
+            id: decoderChoice
+
+            Layout.preferredWidth: 110
+            model: panel.decoders
+            currentIndex: panel.decoders.indexOf(panel.decoder)
+            onActivated: (index) => {
+                panel.decoder = panel.decoders[index]
+                panel.search()
+            }
+        }
+
+        // Read on return, like the band. Each term is key=value and every
+        // one must match, so the Tip says the syntax rather than the
+        // placeholder carrying all of it.
+        RTextField {
+            id: decodedField
+
+            Layout.fillWidth: true
+            Layout.maximumWidth: 320
+            mono: true
+            placeholderText: "anyone, or mmsi=366123456"
+            onAccepted: panel.search()
+
+            HoverHandler { id: decodedHover }
+
+            Tip {
+                visible: decodedHover.hovered && !decodedField.activeFocus
+                delay: 400
+                text: "key=value terms separated by spaces, all of which must match, "
+                      + "for example mmsi=366123456 talkgroup=101. "
+                      + "Keys are the decoder's own: talkgroup, source, mmsi, callsign."
             }
         }
     }
@@ -253,10 +307,21 @@ ColumnLayout {
                     font.pixelSize: Theme.sizeSmall
                 }
                 Label {
-                    Layout.fillWidth: true
+                    Layout.preferredWidth: row.modelData.decoded !== "" ? 56 : -1
+                    Layout.fillWidth: row.modelData.decoded === ""
                     text: row.modelData.label
                     elide: Text.ElideRight
                     color: row.modelData.label === "signal" ? Theme.inkDim : Theme.ink
+                    font.pixelSize: Theme.sizeSmall
+                }
+                // A decoder's hit says who it was, the reason it was found.
+                Label {
+                    visible: row.modelData.decoded !== ""
+                    Layout.fillWidth: true
+                    text: row.modelData.decoded
+                    elide: Text.ElideRight
+                    color: Theme.ink
+                    font.family: Theme.monoFont
                     font.pixelSize: Theme.sizeSmall
                 }
                 Label {

@@ -58,6 +58,7 @@ and never the one being written.
 revenant-capture list D:\capture --from -2h
 revenant-capture search D:\capture --freq 162.4M:162.6M --from -1d --min-duration 2s
 revenant-capture occupancy D:\capture --freq 462.5M:462.75M --from -6h --bucket 10m
+revenant-capture search D:\capture --decoder p25p1 --decoded talkgroup=101 --from -1d
 revenant-capture index D:\capture
 revenant-capture extract D:\capture --from 2026-10-12T20:30:00Z --to 2026-10-12T20:35:00Z --out E:\keep
 revenant-capture recover D:\capture
@@ -70,6 +71,17 @@ quiet bucket from one nothing recorded. `index` runs the wideband detector over
 segments that were captured without it, or with different settings, and writes
 what it finds back into their metas; on the RTX 4090 that runs at about 12x
 realtime at 2.4 MS/s. `extract` copies whole segments.
+
+Decoders write what they read into the metas too. Each identifier a receiver
+decodes (a P25 or DMR talkgroup, source or destination; an AIS MMSI or
+callsign; an AX.25 or M17 source; a POCSAG address; a D-STAR caller; a TETRA
+network's country and network codes) becomes one annotation under the
+`revenant-decode` generator, held open across every message carrying it until
+it has been quiet for 10 s, its receiver retunes or goes away, or the capture
+stops. `--decoder NAME` and `--decoded KEY=VALUE` find them, in `search` and
+`occupancy` alike. Repeat `--decoded` to require every term. Keys and values
+match whole and ignore case, so `talkgroup=101` does not find 1011 and
+`callsign=wdc1234` finds WDC1234. Free text is never indexed.
 
 ## Replaying
 
@@ -112,5 +124,8 @@ replay is not itself recorded. The session calls behind it,
 
 - A track the live detector follows is annotated when it ends, as one entry
   per segment it was present in, joined by `revenant:track_id`.
+- A decoded identifier's span starts where the first message carrying it
+  began, to within one decode chunk: the receiver's samples are placed on the
+  capture's stream when the message is handed over, not where it was read.
 - Replay stops at a change of sample rate or of stream, which needs a new grid.
 - The segment length is the granularity of `extract` and of the ring.

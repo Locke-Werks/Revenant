@@ -227,7 +227,7 @@ TEST_CASE("A meta carries every key format.h names and the file source reads it"
     for (const std::string_view key :
          {"\"core:datatype\":\"cu8\"", "\"core:sample_rate\":1000000", "\"core:version\":\"1.",
           "\"core:recorder\":\"Revenant ", "\"core:hw\":\"test \\\"dongle\\\"\\nline two\"",
-          "\"name\":\"revenant\"", "\"version\":\"1.0.0\"", "\"optional\":true",
+          "\"name\":\"revenant\"", "\"version\":\"1.1.0\"", "\"optional\":true",
           "\"revenant:stream_epoch\":4660", "\"revenant:first_index\":0",
           "\"revenant:epoch_anchor_ns\":1791806400000000000", "\"revenant:dropped_before\":0",
           "\"revenant:close_reason\":\"stop\"", "\"revenant:gain_db\":29.7",

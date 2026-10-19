@@ -2820,6 +2820,12 @@ void write_capture_query(schema::CaptureQuery::Builder out, const CaptureQuery& 
     out.setFamily(query.family.c_str());
     out.setGenerator(query.generator.c_str());
     out.setLimit(query.limit);
+    out.setDecoder(query.decoder.c_str());
+    auto decoded = out.initDecoded(static_cast<unsigned>(query.decoded.size()));
+    for (std::size_t i = 0; i < query.decoded.size(); ++i) {
+        decoded[static_cast<unsigned>(i)].setKey(query.decoded[i].first.c_str());
+        decoded[static_cast<unsigned>(i)].setValue(query.decoded[i].second.c_str());
+    }
 }
 
 }  // namespace
@@ -2886,6 +2892,11 @@ Expected<CaptureSearchResult> ClientImpl::capture_search(const CaptureQuery& que
                 hit.generator = read_text(row.getGenerator());
                 hit.track_id = row.getTrackId();
                 hit.replay_uri = read_text(row.getReplayUri());
+                hit.decoder = read_text(row.getDecoder());
+                for (const auto term : row.getDecoded()) {
+                    hit.decoded.emplace_back(read_text(term.getKey()),
+                                             read_text(term.getValue()));
+                }
                 out.hits.push_back(std::move(hit));
             }
             out.matched = in.getMatched();

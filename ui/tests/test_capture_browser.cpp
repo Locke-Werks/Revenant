@@ -24,6 +24,7 @@ using revenant::ui::kCaptureMinDurations;
 using revenant::ui::kCaptureWindowNs;
 using revenant::ui::kCaptureWindows;
 using revenant::ui::parse_capture_band;
+using revenant::ui::parse_decoded_terms;
 
 namespace {
 
@@ -141,4 +142,41 @@ TEST_CASE("a band that cannot be read is refused, not guessed", "[capture_browse
     CHECK_FALSE(parse_capture_band("162.4M:").has_value());
     CHECK_FALSE(parse_capture_band("a:b").has_value());
     CHECK_FALSE(parse_capture_band("1M:2M:3M").has_value());
+}
+
+TEST_CASE("decoded terms are key=value separated by spaces", "[capture_browser]")
+{
+    const auto terms = parse_decoded_terms("  mmsi=366123456   talkgroup=101 ");
+    REQUIRE(terms.has_value());
+    REQUIRE(terms->size() == 2);
+    CHECK((*terms)[0].first == "mmsi");
+    CHECK((*terms)[0].second == "366123456");
+    CHECK((*terms)[1].first == "talkgroup");
+    CHECK((*terms)[1].second == "101");
+
+    const auto blank = parse_decoded_terms("   ");
+    REQUIRE(blank.has_value());
+    CHECK(blank->empty());
+}
+
+TEST_CASE("a decoded term that cannot be read is refused", "[capture_browser]")
+{
+    // Rejects: a bare word searched as a key with no value, and a second '='
+    // folded into the value.
+    CHECK_FALSE(parse_decoded_terms("366123456").has_value());
+    CHECK_FALSE(parse_decoded_terms("mmsi=").has_value());
+    CHECK_FALSE(parse_decoded_terms("=101").has_value());
+    CHECK_FALSE(parse_decoded_terms("a=b=c").has_value());
+}
+
+TEST_CASE("a decoder's hit is labelled by the decoder and lists who", "[capture_browser]")
+{
+    // Rejects: the empty family of a decode annotation drawn as "signal".
+    CaptureHitIn hit = hit_at(0, "capture://d");
+    hit.decoder = "ais";
+    hit.decoded = {{"mmsi", "366123456"}, {"callsign", "WDC1234"}};
+    const auto row = capture_row(hit, 0);
+    CHECK(row.label == "ais");
+    CHECK(row.decoded == "mmsi=366123456 callsign=WDC1234");
+    CHECK(capture_row(hit_at(0, ""), 0).decoded.empty());
 }

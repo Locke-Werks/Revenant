@@ -28,6 +28,7 @@
 #include "core/capture/format.h"
 #include "core/capture/index.h"
 #include "core/capture/search.h"
+#include "core/capture/writer.h"
 #include "core/dsp/synth/modulators.h"
 #include "core/dsp/synth/wideband.h"
 #include "tests/reference/gpu_fixture.h"
@@ -473,6 +474,194 @@ TEST_CASE("a malformed meta is refused and left untouched", "[capture][merge]") 
     CHECK_FALSE(written.has_value());
     CHECK(read_text(path) == kBad);
     CHECK_FALSE(capture::read_annotations(path.string()).has_value());
+}
+
+// ---------------------------------------------------------------------------
+// Decoded identifiers
+// ---------------------------------------------------------------------------
+
+namespace {
+
+[[nodiscard]] Annotation decoded_annotation(std::uint64_t start, std::string decoder,
+                                            std::vector<std::pair<std::string, std::string>> fields,
+                                            std::uint32_t messages = 4) {
+    Annotation a;
+    a.sample_start = start;
+    a.sample_count = 1'000'000;
+    a.freq_lower = 852'000'000;
+    a.freq_upper = 852'012'500;
+    a.confidence = 1.0;
+    a.decoder = std::move(decoder);
+    a.decoded = std::move(fields);
+    a.messages = messages;
+    return a;
+}
+
+[[nodiscard]] StoredAnnotation decoded_stored(
+    std::uint64_t start, std::string decoder,
+    std::vector<std::pair<std::string, std::string>> fields) {
+    StoredAnnotation out;
+    out.annotation = decoded_annotation(start, std::move(decoder), std::move(fields));
+    out.generator = std::string(capture::kDecodeGenerator);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("decode keys survive the writer's meta and the late append", "[capture][search]") {
+    capture::MetaFields fields;
+    fields.info = segment_info(0, 10'000'000);
+    fields.close_reason = "stop";
+    fields.hw = "test";
+    capture::MetaFields::Entry entry;
+    entry.annotation = decoded_annotation(100, "ais", {{"mmsi", "366123456"}}, 7);
+    entry.generator = std::string(capture::kDecodeGenerator);
+    fields.annotations.push_back(entry);
+    capture::MetaFields::Entry detect;
+    detect.annotation.sample_start = 50;
+    detect.annotation.family = "NFM";
+    fields.annotations.push_back(detect);
+
+    const std::string meta = capture::render_meta(fields);
+    CHECK(meta.find(R"("version":"1.1.0")") != std::string::npos);
+    CHECK(meta.find(R"("core:label":"ais mmsi 366123456")") != std::string::npos);
+
+    // The late-append path writes through search.cpp's own serialiser.
+    const StoredAnnotation late[] = {decoded_stored(900, "p25p1", {{"talkgroup", "101"}})};
+    auto appended = capture::append_annotations(meta, late);
+    INFO(message_of(appended));
+    REQUIRE(appended.has_value());
+    CHECK(appended->find(R"("core:label": "p25p1 talkgroup 101")") != std::string::npos);
+
+    const std::filesystem::path path = test::unique_temp_path("revenant_decode_meta", ".sigmf-meta");
+    TempFiles files;
+    files.paths.push_back(path);
+    write_text(path, *appended);
+    auto read = capture::read_annotations(path.string());
+    INFO(message_of(read));
+    REQUIRE(read.has_value());
+    REQUIRE(read->size() == 3);
+
+    // Ordered by start: the detector's at 50, the AIS at 100, the late P25 at 900.
+    const StoredAnnotation& ais = (*read)[1];
+    CHECK(ais.generator == capture::kDecodeGenerator);
+    CHECK(ais.annotation.decoder == "ais");
+    REQUIRE(ais.annotation.decoded.size() == 1);
+    CHECK(ais.annotation.decoded[0] == std::pair<std::string, std::string>{"mmsi", "366123456"});
+    CHECK(ais.annotation.messages == 7);
+    CHECK(ais.annotation.family.empty());
+
+    const StoredAnnotation& nfm = (*read)[0];
+    CHECK(nfm.generator == capture::kDetectGenerator);
+    CHECK(nfm.annotation.decoder.empty());
+    CHECK(nfm.annotation.decoded.empty());
+
+    const StoredAnnotation& p25 = (*read)[2];
+    CHECK(p25.generator == capture::kDecodeGenerator);
+    CHECK(p25.annotation.decoder == "p25p1");
+    CHECK(p25.annotation.decoded[0].second == "101");
+    CHECK(p25.annotation.messages == 4);
+}
+
+TEST_CASE("a 1.0.0 meta still reads, and a numeric identifier reads as text",
+          "[capture][search]") {
+    const std::filesystem::path path = test::unique_temp_path("revenant_decode_old", ".sigmf-meta");
+    TempFiles files;
+    files.paths.push_back(path);
+    write_text(path, kMeta);
+    auto old = capture::read_annotations(path.string());
+    INFO(message_of(old));
+    REQUIRE(old.has_value());
+    CHECK(old->size() == 3);
+    for (const StoredAnnotation& stored_one : *old) {
+        CHECK(stored_one.annotation.decoder.empty());
+    }
+
+    write_text(path, R"({"annotations": [{"core:sample_start": 1, "revenant:decoder": "ais",
+        "revenant:decoded": {"mmsi": 366123456}, "revenant:messages": 2}]})");
+    auto numeric = capture::read_annotations(path.string());
+    INFO(message_of(numeric));
+    REQUIRE(numeric.has_value());
+    REQUIRE(numeric->size() == 1);
+    CHECK((*numeric)[0].annotation.decoded[0].second == "366123456");
+}
+
+TEST_CASE("decoder and decoded filters match whole terms, ANDed, ignoring case",
+          "[capture][search]") {
+    std::vector<IndexedSegment> segments = two_segments();
+    segments[0].annotations.push_back(decoded_stored(
+        2'000'000, "ais", {{"mmsi", "366123456"}}));
+    segments[0].annotations.push_back(decoded_stored(
+        2'000'000, "ais", {{"callsign", "WDC1234"}}));
+    segments[1].annotations.push_back(decoded_stored(
+        1'000'000, "p25p1", {{"talkgroup", "101"}, {"source", "4500"}}));
+    segments[1].annotations.push_back(decoded_stored(
+        3'000'000, "p25p1", {{"talkgroup", "1011"}}));
+
+    capture::Query by_decoder;
+    by_decoder.decoder = "P25P1";
+    auto hits = capture::run_query(segments, by_decoder);
+    REQUIRE(hits.size() == 2);
+    CHECK(hits[0].decoder == "p25p1");
+    CHECK(hits[0].generator == capture::kDecodeGenerator);
+
+    capture::Query callsign;
+    callsign.decoded = {{"CallSign", "wdc1234"}};
+    hits = capture::run_query(segments, callsign);
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0].decoded[0].second == "WDC1234");
+    CHECK(hits[0].messages == 4);
+
+    // Exact, so 101 does not find 1011.
+    capture::Query talkgroup;
+    talkgroup.decoded = {{"talkgroup", "101"}};
+    hits = capture::run_query(segments, talkgroup);
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0].data_path == "b.sigmf-data");
+
+    capture::Query both;
+    both.decoded = {{"talkgroup", "101"}, {"source", "4500"}};
+    CHECK(capture::run_query(segments, both).size() == 1);
+    both.decoded[1].second = "4501";
+    CHECK(capture::run_query(segments, both).empty());
+
+    capture::Query wrong_decoder;
+    wrong_decoder.decoder = "dmr";
+    wrong_decoder.decoded = {{"talkgroup", "101"}};
+    CHECK(capture::run_query(segments, wrong_decoder).empty());
+
+    // The detector's own view is untouched by the new entries' presence.
+    capture::Query detect;
+    detect.generator = std::string(capture::kDetectGenerator);
+    CHECK(capture::run_query(segments, detect).size() == 1);
+}
+
+TEST_CASE("re-indexing leaves revenant-decode entries alone", "[capture][merge]") {
+    const StoredAnnotation decode[] = {decoded_stored(300, "dmr", {{"talkgroup", "9"}})};
+    auto with_decode = capture::append_annotations(kMeta, decode);
+    REQUIRE(with_decode.has_value());
+
+    Annotation added;
+    added.sample_start = 700;
+    added.family = "NFM";
+    const Annotation one[] = {added};
+    auto merged = capture::merge_annotations(*with_decode, one, capture::kIndexGenerator,
+                                             capture::IndexStamp{"revenant-index", "now", ""});
+    INFO(message_of(merged));
+    REQUIRE(merged.has_value());
+
+    const std::filesystem::path path = test::unique_temp_path("revenant_decode_kept", ".sigmf-meta");
+    TempFiles files;
+    files.paths.push_back(path);
+    write_text(path, *merged);
+    auto read = capture::read_annotations(path.string());
+    REQUIRE(read.has_value());
+    const auto kept = std::ranges::count_if(*read, [](const StoredAnnotation& s) {
+        return s.generator == capture::kDecodeGenerator && s.annotation.decoder == "dmr" &&
+               s.annotation.decoded.size() == 1 && s.annotation.decoded[0].second == "9";
+    });
+    CHECK(kept == 1);
+    CHECK(read->size() == 4);
 }
 
 // ---------------------------------------------------------------------------

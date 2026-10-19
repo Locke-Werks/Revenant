@@ -34,6 +34,8 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "core/dsp/types.h"
 #include "core/source/capabilities.h"
@@ -69,7 +71,9 @@ inline constexpr std::string_view kOpenSuffix = ".open";
 // this name and version, optional = true, so a reader that does not know it
 // still reads the recording.
 inline constexpr std::string_view kExtensionName = "revenant";
-inline constexpr std::string_view kExtensionVersion = "1.0.0";
+inline constexpr std::string_view kExtensionVersion = "1.1.0";
+// 1.1.0 added the decode keys below. A 1.0.0 meta reads exactly as before:
+// every key 1.1.0 added is optional and defaults to absent.
 
 // Global keys, beyond the core ones every segment carries
 // (core:datatype, core:sample_rate, core:version, core:recorder = "Revenant
@@ -108,13 +112,24 @@ inline constexpr std::string_view kExtensionVersion = "1.0.0";
 // core:sample_start, core:sample_count (relative to the segment),
 // core:freq_lower_edge, core:freq_upper_edge (absolute Hz), core:label
 // (the family name when one was given, otherwise "signal"),
-// core:generator ("revenant-detect" live, "revenant-index" offline).
+// core:generator ("revenant-detect" live, "revenant-index" offline,
+// "revenant-decode" for a decoder's identifiers).
 //
 //   revenant:confidence   number, 0..1, the detector's confidence.
 //   revenant:peak_db      number, peak level in the detector's dB scale.
 //   revenant:snr_db       number, against the local noise floor.
 //   revenant:family       string, optional, the identified family.
 //   revenant:track_id     u64, optional, the live detector's track id.
+//
+// A revenant-decode entry says who was on the air rather than what: one
+// identifier a decoder read, held open across every message that carried it
+// until it went quiet. core:label is "<decoder> <key> <value>", and
+// confidence is 1 since a decoded message passed its own checks.
+//
+//   revenant:decoder      string, the decoder's name, core/rpc/decoders.h's.
+//   revenant:decoded      object, key to string value, the identifier as the
+//                         decoder's DecodedMessage field spelled it.
+//   revenant:messages     u32, messages that carried it within the span.
 
 // What the writer needs to know about the stream it is writing. Also what the
 // catalog reconstructs from a meta file.
@@ -149,6 +164,30 @@ struct Annotation {
     double snr_db = 0.0;
     // Empty when the signal was not identified.
     std::string family;
+
+    // Set on revenant-decode entries only; empty for the detector's.
+    std::string decoder;
+    std::vector<std::pair<std::string, std::string>> decoded;
+    std::uint32_t messages = 0;
 };
+
+// core:generator for a decoder's identifiers.
+inline constexpr std::string_view kDecodeGenerator = "revenant-decode";
+
+// core:label as written: the decode label, else the family, else "signal".
+[[nodiscard]] inline std::string annotation_label(const Annotation& a)
+{
+    if (!a.decoder.empty()) {
+        std::string out = a.decoder;
+        for (const auto& [key, value] : a.decoded) {
+            out += ' ';
+            out += key;
+            out += ' ';
+            out += value;
+        }
+        return out;
+    }
+    return a.family.empty() ? std::string("signal") : a.family;
+}
 
 }  // namespace revenant::capture

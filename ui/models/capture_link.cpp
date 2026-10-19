@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -28,8 +29,21 @@
 namespace revenant::ui {
 
 void EngineLink::searchCapture(const QString& window, const QString& band,
-                               const QString& minDuration)
+                               const QString& minDuration, const QString& decoder,
+                               const QString& decoded)
 {
+    auto terms = parse_decoded_terms(decoded.toStdString());
+    if (!terms) {
+        capture_hits_.clear();
+        capture_occupancy_.clear();
+        capture_search_fault_ =
+            QStringLiteral("could not read \"%1\" as decoded terms; write them as "
+                           "mmsi=366123456 talkgroup=101")
+                .arg(decoded.trimmed());
+        capture_search_busy_ = false;
+        emit captureHitsChanged();
+        return;
+    }
     double low = spanLowHz();
     double high = spanHighHz();
     if (!band.trimmed().isEmpty()) {
@@ -55,6 +69,9 @@ void EngineLink::searchCapture(const QString& window, const QString& band,
         want_capture_window_ns_ = capture_choice_ns(kCaptureWindows, window.toStdString(), 1);
         want_capture_min_ns_ =
             capture_choice_ns(kCaptureMinDurations, minDuration.toStdString(), 0);
+        want_capture_decoder_ = decoder == QStringLiteral("any") ? std::string{}
+                                                                  : decoder.toStdString();
+        want_capture_decoded_ = std::move(*terms);
     }
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
@@ -74,6 +91,8 @@ void EngineLink::apply_capture_search()
     double high = 0.0;
     std::int64_t window_ns = kCaptureWindowNs;
     std::int64_t min_ns = 0;
+    std::string decoder;
+    std::vector<std::pair<std::string, std::string>> decoded;
     {
         const std::lock_guard<std::mutex> lock(capture_search_mutex_);
         if (!std::exchange(want_capture_search_, false)) {
@@ -83,6 +102,8 @@ void EngineLink::apply_capture_search()
         high = want_capture_high_hz_;
         window_ns = want_capture_window_ns_;
         min_ns = want_capture_min_ns_;
+        decoder = want_capture_decoder_;
+        decoded = want_capture_decoded_;
     }
 
     const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -93,6 +114,8 @@ void EngineLink::apply_capture_search()
     query.from_ns = window.from_ns;
     query.to_ns = window.to_ns;
     query.min_duration_ns = min_ns;
+    query.decoder = decoder;
+    query.decoded = decoded;
     if (window.freq_high_hz > window.freq_low_hz) {
         query.freq_low_hz = window.freq_low_hz;
         query.freq_high_hz = window.freq_high_hz;
@@ -107,7 +130,10 @@ void EngineLink::apply_capture_search()
         request.bucket_ns = window_ns / kCaptureOccupancyBuckets;
         request.freq_low_hz = window.freq_low_hz;
         request.freq_high_hz = window.freq_high_hz;
+        // The same filter as the list, so the strip shows where the hits are.
         request.filter.min_duration_ns = min_ns;
+        request.filter.decoder = decoder;
+        request.filter.decoded = decoded;
         if (auto buckets = client_->capture_occupancy(request)) {
             for (const rpc::CaptureBucket& bucket : *buckets) {
                 QVariantMap map;
@@ -126,7 +152,8 @@ void EngineLink::apply_capture_search()
         hits.reserve(answer->hits.size());
         for (const rpc::CaptureHit& hit : answer->hits) {
             hits.push_back({hit.start_ns, hit.end_ns, hit.freq_lower_hz, hit.freq_upper_hz,
-                            hit.confidence, hit.family, hit.replay_uri});
+                            hit.confidence, hit.family, hit.replay_uri, hit.decoder,
+                            hit.decoded});
         }
         const std::int64_t offset = QDateTime::currentDateTime().offsetFromUtc();
         for (const CaptureRow& row : capture_rows(std::move(hits), offset)) {
@@ -137,6 +164,7 @@ void EngineLink::apply_capture_search()
             map.insert(QStringLiteral("label"), QString::fromStdString(row.label));
             map.insert(QStringLiteral("confidence"), QString::fromStdString(row.confidence));
             map.insert(QStringLiteral("uri"), QString::fromStdString(row.replay_uri));
+            map.insert(QStringLiteral("decoded"), QString::fromStdString(row.decoded));
             rows.append(map);
         }
     } else {

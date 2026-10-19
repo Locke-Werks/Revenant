@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <format>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/capture/format.h"
@@ -67,7 +68,10 @@ private:
 //   1.1 to 1.5 s on the marine channel after 0.1 s of lost samples, closed by a retune
 //   1.5 to 1.8 s on the weather channel, closed by stop
 // with a confident burst on the marine channel and a weak one on weather.
-void record(const std::string& root)
+// With `decoded`, also an AIS MMSI on the marine channel filed while its
+// segment is open, an AIS callsign filed after it closed, and a P25
+// talkgroup on weather.
+void record(const std::string& root, bool decoded = false)
 {
     capture::WriterConfig config;
     config.root = fs::path(root);
@@ -97,6 +101,23 @@ void record(const std::string& root)
     faint.peak_db = -70.0;
     writer.add_annotation(1'600'000, faint);
 
+    const auto decode = [](std::string decoder, std::string key, std::string value,
+                           dsp::Hertz centre) {
+        capture::Annotation a;
+        a.sample_count = 100'000;
+        a.freq_lower = centre - 12'500;
+        a.freq_upper = centre + 12'500;
+        a.confidence = 1.0;
+        a.decoder = std::move(decoder);
+        a.decoded = {{std::move(key), std::move(value)}};
+        a.messages = 3;
+        return a;
+    };
+    if (decoded) {
+        writer.add_annotation(300'000, decode("ais", "mmsi", "366123456", kMarine));
+        writer.add_annotation(1'650'000, decode("p25p1", "talkgroup", "101", kWeather));
+    }
+
     std::vector<std::byte> bytes(kBlock * 2);
     const auto feed = [&](dsp::SampleIndex start, dsp::Hertz center, std::uint64_t dropped) {
         for (std::size_t i = 0; i < bytes.size(); ++i) {
@@ -120,6 +141,10 @@ void record(const std::string& root)
     }
     for (dsp::SampleIndex index = 1'500'000; index < 1'800'000; index += kBlock) {
         feed(index, kWeather, 0);
+    }
+    if (decoded) {
+        // The first segment closed long ago, so this goes in by the late path.
+        writer.add_annotation(100'000, decode("ais", "callsign", "WDC1234", kMarine));
     }
     writer.stop();
     INFO(writer.stats().last_error);
@@ -333,4 +358,50 @@ TEST_CASE("index runs the detector over each segment and writes it back",
     INFO(again.error << "\n" << again.text);
     REQUIRE(again.ok);
     CHECK(contains(again.text, "0 indexed, 4 already indexed"));
+}
+
+TEST_CASE("search finds decoded identifiers in a root the writer made", "[capture][tools]")
+{
+    Scratch scratch;
+    const std::string root = scratch.root();
+    record(root, true);
+
+    const Run mmsi = run({"search", root, "--decoded", "mmsi=366123456"});
+    INFO(mmsi.error << "\n" << mmsi.text);
+    REQUIRE(mmsi.ok);
+    CHECK(contains(mmsi.text, "1 hit in 4 segments"));
+    CHECK(contains(mmsi.text, "ais mmsi 366123456"));
+    CHECK(contains(mmsi.text, "revenant-decode"));
+    CHECK(contains(mmsi.text, "2026-10-12T00:00:00.300Z"));
+
+    const Run late = run({"search", root, "--decoder", "AIS", "--decoded=callsign=wdc1234"});
+    INFO(late.error << "\n" << late.text);
+    REQUIRE(late.ok);
+    CHECK(contains(late.text, "1 hit in 4 segments"));
+    CHECK(contains(late.text, "ais callsign WDC1234"));
+
+    const Run ais = run({"search", root, "--decoder", "ais"});
+    REQUIRE(ais.ok);
+    CHECK(contains(ais.text, "2 hits"));
+
+    const Run both = run({"search", root, "--decoded", "mmsi=366123456", "--decoded",
+                          "callsign=WDC1234"});
+    REQUIRE(both.ok);
+    CHECK(contains(both.text, "0 hits"));
+
+    const Run json = run({"search", root, "--decoded", "talkgroup=101", "--json"});
+    INFO(json.text);
+    REQUIRE(json.ok);
+    CHECK(contains(json.text, "\"decoder\": \"p25p1\""));
+    CHECK(contains(json.text, "\"decoded\": {\"talkgroup\": \"101\"}"));
+    CHECK(contains(json.text, "\"label\": \"p25p1 talkgroup 101\""));
+
+    const Run occupancy =
+        run({"occupancy", root, "--freq", "162.5M:162.6M", "--decoder", "p25p1"});
+    INFO(occupancy.error << "\n" << occupancy.text);
+    REQUIRE(occupancy.ok);
+
+    const Run bad = run({"search", root, "--decoded", "mmsi"});
+    REQUIRE_FALSE(bad.ok);
+    CHECK(contains(bad.error, "KEY=VALUE"));
 }

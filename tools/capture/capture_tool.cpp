@@ -124,11 +124,18 @@ struct Arguments {
     std::string root;
     std::map<std::string, std::string, std::less<>> values;
     std::set<std::string, std::less<>> switches;
+    // Flags that may be given more than once, each value in order.
+    std::map<std::string, std::vector<std::string>, std::less<>> lists;
 
     [[nodiscard]] const std::string* value(std::string_view name) const
     {
         const auto found = values.find(name);
         return found == values.end() ? nullptr : &found->second;
+    }
+    [[nodiscard]] std::span<const std::string> all(std::string_view name) const
+    {
+        const auto found = lists.find(name);
+        return found == lists.end() ? std::span<const std::string>{} : found->second;
     }
     [[nodiscard]] bool has(std::string_view name) const { return switches.contains(name); }
 };
@@ -188,6 +195,11 @@ struct Arguments {
                 value = rest[++i];
             } else {
                 return fail(std::format("{} needs a value, as in {} <value>", arg, arg));
+            }
+            // --decoded terms are ANDed, so giving several is the point.
+            if (arg == "--decoded") {
+                parsed.lists[std::string(arg)].push_back(std::move(value));
+                continue;
             }
             if (parsed.values.contains(arg)) {
                 return fail(std::format("{} was given twice; give it once", arg));
@@ -454,12 +466,27 @@ struct Range {
         query.family = *text;
     }
     if (const std::string* text = args.value("--generator")) {
-        if (*text != capture::kDetectGenerator && *text != capture::kIndexGenerator) {
+        if (*text != capture::kDetectGenerator && *text != capture::kIndexGenerator &&
+            *text != capture::kDecodeGenerator) {
             return fail(std::format("--generator '{}' is not one this capture writes. Use {} for "
-                                    "the live detector or {} for revenant-capture index.",
-                                    *text, capture::kDetectGenerator, capture::kIndexGenerator));
+                                    "the live detector, {} for revenant-capture index or {} for "
+                                    "decoded identifiers.",
+                                    *text, capture::kDetectGenerator, capture::kIndexGenerator,
+                                    capture::kDecodeGenerator));
         }
         query.generator = *text;
+    }
+    if (const std::string* text = args.value("--decoder")) {
+        query.decoder = *text;
+    }
+    for (const std::string& term : args.all("--decoded")) {
+        const auto equals = term.find('=');
+        if (equals == std::string::npos || equals == 0 || equals + 1 == term.size()) {
+            return fail(std::format("--decoded '{}' is not KEY=VALUE, such as mmsi=366123456 "
+                                    "or talkgroup=101",
+                                    term));
+        }
+        query.decoded.emplace_back(term.substr(0, equals), term.substr(equals + 1));
     }
     return {};
 }
@@ -472,7 +499,8 @@ struct Range {
 {
     auto args = parse_arguments("search", rest,
                                 {"--from", "--to", "--freq", "--min-confidence", "--min-snr",
-                                 "--min-duration", "--family", "--generator"},
+                                 "--min-duration", "--family", "--generator", "--decoder",
+                                 "--decoded"},
                                 {"--json"});
     if (!args) {
         return std::unexpected(args.error());
@@ -511,6 +539,22 @@ struct Range {
     const auto vrx_of = [&](const capture::Hit& hit) {
         return format_frequency(hit.freq_lower + (hit.freq_upper - hit.freq_lower) / 2);
     };
+    // A decode hit is named by who it was, which is what the search asked.
+    const auto label_of = [](const capture::Hit& hit) {
+        capture::Annotation a;
+        a.family = hit.family;
+        a.decoder = hit.decoder;
+        a.decoded = hit.decoded;
+        return capture::annotation_label(a);
+    };
+    const auto decoded_json = [](const capture::Hit& hit) {
+        std::string out = "{";
+        for (std::size_t i = 0; i < hit.decoded.size(); ++i) {
+            out += std::format("{}{}: {}", i == 0 ? "" : ", ", json_string(hit.decoded[i].first),
+                               json_string(hit.decoded[i].second));
+        }
+        return out + "}";
+    };
 
     if (args->has("--json")) {
         env.out("[");
@@ -521,13 +565,15 @@ struct Range {
                 "\"freq_lower\": {}, \"freq_upper\": {}, \"confidence\": {}, \"snr_db\": {}, "
                 "\"peak_db\": {}, \"family\": {}, \"generator\": {}, \"data_path\": {}, "
                 "\"stream_epoch\": {}, \"first_index\": {}, \"sample_start\": {}, "
-                "\"sample_count\": {}, \"replay\": {}, \"vrx\": {}}}{}",
+                "\"sample_count\": {}, \"replay\": {}, \"vrx\": {}, \"label\": {}, "
+                "\"decoder\": {}, \"decoded\": {}, \"messages\": {}}}{}",
                 json_string(format_instant(hit.start_ns)), json_string(format_instant(hit.end_ns)),
                 hit.start_ns, hit.end_ns, hit.freq_lower, hit.freq_upper,
                 json_number(hit.confidence), json_number(hit.snr_db), json_number(hit.peak_db),
                 json_string(hit.family), json_string(hit.generator), json_string(hit.data_path),
                 hit.stream_epoch, hit.first_index, hit.sample_start, hit.sample_count,
-                json_string(replay_of(hit)), json_string(vrx_of(hit)),
+                json_string(replay_of(hit)), json_string(vrx_of(hit)), json_string(label_of(hit)),
+                json_string(hit.decoder), decoded_json(hit), hit.messages,
                 i + 1 == hits.size() ? "" : ","));
         }
         env.out("]");
@@ -538,7 +584,8 @@ struct Range {
         env.out(std::format("{}  {:>9}  {} to {}  conf {:.2f}  snr {:5.1f} dB  {}  {}",
                             format_instant(hit.start_ns), format_ns_span(hit.end_ns - hit.start_ns),
                             format_frequency(hit.freq_lower), format_frequency(hit.freq_upper),
-                            hit.confidence, hit.snr_db, hit.family.empty() ? "-" : hit.family,
+                            hit.confidence, hit.snr_db,
+                            hit.decoder.empty() && hit.family.empty() ? "-" : label_of(hit),
                             hit.generator));
         const std::string uri = replay_of(hit);
         env.out(std::format("    replay  {}", uri));
@@ -568,7 +615,8 @@ struct Range {
 {
     auto args = parse_arguments("occupancy", rest,
                                 {"--from", "--to", "--freq", "--bucket", "--min-confidence",
-                                 "--min-snr", "--min-duration", "--family", "--generator"},
+                                 "--min-snr", "--min-duration", "--family", "--generator",
+                                 "--decoder", "--decoded"},
                                 {});
     if (!args) {
         return std::unexpected(args.error());
@@ -1063,11 +1111,12 @@ std::string usage()
            "      and metas the catalog could not read.\n"
            "  revenant-capture search <root> [--from T] [--to T] [--freq LOW:HIGH]\n"
            "                   [--min-confidence X] [--min-snr DB] [--min-duration D]\n"
-           "                   [--family S] [--generator G] [--json]\n"
+           "                   [--family S] [--generator G] [--decoder NAME]\n"
+           "                   [--decoded KEY=VALUE ...] [--json]\n"
            "      What was seen, one hit a line, with a capture:// URI that replays it and\n"
            "      the revenant-cli line that listens to it.\n"
            "  revenant-capture occupancy <root> --freq LOW:HIGH [--from T] [--to T]\n"
-           "                   [--bucket D]\n"
+           "                   [--bucket D] [the search filters]\n"
            "      A bar per bucket (default 1m): occupied, captured and quiet, or not\n"
            "      captured at all.\n"
            "  revenant-capture index <root> [--from T] [--to T] [--force] [--gpu N]\n"
@@ -1083,7 +1132,10 @@ std::string usage()
            "Times: 2026-10-12T14:03:07.250Z (UTC, Z required), epoch nanoseconds, now,\n"
            "or a duration ago such as -10m or -1h30m.\n"
            "Frequencies: 162.55M, 98.1M, 7074k, 1090000000. A band is LOW:HIGH.\n"
-           "Durations: 500ms, 2s, 10m, 1h30m, 1d.\n";
+           "Durations: 500ms, 2s, 10m, 1h30m, 1d.\n"
+           "Decoded: --decoder p25p1 --decoded talkgroup=101 finds the spans a decoder\n"
+           "heard that identifier in. Repeat --decoded to require every term; keys and\n"
+           "values match whole, ignoring case.\n";
 }
 
 Status run(std::span<const std::string> args, const Environment& env)

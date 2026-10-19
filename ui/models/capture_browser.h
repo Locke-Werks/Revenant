@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "models/frequency_entry.h"
@@ -88,6 +89,38 @@ struct CaptureBand {
     return CaptureBand{std::min(low->hertz, high->hertz), std::max(low->hertz, high->hertz)};
 }
 
+using DecodedTerms = std::vector<std::pair<std::string, std::string>>;
+
+// "mmsi=366123456 talkgroup=101": whitespace separated key=value terms, all
+// of which a hit must carry. Blank is no terms. A term with no '=', an empty
+// side or a second '=' is nullopt, so a typo is said back rather than
+// searched for as something else.
+[[nodiscard]] inline std::optional<DecodedTerms> parse_decoded_terms(std::string_view text)
+{
+    DecodedTerms terms;
+    std::size_t at = 0;
+    while (at < text.size()) {
+        if (text[at] == ' ' || text[at] == '\t') {
+            ++at;
+            continue;
+        }
+        std::size_t end = at;
+        while (end < text.size() && text[end] != ' ' && text[end] != '\t') {
+            ++end;
+        }
+        const std::string_view term = text.substr(at, end - at);
+        const std::size_t equals = term.find('=');
+        if (equals == std::string_view::npos || equals == 0 || equals + 1 == term.size() ||
+            term.find('=', equals + 1) != std::string_view::npos) {
+            return std::nullopt;
+        }
+        terms.emplace_back(std::string(term.substr(0, equals)),
+                           std::string(term.substr(equals + 1)));
+        at = end;
+    }
+    return terms;
+}
+
 // The occupancy strip's columns: enough to see a burst in a day's window,
 // few enough that the answer is a small message.
 inline constexpr std::int64_t kCaptureOccupancyBuckets = 120;
@@ -123,6 +156,8 @@ struct CaptureHitIn {
     double confidence = 0.0;
     std::string family;
     std::string replay_uri;
+    std::string decoder;
+    DecodedTerms decoded;
 };
 
 struct CaptureRow {
@@ -132,6 +167,8 @@ struct CaptureRow {
     std::string label;
     std::string confidence;
     std::string replay_uri;
+    // A decoder's hit's identifiers, "mmsi=366123456", empty on a detection.
+    std::string decoded;
 };
 
 // Local wall clock, HH:MM:SS. The offset comes from the caller because the
@@ -182,7 +219,15 @@ struct CaptureRow {
     row.frequency = format_capture_range(hit.freq_lower_hz, hit.freq_upper_hz);
     // An unclassified hit is still a signal; an empty cell would read as a
     // row that failed to load.
-    row.label = hit.family.empty() ? std::string{"signal"} : hit.family;
+    row.label = !hit.decoder.empty() ? hit.decoder
+                : hit.family.empty()  ? std::string{"signal"}
+                                      : hit.family;
+    for (const auto& [key, value] : hit.decoded) {
+        if (!row.decoded.empty()) {
+            row.decoded += ' ';
+        }
+        row.decoded += std::format("{}={}", key, value);
+    }
     row.confidence = std::format("{}%", static_cast<int>(std::clamp(hit.confidence, 0.0, 1.0) * 100.0 + 0.5));
     row.replay_uri = hit.replay_uri;
     return row;

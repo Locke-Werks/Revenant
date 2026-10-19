@@ -1967,6 +1967,11 @@ public:
                                         const capture::Annotation& annotation,
                                         std::optional<std::uint64_t> track_id);
 
+    // The stream index just past the last block handed to the running
+    // stream's writer, or nothing with no writer. Lock free, so a decode lane
+    // may ask per message; it says where "now" is for add_capture_annotation.
+    [[nodiscard]] virtual std::optional<dsp::SampleIndex> capture_stream_index() const;
+
     // Closes the last stream's open segment once run() has returned. run()
     // leaves it open so tracks still alive at the end of the stream can be
     // annotated onto it; this is the caller saying it has finished doing so.
@@ -2100,6 +2105,10 @@ inline std::optional<std::filesystem::path> Engine::capture_root() const { retur
 
 inline void Engine::add_capture_annotation(dsp::SampleIndex, const capture::Annotation&,
                                            std::optional<std::uint64_t>) {}
+
+inline std::optional<dsp::SampleIndex> Engine::capture_stream_index() const {
+    return std::nullopt;
+}
 
 inline void Engine::close_capture() {}
 

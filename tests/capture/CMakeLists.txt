@@ -14,6 +14,7 @@
 add_executable(revenant_capture_tests
     ../support/no_modal_dialogs.cpp
     test_writer.cpp
+    test_decode_annotations.cpp
 )
 
 target_link_libraries(revenant_capture_tests PRIVATE

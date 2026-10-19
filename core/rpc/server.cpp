@@ -315,6 +315,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -329,6 +330,7 @@
 #include <kj/string.h>
 
 #include "core/capture/catalog.h"
+#include "core/capture/decode_annotations.h"
 #include "core/capture/search.h"
 #include "core/capture/track_annotations.h"
 #include "core/detect/detector.h"
@@ -465,7 +467,51 @@ void release_engine(const engine::Engine& engine) {
     out.min_duration_ns = in.getMinDurationNs();
     out.family = std::string(in.getFamily().cStr());
     out.generator = std::string(in.getGenerator().cStr());
+    out.decoder = std::string(in.getDecoder().cStr());
+    for (const auto term : in.getDecoded()) {
+        out.decoded.emplace_back(term.getKey().cStr(), term.getValue().cStr());
+    }
     return out;
+}
+
+// How long a decoded identifier may go unheard before its span closes. Long
+// enough to ride over a P25 control channel's gaps between TSBKs naming the
+// same talkgroup, short enough that two calls a minute apart are two hits.
+constexpr double kDecodeAnnotationGapSeconds = 10.0;
+
+// A receiver's granted passband in absolute hertz, place_tap's arithmetic.
+[[nodiscard]] std::pair<double, double> decoded_passband(const engine::EngineInfo& info,
+                                                         const engine::VrxStatus& status) {
+    const double center = static_cast<double>(info.source_center) +
+                          static_cast<double>(status.params.center);
+    return {center + static_cast<double>(status.placement.granted_low),
+            center + static_cast<double>(status.placement.granted_high)};
+}
+
+// A decoded field as the text a capture annotation stores and a search
+// compares: integers in decimal, so "mmsi=366123456" matches what AIS sent.
+[[nodiscard]] std::string decoded_text(const DecodedField& field) {
+    if (const auto* value = field.integer()) {
+        return std::to_string(*value);
+    }
+    if (const auto* value = field.real()) {
+        return std::format("{}", *value);
+    }
+    if (const auto* value = field.flag()) {
+        return *value ? "true" : "false";
+    }
+    if (const auto* value = field.text()) {
+        return *value;
+    }
+    if (const auto* value = field.bytes()) {
+        std::string hex;
+        hex.reserve(value->size() * 2);
+        for (const std::uint8_t byte : *value) {
+            hex += std::format("{:02x}", byte);
+        }
+        return hex;
+    }
+    return {};
 }
 
 void write_capture_catalog(schema::CaptureCatalog::Builder out, const CaptureCatalog& in) {
@@ -521,6 +567,12 @@ void write_capture_search(schema::CaptureSearchResult::Builder out,
         row.setGenerator(from.generator.c_str());
         row.setTrackId(from.track_id);
         row.setReplayUri(from.replay_uri.c_str());
+        row.setDecoder(from.decoder.c_str());
+        auto decoded = row.initDecoded(static_cast<unsigned>(from.decoded.size()));
+        for (std::size_t j = 0; j < from.decoded.size(); ++j) {
+            decoded[static_cast<unsigned>(j)].setKey(from.decoded[j].first.c_str());
+            decoded[static_cast<unsigned>(j)].setValue(from.decoded[j].second.c_str());
+        }
     }
     out.setMatched(in.matched);
     auto skipped = out.initSkipped(static_cast<unsigned>(in.skipped.size()));
@@ -1231,6 +1283,12 @@ struct DecodeRoute {
     // Scratch the decoder appends into, kept so a busy decoder does not
     // allocate a vector per chunk.
     std::vector<DecodedMessage> scratch;
+
+    // The receiver's granted passband in absolute hertz, for the capture
+    // annotations its messages become. Set at attach and on every retune by
+    // the loop thread, so the lane never asks the engine per message.
+    double freq_lower_hz = 0.0;
+    double freq_upper_hz = 0.0;
 };
 
 // One subscriber to one receiver's passband. Loop thread only, same as
@@ -1724,8 +1782,17 @@ public:
                                      const engine::VrxStatus& status, const DecoderSpec& spec);
     void end_decoded(const std::shared_ptr<DecodedNode>& node);
     void end_decoded_for_vrx(engine::VrxId vrx, kj::StringPtr reason);
-    void reset_decoded_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target);
+    void reset_decoded_for_vrx(engine::VrxId vrx, const engine::VrxStatus& status);
     [[nodiscard]] Expected<DecodedStats> decoded_stats(DecodedNode& node);
+
+    // The decoded half of the capture annotations. note_decoded hands one
+    // message to decode_annotator_ from a decode lane with route.lock held;
+    // the rest close spans for a receiver that moved or went, let spans past
+    // their gap go, and close everything at the end of a stream.
+    void note_decoded(const DecodeRoute& route, const DecodedMessage& message);
+    void close_decoded_annotations(engine::VrxId vrx);
+    void advance_decoded_annotations();
+    void finish_decoded_annotations();
 
     // A decode lane, with route.lock held by the lane's work for the route.
     // Never fails anything: a decoder that refuses records a fault and
@@ -1984,6 +2051,16 @@ private:
     // nothing. On an engine without EngineConfig::capture the engine drops
     // what this sends.
     std::optional<capture::TrackAnnotator> annotator_;  // detect_lock_
+
+    // Turns decoded identifiers into capture annotations. Built on the first
+    // message after capture starts, at that stream's rate, and dropped with
+    // the stream. Its own lock and never detect_lock_: decode lanes feed it
+    // with a route lock held, and the order is route lock, then this, then
+    // the engine's capture lock inside add_capture_annotation. Nothing that
+    // holds this takes detect_lock_ or a route lock.
+    std::mutex decode_annotator_lock_;
+    std::optional<capture::DecodeAnnotator> decode_annotator_;  // decode_annotator_lock_
+    double decode_annotator_rate_ = 0.0;                        // decode_annotator_lock_
 
     // The front end's verdict, and the decision it was last taken at.
     //
@@ -4675,16 +4752,19 @@ void ServerImpl::forget_across_retune() {
             continue;
         }
         reset_rds_for_vrx(id, status->tuning_epoch);
-        reset_decoded_for_vrx(id, status->tuning_epoch);
+        reset_decoded_for_vrx(id, *status);
         reset_audio_for_vrx(id, status->tuning_epoch);
     }
 }
 
 void ServerImpl::flush_capture_annotations() {
-    std::scoped_lock held(detect_lock_);
-    if (annotator_.has_value()) {
-        annotator_->finish();
+    {
+        std::scoped_lock held(detect_lock_);
+        if (annotator_.has_value()) {
+            annotator_->finish();
+        }
     }
+    finish_decoded_annotations();
 }
 
 void ServerImpl::forget_detector() {
@@ -4914,6 +4994,7 @@ void ServerImpl::sigid_consume(const DetectSlot& slot) {
                 annotator_->observe(detector_->tracks(),
                                     detector_->config().confidence_threshold);
             }
+            advance_decoded_annotations();
             publish_detections_locked();
 
             // Kept here as well as in the detector, which a retune rebuilds:
@@ -6106,6 +6187,7 @@ void ServerImpl::enqueue_decoded(DecodeRoute& route) {
     for (DecodedMessage& message : route.scratch) {
         message.vrx = route.vrx.value;
         message.sequence = route.sequence++;
+        note_decoded(route, message);
         for (const auto& node : route.nodes) {
             if (node->forward) {
                 node->forward(message);
@@ -6122,6 +6204,78 @@ void ServerImpl::enqueue_decoded(DecodeRoute& route) {
             }
             node->queue.push_back(message);
         }
+    }
+}
+
+void ServerImpl::note_decoded(const DecodeRoute& route, const DecodedMessage& message) {
+    // A retune's leftovers are the tuning the client left, and the route
+    // already drops them; with no writer there are no samples to note.
+    if (route.discarding() || message.sample_rate == 0 || message.fields.empty()) {
+        return;
+    }
+    const std::optional<dsp::SampleIndex> now = engine_.capture_stream_index();
+    if (!now.has_value()) {
+        return;
+    }
+
+    capture::DecodeAnnotator::Sighting sighting{
+        .vrx = route.vrx.value,
+        .decoder = std::string(route.spec.name),
+        .fields = {},
+        .end_index = *now,
+        .span_samples = 0,
+        .freq_lower_hz = route.freq_lower_hz,
+        .freq_upper_hz = route.freq_upper_hz,
+    };
+    sighting.fields.reserve(message.fields.size());
+    for (const DecodedField& field : message.fields) {
+        sighting.fields.emplace_back(field.key, decoded_text(field));
+    }
+
+    const std::scoped_lock held(decode_annotator_lock_);
+    if (!decode_annotator_.has_value()) {
+        // At the stream's rate, read here rather than at open because capture
+        // starts with run(); the rate does not change while a stream runs.
+        const double source_rate = static_cast<double>(engine_.info().source_rate);
+        if (source_rate <= 0.0) {
+            return;
+        }
+        decode_annotator_.emplace(
+            static_cast<std::uint64_t>(source_rate * kDecodeAnnotationGapSeconds),
+            [this](std::uint64_t start, const capture::Annotation& annotation) {
+                engine_.add_capture_annotation(start, annotation, std::nullopt);
+            });
+        decode_annotator_rate_ = source_rate;
+    }
+    const double receiver_samples = static_cast<double>(message.end_sample - message.start_sample);
+    sighting.span_samples = static_cast<std::uint64_t>(
+        receiver_samples / static_cast<double>(message.sample_rate) * decode_annotator_rate_);
+    decode_annotator_->observe(sighting);
+}
+
+void ServerImpl::close_decoded_annotations(engine::VrxId vrx) {
+    const std::scoped_lock held(decode_annotator_lock_);
+    if (decode_annotator_.has_value()) {
+        decode_annotator_->close_vrx(vrx.value);
+    }
+}
+
+void ServerImpl::advance_decoded_annotations() {
+    const std::optional<dsp::SampleIndex> now = engine_.capture_stream_index();
+    if (!now.has_value()) {
+        return;
+    }
+    const std::scoped_lock held(decode_annotator_lock_);
+    if (decode_annotator_.has_value()) {
+        decode_annotator_->advance(*now);
+    }
+}
+
+void ServerImpl::finish_decoded_annotations() {
+    const std::scoped_lock held(decode_annotator_lock_);
+    if (decode_annotator_.has_value()) {
+        decode_annotator_->finish();
+        decode_annotator_.reset();
     }
 }
 
@@ -6146,6 +6300,8 @@ Status ServerImpl::add_decoded(std::shared_ptr<DecodedNode> node,
         route->epoch_target = status.tuning_epoch;
 
         route->lane = pick_lane();
+        std::tie(route->freq_lower_hz, route->freq_upper_hz) =
+            decoded_passband(engine_.info(), status);
         auto attached = engine_.attach_audio_sink(
             node->vrx,
             lane_sink(route->lane, std::make_shared<const LaneWork>(
@@ -6300,14 +6456,26 @@ void ServerImpl::end_decoded_for_vrx(engine::VrxId vrx, kj::StringPtr reason) {
     for (const auto& route : routes) {
         end_decode_route(route, reason);
     }
+
+    // After the routes end, so what a decoder flushed on its way out still
+    // lands in the span it extends.
+    close_decoded_annotations(vrx);
 }
 
-void ServerImpl::reset_decoded_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target) {
+void ServerImpl::reset_decoded_for_vrx(engine::VrxId vrx, const engine::VrxStatus& status) {
+    const std::uint64_t epoch_target = status.tuning_epoch;
+    const auto [lower, upper] = decoded_passband(engine_.info(), status);
+
+    // Before the routes take the new edges, so a span open at the old
+    // frequency is written with the old one.
+    close_decoded_annotations(vrx);
     for (const auto& [key, route] : decode_routes_) {
         if (key.first != vrx.value) {
             continue;
         }
         const std::scoped_lock held(route->lock);
+        route->freq_lower_hz = lower;
+        route->freq_upper_hz = upper;
         if (route->decoder != nullptr) {
             route->decoder->reset();
         }
@@ -6570,6 +6738,10 @@ void ServerImpl::release_source_state(kj::StringPtr reason) {
         last_front_end_decision_ = 0;
         withdraw_detections_locked();
     }
+
+    // The decoded spans belong to the stream too, and the next one counts
+    // its indices from its own start.
+    finish_decoded_annotations();
 
     // The queued copies, which are the old stream's frames numbered in its
     // sample indices. The spare pools are left: they are memory this server
@@ -7076,6 +7248,8 @@ kj::Promise<CaptureSearchResult> ServerImpl::capture_search(capture::Query query
                 row.family = hit.family;
                 row.generator = hit.generator;
                 row.track_id = hit.track_id;
+                row.decoder = hit.decoder;
+                row.decoded = hit.decoded;
                 row.replay_uri = replay_uri(capture_root_, hit.start_ns - kReplayLeadNs,
                                             hit.end_ns + kReplayTailNs);
                 out.hits.push_back(std::move(row));
@@ -7809,7 +7983,7 @@ Status ServerImpl::after_vrx_retuned(engine::VrxId vrx, const engine::VrxParams&
     // Every event decoder on the receiver too, on the same fence and for the
     // same reason: a P25 header half from one transmitter and half from
     // another decodes to a talkgroup neither of them sent.
-    reset_decoded_for_vrx(vrx, status->tuning_epoch);
+    reset_decoded_for_vrx(vrx, *status);
 
     // And a P25 receiver's voice, which is a decoder in an audio route.
     reset_audio_for_vrx(vrx, status->tuning_epoch);
@@ -8486,6 +8660,7 @@ void ServerImpl::stop() {
         last_front_end_decision_ = 0;
         withdraw_detections_locked();
     }
+    finish_decoded_annotations();
 
     release_engine(engine_);
 }

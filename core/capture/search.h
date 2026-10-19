@@ -24,6 +24,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "core/capture/format.h"
@@ -40,6 +41,7 @@ inline constexpr std::string_view kIndexGenerator = "revenant-index";
 //
 // format.h's Annotation carries what an annotation says about the signal and
 // not who said it, so the generator and the live track id ride beside it.
+// A decode entry's decoder and identifiers are in the Annotation itself.
 // A query filters on the generator, which is how a caller asks for the live
 // detector's view, the offline index's, or both.
 struct StoredAnnotation {
@@ -157,6 +159,14 @@ struct Query {
 
     // Exact. Empty takes every generator.
     std::string generator;
+    // A decoder's name, exact but case-insensitive. Empty takes every
+    // annotation; non-empty excludes everything that is not a decode entry.
+    std::string decoder;
+
+    // Identifier terms, all of which must match one decode entry's
+    // revenant:decoded. Key and value are exact but case-insensitive, since
+    // a callsign is the same callsign in either case.
+    std::vector<std::pair<std::string, std::string>> decoded;
 };
 
 struct Hit {
@@ -182,6 +192,11 @@ struct Hit {
 
     // The live detector's track id, zero when the entry carried none.
     std::uint64_t track_id = 0;
+
+    // A decode entry's, format.h's; empty on every other.
+    std::string decoder;
+    std::vector<std::pair<std::string, std::string>> decoded;
+    std::uint32_t messages = 0;
 };
 
 // Every annotation passing the query, ordered by start, then by lower edge,
