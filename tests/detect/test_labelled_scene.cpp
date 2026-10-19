@@ -41,7 +41,10 @@
 //
 // THIRTY SECONDS A SCENE. With twenty, RTTY's first probe came back at 11 to
 // 12 s of stream and its long dwell did not land before the end on two seeds
-// of three on 16 channels; with thirty it verified on all three.
+// of three on 16 channels; with thirty it verified on all three. Thirty also
+// leaves room for the two retries tier two gives an unverified dwell, which
+// is what holds RTTY's label on a run whose first dwell came back empty; see
+// the comment above the case.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -253,24 +256,15 @@ struct Record {
 // moves any emitter of the labelled scene off its label, which is what the
 // keyed carrier's did unnoticed.
 //
-// WHAT THIS USED TO SAY, with the case tagged [!mayfail] from 8e1e10a: "This
-// case runs and reports every wrong label as before; [!mayfail] only stops a
-// failure from failing the run. It went in to let a release out, after the
-// case failed three runs in a row on RTTY seed 3, 16 channels, reading 2FSK.
-// The cause is in identification, not in this test: RTTY's long dwell comes
-// back unverified for some placements of its 5 s window, and the placement
-// follows the wall clock and the probe pool's load". Tier two now gives an
-// unverified dwell up to detect::kIdentifyDwells in all, so one bad placement
-// no longer settles RTTY's label: RTTY on 16 channels ended RTTY in 15 of 15
-// seed runs under load on 2026-10-02.
-//
-// [!mayfail] IS STILL ON, FOR A DIFFERENT CAUSE. One run in five under load
-// failed on D-STAR, seed 2, the CLI's own grid, read as M17. core/identify's
-// M17 row sometimes verifies on a D-STAR signal (a LinkSetup counted as 2
-// against a bar of 2), and the first row to verify wins, so no retry follows.
-// Take the tag off when that row stops verifying on D-STAR; GitHub issue #2.
+// RTTY ON SIXTEEN CHANNELS reads 2FSK first on some runs and recovers: its
+// long dwell comes back unverified for some placements of its 5 s window, and
+// tier two gives an unverified dwell up to detect::kIdentifyDwells in all.
+// D-STAR on the CLI's own grid read M17 on some runs, until the M17 row
+// stopped counting a link setup frame whose CRC failed and stream frames
+// whose Frame Numbers do not count by one; tests/characterise/test_identify.cpp
+// holds that row to D-STAR. GitHub issue #2 has both.
 TEST_CASE("each emitter of the labelled scene ends with its own label",
-          "[gpu][detect][labelled][!mayfail]") {
+          "[gpu][detect][labelled]") {
     REVENANT_NEEDS_GPU();
 
     const std::uint64_t seeds[] = {1, 2, 3};

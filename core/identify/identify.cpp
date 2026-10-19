@@ -6,8 +6,10 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <format>
 #include <numbers>
+#include <optional>
 #include <vector>
 
 #include "core/decode/ax25.h"
@@ -198,12 +200,28 @@ struct Counted {
     if (auto ran = decoder->process(samples, frames); !ran) {
         return std::unexpected(ran.error());
     }
+    // A stream frame counts only when its Frame Number is one on from the
+    // stream frame before it, the paragraph under Table 2.10. The decoder
+    // keeps decoding stream frames behind an LSF whose CRC failed, so a
+    // stream frame on its own is not behind either of m17.h's rules; on
+    // D-STAR that put five on one dwell, GitHub issue #2.
+    std::optional<std::uint16_t> previous;
     Counted counted;
     for (const decode::M17Frame& frame : frames) {
-        if (frame.kind == decode::M17FrameKind::LinkSetup && frame.lsf.has_value()) {
+        if (frame.kind == decode::M17FrameKind::Stream && frame.stream.has_value()) {
+            const std::uint16_t number = frame.stream->frame_number & 0x7FFFU;
+            if (previous.has_value() && ((*previous + 1U) & 0x7FFFU) == number) {
+                ++counted.verified;
+            }
+            previous = number;
+            continue;
+        }
+        previous.reset();
+        // The decoder hands back an LSF whose CRC failed, for display; only
+        // one that checked is evidence, and it counts for the whole bar.
+        if (frame.kind == decode::M17FrameKind::LinkSetup && frame.lsf.has_value() &&
+            frame.lsf->crc_valid) {
             counted.verified += 2;
-        } else if (frame.kind == decode::M17FrameKind::Stream && frame.stream.has_value()) {
-            ++counted.verified;
         }
     }
     return counted;

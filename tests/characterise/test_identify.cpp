@@ -447,6 +447,53 @@ TEST_CASE("noise verifies nothing at any plausible width", "[characterise][ident
     }
 }
 
+// D-STAR read as M17 on the labelled scene, GitHub issue #2: the M17 row
+// counted a link setup frame as two whether its CRC checked or not, and two
+// is the whole bar, so one sync burst found in D-STAR's GMSK settled the
+// label. Many dwells of D-STAR, each starting at a different point of its
+// frames and in different noise, and the M17 row must verify on none.
+//
+// REJECTS: an M17 link setup frame counted without its CRC, which is what
+// identify.h already said the row required.
+TEST_CASE("D-STAR does not verify the M17 row", "[characterise][identify]") {
+    constexpr dsp::SampleRate kRate = 48000;
+    siggen::DStarModConfig mod;
+    mod.rate = kRate;
+    siggen::DStarMessage message;
+    message.header.own_callsign = "N0CALL";
+    message.header.companion = "CQCQCQ";
+    message.header.destination_repeater = "DIRECT";
+    message.header.departure_repeater = "DIRECT";
+    std::uint32_t state = 0x2468ACEU;
+    for (std::size_t i = 0; i < 168; ++i) {
+        std::array<std::uint8_t, decode::kDStarVoiceBits> voice{};
+        for (std::uint8_t& bit : voice) {
+            state = state * 1103515245U + 12345U;
+            bit = static_cast<std::uint8_t>((state >> 16) & 1U);
+        }
+        message.voice_frames.push_back(voice);
+    }
+    auto once = siggen::dstar_render(mod, message);
+    REQUIRE(once.has_value());
+    const auto long_run = repeat_to(*once, 6 * kRate);
+    constexpr std::size_t kDwell = 2 * kRate;
+    for (std::uint64_t trial = 0; trial < 24; ++trial) {
+        const auto start = static_cast<std::ptrdiff_t>(trial * (kRate / 6));
+        const std::vector<dsp::Complex32> dwell(
+            long_run.begin() + start, long_run.begin() + start + static_cast<std::ptrdiff_t>(kDwell));
+        const auto samples = in_noise(dwell, kRate, kSnrDb, kSeed + 300 + trial);
+        const auto result = run(samples, kRate, 5000.0);
+        for (const identify::Attempt& attempt : result.attempts) {
+            if (attempt.protocol == Protocol::M17) {
+                INFO("trial " << trial << ": M17 " << attempt.verified << "/" << attempt.required);
+                CHECK(attempt.result != identify::AttemptResult::Verified);
+            }
+        }
+        INFO("trial " << trial);
+        CHECK(result.protocol != Protocol::M17);
+    }
+}
+
 // REJECTS: CW claimed on a carrier that is on and never keyed, which is what
 // the tier-two "carrier" answer mostly is on HF. A keyed carrier has elements
 // and spaces to time; a steady one has neither.

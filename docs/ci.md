@@ -225,18 +225,16 @@ dongle skips in it did not test the backend.
 contention with a second process, the timeout, release on destruction, a holder
 that is killed, and a test double standing in for the device open.
 
-### One case may fail without failing the run, until issue #2
+### No case may fail without failing the run
 
 "each emitter of the labelled scene ends with its own label", in
-`tests/detect/test_labelled_scene.cpp`, carries Catch2's `[!mayfail]` tag since
-2026-10-02. It still runs and still prints every wrong label, but a failure exits 0, so
-ctest lists the case as passed and `build-and-test` stays green. It went on after the
-case failed three runs in a row on RTTY, seed 3, 16 channels, which held up the release
-job behind it ("Let the labelled scene case fail without failing the run until #2").
-The RTTY cause was fixed the same day by giving an unverified identification dwell two
-more tries; the tag stays for a second one, the M17 row in `core/identify` sometimes
-verifying on a D-STAR signal. The comment above the case has both, and the tag comes off
-when GitHub issue #2 closes.
+`tests/detect/test_labelled_scene.cpp`, carried Catch2's `[!mayfail]` tag from
+2026-10-02 until GitHub issue #2 closed: a failure exited 0, so ctest listed the case as
+passed. It went on after the case failed three runs in a row on RTTY, seed 3, 16
+channels. RTTY was fixed by giving an unverified identification dwell two more tries,
+and the second cause, the M17 row in `core/identify` verifying on D-STAR, by counting
+only a link setup frame whose CRC checks and stream frames whose Frame Numbers count by
+one. The tag is off and the case fails the run again.
 
 A green run therefore says nothing about that case. Read its output in the ctest log
 rather than its status.

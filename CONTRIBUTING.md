@@ -115,9 +115,9 @@ worth stating rather than leaving to be assumed.
 Hardware tests skip when the hardware is absent, so a machine with no radio
 and no sound card still runs a green suite. A skip is not a pass: if you
 changed something a skipped test covers, find a way to run it. Nor is a case
-tagged `[!mayfail]`, which can fail inside a green run; one is tagged that way
-today, and docs/ci.md says which and why. If your change touches what it
-covers, read its output.
+tagged `[!mayfail]`, which can fail inside a green run; none is tagged that
+way today, and one that is gets a section in docs/ci.md saying which and why.
+If your change touches what it covers, read its output.
 
 The cases that open the RTL-SDR carry the ctest label `dongle`. To run
 everything else while you are using the radio:

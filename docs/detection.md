@@ -2907,8 +2907,7 @@ note on a constant envelope are now 2-FSK ahead of every other branch
 (`CharacteriseConfig::tone_pair_fraction`, "THE SAME TWO BARS ON A CONSTANT
 ENVELOPE"), which is the right family and opens the RTTY row on every probe.
 
-`tests/detect/test_labelled_scene.cpp` runs it in ctest, under `[!mayfail]`
-since 2026-10-02 for the reason two paragraphs down: `siggen labelled`
+`tests/detect/test_labelled_scene.cpp` holds it in ctest: `siggen labelled`
 at seeds 1, 2 and 3, 30 s each, run at twice realtime on sixteen channels
 and on the default grid, and every emitter's tracks at the last decision carry
 its own label and no other. All twelve held on all six runs, RTTY by its
@@ -2917,8 +2916,8 @@ reason below, and USB, since "USB and LSB on the wire" below, by its side.
 WHAT THE FIRST SENTENCE USED TO SAY at its end: "carry its own label and no
 other, USB none", which was the rule for USB until the side reached the label.
 And at its start: "`tests/detect/test_labelled_scene.cpp` holds it, in ctest",
-which it did until the tag, since when a wrong label is reported and does not
-fail the run.
+which it did until the `[!mayfail]` tag of 2026-10-02, and does again since
+issue #2 closed.
 
 RTTY on sixteen channels held to its protocol only while its one long dwell
 verified. Where a dwell's five seconds fall follows the wall clock and the
@@ -2929,16 +2928,18 @@ decoders went into the AX.25 and P25 rows (GitHub issue #2). Tier two now
 gives a narrow track up to `detect::kIdentifyDwells` long dwells, each only
 while the one before verified nothing, behind every first dwell.
 
-**The case runs in ctest and no longer fails it.** "Let the labelled scene
-case fail without failing the run until #2" tagged it `[!mayfail]` on
-2026-10-02 to let a release out: it still runs every emitter and reports every
-wrong label, and a failure no longer fails `ctest`. After the retried dwells
-RTTY on sixteen channels ended RTTY in 15 of 15 seed runs under load. The tag
-stays for a second cause: one run in five under load read D-STAR, seed 2, on
-the CLI's own grid, as M17, because `core/identify`'s M17 row sometimes
-verifies on a D-STAR signal, a link setup counted as 2 against a bar of 2, and
-the first row to verify wins, so no retry follows. It comes off when that row
-stops verifying on D-STAR; issue #2 is open.
+**The case fails the run again.** "Let the labelled scene case fail without
+failing the run until #2" tagged it `[!mayfail]` on 2026-10-02 to let a
+release out. After the retried dwells RTTY on sixteen channels ended RTTY in 15
+of 15 seed runs under load, and a second cause remained: one run in five under
+load read D-STAR, seed 2, on the CLI's own grid, as M17. The M17 row counted a
+link setup frame as 2 against a bar of 2 whether its CRC checked or not, and
+every stream frame the decoder handed back behind it as 1, and the first row to
+verify wins, so no retry followed. On 24 two-second dwells of D-STAR at 20 dB
+the row verified on three. It now counts a link setup frame only when its CRC
+checks and a stream frame only when its Frame Number is one on from the stream
+frame before it; `tests/characterise/test_identify.cpp`, "D-STAR does not
+verify the M17 row", holds it there, and the tag is off.
 
 **RTTY's protocol on the default grid** is out of reach, and was before. Its
 detection is 1318 Hz wide, and the RTTY and CW rows in

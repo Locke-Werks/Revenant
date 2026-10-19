@@ -36,9 +36,8 @@
 //                 CRC. One, because that CRC sits under a training sequence
 //                 correlation and a rate 2/3 code.
 //   M17           a link setup frame whose CRC checks, counting two, or a
-//                 stream frame whose LICH decoded under its Golay code behind
-//                 the preamble or frame-number rule m17.h states, counting
-//                 one. Two.
+//                 stream frame whose Frame Number is one on from the stream
+//                 frame before it, M17 2.8.1, counting one. Two.
 //   POCSAG        a batch synchronised on its codeword and confirmed by the
 //                 preamble or by the next synchronisation codeword, ITU-R
 //                 M.584-2 clauses 1.1 and 1.2, or a page whose address
