@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "hackrf",
+  "version-string": "2026.01.3",
+  "description": "libhackrf, the host library for the HackRF One and HackRF Pro. Revenant overlay: the library alone, from greatscottgadgets/hackrf v2026.01.3",
+  "homepage": "https://github.com/greatscottgadgets/hackrf",
+  "license": "BSD-3-Clause",
+  "supports": "!uwp",
+  "dependencies": [
+    "libusb",
+    {
+      "name": "pthreads",
+      "platform": "windows & !mingw"
+    },
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ]
+}

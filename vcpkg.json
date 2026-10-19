@@ -12,6 +12,7 @@
         },
         "libusb",
         "rtlsdr",
+        "hackrf",
         "capnproto",
         "whisper-cpp",
         {

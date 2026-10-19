@@ -49,6 +49,11 @@ patches and Revenant's own archive. This also carries rtlsdr's upstream
 source, because a patch is a set of changes to a base and without the base it
 is not the source of anything.
 
+hackrf, built since 2026-10-18 from vcpkg-overlays/hackrf, is not in the
+archive: it compiles only libhackrf's hackrf.c and hackrf.h, both
+BSD-3-Clause, and the port declares that, so is_copyleft leaves it out.
+docs/hackrf-provenance.md has the pin and the licence reading.
+
 THE CLIENT'S LIBRARIES
 
 The client payload conveys Qt 6.8.3 (LGPL-3.0) and FFmpeg 7.1

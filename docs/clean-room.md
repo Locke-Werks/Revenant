@@ -333,7 +333,7 @@ reading the licence file in each repository:
 | Project | Licence | Verified from |
 | --- | --- | --- |
 | `osmocom/rtl-sdr` (librtlsdr) | GPL-2.0-or-later | `COPYING` at the repository root for the version 2 text, the per-file notice for the "or later" |
-| `greatscottgadgets/hackrf` (libhackrf) | GPL-2.0 | `COPYING` at the repository root |
+| `greatscottgadgets/hackrf` (libhackrf) | GPL-2.0 at the root; `hackrf.c` and `hackrf.h` are BSD-3-Clause | `COPYING` at the repository root. Corrected 2026-10-18: the root file covers the firmware, tools and build files, and the two library sources carry their own BSD-3-Clause notices. The HackRF backend compiles only those two; see `docs/hackrf-provenance.md` |
 | `pothosware/SoapySDR` | Boost Software License 1.0 | `LICENSE_1_0.txt` |
 | `libusb/libusb` | LGPL-2.1-or-later | `COPYING` at the repository root for the version 2.1 text, the per-file notice for the "or later". The survey recorded only the root file and so recorded only "LGPL-2.1"; corrected 2026-09-19, see below |
 
