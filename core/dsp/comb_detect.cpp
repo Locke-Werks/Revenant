@@ -308,6 +308,62 @@ void match(const std::vector<Peak>& peaks, double c, double d, double tolerance,
     if (ks.empty()) {
         return std::nullopt;
     }
+
+    // Two combs a few bins apart at one spacing, a comb and its one-sided
+    // ripple comb, can each sit inside the loose tolerances, and the least-
+    // squares line then settles between them, tilted, on one comb's lines at
+    // one end and the other's at the other. Each end is then one comb alone,
+    // so a grid regrown from either end's lines at the final tolerance holds
+    // that comb across the span; the one with the most lines wins.
+    if (ks.size() >= 3 * kCombMinLines) {
+        const std::size_t third = ks.size() / 3;
+        for (const bool low : {true, false}) {
+            double sc = 0.0;
+            double sd = 0.0;
+            std::vector<std::int64_t> seed_ks(low ? ks.begin() : ks.end() - static_cast<std::ptrdiff_t>(third),
+                                              low ? ks.begin() + static_cast<std::ptrdiff_t>(third) : ks.end());
+            std::vector<std::size_t> seed_which(
+                low ? which.begin() : which.end() - static_cast<std::ptrdiff_t>(third),
+                low ? which.begin() + static_cast<std::ptrdiff_t>(third) : which.end());
+            bool ok = true;
+            for (int pass = 0; pass < 5 && ok; ++pass) {
+                if (pass > 0) {
+                    match(peaks, sc, sd, final_tolerance, seed_ks, seed_which);
+                }
+                double sk = 0.0;
+                double sx = 0.0;
+                double skk = 0.0;
+                double skx = 0.0;
+                const auto m = static_cast<double>(seed_ks.size());
+                for (std::size_t i = 0; i < seed_ks.size(); ++i) {
+                    const auto k = static_cast<double>(seed_ks[i]);
+                    const double x = peaks[seed_which[i]].x;
+                    sk += k;
+                    sx += x;
+                    skk += k * k;
+                    skx += k * x;
+                }
+                const double det = m * skk - sk * sk;
+                ok = seed_ks.size() >= 2 && det > 0.0;
+                if (ok) {
+                    sd = (m * skx - sk * sx) / det;
+                    sc = (sx - sd * sk) / m;
+                    ok = sd >= kMinSpacingBins * 0.9;
+                }
+            }
+            if (!ok) {
+                continue;
+            }
+            match(peaks, sc, sd, final_tolerance, seed_ks, seed_which);
+            if (seed_ks.size() > ks.size()) {
+                c = sc;
+                d = sd;
+                ks = std::move(seed_ks);
+                which = std::move(seed_which);
+            }
+        }
+    }
+
     Fit fit;
     fit.c = c;
     fit.d = d;
