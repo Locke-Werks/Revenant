@@ -37,10 +37,32 @@ The harness in `tools/bench` reads these and skips, loudly, any entry whose
 data file is not present locally, so a developer without the corpus still gets
 a green synthetic run and an explicit list of what went untested.
 
-Extraction exists: `revenant-capture extract` cuts whole segments out of the
-rolling capture, which shipped as M4. The corpus is still empty and nothing in
-`tools/bench` reads a manifest yet, so the harness above is the design and not
-code. Issue #4 tracks it.
+An entry is `<name>.sigmf-meta` in this directory: the sidecar
+`revenant-capture extract` wrote, with these keys added to `global`:
+
+    "core:sha512": "<dataset checksum>",
+    "corpus:url": "<where to fetch <name>.sigmf-data>",
+    "corpus:min_recall": 0.9,
+    "corpus:max_false_alarms": 3,
+    "corpus:truth": [
+      {"core:freq_lower_edge": 152000000, "core:freq_upper_edge": 152020000,
+       "core:label": "POCSAG"}
+    ]
+
+Edges are absolute Hz; `core:label` is optional and, when present, must match
+`detect::label_track`'s name. `corpus:max_false_alarms` is optional. The truth
+is its own key because the sidecar's `annotations` already hold what the live
+detector saw. The dataset is `<data dir>/<name>.sigmf-data`, with the sidecar
+extract wrote beside it, since the file source finds a dataset through that.
+
+`bench corpus --data DIR` (or `REVENANT_CORPUS`) replays each entry through the
+engine, the detector and tier two, prints one line per entry and a total, and
+exits 1 when an entry is under its thresholds. `tools/bench/corpus.h` has the
+scoring. The corpus itself is still empty.
+
+WHAT THIS PARAGRAPH USED TO SAY, until 2026-10-18: "The corpus is still empty
+and nothing in `tools/bench` reads a manifest yet, so the harness above is the
+design and not code. Issue #4 tracks it."
 
 WHAT THIS PARAGRAPH USED TO SAY, until 2026-10-16: "Arrives with extraction,
 which needs the rolling capture to extract from: the README's roadmap numbers

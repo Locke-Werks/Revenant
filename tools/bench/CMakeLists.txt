@@ -3,6 +3,7 @@
 
 add_library(revenant_bench STATIC
     sweep.cpp
+    corpus.cpp
     curve.cpp
     throughput.cpp
     cw_engine.cpp

@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <format>
 #include <fstream>
 #include <optional>
@@ -40,6 +41,7 @@
 
 #include "core/engine/vrx.h"
 #include "core/error.h"
+#include "tools/bench/corpus.h"
 #include "tools/bench/curve.h"
 #include "tools/bench/cw_engine.h"
 #include "tools/bench/mode_subjects.h"
@@ -1004,6 +1006,49 @@ int command_cw_engine(const ArgMap& args) {
 
 constexpr std::string_view kCwFileOptions[] = {"seconds", "channels", "gpu"};
 
+constexpr std::string_view kCorpusOptions[] = {"manifests", "data", "pace", "gpu"};
+
+// The real-signal corpus. tools/bench/corpus.h has the manifest format and
+// the scoring; this is the argument layer and the exit code.
+int command_corpus(const ArgMap& args) {
+    if (const Status ok = args.require_known(kCorpusOptions); !ok) {
+        std::print(stderr, "bench corpus: {}\n", ok.error().message);
+        return kExitUsage;
+    }
+    const std::string manifests(args.text("manifests", "tests/corpus"));
+    std::string data(args.text("data", ""));
+    if (data.empty()) {
+        if (const char* env = std::getenv("REVENANT_CORPUS"); env != nullptr) {
+            data = env;
+        }
+    }
+    bench::CorpusRunOptions options;
+    auto pace = args.number("pace", options.pace);
+    auto gpu = args.number("gpu", options.gpu);
+    for (const revenant::Error* error :
+         {pace ? nullptr : &pace.error(), gpu ? nullptr : &gpu.error()}) {
+        if (error != nullptr) {
+            std::print(stderr, "bench corpus: {}\n", error->message);
+            return kExitUsage;
+        }
+    }
+    options.pace = *pace;
+    options.gpu = static_cast<int>(*gpu);
+
+    auto entries = bench::load_corpus(manifests);
+    if (!entries) {
+        std::print(stderr, "bench corpus: {}\n", entries.error().message);
+        return kExitError;
+    }
+    const bench::CorpusReport report = bench::run_corpus(
+        *entries, data,
+        [&](const bench::CorpusEntry& entry, const std::string& path) {
+            return bench::replay_corpus_entry(entry, path, options);
+        },
+        stdout);
+    return report.regressed() ? kExitRegression : kExitOk;
+}
+
 int command_cw_file(const ArgMap& args) {
     if (const Status ok = args.require_known(kCwFileOptions); !ok) {
         std::print(stderr, "bench cw-file: {}\n", ok.error().message);
@@ -1152,6 +1197,14 @@ the offset in hertz from the source's centre, mode cw, usb or lsb.
   --channels N            channelizer channels          (default 16)
   --gpu N                 device index                  (default -1)
 
+corpus: every entry in tests/corpus replayed through the detector and tier two
+and scored against its ground truth (tools/bench/corpus.h, tests/corpus/README.md).
+An entry whose dataset is not present is skipped and listed, not failed.
+  --manifests DIR         the entries' sidecars         (default tests/corpus)
+  --data DIR              the datasets                  (default $REVENANT_CORPUS)
+  --pace X                multiple of realtime          (default 2)
+  --gpu N                 device index                  (default -1)
+
 exit codes:
   0  ok
   1  regression, or validation outside the band
@@ -1199,6 +1252,9 @@ int main(int argc, char** argv) {
     }
     if (command == "cw-engine") {
         return command_cw_engine(*parsed);
+    }
+    if (command == "corpus") {
+        return command_corpus(*parsed);
     }
 
     std::print(stderr, "bench: unknown command '{}'\n", command);

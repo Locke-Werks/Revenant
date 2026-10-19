@@ -72,6 +72,38 @@ if(TARGET bench)
         TIMEOUT 600
     )
 
+    # The corpus harness's manifest parsing, scoring and skip rule, host code.
+    add_executable(revenant_bench_corpus_tests
+        ../support/no_modal_dialogs.cpp
+        test_corpus.cpp
+    )
+    target_link_libraries(revenant_bench_corpus_tests PRIVATE
+        revenant_bench
+        Catch2::Catch2WithMain
+    )
+    target_include_directories(revenant_bench_corpus_tests PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(revenant_bench_corpus_tests PRIVATE
+        REVENANT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    revenant_apply_warnings(revenant_bench_corpus_tests)
+    catch_discover_tests(revenant_bench_corpus_tests
+        PROPERTIES
+            LABELS "tools"
+            TIMEOUT 300
+    )
+
+    # The corpus run itself, from the source tree so the default manifest
+    # directory resolves. With no datasets on the machine every entry skips
+    # and the run is green, which is the README's promise.
+    add_test(
+        NAME bench_corpus_runs
+        COMMAND bench corpus
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(bench_corpus_runs PROPERTIES
+        LABELS "tools"
+        TIMEOUT 3600
+    )
+
     # The rds mode, run small: one point at 12 dB Eb/N0, eight trials. It
     # proves the transmitter, the noise and the decoder are wired into the
     # harness and that every trial locks, which is what the decoded count
