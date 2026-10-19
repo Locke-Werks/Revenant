@@ -72,7 +72,8 @@ segments that were captured without it, or with different settings, and writes
 what it finds back into their metas; on the RTX 4090 that runs at about 12x
 realtime at 2.4 MS/s. `extract` copies whole segments.
 
-Decoders write what they read into the metas too. Each identifier a receiver
+Decoders running in the engine write what they read into the metas too;
+`revenant-cli --decode --capture` does not. Each identifier a receiver
 decodes (a P25 or DMR talkgroup, source or destination; an AIS MMSI or
 callsign; an AX.25 or M17 source; a POCSAG address; a D-STAR caller; a TETRA
 network's country and network codes) becomes one annotation under the
@@ -81,7 +82,9 @@ it has been quiet for 10 s, its receiver retunes or goes away, or the capture
 stops. `--decoder NAME` and `--decoded KEY=VALUE` find them, in `search` and
 `occupancy` alike. Repeat `--decoded` to require every term. Keys and values
 match whole and ignore case, so `talkgroup=101` does not find 1011 and
-`callsign=wdc1234` finds WDC1234. Free text is never indexed.
+`callsign=wdc1234` finds WDC1234. A P25 control channel's grant groups are
+filed as `talkgroup`, the same key a voice channel uses. Free text is never
+indexed.
 
 ## Replaying
 

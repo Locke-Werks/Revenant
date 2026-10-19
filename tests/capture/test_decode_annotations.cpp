@@ -119,6 +119,33 @@ TEST_CASE("close_vrx ends only that receiver's spans", "[capture][decode]")
     CHECK(h.annotator.open_spans() == 0);
 }
 
+// A control channel's grants name the talkgroup "group" and "group_2"; they
+// must land in the same span a voice channel's "talkgroup" would.
+TEST_CASE("p25 control channel groups are filed as talkgroups", "[capture][decode]")
+{
+    Harness h;
+    h.annotator.observe(sighting(1, "p25p1", {{"group", "2559"}, {"source", "190709"}}, 1'000));
+    h.annotator.observe(sighting(1, "p25p1", {{"group", "2559"}, {"group_2", "4712"}}, 2'000));
+    h.annotator.observe(sighting(1, "p25p1", {{"talkgroup", "2559"}}, 3'000));
+    h.annotator.finish();
+    REQUIRE(h.out.size() == 3);
+    int tg2559 = 0;
+    int tg4712 = 0;
+    for (const Emitted& e : h.out) {
+        REQUIRE(e.annotation.decoded.size() == 1);
+        if (e.annotation.decoded[0] == std::pair<std::string, std::string>{"talkgroup", "2559"}) {
+            ++tg2559;
+            CHECK(e.annotation.messages == 3);
+        }
+        if (e.annotation.decoded[0] == std::pair<std::string, std::string>{"talkgroup", "4712"}) {
+            ++tg4712;
+        }
+    }
+    CHECK(tg2559 == 1);
+    CHECK(tg4712 == 1);
+    CHECK(DecodeAnnotator::filed_as("dmr", "group") == "group");
+}
+
 TEST_CASE("only allowlisted identifier keys are indexed", "[capture][decode]")
 {
     Harness h;

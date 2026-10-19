@@ -87,17 +87,31 @@ public:
         return false;
     }
 
+    // The name a key is filed under. A P25 control channel publishes its
+    // talkgroups as "group" and "group_2" (the TSBK grants), the voice
+    // channel as "talkgroup"; both are filed as talkgroup so one search
+    // finds a talkgroup whichever channel heard it. Found in the live check
+    // of 2026-10-18, where a control channel indexed no talkgroup at all.
+    [[nodiscard]] static std::string_view filed_as(std::string_view decoder, std::string_view key)
+    {
+        if (decoder == "p25p1" && (key == "group" || key == "group_2")) {
+            return "talkgroup";
+        }
+        return key;
+    }
+
     void observe(const Sighting& sighting)
     {
         advance(sighting.end_index);
         const std::uint64_t start =
             sighting.end_index - std::min(sighting.span_samples, sighting.end_index);
-        for (const auto& [key, value] : sighting.fields) {
+        for (const auto& [raw_key, value] : sighting.fields) {
+            const std::string_view key = filed_as(sighting.decoder, raw_key);
             if (value.empty() || !indexed(sighting.decoder, key)) {
                 continue;
             }
-            auto [it, opened] =
-                open_.try_emplace(Key{sighting.vrx, sighting.decoder, key, value});
+            auto [it, opened] = open_.try_emplace(
+                Key{sighting.vrx, sighting.decoder, std::string(key), value});
             Open& span = it->second;
             if (opened) {
                 span.start = start;
