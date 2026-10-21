@@ -132,6 +132,7 @@ ColumnLayout {
         // Ctrl+Home; models/span_view.h has the rules. "full" is the way out
         // of a band the menu zoomed to, and is lit while the view is narrow.
         Row {
+            id: zoomRow
             anchors.left: ceilingPin.right
             anchors.leftMargin: 6
             anchors.verticalCenter: ceilingPin.verticalCenter
@@ -167,6 +168,26 @@ ColumnLayout {
                            : "") + "Show the full span (" + KeyMap.keysText("view.full") + ")"
                 }
             }
+        }
+
+        // Band-plan overlay labels (feature 18): plan channels and named
+        // detections over the trace, and the toggle for them beside the zoom.
+        SpanLabels {
+            id: spanLabels
+            anchors.fill: parent
+            visible: span.drawing && shown
+        }
+        RButton {
+            anchors.left: zoomRow.right
+            anchors.leftMargin: 6
+            anchors.verticalCenter: ceilingPin.verticalCenter
+            visible: span.drawing
+            flat: true
+            implicitHeight: 20
+            text: "labels"
+            checked: SpanLabelSettings.showLabels
+            onClicked: SpanLabelSettings.showLabels = !SpanLabelSettings.showLabels
+            Tip { visible: parent.hovered; text: "Show band-plan and identified-signal labels on the span. Click a label to tune there." }
         }
 
         PinPlate {

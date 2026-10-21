@@ -494,6 +494,40 @@ ColumnLayout {
         }
     }
 
+    // Band-plan overlay labels (feature 18); bits are models/live_labels.h's
+    // LabelCategory.
+    RCheckBox {
+        text: "label channels and identified signals on the span"
+        checked: SpanLabelSettings.showLabels
+        onToggled: {
+            SpanLabelSettings.showLabels = checked
+            checked = Qt.binding(() => SpanLabelSettings.showLabels)
+        }
+    }
+    Flow {
+        Layout.fillWidth: true
+        spacing: 8
+        Repeater {
+            model: [
+                { bit: 1, name: "heard now" }, { bit: 2, name: "amateur" },
+                { bit: 4, name: "weather" }, { bit: 8, name: "aviation" },
+                { bit: 16, name: "marine" }, { bit: 32, name: "public safety" },
+                { bit: 64, name: "personal" }, { bit: 128, name: "broadcast" },
+                { bit: 256, name: "other" }
+            ]
+            delegate: RCheckBox {
+                required property var modelData
+                text: modelData.name
+                enabled: SpanLabelSettings.showLabels
+                checked: (SpanLabelSettings.categories & modelData.bit) !== 0
+                onToggled: {
+                    SpanLabelSettings.setCategory(modelData.bit, checked)
+                    checked = Qt.binding(() => (SpanLabelSettings.categories & modelData.bit) !== 0)
+                }
+            }
+        }
+    }
+
     Rule {}
 
     SectionTitle { text: "radio" }

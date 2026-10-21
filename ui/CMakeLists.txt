@@ -801,6 +801,23 @@ if(REVENANT_UI_TESTS)
     endif()
 endif()
 
+# Band-plan overlay labels (feature 18), in one place so the lists above stay
+# as they were. live_labels.h and label_layout.h hold no Qt, so the tests take
+# them as headers.
+target_sources(revenant_ui PRIVATE
+    models/live_labels.h
+    models/live_labels_model.cpp
+    models/live_labels_model.h
+    render/label_layout.h
+)
+qt_target_qml_sources(revenant_ui QML_FILES qml/SpanLabels.qml)
+if(TARGET revenant_ui_tests)
+    target_sources(revenant_ui_tests PRIVATE
+        tests/test_label_layout.cpp
+        tests/test_live_labels.cpp
+    )
+endif()
+
 message(STATUS "revenant_ui")
 message(STATUS "  engine tree  ${REVENANT_SOURCE_DIR}")
 message(STATUS "  Qt           ${Qt6_VERSION} at ${QT6_INSTALL_PREFIX}")
