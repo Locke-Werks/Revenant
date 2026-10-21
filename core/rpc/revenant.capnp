@@ -3934,6 +3934,10 @@ interface Session {
     # and they report ownerKind plugin with ownerName "trunk".
     #
     # Encrypted calls are logged and never followed or played.
+    #
+    # While it runs, an engine plugin (plugins/p25trunk) may not open a p25p1
+    # receiver, and the ones plugins already had open, the control channel
+    # aside, are removed, so no call is followed twice.
     setTrunkFollow @45 (vrx :UInt64, on :Bool, maxFollowers :UInt32) -> ();
 
     # A poll, not a stream: the log is a state that changes a few times a

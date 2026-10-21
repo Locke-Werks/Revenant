@@ -8440,6 +8440,15 @@ Expected<std::uint32_t> ServerImpl::plugin_add_vrx(std::size_t plugin,
     if (!plugin_receivers_allowed_) {
         return fail("plugin receivers are switched off while the client's auto DV is on");
     }
+    // The built-in follower and plugins/p25trunk both open a p25p1 receiver
+    // per voice grant. With both on one control channel every call would be
+    // opened twice, so while the follower runs it owns P25 voice: a plugin's
+    // p25p1 receiver is refused, and trunk_follow removes the ones already
+    // open. The plugin goes back to working when following stops.
+    if (*demod == engine::Demod::P25p1 && trunk_.control) {
+        return fail("the engine's own P25 trunk follower is running, and it opens the p25p1 "
+                    "receivers while it does");
+    }
     engine::VrxParams params;
     params.demod = *demod;
     params.center = static_cast<dsp::Hertz>(
@@ -8740,6 +8749,22 @@ Status ServerImpl::trunk_follow(engine::VrxId control, bool on, std::uint32_t ma
         return std::unexpected(node.error());
     }
     trunk_.control_node = *std::move(node);
+
+    // See plugin_add_vrx: the follower and a plugin never both follow. The
+    // control channel itself stays even when a plugin opened it.
+    for (const engine::VrxId id : engine_.vrx_ids()) {
+        if (id == control) {
+            continue;
+        }
+        const std::uint64_t session = owner_of(id).session;
+        const bool plugin =
+            std::any_of(plugins_.begin(), plugins_.end(),
+                        [session](const PluginSlot& slot) { return slot.session == session; });
+        auto vrx = engine_.vrx_status(id);
+        if (plugin && vrx && vrx->params.demod == engine::Demod::P25p1 && engine_.remove_vrx(id)) {
+            after_vrx_removed(id, "the engine's own P25 trunk follower took over P25 voice");
+        }
+    }
 
     engine::TrunkSettings settings;
     settings.max_followers = trunk_.max_followers;
