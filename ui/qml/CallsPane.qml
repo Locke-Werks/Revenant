@@ -24,15 +24,10 @@ ColumnLayout {
     property string view: "calls"
     readonly property var rows: view === "calls" ? table.calls : table.groups
 
-    readonly property bool trunking: {
-        const files = engineLink.pluginFiles;
-        for (let i = 0; i < files.length; ++i) {
-            if (files[i].running && files[i].name.indexOf("p25") === 0) {
-                return true;
-            }
-        }
-        return false;
-    }
+    // The engine's follower, not a loaded p25trunk plugin: the plugin loads
+    // with every engine, and counting it held this pane open over CW and SSB
+    // work with nothing digital anywhere. A plugin's receivers show as feeds.
+    readonly property bool trunking: engineLink.trunkEnabled
 
     Layout.fillWidth: true
     spacing: 4
