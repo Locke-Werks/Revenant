@@ -180,6 +180,7 @@ add_library(revenant_core STATIC
     engine/engine.cpp
     engine/graph.cpp
     engine/noise_stage.cpp
+    engine/passband_notch.cpp
     engine/probe.cpp
     engine/scheduler.cpp
     engine/spectrum_scale.cpp

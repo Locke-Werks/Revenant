@@ -120,6 +120,7 @@
 #include <thread>
 #include <utility>
 
+#include "core/dsp/carrier_tracker.h"
 #include "core/dsp/comb_cancel.h"
 #include "core/dsp/comb_spectrum.h"
 #include "core/dsp/convert.h"
@@ -131,6 +132,7 @@
 #include "core/dsp/vrx_reference.h"
 #include "core/engine/listener_level.h"
 #include "core/engine/load_clock.h"
+#include "core/engine/passband_notch.h"
 #include "core/engine/record_util.h"
 #include "core/engine/signal_meter.h"
 #include "core/engine/spectrum_scale.h"
@@ -703,6 +705,19 @@ struct Graph::Impl {
         dsp::SampleIndex passband_last_start = 0;
         bool passband_have_last = false;
 
+        // The display's notch shaping and carrier tracker, completion thread
+        // only like the scale above. Sized on the first frame from the view's
+        // scratch, which is the most bins a frame can have, so later frames
+        // allocate nothing. The tracker restarts when the frame's axis moves,
+        // since it tracks by bin.
+        std::optional<dsp::CarrierTracker> passband_tracker;
+        double passband_tracker_zero = 0.0;
+        double passband_tracker_width = 0.0;
+        std::vector<float> passband_raw;
+        std::vector<float> passband_levels_scratch;
+        std::vector<std::uint8_t> passband_excluded;
+        std::array<PassbandCarrier, dsp::CarrierTracker::kMaxReports> passband_carriers{};
+
         // Recording thread only. The completion thread gets its own copy of
         // the pointer in the frame snapshot, so replacing a sink never races
         // a delivery that is already under way.
@@ -818,6 +833,13 @@ struct Graph::Impl {
         // what keep the barriers off the per-receiver path.
         std::uint32_t passband_window_offset = 0;
         bool passband_recorded = false;
+
+        // What the display shapes and reports with, from the recording
+        // thread's params, so a retune lands on the frame boundary here as
+        // it does for the audio.
+        PassbandNotchRequest passband_notch{};
+        dsp::Hertz passband_center = 0;
+        bool passband_split = false;
     };
 
     struct Frame {
@@ -2846,6 +2868,54 @@ struct Graph::Impl {
         slot.passband_last_start = entry.passband_start;
         slot.passband_have_last = true;
 
+        // Bins in the receiver's frame: signed hertz from its centre.
+        const double bin_width = entry.passband_geometry.bin_width_hz();
+        const double bin_zero =
+            entry.passband_geometry.bin_zero_hz() - static_cast<double>(entry.passband_center);
+
+        if (slot.passband_raw.size() < view.scratch.size()) {
+            slot.passband_raw.resize(view.scratch.size());
+            slot.passband_levels_scratch.resize(view.scratch.size());
+            slot.passband_excluded.resize(view.scratch.size());
+        }
+        if (!slot.passband_tracker.has_value()) {
+            // Six bins rather than the tracker's four: the passband window
+            // puts a carrier halfway between two bin centres into both at
+            // nearly equal level, with a skirt either side above the -20 dB
+            // edge, which measured 4.5 bins on a clean AM carrier.
+            dsp::CarrierTrackerConfig tracking;
+            tracking.max_width_bins = 6.0F;
+            slot.passband_tracker.emplace(view.scratch.size(), tracking);
+        }
+
+        // The tracker reads the power before any notch, so a carrier stays
+        // listed once it is notched and "notch all" does not forget it.
+        if (bin_zero != slot.passband_tracker_zero || bin_width != slot.passband_tracker_width) {
+            slot.passband_tracker->reset();
+            slot.passband_tracker_zero = bin_zero;
+            slot.passband_tracker_width = bin_width;
+        }
+        slot.passband_tracker->update(values, bin_width, bin_zero, elapsed_seconds);
+
+        const std::span<float> raw(slot.passband_raw.data(), bins);
+        if (entry.passband_split) {
+            std::ranges::copy(values, raw.begin());
+        }
+
+        const PassbandNotchMarks marks = map_passband_notches(entry.passband_notch);
+        const std::span<std::uint8_t> excluded(slot.passband_excluded.data(), bins);
+        const std::size_t notched =
+            shape_passband(values, bin_width, bin_zero, entry.passband_notch, marks, excluded);
+        if (notched != 0) {
+            // Measured again without the notched bins, so the hole does not
+            // drag the floor down nor a notched carrier hold the ceiling up.
+            std::array<float, 2> outside{};
+            if (measure_outside(values, excluded, slot.passband_levels_scratch, outside)) {
+                measured[0] = outside[0];
+                measured[1] = outside[1];
+            }
+        }
+
         const SpectrumScaleLevels ends =
             slot.passband_scale->update(measured[0], measured[1], elapsed_seconds);
 
@@ -2870,6 +2940,20 @@ struct Graph::Impl {
         out.ceiling_db = ends.ceiling_db;
         out.percentile_low_db = measured[0];
         out.percentile_high_db = measured[1];
+        out.notch_marks = marks.view();
+        out.notch_audio_only = marks.audio_only;
+
+        const auto reports = slot.passband_tracker->carriers();
+        for (std::size_t i = 0; i < reports.size(); ++i) {
+            slot.passband_carriers[i] =
+                PassbandCarrier{reports[i].offset_hz, reports[i].width_hz, reports[i].level_db,
+                                reports[i].age_seconds};
+        }
+        out.carriers = std::span<const PassbandCarrier>(slot.passband_carriers.data(),
+                                                        reports.size());
+        if (entry.passband_split) {
+            out.raw_power_db = raw;
+        }
 
         Status delivered;
         {
@@ -5185,6 +5269,16 @@ Status Graph::on_block(const source::SourceBlock& block) {
             // recorded after this loop, not inside it: see record_passbands.
             entry.passband = slot->passband;
             entry.passband_sink = slot->passband_sink;
+            if (entry.passband != nullptr) {
+                const VrxParams& params = slot->recording_params;
+                entry.passband_notch.demod = params.demod;
+                entry.passband_notch.cw_pitch = params.cw_pitch;
+                entry.passband_notch.audio_rate =
+                    with_audio_rate(params, impl.config.audio_rate).audio_rate;
+                entry.passband_notch.notches = dsp::notches_of(params);
+                entry.passband_center = params.center;
+                entry.passband_split = params.display_split;
+            }
             frame.vrxs.push_back(std::move(entry));
         }
 

@@ -767,8 +767,15 @@ std::optional<double> notch_audio_hz(engine::Demod mode, Hertz passband_hz, Hert
 
 NotchSet notches_of(const engine::VrxParams& params) {
     NotchSet out{};
+    // Entry 0 from the single notch fields, which stay authoritative for it
+    // while callers move to the list; see engine::VrxParams::notches.
     out[0] = NotchSpec{params.notch_enabled, params.notch_hz, params.notch_depth_db,
                        params.notch_width_hz};
+    static_assert(engine::kMaxVrxNotches == kMaxNotches);
+    for (std::size_t i = 1; i < kMaxNotches; ++i) {
+        const engine::VrxNotch& n = params.notches[i];
+        out[i] = NotchSpec{n.enabled, n.hz, n.depth_db, n.width_hz};
+    }
     return out;
 }
 

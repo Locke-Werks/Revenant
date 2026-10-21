@@ -581,12 +581,20 @@ void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& i
     out.setAutoNotch(in.auto_notch_enabled);
     out.setNoiseReduction(in.nr_enabled);
     out.setNoiseReductionStrength(in.nr_strength);
-    // engine::VrxParams holds one notch, so the list carries it alone.
-    auto notches = out.initNotches(1);
+    // All four, entry 0 from the single notch fields that an older peer
+    // reads instead of the list.
+    auto notches = out.initNotches(static_cast<unsigned>(engine::kMaxVrxNotches));
     notches[0].setEnabled(in.notch_enabled);
     notches[0].setHz(in.notch_hz);
     notches[0].setDepthDb(in.notch_depth_db);
     notches[0].setWidthHz(in.notch_width_hz);
+    for (unsigned i = 1; i < notches.size(); ++i) {
+        notches[i].setEnabled(in.notches[i].enabled);
+        notches[i].setHz(in.notches[i].hz);
+        notches[i].setDepthDb(in.notches[i].depth_db);
+        notches[i].setWidthHz(in.notches[i].width_hz);
+    }
+    out.setDisplaySplit(in.display_split);
 }
 
 void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in,
@@ -665,6 +673,30 @@ void write_passband_frame(schema::PassbandFrame::Builder out,
     out.setCeilingDb(in.ceiling_db);
     out.setPercentileLowDb(in.percentile_low_db);
     out.setPercentileHighDb(in.percentile_high_db);
+
+    auto marks = out.initNotchMarks(static_cast<unsigned>(in.notch_marks.size()));
+    for (unsigned i = 0; i < marks.size(); ++i) {
+        marks[i].setOffsetHz(in.notch_marks[i].offset_hz);
+        marks[i].setWidthHz(in.notch_marks[i].width_hz);
+        marks[i].setDepthDb(in.notch_marks[i].depth_db);
+        marks[i].setNotch(in.notch_marks[i].notch);
+    }
+    out.setNotchAudioOnly(in.notch_audio_only);
+
+    auto carriers = out.initCarriers(static_cast<unsigned>(in.carriers.size()));
+    for (unsigned i = 0; i < carriers.size(); ++i) {
+        carriers[i].setOffsetHz(in.carriers[i].offset_hz);
+        carriers[i].setWidthHz(in.carriers[i].width_hz);
+        carriers[i].setLevelDb(in.carriers[i].level_db);
+        carriers[i].setAgeSeconds(in.carriers[i].age_seconds);
+    }
+
+    if (!in.raw_power_db.empty()) {
+        auto raw = out.initRawPowerDb(static_cast<unsigned>(in.raw_power_db.size()));
+        for (unsigned i = 0; i < raw.size(); ++i) {
+            raw.set(i, in.raw_power_db[i]);
+        }
+    }
 }
 
 void write_detection(schema::Detection::Builder out, const detect::Track& in) {
@@ -898,19 +930,21 @@ Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in) {
     out.nr_enabled = in.getNoiseReduction();
     out.nr_strength = in.getNoiseReductionStrength();
 
-    // Entry 0 is the single notch above, which stays authoritative. The
-    // engine applies one notch until engine::VrxParams carries the list, so
-    // an enabled second notch is refused rather than silently dropped.
+    // Entry 0 is the single notch above, which stays authoritative and is
+    // mirrored into the list; an older peer sends no list and leaves 1 to 3
+    // off.
     const auto notches = in.getNotches();
-    if (notches.size() > 4U) {
-        return fail(std::format("{} notches asked for where at most 4 run", notches.size()));
+    if (notches.size() > engine::kMaxVrxNotches) {
+        return fail(std::format("{} notches asked for where at most {} run", notches.size(),
+                                engine::kMaxVrxNotches));
     }
     for (std::uint32_t i = 1; i < notches.size(); ++i) {
-        if (notches[i].getEnabled()) {
-            return fail(std::format(
-                "notch {} is enabled, and this engine applies only the first notch", i + 1));
-        }
+        out.notches[i] = engine::VrxNotch{notches[i].getEnabled(), notches[i].getHz(),
+                                          notches[i].getDepthDb(), notches[i].getWidthHz()};
     }
+    out.notches[0] = engine::VrxNotch{out.notch_enabled, out.notch_hz, out.notch_depth_db,
+                                      out.notch_width_hz};
+    out.display_split = in.getDisplaySplit();
     return out;
 }
 

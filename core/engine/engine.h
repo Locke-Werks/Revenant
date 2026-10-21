@@ -1435,6 +1435,20 @@ using SpectrumSink = std::function<Status(const SpectrumFrame&)>;
 // rolling off at one side. That is a fact about what the receiver can see
 // rather than a display artefact: the fine stage filters the same channel,
 // so the audio has it too.
+struct PassbandNotchMark {
+    double offset_hz = 0.0;
+    double width_hz = 0.0;
+    double depth_db = 0.0;
+    std::uint8_t notch = 0;
+};
+
+struct PassbandCarrier {
+    double offset_hz = 0.0;
+    double width_hz = 0.0;
+    float level_db = 0.0F;
+    float age_seconds = 0.0F;
+};
+
 struct PassbandFrame {
     VrxId vrx;
 
@@ -1480,11 +1494,37 @@ struct PassbandFrame {
     // What the device measured of THIS frame, before any smoothing. A
     // consumer with its own time constant wants these rather than the two
     // above; there are no pins on the passband scale for that reason.
+    //
+    // With a manual notch mapped into the frame these two are measured on the
+    // host from the bins outside every notch, rather than on the device, so a
+    // 40 dB hole does not drag the scale down and a notched carrier does not
+    // hold the ceiling up. floor_db and ceiling_db follow them.
     float percentile_low_db = 0.0F;
     float percentile_high_db = 0.0F;
+
+    // The manual notches mapped onto this passband, already applied to
+    // power_db as the section's response: the display shows what the audio
+    // loses. Offsets in VrxParams' frame, signed hertz from `center`. AM and
+    // DSB place one notch twice, so `notch` names the entry. With
+    // notch_audio_only the mode's notch has no passband location (NFM, WFM),
+    // nothing was applied, and each enabled notch is listed at its control
+    // offset so a display can draw it as a marker. Valid for the call only.
+    std::span<const PassbandNotchMark> notch_marks;
+    bool notch_audio_only = false;
+
+    // Stationary narrow carriers, dsp::CarrierTracker's report, measured on
+    // the power before notch shaping so a carrier stays listed once
+    // notched. Strongest first, offsets from `center`. Valid for the call.
+    std::span<const PassbandCarrier> carriers;
+
+    // The power before notch shaping, bin for bin with power_db, only while
+    // VrxParams::display_split is set and empty otherwise. The display tap
+    // reads the channel ring ahead of the impulse blanker, so this row and
+    // power_db both show the air unblanked; they differ by the notches.
+    std::span<const float> raw_power_db;
 };
 
-using PassbandSink = std::function<Status(const PassbandFrame&)>;
+using PassbandSink =std::function<Status(const PassbandFrame&)>;
 
 // Two things the graph detected that nothing outside this process could see.
 //

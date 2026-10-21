@@ -585,6 +585,17 @@ static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
     out.auto_notch_enabled = in.getAutoNotch();
     out.nr_enabled = in.getNoiseReduction();
     out.nr_strength = in.getNoiseReductionStrength();
+
+    // Entry 0 mirrors the single notch fields, which stay authoritative; an
+    // older peer sends no list and leaves 1 to 3 off. More than four is a
+    // malformed peer, and the extras are dropped rather than run.
+    const auto notches = in.getNotches();
+    for (unsigned i = 1; i < notches.size() && i < kMaxNotches; ++i) {
+        out.notches[i] = NotchEntry{notches[i].getEnabled(), notches[i].getHz(),
+                                    notches[i].getDepthDb(), notches[i].getWidthHz()};
+    }
+    out.notches = resolved_notches(out);
+    out.display_split = in.getDisplaySplit();
     return out;
 }
 
@@ -609,6 +620,16 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.setAutoNotch(in.auto_notch_enabled);
     out.setNoiseReduction(in.nr_enabled);
     out.setNoiseReductionStrength(in.nr_strength);
+
+    const auto resolved = resolved_notches(in);
+    auto notches = out.initNotches(static_cast<unsigned>(resolved.size()));
+    for (unsigned i = 0; i < notches.size(); ++i) {
+        notches[i].setEnabled(resolved[i].enabled);
+        notches[i].setHz(resolved[i].hz);
+        notches[i].setDepthDb(resolved[i].depth_db);
+        notches[i].setWidthHz(resolved[i].width_hz);
+    }
+    out.setDisplaySplit(in.display_split);
 }
 
 [[nodiscard]] VrxPlacement read_vrx_placement(schema::VrxPlacement::Reader in) {
@@ -1100,6 +1121,30 @@ void read_passband_frame(PassbandFrame& out, schema::PassbandFrame::Reader in) {
     out.ceiling_db = in.getCeilingDb();
     out.percentile_low_db = in.getPercentileLowDb();
     out.percentile_high_db = in.getPercentileHighDb();
+
+    // assign and resize rather than fresh vectors, so a recycled frame keeps
+    // its capacity.
+    const auto marks = in.getNotchMarks();
+    out.notch_marks.resize(marks.size());
+    for (unsigned i = 0; i < marks.size(); ++i) {
+        out.notch_marks[i] = PassbandNotchMark{marks[i].getOffsetHz(), marks[i].getWidthHz(),
+                                               marks[i].getDepthDb(), marks[i].getNotch()};
+    }
+    out.notch_audio_only = in.getNotchAudioOnly();
+
+    const auto carriers = in.getCarriers();
+    out.carriers.resize(carriers.size());
+    for (unsigned i = 0; i < carriers.size(); ++i) {
+        out.carriers[i] =
+            PassbandCarrier{carriers[i].getOffsetHz(), carriers[i].getWidthHz(),
+                            carriers[i].getLevelDb(), carriers[i].getAgeSeconds()};
+    }
+
+    const auto raw = in.getRawPowerDb();
+    out.raw_power_db.resize(raw.size());
+    for (unsigned i = 0; i < raw.size(); ++i) {
+        out.raw_power_db[i] = raw[i];
+    }
 }
 
 void read_audio_chunk(AudioChunk& out, schema::AudioChunk::Reader in) {

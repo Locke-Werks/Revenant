@@ -640,14 +640,23 @@ public:
 
     void assign(const engine::PassbandFrame& source) {
         bins_.assign(source.power_db.begin(), source.power_db.end());
+        raw_.assign(source.raw_power_db.begin(), source.raw_power_db.end());
+        marks_.assign(source.notch_marks.begin(), source.notch_marks.end());
+        carriers_.assign(source.carriers.begin(), source.carriers.end());
         frame_ = source;
         frame_.power_db = std::span<const float>(bins_);
+        frame_.raw_power_db = std::span<const float>(raw_);
+        frame_.notch_marks = std::span<const engine::PassbandNotchMark>(marks_);
+        frame_.carriers = std::span<const engine::PassbandCarrier>(carriers_);
     }
 
     [[nodiscard]] const engine::PassbandFrame& frame() const { return frame_; }
 
 private:
     std::vector<float> bins_;
+    std::vector<float> raw_;
+    std::vector<engine::PassbandNotchMark> marks_;
+    std::vector<engine::PassbandCarrier> carriers_;
     engine::PassbandFrame frame_;
 };
 

@@ -37,6 +37,8 @@
 
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -430,6 +432,18 @@ struct VrxId {
 //
 // Integer hertz throughout, which is why nothing here is a double: a
 // frequency that has been through a float is a frequency nobody can source.
+// One manual notch in VrxParams' frame: signed hertz from `center`.
+inline constexpr std::size_t kMaxVrxNotches = 4;
+
+struct VrxNotch {
+    bool enabled = false;
+    dsp::Hertz hz = 1'000;
+    double depth_db = 40.0;
+    dsp::Hertz width_hz = 100;
+
+    friend constexpr bool operator==(const VrxNotch&, const VrxNotch&) = default;
+};
+
 struct VrxParams {
     // Hertz from the SOURCE'S BASEBAND DC. Not an absolute radio frequency,
     // and bounded by plus and minus half the source rate. The field is called
@@ -673,6 +687,17 @@ struct VrxParams {
     dsp::Hertz notch_hz = 1'000;
     double notch_depth_db = 40.0;
     dsp::Hertz notch_width_hz = 100;
+
+    // Up to four manual notches, run as a cascade. ENTRY 0 IS THE SINGLE
+    // NOTCH ABOVE while callers move to the list: dsp::notches_of takes entry
+    // 0 from the four fields above and entries 1 to 3 from here, so a caller
+    // that knows only the single notch means what it meant. Same ranges.
+    std::array<VrxNotch, kMaxVrxNotches> notches{};
+
+    // The passband display's split view: when set, each PassbandFrame also
+    // carries raw_power_db, the passband before any notch shaping. Off costs
+    // nothing; on costs one copy of the frame on the completion thread.
+    bool display_split = false;
 
     // The automatic notch, an adaptive line enhancer that removes steady
     // tones from the audio. Offered on AM, USB, LSB, DSB, NFM and CW. On CW

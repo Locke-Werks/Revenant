@@ -254,6 +254,41 @@ struct PassbandFrame {
     # What the device measured of THIS frame, before any smoothing.
     percentileLowDb @8 :Float32;
     percentileHighDb @9 :Float32;
+
+    # The manual notches mapped onto this passband, already applied to
+    # powerDb as the notch section's response. Bins inside a mark's width are
+    # left out of the floor, ceiling and percentiles above. With
+    # notchAudioOnly the mode's notch has no passband location (NFM, WFM):
+    # each enabled notch is listed at its control offset to draw as a
+    # marker, and nothing was applied.
+    notchMarks @10 :List(PassbandNotchMark);
+    notchAudioOnly @11 :Bool = false;
+
+    # Stationary narrow carriers seen in the un-notched power, strongest
+    # first, so a carrier stays listed after it has been notched.
+    carriers @12 :List(PassbandCarrier);
+
+    # The passband before notch shaping, bin for bin with powerDb. Empty
+    # unless the receiver's displaySplit is set. Both rows read the display
+    # tap, which is ahead of the impulse blanker, so neither shows blanking.
+    rawPowerDb @13 :List(Float32);
+}
+
+struct PassbandNotchMark {
+    # Signed hertz from the receiver's centre, VrxParams' frame.
+    offsetHz @0 :Float64;
+    widthHz @1 :Float64;
+    depthDb @2 :Float64;
+    # Which notch, 0 to 3; AM and DSB place one notch twice.
+    notch @3 :UInt8;
+}
+
+struct PassbandCarrier {
+    # Signed hertz from the receiver's centre.
+    offsetHz @0 :Float64;
+    widthHz @1 :Float64;
+    levelDb @2 :Float32;
+    ageSeconds @3 :Float32;
 }
 
 struct EngineInfo {
@@ -1062,6 +1097,10 @@ struct VrxParams {
     # this list empty, because the peer predates it, takes entry 0 from those
     # fields and leaves the rest off. Entries past the fourth are refused.
     notches @20 :List(Notch);
+
+    # The passband display's split view: each PassbandFrame then also carries
+    # rawPowerDb, the passband before notch shaping. Display only.
+    displaySplit @21 :Bool = false;
 }
 
 struct Notch {

@@ -553,6 +553,10 @@ struct VrxParams {
     bool auto_notch_enabled = false;
     bool nr_enabled = false;
     double nr_strength = 0.5;
+
+    // The passband display's split view: PassbandFrame::raw_power_db is
+    // filled only while this is set.
+    bool display_split = false;
 };
 
 // All four notches with entry 0 taken from the single notch fields.
@@ -884,6 +888,24 @@ struct PassbandGeometry {
     [[nodiscard]] constexpr bool enabled() const { return bins != 0; }
 };
 
+struct PassbandNotchMark {
+    double offset_hz = 0.0;
+    double width_hz = 0.0;
+    double depth_db = 0.0;
+    std::uint8_t notch = 0;
+
+    friend bool operator==(const PassbandNotchMark&, const PassbandNotchMark&) = default;
+};
+
+struct PassbandCarrier {
+    double offset_hz = 0.0;
+    double width_hz = 0.0;
+    float level_db = 0.0F;
+    float age_seconds = 0.0F;
+
+    friend bool operator==(const PassbandCarrier&, const PassbandCarrier&) = default;
+};
+
 struct PassbandFrame {
     std::uint64_t vrx = 0;
     std::vector<float> power_db;
@@ -898,6 +920,21 @@ struct PassbandFrame {
     float ceiling_db = 0.0F;
     float percentile_low_db = 0.0F;
     float percentile_high_db = 0.0F;
+
+    // The manual notches mapped onto this passband and already applied to
+    // power_db. Offsets are signed hertz from the receiver's centre. AM and
+    // DSB place one notch twice, so `notch` says which entry a mark is.
+    // With notch_audio_only nothing was applied and each enabled notch is
+    // listed at its control offset, to draw as a marker.
+    std::vector<PassbandNotchMark> notch_marks;
+    bool notch_audio_only = false;
+
+    // Stationary narrow carriers in the un-notched power, strongest first.
+    std::vector<PassbandCarrier> carriers;
+
+    // The passband before notch shaping, bin for bin with power_db, and
+    // empty unless VrxParams::display_split is set.
+    std::vector<float> raw_power_db;
 };
 
 // One receiver's audio, as it reaches a client.
