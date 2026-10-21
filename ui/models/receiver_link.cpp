@@ -31,6 +31,10 @@
 // the one thing worth seeing: that the engine did not give what was asked.
 
 #include "models/engine_link.h"
+#include "models/band_plan.h"
+#include "models/settings.h"
+
+#include <QSettings>
 
 #include <algorithm>
 #include <cmath>
@@ -289,6 +293,19 @@ void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode
                                    static_cast<qsizetype>(from_label.mode.size()));
     } else if (click_chooses_demod(named, measured, demod_touched_)) {
         chosen = demod_name(demod_for_detection(measured));
+    } else if (!named && measured <= 0.0 && !demod_touched_) {
+        // A click on no detection has no measurement to choose from, and
+        // keeping the last receiver's mode opened NFM on a CW signal in the
+        // 20 m CW sub-band, which the engine then refused on a 96 kS/s grid.
+        // The band plan is the best guess left.
+        const auto mask = QSettings()
+                              .value(settings::kBandPlanRegion, settings::kBandPlanRegionDefault)
+                              .toUInt();
+        const std::string_view planned =
+            band_mode_at(static_cast<std::int64_t>(std::llround(absolute_hz)), mask);
+        if (!planned.empty()) {
+            chosen = QString::fromUtf8(planned.data(), static_cast<qsizetype>(planned.size()));
+        }
     }
 
     tune_receiver(absolute_hz, chosen, measured, named);

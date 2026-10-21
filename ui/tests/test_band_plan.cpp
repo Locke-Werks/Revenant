@@ -248,3 +248,15 @@ TEST_CASE("a centre exactly on the range's edge is reachable", "[bands]")
     CHECK(band_reachable(band, band.centre_hz - 1, band.centre_hz));
     CHECK_FALSE(band_reachable(band, band.centre_hz + 1, band.centre_hz + 2));
 }
+
+// Rejects taking the first or the widest row: 20 m is a usb allocation, and a
+// click in its CW sub-band has to come back cw.
+TEST_CASE("the plan's mode at a frequency is the narrowest row's", "[bands]")
+{
+    using revenant::ui::band_mode_at;
+    using revenant::ui::kRegionUS;
+    CHECK(band_mode_at(14'030'000, kRegionUS) == "cw");
+    CHECK(band_mode_at(14'200'000, kRegionUS) == "usb");
+    CHECK(band_mode_at(7'010'000, kRegionUS) == "cw");
+    CHECK(band_mode_at(1, kRegionUS).empty());
+}

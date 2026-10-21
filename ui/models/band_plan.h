@@ -149,4 +149,22 @@ inline constexpr auto kBands = std::to_array<Band>({
     return band.centre_hz >= tune_low_hz && band.centre_hz <= tune_high_hz;
 }
 
+// The mode the plan gives this frequency: the narrowest row holding it that
+// names one, so a CW sub-band answers over the allocation it sits in. "" when
+// no row in the mask names a mode here.
+[[nodiscard]] inline std::string_view band_mode_at(std::int64_t hz, std::uint32_t mask)
+{
+    const Band* best = nullptr;
+    for (const Band& band : kBands) {
+        if ((band.regions & mask) == 0 || band.mode.empty() || hz < band.low_hz ||
+            hz >= band.high_hz) {
+            continue;
+        }
+        if (best == nullptr || band.high_hz - band.low_hz < best->high_hz - best->low_hz) {
+            best = &band;
+        }
+    }
+    return best != nullptr ? best->mode : std::string_view{};
+}
+
 }  // namespace revenant::ui
