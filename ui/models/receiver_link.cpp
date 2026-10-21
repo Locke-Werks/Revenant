@@ -931,7 +931,8 @@ void EngineLink::apply_pane_request(const PaneRequest& request)
         return;
     }
 
-    if (auto applied = client_->set_vrx_params(live_receiver_id_, params); !applied) {
+    if (auto applied = client_->set_vrx_params(live_receiver_id_, timeshift_for_set(params));
+        !applied) {  // Time-shift: timeshift_for_set
         // The one refusal that is not a mistake: the engine says a change
         // to the filter's shape is a remove and an add, because rebuilding
         // a pipeline under a command buffer already in flight is not
@@ -989,7 +990,7 @@ bool EngineLink::recreate_receiver(const rpc::VrxParams& params, std::uint64_t k
 {
     drop_receiver();
 
-    auto added = client_->add_vrx(params);
+    auto added = client_->add_vrx(timeshift_for_add(params));  // Time-shift
     if (!added) {
         const QString why = QString::fromStdString(added.error().message);
         note_receiver_fault(why);

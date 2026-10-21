@@ -1156,6 +1156,21 @@ struct VrxParams {
     # Constellation and eye panel (#17): on a digital receiver each
     # PassbandFrame then also carries symbols. Display only.
     displaySymbols @26 :Bool = false;
+
+    # RESERVED, NOT FIELDS. @27 to @30 were set aside for features that in
+    # the end needed no VrxParams field, and Cap'n Proto refuses a hole in
+    # the ordinals. Nothing reads or writes them; a future field takes one
+    # over by renaming it in place.
+    reserved27 @27 :Bool;
+    reserved28 @28 :Bool;
+    reserved29 @29 :Bool;
+    reserved30 @30 :Bool;
+
+    # Time-shift: run this receiver on the replay of the time-shift buffer
+    # rather than on the live stream. Fixed at addVrx; setVrxParams refuses a
+    # change. A receiver asked for with no replay running is refused. An
+    # older engine ignores the field and opens it live.
+    timeShiftReplay @31 :Bool = false;
 }
 
 # Adaptive noise profile controls. learnCount and resetCount are commands
@@ -1433,6 +1448,13 @@ struct SpectrumFrame {
     ceilingDb @6 :Float32;
     percentileLowDb @7 :Float32;
     percentileHighDb @8 :Float32;
+
+    # Time-shift: true on a frame from the replay of the time-shift buffer,
+    # which shares this subscription with live frames, and the wall clock of
+    # its first sample in Unix epoch nanoseconds. A live frame carries false
+    # and zero, and so does every frame from an older engine.
+    timeShiftReplay @9 :Bool = false;
+    timeShiftWallNs @10 :Int64 = 0;
 }
 
 # Where a detection is in its life, ordinal for ordinal with
@@ -3874,12 +3896,27 @@ interface Session {
     # An older engine refuses it as unimplemented.
     setSpurCancel @41 (on :Bool) -> ();
 
-    # MERGE PLACEHOLDERS: @42 to @44 belong to features built on other
-    # branches, and Cap'n Proto refuses a hole in the ordinals. Delete these
-    # three when those branches merge; nothing implements or calls them.
-    trunkMergePlaceholder42 @42 () -> ();
-    trunkMergePlaceholder43 @43 () -> ();
-    trunkMergePlaceholder44 @44 () -> ();
+    # THE TIME-SHIFT BUFFER, added on 2026-10-20. The engine keeps the last
+    # few minutes of the source in host memory (core/engine/timeshift.h) so a
+    # receiver can be opened on a signal that has already ended.
+    #
+    # timeShift reports what is held, and with setLimits also changes the two
+    # bounds first, which empties the buffer and ends any replay. Engine-wide.
+    timeShift @42 (setLimits :Bool, limits :TimeShiftLimits)
+        -> (extent :TimeShiftExtent);
+
+    # Starts a replay at the sample taken at atNs, or moves the running one
+    # there, at speed times real time (clamped to one through sixteen). While
+    # it runs, the spectrum subscription also carries the replay's frames,
+    # marked SpectrumFrame.timeShiftReplay, and addVrx with
+    # VrxParams.timeShiftReplay opens a receiver on it. Receivers on a replay
+    # keep running across a move.
+    startTimeShiftReplay @43 (atNs :Int64, speed :Float64 = 1.0)
+        -> (extent :TimeShiftExtent);
+
+    # Ends the replay and removes every receiver on it, which their
+    # subscribers hear as an ordinary removal. Safe with none running.
+    stopTimeShiftReplay @44 () -> ();
 
     # P25 TRUNK FOLLOWING, added on 2026-10-20. The engine reads the voice
     # grants a control channel sends and opens a p25p1 receiver on each
@@ -3907,6 +3944,27 @@ interface Session {
     # Replaces the allow, deny and priority lists, applied to calls already
     # on the air as well as later ones.
     setTrunkRules @47 (rules :TrunkRules) -> ();
+}
+
+struct TimeShiftLimits {
+    seconds @0 :Float64 = 120.0;
+    budgetBytes @1 :UInt64 = 2147483648;
+}
+
+struct TimeShiftExtent {
+    # False when nothing is held: no stream yet, a limit of zero, or memory
+    # refused. The ranges below are half open.
+    available @0 :Bool;
+    oldestNs @1 :Int64;
+    newestNs @2 :Int64;
+    sampleRate @3 :Int64;
+    center @4 :Int64;
+    capacitySeconds @5 :Float64;
+    capacityBytes @6 :UInt64;
+    replaying @7 :Bool;
+    replayNs @8 :Int64;
+    replaySpeed @9 :Float64;
+    limits @10 :TimeShiftLimits;
 }
 
 # One closed segment of the rolling capture. Segments still being written are

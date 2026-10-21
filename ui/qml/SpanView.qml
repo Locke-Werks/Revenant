@@ -581,4 +581,10 @@ ColumnLayout {
         onAddRequested: (id, centerHz, bandwidthHz, pointerHz) =>
                         span.selection.takeAdd(id, centerHz, bandwidthHz, pointerHz)
     }
+
+    // Time-shift: the scrub bar, under the history it scrubs.
+    TimeShiftBar {
+        Layout.fillWidth: true
+        Layout.preferredHeight: visible ? implicitHeight : 0
+    }
 }

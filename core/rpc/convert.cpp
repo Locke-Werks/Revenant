@@ -605,6 +605,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& i
     profile.setLearnCount(in.profile_learn_count);
     profile.setResetCount(in.profile_reset_count);
     out.setDisplaySymbols(in.display_symbols);  // #17
+    out.setTimeShiftReplay(in.timeshift_replay);  // Time-shift
 }
 
 void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in,
@@ -657,6 +658,8 @@ void write_spectrum_frame(schema::SpectrumFrame::Builder out,
     out.setCeilingDb(in.ceiling_db);
     out.setPercentileLowDb(in.percentile_low_db);
     out.setPercentileHighDb(in.percentile_high_db);
+    out.setTimeShiftReplay(in.timeshift_replay);  // Time-shift
+    out.setTimeShiftWallNs(in.timeshift_wall_ns);
 }
 
 void write_passband_geometry(schema::PassbandGeometry::Builder out,
@@ -1001,6 +1004,7 @@ Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in) {
     out.profile_learn_count = in.getNoiseProfileControl().getLearnCount();
     out.profile_reset_count = in.getNoiseProfileControl().getResetCount();
     out.display_symbols = in.getDisplaySymbols();  // #17
+    out.timeshift_replay = in.getTimeShiftReplay();  // Time-shift
     return out;
 }
 

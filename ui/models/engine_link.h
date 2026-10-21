@@ -5515,6 +5515,105 @@ private:
     // Supervisor thread.
     std::chrono::steady_clock::time_point trunk_next_poll_{};
     std::uint64_t trunk_revision_posted_ = ~std::uint64_t{0};
+    // --- Time-shift buffer, models/timeshift_link.cpp ----------------------
+    //
+    // The scrub bar's state and the two bounds. Moving the bar off live
+    // starts a replay at that instant and moves the pane's receiver onto it,
+    // and the span draws the replay's frames; back at live the receiver
+    // returns to the live stream and the replay ends. Receivers in the rack
+    // stay live throughout. core/engine/timeshift_replay.h has the engine's
+    // half.
+    Q_PROPERTY(bool timeShiftAvailable READ timeShiftAvailable NOTIFY timeShiftChanged)
+    Q_PROPERTY(double timeShiftHeldSeconds READ timeShiftHeldSeconds NOTIFY timeShiftChanged)
+    Q_PROPERTY(double timeShiftCapacitySeconds READ timeShiftCapacitySeconds
+                   NOTIFY timeShiftChanged)
+    Q_PROPERTY(bool timeShiftReplaying READ timeShiftReplaying NOTIFY timeShiftChanged)
+    Q_PROPERTY(double timeShiftSecondsAgo READ timeShiftSecondsAgo NOTIFY timeShiftChanged)
+    Q_PROPERTY(QString timeShiftNote READ timeShiftNote NOTIFY timeShiftChanged)
+    Q_PROPERTY(double timeShiftMinutes READ timeShiftMinutes WRITE setTimeShiftMinutes
+                   NOTIFY timeShiftLimitsChanged)
+    Q_PROPERTY(double timeShiftBudgetGiB READ timeShiftBudgetGiB WRITE setTimeShiftBudgetGiB
+                   NOTIFY timeShiftLimitsChanged)
+    Q_PROPERTY(double timeShiftSpeed READ timeShiftSpeed WRITE setTimeShiftSpeed
+                   NOTIFY timeShiftLimitsChanged)
+
+public:
+    [[nodiscard]] bool timeShiftAvailable() const { return timeshift_view_.available; }
+    [[nodiscard]] double timeShiftHeldSeconds() const { return timeshift_view_.held_seconds; }
+    [[nodiscard]] double timeShiftCapacitySeconds() const
+    {
+        return timeshift_view_.capacity_seconds;
+    }
+    [[nodiscard]] bool timeShiftReplaying() const { return timeshift_view_.replaying; }
+    [[nodiscard]] double timeShiftSecondsAgo() const { return timeshift_view_.seconds_ago; }
+    [[nodiscard]] QString timeShiftNote() const { return timeshift_view_.note; }
+    [[nodiscard]] double timeShiftMinutes() const { return timeshift_minutes_; }
+    [[nodiscard]] double timeShiftBudgetGiB() const { return timeshift_budget_gib_; }
+    [[nodiscard]] double timeShiftSpeed() const { return timeshift_speed_; }
+    void setTimeShiftMinutes(double minutes);
+    void setTimeShiftBudgetGiB(double gib);
+    void setTimeShiftSpeed(double speed);
+
+    // A slider position in [0, 1], 1 being live. models/timeshift_scrub.h.
+    Q_INVOKABLE void timeShiftScrub(double position);
+    Q_INVOKABLE void timeShiftLive();
+    Q_INVOKABLE QString timeShiftLabel(double position) const;
+    Q_INVOKABLE double timeShiftPosition() const;
+
+signals:
+    void timeShiftChanged();
+    void timeShiftLimitsChanged();
+
+private:
+    struct TimeShiftView {
+        bool available = false;
+        double held_seconds = 0.0;
+        double capacity_seconds = 0.0;
+        bool replaying = false;
+        double seconds_ago = 0.0;
+        QString note;
+    };
+
+    void load_timeshift_settings();
+    void wake_timeshift();
+    // Supervisor thread. `probe` is the once-a-second pass.
+    void apply_timeshift(bool probe);
+    void post_timeshift(const rpc::TimeShiftExtent& extent, const QString& note);
+    // The flag the pane's receiver is created or retuned with.
+    [[nodiscard]] rpc::VrxParams timeshift_for_add(rpc::VrxParams params);
+    [[nodiscard]] rpc::VrxParams timeshift_for_set(rpc::VrxParams params) const;
+    // Frames of the stream the span is not showing are dropped on arrival.
+    [[nodiscard]] bool timeshift_skips(const rpc::SpectrumFrame& frame) const
+    {
+        return frame.timeshift_replay != timeshift_viewing_.load(std::memory_order_acquire);
+    }
+
+    // Qt thread.
+    TimeShiftView timeshift_view_;
+    double timeshift_minutes_ = 2.0;
+    double timeshift_budget_gib_ = 2.0;
+    double timeshift_speed_ = 1.0;
+    std::atomic<bool> timeshift_limits_known_{false};
+
+    // The Qt thread's requests and the supervisor's answer.
+    std::mutex timeshift_mutex_;
+    bool timeshift_limits_pending_ = false;  // guarded
+    bool timeshift_seek_pending_ = false;    // guarded
+    double timeshift_seek_ago_ = 0.0;        // guarded
+    double timeshift_seek_speed_ = 1.0;      // guarded
+    rpc::TimeShiftLimits timeshift_limits_;  // guarded
+    TimeShiftView timeshift_posted_;         // guarded
+    std::atomic<bool> timeshift_wake_pending_{false};
+
+    // Which stream the span draws. Written by the supervisor once a replay
+    // has started or ended, read on the Cap'n Proto loop per frame.
+    std::atomic<bool> timeshift_viewing_{false};
+
+    // Supervisor thread only.
+    const rpc::Client* timeshift_client_ = nullptr;
+    bool timeshift_engaged_ = false;
+    bool timeshift_pane_on_replay_ = false;
+    rpc::TimeShiftExtent timeshift_extent_;
 };
 
 }  // namespace revenant::ui

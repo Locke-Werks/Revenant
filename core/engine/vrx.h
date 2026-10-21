@@ -735,6 +735,10 @@ struct VrxParams {
     bool profile_auto_learn = true;
     std::uint32_t profile_learn_count = 0;
     std::uint32_t profile_reset_count = 0;
+    // Time-shift: place this receiver on the replay graph rather than the
+    // live one. Fixed at add_vrx; a set_vrx_params that changes it is
+    // refused, because the two graphs are different streams.
+    bool timeshift_replay = false;
 };
 
 // How a receiver was actually placed on the grid, which the caller needs to

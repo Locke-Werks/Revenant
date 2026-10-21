@@ -191,6 +191,7 @@ add_executable(revenant_engine_tests
     test_spectrum_scale.cpp
     test_thread_role.cpp
     test_trunk_follower.cpp
+    test_timeshift.cpp
     test_vrx_reanchor.cpp
     test_vrx_tune.cpp
 )

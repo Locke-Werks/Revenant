@@ -590,6 +590,58 @@ ColumnLayout {
         }
     }
 
+    // Time-shift: how much of the source the engine keeps in memory for the
+    // span's scrub bar. The smaller of the two bounds wins; changing either
+    // empties what is held. Remembered; models/settings.h, kTimeShiftMinutes.
+    RowLayout {
+        spacing: 8
+        Label {
+            text: "time-shift"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeBody
+            Layout.minimumWidth: 70
+        }
+        RSlider {
+            id: shiftMinutes
+            Layout.preferredWidth: 160
+            from: 0
+            to: 10
+            stepSize: 0.5
+            snapMode: Slider.SnapAlways
+            value: engineLink.timeShiftMinutes
+            onMoved: engineLink.timeShiftMinutes = value
+        }
+        Label {
+            text: shiftMinutes.value === 0 ? "off" : shiftMinutes.value.toFixed(1) + " min"
+            color: Theme.ink
+            font.pixelSize: Theme.sizeBody
+            Layout.minimumWidth: 56
+        }
+        RSlider {
+            id: shiftBudget
+            Layout.preferredWidth: 160
+            from: 0.5
+            to: 16
+            stepSize: 0.5
+            snapMode: Slider.SnapAlways
+            value: engineLink.timeShiftBudgetGiB
+            onMoved: engineLink.timeShiftBudgetGiB = value
+        }
+        Label {
+            text: "at most " + shiftBudget.value.toFixed(1) + " GiB of RAM"
+            color: Theme.ink
+            font.pixelSize: Theme.sizeBody
+        }
+    }
+    Label {
+        visible: engineLink.timeShiftCapacitySeconds > 0
+        color: Theme.inkDim
+        font.pixelSize: Theme.sizeSmall
+        text: "room for " + Math.round(engineLink.timeShiftCapacitySeconds)
+              + " s at this source's rate, " + Math.round(engineLink.timeShiftHeldSeconds)
+              + " s held now"
+    }
+
     Rule {}
 
     SectionTitle { text: "speech" }
