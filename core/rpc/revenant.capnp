@@ -1113,6 +1113,25 @@ struct VrxParams {
     # The audio spectrum strip: each PassbandFrame then also carries
     # audioPowerDb. Display only.
     displayAudioSpectrum @22 :Bool = false;
+
+    # PLACEHOLDERS, NOT FIELDS. Ordinals @23 to @30 belong to features built
+    # on other branches, and Cap'n Proto refuses a hole in the ordinals, so
+    # this branch carries them under these names only to compile. Delete
+    # these eight lines when those branches are merged.
+    timeShiftPad23 @23 :Bool;
+    timeShiftPad24 @24 :Bool;
+    timeShiftPad25 @25 :Bool;
+    timeShiftPad26 @26 :Bool;
+    timeShiftPad27 @27 :Bool;
+    timeShiftPad28 @28 :Bool;
+    timeShiftPad29 @29 :Bool;
+    timeShiftPad30 @30 :Bool;
+
+    # Time-shift: run this receiver on the replay of the time-shift buffer
+    # rather than on the live stream. Fixed at addVrx; setVrxParams refuses a
+    # change. A receiver asked for with no replay running is refused. An
+    # older engine ignores the field and opens it live.
+    timeShiftReplay @31 :Bool = false;
 }
 
 struct Notch {
@@ -1381,6 +1400,13 @@ struct SpectrumFrame {
     ceilingDb @6 :Float32;
     percentileLowDb @7 :Float32;
     percentileHighDb @8 :Float32;
+
+    # Time-shift: true on a frame from the replay of the time-shift buffer,
+    # which shares this subscription with live frames, and the wall clock of
+    # its first sample in Unix epoch nanoseconds. A live frame carries false
+    # and zero, and so does every frame from an older engine.
+    timeShiftReplay @9 :Bool = false;
+    timeShiftWallNs @10 :Int64 = 0;
 }
 
 # Where a detection is in its life, ordinal for ordinal with
@@ -3821,6 +3847,49 @@ interface Session {
     # frequency an open receiver is tuned to. Off lets go of every spur held.
     # An older engine refuses it as unimplemented.
     setSpurCancel @41 (on :Bool) -> ();
+
+    # THE TIME-SHIFT BUFFER, added on 2026-10-20. The engine keeps the last
+    # few minutes of the source in host memory (core/engine/timeshift.h) so a
+    # receiver can be opened on a signal that has already ended.
+    #
+    # timeShift reports what is held, and with setLimits also changes the two
+    # bounds first, which empties the buffer and ends any replay. Engine-wide.
+    timeShift @42 (setLimits :Bool, limits :TimeShiftLimits)
+        -> (extent :TimeShiftExtent);
+
+    # Starts a replay at the sample taken at atNs, or moves the running one
+    # there, at speed times real time (clamped to one through sixteen). While
+    # it runs, the spectrum subscription also carries the replay's frames,
+    # marked SpectrumFrame.timeShiftReplay, and addVrx with
+    # VrxParams.timeShiftReplay opens a receiver on it. Receivers on a replay
+    # keep running across a move.
+    startTimeShiftReplay @43 (atNs :Int64, speed :Float64 = 1.0)
+        -> (extent :TimeShiftExtent);
+
+    # Ends the replay and removes every receiver on it, which their
+    # subscribers hear as an ordinary removal. Safe with none running.
+    stopTimeShiftReplay @44 () -> ();
+}
+
+struct TimeShiftLimits {
+    seconds @0 :Float64 = 120.0;
+    budgetBytes @1 :UInt64 = 2147483648;
+}
+
+struct TimeShiftExtent {
+    # False when nothing is held: no stream yet, a limit of zero, or memory
+    # refused. The ranges below are half open.
+    available @0 :Bool;
+    oldestNs @1 :Int64;
+    newestNs @2 :Int64;
+    sampleRate @3 :Int64;
+    center @4 :Int64;
+    capacitySeconds @5 :Float64;
+    capacityBytes @6 :UInt64;
+    replaying @7 :Bool;
+    replayNs @8 :Int64;
+    replaySpeed @9 :Float64;
+    limits @10 :TimeShiftLimits;
 }
 
 # One closed segment of the rolling capture. Segments still being written are

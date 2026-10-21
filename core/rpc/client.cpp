@@ -597,6 +597,7 @@ static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
     out.notches = resolved_notches(out);
     out.display_split = in.getDisplaySplit();
     out.display_audio_spectrum = in.getDisplayAudioSpectrum();
+    out.timeshift_replay = in.getTimeShiftReplay();  // Time-shift
     return out;
 }
 
@@ -632,6 +633,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     }
     out.setDisplaySplit(in.display_split);
     out.setDisplayAudioSpectrum(in.display_audio_spectrum);
+    out.setTimeShiftReplay(in.timeshift_replay);  // Time-shift
 }
 
 [[nodiscard]] VrxPlacement read_vrx_placement(schema::VrxPlacement::Reader in) {
@@ -1096,6 +1098,8 @@ void read_spectrum_frame(SpectrumFrame& out, schema::SpectrumFrame::Reader in) {
     out.ceiling_db = in.getCeilingDb();
     out.percentile_low_db = in.getPercentileLowDb();
     out.percentile_high_db = in.getPercentileHighDb();
+    out.timeshift_replay = in.getTimeShiftReplay();  // Time-shift
+    out.timeshift_wall_ns = in.getTimeShiftWallNs();
 }
 
 [[nodiscard]] PassbandGeometry read_passband_geometry(schema::PassbandGeometry::Reader in) {
@@ -1489,6 +1493,11 @@ public:
     [[nodiscard]] Status set_impulse_excision(bool on) override;
     [[nodiscard]] Status set_comb_cancel(bool on) override;
     [[nodiscard]] Status set_spur_cancel(bool on) override;
+    [[nodiscard]] Expected<TimeShiftExtent> timeshift(
+        std::optional<TimeShiftLimits> limits) override;  // Time-shift
+    [[nodiscard]] Expected<TimeShiftExtent> start_timeshift_replay(std::int64_t at_ns,
+                                                                   double speed) override;
+    [[nodiscard]] Status stop_timeshift_replay() override;
     [[nodiscard]] Status set_plugin_receivers(bool allowed) override;
 
     [[nodiscard]] Status subscribe_spectrum(std::uint32_t every_nth,
@@ -2220,6 +2229,59 @@ Status ClientImpl::set_spur_cancel(bool on) {
         auto request = state.session.setSpurCancelRequest();
         request.setOn(on);
         return request.send().ignoreResult();
+    });
+}
+
+// --- Time-shift buffer -------------------------------------------------------
+
+namespace {
+
+[[nodiscard]] TimeShiftExtent read_timeshift_extent(schema::TimeShiftExtent::Reader in) {
+    TimeShiftExtent out;
+    out.available = in.getAvailable();
+    out.oldest_ns = in.getOldestNs();
+    out.newest_ns = in.getNewestNs();
+    out.sample_rate = in.getSampleRate();
+    out.center = in.getCenter();
+    out.capacity_seconds = in.getCapacitySeconds();
+    out.capacity_bytes = in.getCapacityBytes();
+    out.replaying = in.getReplaying();
+    out.replay_ns = in.getReplayNs();
+    out.replay_speed = in.getReplaySpeed();
+    out.limits.seconds = in.getLimits().getSeconds();
+    out.limits.budget_bytes = in.getLimits().getBudgetBytes();
+    return out;
+}
+
+}  // namespace
+
+Expected<TimeShiftExtent> ClientImpl::timeshift(std::optional<TimeShiftLimits> limits) {
+    return on_loop("timeshift", [limits](LoopState& state) {
+        auto request = state.session.timeShiftRequest();
+        request.setSetLimits(limits.has_value());
+        if (limits.has_value()) {
+            auto out = request.initLimits();
+            out.setSeconds(limits->seconds);
+            out.setBudgetBytes(limits->budget_bytes);
+        }
+        return request.send().then(
+            [](auto&& response) { return read_timeshift_extent(response.getExtent()); });
+    });
+}
+
+Expected<TimeShiftExtent> ClientImpl::start_timeshift_replay(std::int64_t at_ns, double speed) {
+    return on_loop("start_timeshift_replay", [at_ns, speed](LoopState& state) {
+        auto request = state.session.startTimeShiftReplayRequest();
+        request.setAtNs(at_ns);
+        request.setSpeed(speed);
+        return request.send().then(
+            [](auto&& response) { return read_timeshift_extent(response.getExtent()); });
+    });
+}
+
+Status ClientImpl::stop_timeshift_replay() {
+    return on_loop("stop_timeshift_replay", [](LoopState& state) {
+        return state.session.stopTimeShiftReplayRequest().send().ignoreResult();
     });
 }
 

@@ -58,6 +58,7 @@
 #include "core/engine/pacing_window.h"
 #include "core/engine/ring_consumer.h"
 #include "core/engine/scheduler.h"
+#include "core/engine/timeshift_replay.h"
 #include "core/engine/vrx_stage.h"
 #include "core/source/calibration.h"
 #include "core/source/corrected_source.h"
@@ -713,6 +714,9 @@ public:
         // attach_audio_sink's on-demand pruning does not cover this.
         drop_audio_fanouts();
 
+        // Time-shift: the replay and what it replays belong to this stream.
+        timeshift_close();
+
         // The stream has ended, so this closes its last segment. The next
         // source is a new stream and gets a new writer and epoch at run().
         stop_capture();
@@ -1245,6 +1249,9 @@ public:
             return fail("Engine::add_vrx before a source is open: a receiver is placed on the "
                         "grid, and there is no grid until the source's rate is known");
         }
+        if (params.timeshift_replay) {
+            return timeshift_add_vrx(params);  // Time-shift
+        }
 
         // Pure: the grid, the rate and the request, and nothing else. This is
         // the whole of what adding a receiver computes against the coarse
@@ -1270,6 +1277,9 @@ public:
         if (graph_ == nullptr) {
             return fail("Engine::remove_vrx before a source is open");
         }
+        if (is_timeshift_vrx(id)) {
+            return timeshift_graph([&](Graph& g) { return g.remove_vrx(id); });  // Time-shift
+        }
         if (is_probe_id(id)) {
             return refuse_probe_id(id, "Engine::remove_vrx");
         }
@@ -1283,9 +1293,17 @@ public:
         if (is_probe_id(id)) {
             return refuse_probe_id(id, "Engine::set_vrx_params");
         }
+        if (is_timeshift_vrx(id) != params.timeshift_replay) {
+            return fail("Engine::set_vrx_params cannot move a receiver between the live stream "
+                        "and the time-shift replay; remove it and add it again");  // Time-shift
+        }
         auto placement = place(info_.grid, info_.source_rate, params);
         if (!placement) {
             return std::unexpected(with_context(placement.error(), "Engine::set_vrx_params"));
+        }
+        if (is_timeshift_vrx(id)) {
+            return timeshift_graph(  // Time-shift
+                [&](Graph& g) { return g.set_vrx_params(id, params, *placement); });
         }
         return graph_->set_vrx_params(id, params, *placement);
     }
@@ -1297,11 +1315,16 @@ public:
         if (is_probe_id(id)) {
             return std::unexpected(refuse_probe_id(id, "Engine::vrx_status").error());
         }
+        if (is_timeshift_vrx(id)) {
+            return timeshift_graph([&](Graph& g) { return g.vrx_status(id); });  // Time-shift
+        }
         return graph_->vrx_status(id);
     }
 
     [[nodiscard]] std::vector<VrxId> vrx_ids() const override {
-        return graph_ == nullptr ? std::vector<VrxId>{} : graph_->vrx_ids();
+        auto ids = graph_ == nullptr ? std::vector<VrxId>{} : graph_->vrx_ids();
+        timeshift_append_ids(ids);  // Time-shift
+        return ids;
     }
 
     [[nodiscard]] Status set_audio_sink(VrxId id, AudioSink sink) override {
@@ -1310,6 +1333,10 @@ public:
         }
         if (is_probe_id(id)) {
             return refuse_probe_id(id, "Engine::set_audio_sink");
+        }
+        if (is_timeshift_vrx(id)) {
+            return timeshift_graph(  // Time-shift
+                [&](Graph& g) { return g.set_audio_sink(id, std::move(sink)); });
         }
         return graph_->set_audio_sink(id, std::move(sink));
     }
@@ -1326,6 +1353,7 @@ public:
                         "the stage belongs to the coarse chain and adding one to a running "
                         "graph would mean rebuilding that");
         }
+        timeshift_keep_spectrum_sink(sink);  // Time-shift
         return graph_->set_spectrum_sink(std::move(sink));
     }
 
@@ -1343,6 +1371,10 @@ public:
         }
         if (is_probe_id(id)) {
             return refuse_probe_id(id, "Engine::set_passband_sink");
+        }
+        if (is_timeshift_vrx(id)) {
+            return timeshift_graph(  // Time-shift
+                [&](Graph& g) { return g.set_passband_sink(id, std::move(sink)); });
         }
         return graph_->set_passband_sink(id, std::move(sink));
     }
@@ -1468,6 +1500,8 @@ public:
                 return graph->on_block(block);
             };
         }
+        // Time-shift: every block is kept, after whatever else saw it.
+        sink = timeshift_wrap(std::move(sink));
         auto started = source_->start(options, std::move(sink));
         if (!started) {
             stop_capture();
@@ -2107,6 +2141,186 @@ private:
     std::atomic<dsp::Hertz> capture_retune_center_{0};
     std::atomic<dsp::SampleIndex> capture_retune_before_{0};
     std::atomic<dsp::SampleIndex> capture_retune_after_{0};
+
+    // --- Time-shift buffer and replay, core/engine/timeshift.h -------------
+    //
+    // Kept together at the end so the default member order destroys the
+    // replay first, then the buffer it reads, both before the context.
+
+    // Receivers on the replay are issued ids from here up to the probes'
+    // range, so an id alone says which graph it is on.
+    static constexpr std::uint32_t kFirstTimeShiftId = 0x4000'0000U;
+
+    [[nodiscard]] bool is_timeshift_vrx(VrxId id) const override {
+        return id.value >= kFirstTimeShiftId && !is_probe_id(id);
+    }
+
+    [[nodiscard]] source::BlockSink timeshift_wrap(source::BlockSink inner) {
+        timeshift_buffer_.begin_stream(info_.source_rate, capabilities_.native_format);
+        if (!config_.capture || replays_capture()) {
+            // capture_center_for reads this; without a capture nothing else
+            // starts it at the source's centre.
+            capture_center_.store(std::atomic_ref(info_.source_center).load(),
+                                  std::memory_order_release);
+        }
+        return [this, inner = std::move(inner)](const source::SourceBlock& block) {
+            Status fed = inner(block);
+            timeshift_buffer_.push(block, capture_center_for(block));
+            return fed;
+        };
+    }
+
+    // Under timeshift_lock_, which only the control plane takes.
+    template <typename Call>
+    auto timeshift_graph(Call&& call) const -> decltype(call(std::declval<Graph&>())) {
+        const std::scoped_lock held(timeshift_lock_);
+        if (timeshift_replay_ == nullptr) {
+            return fail("that receiver was on a time-shift replay that has ended");
+        }
+        return call(timeshift_replay_->graph());
+    }
+
+    void timeshift_append_ids(std::vector<VrxId>& ids) const {
+        const std::scoped_lock held(timeshift_lock_);
+        if (timeshift_replay_ != nullptr) {
+            const auto more = timeshift_replay_->graph().vrx_ids();
+            ids.insert(ids.end(), more.begin(), more.end());
+        }
+    }
+
+    void timeshift_keep_spectrum_sink(const SpectrumSink& sink) {
+        const std::scoped_lock held(timeshift_lock_);
+        timeshift_spectrum_sink_ = sink;
+        if (timeshift_replay_ != nullptr) {
+            static_cast<void>(timeshift_replay_->set_spectrum_sink(sink));
+        }
+    }
+
+    [[nodiscard]] Expected<VrxId> timeshift_add_vrx(const VrxParams& params) {
+        auto placement = place(info_.grid, info_.source_rate, params);
+        if (!placement) {
+            return std::unexpected(with_context(placement.error(), "Engine::add_vrx"));
+        }
+        const std::scoped_lock held(timeshift_lock_);
+        if (timeshift_replay_ == nullptr) {
+            return fail("Engine::add_vrx asked for a time-shift receiver with no replay "
+                        "running. Start one at the instant to listen from first");
+        }
+        const VrxId id{next_timeshift_id_++};
+        if (is_probe_id(id)) {
+            return fail("Engine::add_vrx has issued every time-shift receiver id");
+        }
+        auto added = timeshift_replay_->graph().add_vrx(id, params, *placement);
+        if (!added) {
+            return std::unexpected(added.error());
+        }
+        return id;
+    }
+
+    [[nodiscard]] TimeShiftExtent timeshift_extent_locked() const {
+        TimeShiftExtent out = timeshift_buffer_.extent();
+        if (timeshift_replay_ != nullptr) {
+            out.replaying = true;
+            out.replay_ns = timeshift_buffer_.wall_ns_at(timeshift_replay_->position());
+            out.replay_speed = timeshift_replay_->speed();
+        }
+        return out;
+    }
+
+    [[nodiscard]] Expected<TimeShiftExtent> timeshift(
+        std::optional<TimeShiftLimits> limits) override {
+        if (limits.has_value()) {
+            if (!std::isfinite(limits->seconds) || limits->seconds < 0.0) {
+                return fail(std::format("a time-shift of {} seconds means nothing",
+                                        limits->seconds));
+            }
+            // A resize empties the buffer under a replay reading it, so the
+            // replay ends first rather than reading zeros.
+            if (limits->seconds != timeshift_buffer_.limits().seconds ||
+                limits->budget_bytes != timeshift_buffer_.limits().budget_bytes) {
+                timeshift_end_replay();
+                timeshift_buffer_.set_limits(*limits);
+            }
+        }
+        const std::scoped_lock held(timeshift_lock_);
+        return timeshift_extent_locked();
+    }
+
+    [[nodiscard]] Expected<TimeShiftExtent> start_timeshift_replay(std::int64_t wall_ns,
+                                                                   double speed) override {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        if (graph_ == nullptr) {
+            return fail("a time-shift replay needs an open source");
+        }
+        const TimeShiftExtent held_now = timeshift_buffer_.extent();
+        if (!held_now.available) {
+            return fail("the time-shift buffer holds nothing yet");
+        }
+        const dsp::SampleIndex at = timeshift_buffer_.index_at(wall_ns);
+
+        const std::scoped_lock held(timeshift_lock_);
+        if (timeshift_replay_ != nullptr) {
+            timeshift_replay_->seek(at, speed);
+            return timeshift_extent_locked();
+        }
+
+        TimeShiftReplayConfig replay_config;
+        replay_config.graph.grid = info_.grid;
+        replay_config.graph.source_rate = info_.source_rate;
+        replay_config.graph.format = capabilities_.native_format;
+        replay_config.graph.block_samples = block_samples_;
+        replay_config.graph.frames_in_flight = info_.frames_in_flight;
+        replay_config.graph.audio_rate = config_.audio_rate;
+        replay_config.graph.spectrum_transform = config_.spectrum_transform;
+        replay_config.graph.spectrum_floor_db = config_.spectrum_floor_db;
+        replay_config.graph.spectrum_ceiling_db = config_.spectrum_ceiling_db;
+        replay_config.graph.passband_transform = config_.passband_transform;
+        replay_config.prototype = prototype_;
+        auto twiddles = dsp::build_twiddles(info_.grid.channels);
+        if (!twiddles) {
+            return std::unexpected(with_context(twiddles.error(), "the time-shift replay"));
+        }
+        replay_config.twiddles = std::move(*twiddles);
+        replay_config.start_index = at;
+        replay_config.speed = speed;
+
+        auto made = TimeShiftReplay::create(context_, timeshift_buffer_, replay_config);
+        if (!made) {
+            return std::unexpected(made.error());
+        }
+        timeshift_replay_ = std::move(*made);
+        if (timeshift_spectrum_sink_) {
+            static_cast<void>(timeshift_replay_->set_spectrum_sink(timeshift_spectrum_sink_));
+        }
+        return timeshift_extent_locked();
+    }
+
+    [[nodiscard]] Status stop_timeshift_replay() override {
+        timeshift_end_replay();
+        return {};
+    }
+
+    void timeshift_end_replay() {
+        std::unique_ptr<TimeShiftReplay> ending;
+        {
+            const std::scoped_lock held(timeshift_lock_);
+            ending = std::move(timeshift_replay_);
+        }
+        // Outside the lock: the join waits for a block in flight, and a
+        // status poll should not wait behind that.
+        ending.reset();
+    }
+
+    void timeshift_close() {
+        timeshift_end_replay();
+        timeshift_buffer_.release();
+    }
+
+    TimeShiftBuffer timeshift_buffer_;
+    mutable std::mutex timeshift_lock_;
+    SpectrumSink timeshift_spectrum_sink_;
+    std::uint32_t next_timeshift_id_ = kFirstTimeShiftId;
+    std::unique_ptr<TimeShiftReplay> timeshift_replay_;
 };
 
 }  // namespace

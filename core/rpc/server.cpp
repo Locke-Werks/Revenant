@@ -3389,6 +3389,72 @@ public:
         return kj::READY_NOW;
     }
 
+    // --- Time-shift buffer, Session @42 to @44 ------------------------------
+
+    static void write_timeshift_extent(schema::TimeShiftExtent::Builder out,
+                                       const engine::TimeShiftExtent& in) {
+        out.setAvailable(in.available);
+        out.setOldestNs(in.oldest_ns);
+        out.setNewestNs(in.newest_ns);
+        out.setSampleRate(in.rate);
+        out.setCenter(in.center);
+        out.setCapacitySeconds(in.capacity_seconds);
+        out.setCapacityBytes(in.capacity_bytes);
+        out.setReplaying(in.replaying);
+        out.setReplayNs(in.replay_ns);
+        out.setReplaySpeed(in.replay_speed);
+        auto limits = out.initLimits();
+        limits.setSeconds(in.limits.seconds);
+        limits.setBudgetBytes(in.limits.budget_bytes);
+    }
+
+    kj::Promise<void> timeShift(TimeShiftContext context) override {
+        const auto params = context.getParams();
+        std::optional<engine::TimeShiftLimits> limits;
+        if (params.getSetLimits()) {
+            const auto asked = params.getLimits();
+            limits = engine::TimeShiftLimits{.seconds = asked.getSeconds(),
+                                             .budget_bytes = asked.getBudgetBytes()};
+            // A resize ends the replay, and its receivers with it.
+            drop_timeshift_receivers("the time-shift buffer was resized");
+        }
+        auto extent = owner_.engine().timeshift(limits);
+        if (!extent) {
+            return to_exception(extent.error());
+        }
+        write_timeshift_extent(context.getResults().initExtent(), *extent);
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> startTimeShiftReplay(StartTimeShiftReplayContext context) override {
+        const auto params = context.getParams();
+        auto extent =
+            owner_.engine().start_timeshift_replay(params.getAtNs(), params.getSpeed());
+        if (!extent) {
+            return to_exception(extent.error());
+        }
+        write_timeshift_extent(context.getResults().initExtent(), *extent);
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> stopTimeShiftReplay(StopTimeShiftReplayContext) override {
+        drop_timeshift_receivers("the time-shift replay ended");
+        if (auto stopped = owner_.engine().stop_timeshift_replay(); !stopped) {
+            return to_exception(stopped.error());
+        }
+        return kj::READY_NOW;
+    }
+
+    // Through the ordinary removal, so subscribers, decoders and the owning
+    // session hear of each one exactly as if it had been removed by hand.
+    void drop_timeshift_receivers(kj::StringPtr reason) {
+        for (const engine::VrxId id : owner_.engine().vrx_ids()) {
+            if (owner_.engine().is_timeshift_vrx(id) && owner_.engine().remove_vrx(id)) {
+                owner_.after_vrx_removed(id, reason);
+            }
+        }
+    }
+
     kj::Promise<void> captureCatalog(CaptureCatalogContext context) override {
         const auto params = context.getParams();
         return owner_.capture_catalog(params.getFromNs(), params.getToNs())
@@ -5168,7 +5234,8 @@ Status ServerImpl::on_frame(const engine::SpectrumFrame& frame) {
     // HANDED TO THE SIGID LANE AND NOT CONSUMED HERE. WHAT THIS USED TO DO:
     // take detect_lock_ and run consume(), the front-end monitor and tier
     // two's step inline, on this thread. See THE SIGID LANE on the members.
-    if (detecting_.load(std::memory_order_relaxed)) {
+    // Time-shift: a replay frame is the past, and the detector tracks now.
+    if (detecting_.load(std::memory_order_relaxed) && !frame.timeshift_replay) {
         offer_to_sigid(frame);
     }
 

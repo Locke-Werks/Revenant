@@ -561,6 +561,9 @@ struct VrxParams {
     // The audio spectrum strip: PassbandFrame::audio_power_db is filled only
     // while this is set.
     bool display_audio_spectrum = false;
+
+    // Time-shift: open this receiver on the replay. revenant.capnp has the rules.
+    bool timeshift_replay = false;
 };
 
 // All four notches with entry 0 taken from the single notch fields.
@@ -864,6 +867,10 @@ struct SpectrumFrame {
     float ceiling_db = 0.0F;
     float percentile_low_db = 0.0F;
     float percentile_high_db = 0.0F;
+
+    // Time-shift: a replay frame, and its first sample's wall clock.
+    bool timeshift_replay = false;
+    std::int64_t timeshift_wall_ns = 0;
 };
 
 // The frequency axis of one receiver's passband frame.
@@ -1796,6 +1803,27 @@ struct CaptureBucket {
     double occupied = 0.0;
     double captured = 0.0;
     std::uint32_t hits = 0;
+};
+
+// Time-shift buffer, Session.timeShift. Times are Unix epoch nanoseconds and
+// the range is half open.
+struct TimeShiftLimits {
+    double seconds = 120.0;
+    std::uint64_t budget_bytes = 2ULL << 30;
+};
+
+struct TimeShiftExtent {
+    bool available = false;
+    std::int64_t oldest_ns = 0;
+    std::int64_t newest_ns = 0;
+    std::int64_t sample_rate = 0;
+    std::int64_t center = 0;
+    double capacity_seconds = 0.0;
+    std::uint64_t capacity_bytes = 0;
+    bool replaying = false;
+    std::int64_t replay_ns = 0;
+    double replay_speed = 0.0;
+    TimeShiftLimits limits{};
 };
 
 }  // namespace revenant::rpc

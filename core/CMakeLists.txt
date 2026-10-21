@@ -185,6 +185,8 @@ add_library(revenant_core STATIC
     engine/probe.cpp
     engine/scheduler.cpp
     engine/spectrum_scale.cpp
+    engine/timeshift.cpp
+    engine/timeshift_replay.cpp
     engine/vrx_place.cpp
     engine/vrx_stage.cpp
     engine/wav_writer.cpp

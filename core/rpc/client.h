@@ -357,6 +357,24 @@ public:
     // Spur cancelling beside it, engine-wide and on by default.
     [[nodiscard]] virtual Status set_spur_cancel(bool on) = 0;
 
+    // Time-shift buffer, Session.timeShift and the replay pair. Virtual with
+    // a refusal so a test double written before them needs nothing.
+    // revenant.capnp has the rules.
+    [[nodiscard]] virtual Expected<TimeShiftExtent> timeshift(
+        std::optional<TimeShiftLimits> limits) {
+        static_cast<void>(limits);
+        return fail("this client has no time-shift calls");
+    }
+    [[nodiscard]] virtual Expected<TimeShiftExtent> start_timeshift_replay(std::int64_t at_ns,
+                                                                           double speed) {
+        static_cast<void>(at_ns);
+        static_cast<void>(speed);
+        return fail("this client has no time-shift calls");
+    }
+    [[nodiscard]] virtual Status stop_timeshift_replay() {
+        return fail("this client has no time-shift calls");
+    }
+
     // Whether engine plugins may open receivers, engine-wide and allowed by
     // default. Refusing removes every receiver a plugin holds. The client's
     // auto DV refuses it so it and the P25 trunk tracker never share a channel.

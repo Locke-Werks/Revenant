@@ -596,6 +596,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& i
     }
     out.setDisplaySplit(in.display_split);
     out.setDisplayAudioSpectrum(in.display_audio_spectrum);
+    out.setTimeShiftReplay(in.timeshift_replay);  // Time-shift
 }
 
 void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in,
@@ -648,6 +649,8 @@ void write_spectrum_frame(schema::SpectrumFrame::Builder out,
     out.setCeilingDb(in.ceiling_db);
     out.setPercentileLowDb(in.percentile_low_db);
     out.setPercentileHighDb(in.percentile_high_db);
+    out.setTimeShiftReplay(in.timeshift_replay);  // Time-shift
+    out.setTimeShiftWallNs(in.timeshift_wall_ns);
 }
 
 void write_passband_geometry(schema::PassbandGeometry::Builder out,
@@ -959,6 +962,7 @@ Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in) {
                                       out.notch_width_hz};
     out.display_split = in.getDisplaySplit();
     out.display_audio_spectrum = in.getDisplayAudioSpectrum();
+    out.timeshift_replay = in.getTimeShiftReplay();  // Time-shift
     return out;
 }
 

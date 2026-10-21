@@ -133,6 +133,7 @@
 #include "core/dsp/types.h"
 #include "core/engine/device_ring.h"
 #include "core/engine/probe.h"
+#include "core/engine/timeshift.h"
 #include "core/engine/vrx.h"
 #include "core/error.h"
 #include "core/gpu/context.h"
@@ -1386,6 +1387,13 @@ struct SpectrumFrame {
     // against them directly.
     float percentile_low_db = 0.0F;
     float percentile_high_db = 0.0F;
+
+    // Time-shift: set on a frame the replay graph produced, which arrives
+    // through the same sink as live frames so a display can choose. The wall
+    // clock is of the frame's first sample on the live stream, and zero on a
+    // live frame. core/engine/timeshift_replay.h.
+    bool timeshift_replay = false;
+    std::int64_t timeshift_wall_ns = 0;
 };
 
 using SpectrumSink = std::function<Status(const SpectrumFrame&)>;
@@ -2107,6 +2115,30 @@ public:
                                            std::span<const dsp::Hertz> withdrawn,
                                            dsp::Hertz source_center);
 
+    // --- Time-shift buffer, core/engine/timeshift.h --------------------------
+    //
+    // The last few minutes of the source kept in host memory, and a replay of
+    // them on a second graph. A receiver added with VrxParams::timeshift_replay
+    // runs on the replay and every other receiver call answers for it as for
+    // a live one. Virtual with a refusal for the reason submit_probe is.
+
+    // Sets the two bounds and reports what is held. A limits of nullopt only
+    // reports. Any thread; a change empties the buffer.
+    [[nodiscard]] virtual Expected<TimeShiftExtent> timeshift(
+        std::optional<TimeShiftLimits> limits);
+
+    // Starts a replay at the sample taken at `wall_ns`, or moves the one
+    // running there, at `speed` times real time (one to kMaxTimeShiftSpeed).
+    // Receivers already on a replay keep running across a move.
+    [[nodiscard]] virtual Expected<TimeShiftExtent> start_timeshift_replay(std::int64_t wall_ns,
+                                                                           double speed);
+
+    // Ends the replay and every receiver on it. Safe with none running.
+    [[nodiscard]] virtual Status stop_timeshift_replay();
+
+    // True for an id issued to a receiver on the replay.
+    [[nodiscard]] virtual bool is_timeshift_vrx(VrxId id) const;
+
 protected:
     Engine() = default;
 
@@ -2198,6 +2230,19 @@ inline Status Engine::set_spurs(std::span<const dsp::Hertz>, std::span<const dsp
     return fail("this engine has no spur cancelling: it was written before "
                 "CombEstimate::spur existed");
 }
+
+// Time-shift buffer defaults: an engine written before it keeps none.
+inline Expected<TimeShiftExtent> Engine::timeshift(std::optional<TimeShiftLimits>) {
+    return fail("this engine keeps no time-shift buffer");
+}
+
+inline Expected<TimeShiftExtent> Engine::start_timeshift_replay(std::int64_t, double) {
+    return fail("this engine keeps no time-shift buffer");
+}
+
+inline Status Engine::stop_timeshift_replay() { return {}; }
+
+inline bool Engine::is_timeshift_vrx(VrxId) const { return false; }
 
 inline void Engine::drop_audio_fanouts() {
     const std::scoped_lock held(audio_fanout_lock_);
