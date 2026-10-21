@@ -204,6 +204,7 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
                            std::memory_order_release);
         spur_set_.store(true, std::memory_order_release);
     }
+    load_timeshift_settings();  // Time-shift
 
     // Every rack change is a chance that a receiver's engine id moved under
     // a choice, which is what the per-receiver reconcile is about. Compared
@@ -397,6 +398,7 @@ void EngineLink::supervise()
             apply_comb_cancel();
             apply_spur_cancel();
             apply_plugin_receivers();
+            apply_timeshift(false);  // Time-shift
 
             // Then the receiver work. A drag posts a request and wakes this
             // loop immediately rather than waiting out the poll interval,
@@ -540,6 +542,7 @@ void EngineLink::supervise()
             apply_comb_cancel();
             apply_spur_cancel();
             apply_plugin_receivers();
+            apply_timeshift(true);  // Time-shift
 
             apply_receiver_request();
 
@@ -1474,6 +1477,13 @@ double EngineLink::frequencyAtFraction(double fraction) const
 
 void EngineLink::on_frame(const rpc::SpectrumFrame& frame)
 {
+    // Time-shift: live and replay frames share the subscription, and the
+    // span draws one of them. Dropped before the counters, which are one
+    // stream's sequence and would read the other's as loss.
+    if (timeshift_skips(frame)) {
+        return;
+    }
+
     // One copy, and it is unavoidable: the argument is the Client's and is
     // valid only for this call. Assigning into a vector this thread owns
     // reuses its capacity, so the copy is a memcpy after the first frame and

@@ -256,6 +256,9 @@ qt_add_executable(revenant_ui
     models/span_view.h
     models/transcription.h
     models/window_raise.h
+    # Time-shift buffer: the scrub bar and its engine calls.
+    models/timeshift_scrub.h
+    models/timeshift_link.cpp
     render/audio_spectrum_item.cpp
     render/audio_spectrum_item.h
     render/audio_spectrum_map.h
@@ -313,6 +316,7 @@ qt_add_qml_module(revenant_ui
         qml/ContrastCurve.qml
         qml/PivotStrip.qml
         qml/SpanView.qml
+        qml/TimeShiftBar.qml
         qml/Ruler.qml
         qml/BandPicker.qml
         qml/FrequencyDial.qml
@@ -760,6 +764,7 @@ if(REVENANT_UI_TESTS)
             tests/test_status_summary.cpp
             tests/test_transcription.cpp
             tests/test_window_raise.cpp
+            tests/test_timeshift_scrub.cpp
         )
 
         target_include_directories(revenant_ui_tests PRIVATE

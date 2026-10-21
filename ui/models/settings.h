@@ -238,4 +238,12 @@ inline constexpr QLatin1StringView kCaptureFolder{"capture/folder"};
 inline constexpr QLatin1StringView kCaptureRetain{"capture/retain"};
 inline constexpr QLatin1StringView kCaptureMaxAge{"capture/maxAge"};
 
+// The time-shift buffer's two bounds, sent to the engine on connecting once
+// set: minutes of source kept, and the RAM it may take in GiB. The smaller
+// wins. core/engine/timeshift.h.
+inline constexpr QLatin1StringView kTimeShiftMinutes{"timeshift/minutes"};
+inline constexpr QLatin1StringView kTimeShiftBudgetGiB{"timeshift/budgetGiB"};
+inline constexpr double kTimeShiftMinutesDefault = 2.0;
+inline constexpr double kTimeShiftBudgetGiBDefault = 2.0;
+
 }  // namespace revenant::ui::settings
