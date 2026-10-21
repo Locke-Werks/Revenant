@@ -3873,6 +3873,40 @@ interface Session {
     # frequency an open receiver is tuned to. Off lets go of every spur held.
     # An older engine refuses it as unimplemented.
     setSpurCancel @41 (on :Bool) -> ();
+
+    # MERGE PLACEHOLDERS: @42 to @44 belong to features built on other
+    # branches, and Cap'n Proto refuses a hole in the ordinals. Delete these
+    # three when those branches merge; nothing implements or calls them.
+    trunkMergePlaceholder42 @42 () -> ();
+    trunkMergePlaceholder43 @43 () -> ();
+    trunkMergePlaceholder44 @44 () -> ();
+
+    # P25 TRUNK FOLLOWING, added on 2026-10-20. The engine reads the voice
+    # grants a control channel sends and opens a p25p1 receiver on each
+    # granted channel inside the span, moves or removes it as calls come and
+    # go, and keeps a log of every call it saw, followed or not.
+    # core/engine/trunk_follower.h has the rules and core/decode/p25_trunk.h
+    # the grant reading. Built in, beside plugins/p25trunk rather than in it,
+    # so a client can switch it and edit its talkgroup lists over RPC.
+    #
+    # vrx is an open p25p1 receiver on the control channel. on = false stops
+    # following and removes every receiver it opened; the call log stays.
+    # maxFollowers zero keeps the current count. ENGINE-WIDE: one follower,
+    # and a second setTrunkFollow moves it. Follower receivers count as
+    # plugin receivers for setPluginReceivers, so auto DV switches them off,
+    # and they report ownerKind plugin with ownerName "trunk".
+    #
+    # Encrypted calls are logged and never followed or played.
+    setTrunkFollow @45 (vrx :UInt64, on :Bool, maxFollowers :UInt32) -> ();
+
+    # A poll, not a stream: the log is a state that changes a few times a
+    # second at most, and a client redrawing a table wants the whole of it.
+    # revision moves on every change, so a client can skip an unchanged one.
+    trunkStatus @46 () -> (status :TrunkStatus);
+
+    # Replaces the allow, deny and priority lists, applied to calls already
+    # on the air as well as later ones.
+    setTrunkRules @47 (rules :TrunkRules) -> ();
 }
 
 # One closed segment of the rolling capture. Segments still being written are
@@ -4318,4 +4352,56 @@ interface VrxEventReceiver {
 # Dropping this ends the subscription.
 interface VrxEventSubscription {
     cancel @0 () -> ();
+}
+
+# P25 trunk following, setTrunkFollow and the two beside it.
+
+struct TrunkPriority {
+    talkgroup @0 :UInt32;
+    # Higher takes a busy follower receiver from a lower one. Absent is 0.
+    priority @1 :Int32;
+}
+
+struct TrunkRules {
+    # Empty follows every talkgroup not denied.
+    allow @0 :List(UInt32);
+    deny @1 :List(UInt32);
+    priorities @2 :List(TrunkPriority);
+}
+
+# One call, from its first grant to its end. Times are Unix epoch
+# nanoseconds; endNs is the last time it was heard while active.
+struct TrunkCall {
+    id @0 :UInt64;
+    talkgroup @1 :UInt32;
+    hasSource @2 :Bool;
+    source @3 :UInt32;
+    frequency @4 :Int64;
+    startNs @5 :Int64;
+    endNs @6 :Int64;
+    active @7 :Bool;
+    encrypted @8 :Bool;
+    emergency @9 :Bool;
+    # Whether a receiver ever followed it, and which one does now (0 none).
+    followed @10 :Bool;
+    vrx @11 :UInt64;
+    # Why an active call has no receiver, in words, or empty.
+    skip @12 :Text;
+    endReason @13 :Text;
+    priority @14 :Int32;
+}
+
+struct TrunkStatus {
+    enabled @0 :Bool;
+    controlVrx @1 :UInt64;
+    maxFollowers @2 :UInt32;
+    # Good TSBKs and resolved grants since following started.
+    tsbks @3 :UInt64;
+    grants @4 :UInt64;
+    revision @5 :UInt64;
+    # Active calls oldest first, then ended ones newest first.
+    calls @6 :List(TrunkCall);
+    rules @7 :TrunkRules;
+    # Why following stopped, when it did.
+    note @8 :Text;
 }

@@ -225,6 +225,8 @@ qt_add_executable(revenant_ui
     models/ui_rules.h
     models/aft.h
     models/aft_link.cpp
+    models/trunk_aliases.h
+    models/trunk_link.cpp
     models/auto_filter.h
     models/auto_filter_link.cpp
     models/noise_controls.h
@@ -346,6 +348,7 @@ qt_add_qml_module(revenant_ui
         qml/RdsPane.qml
         qml/DecodePane.qml
         qml/CallsPane.qml
+        qml/TrunkPanel.qml
         qml/AudioPane.qml
         qml/ClickReadout.qml
         qml/TopBar.qml
@@ -714,6 +717,7 @@ if(REVENANT_UI_TESTS)
             audio/audio_ring.cpp
             audio/resampler.cpp
             tests/test_adopted_receivers.cpp
+            tests/test_trunk_aliases.cpp
             tests/test_aft.cpp
             tests/test_audio_counters.cpp
             tests/test_auto_pivot.cpp

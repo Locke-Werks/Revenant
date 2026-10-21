@@ -250,4 +250,13 @@ inline constexpr QLatin1StringView kCaptureMaxAge{"capture/maxAge"};
 inline constexpr QLatin1StringView kSpanDisplayView{"display/spanView"};
 inline constexpr QLatin1StringView kPersistenceDecaySeconds{"display/persistenceDecaySeconds"};
 
+// P25 trunk following, as the trunking panel's text fields hold them:
+// "tg = label" lines, talkgroup lists, "tg=priority" pairs, and the follower
+// receiver count. models/trunk_aliases.h parses them.
+inline constexpr QLatin1StringView kTrunkAliases{"trunk/aliases"};
+inline constexpr QLatin1StringView kTrunkAllow{"trunk/allow"};
+inline constexpr QLatin1StringView kTrunkDeny{"trunk/deny"};
+inline constexpr QLatin1StringView kTrunkPriority{"trunk/priority"};
+inline constexpr QLatin1StringView kTrunkMaxFollowers{"trunk/maxFollowers"};
+
 }  // namespace revenant::ui::settings

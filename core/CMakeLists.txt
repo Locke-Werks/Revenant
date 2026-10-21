@@ -119,6 +119,7 @@ add_library(revenant_core STATIC
     decode/imbe.cpp
     decode/navtex.cpp
     decode/m17.cpp
+    decode/p25_trunk.cpp
     decode/p25_tsbk.cpp
     decode/p25p1.cpp
     decode/pocsag.cpp
@@ -189,6 +190,7 @@ add_library(revenant_core STATIC
     engine/probe.cpp
     engine/scheduler.cpp
     engine/spectrum_scale.cpp
+    engine/trunk_follower.cpp
     engine/vrx_place.cpp
     engine/vrx_stage.cpp
     engine/wav_writer.cpp
