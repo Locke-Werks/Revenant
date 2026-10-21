@@ -754,6 +754,7 @@ if(REVENANT_UI_TESTS)
             tests/test_waterfall_scale.cpp
             tests/test_audio_spectrum_map.cpp
             tests/test_passband_marks.cpp
+            tests/test_notch_map_agree.cpp
             tests/test_passband_waterfall.cpp
             tests/test_squelch_control.cpp
             tests/test_status_summary.cpp
