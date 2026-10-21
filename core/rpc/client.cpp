@@ -1511,6 +1511,11 @@ public:
     [[nodiscard]] Expected<std::vector<DecoderInfo>> decoders() override;
     [[nodiscard]] Expected<VocoderPlugins> vocoder_plugins() override;
     [[nodiscard]] Expected<EnginePlugins> engine_plugins() override;
+    // P25 trunk following.
+    [[nodiscard]] Status set_trunk_follow(std::uint64_t vrx, bool on,
+                                          std::uint32_t max_followers) override;
+    [[nodiscard]] Expected<TrunkStatusInfo> trunk_status() override;
+    [[nodiscard]] Status set_trunk_rules(const TrunkRuleSet& rules) override;
     [[nodiscard]] Expected<CaptureCatalog> capture_catalog(
         std::optional<std::int64_t> from_ns, std::optional<std::int64_t> to_ns) override;
     [[nodiscard]] Expected<CaptureSearchResult> capture_search(const CaptureQuery& query) override;
@@ -2856,6 +2861,97 @@ Expected<EnginePlugins> ClientImpl::engine_plugins() {
                 file.name = read_text(row.getName());
                 file.version = read_text(row.getVersion());
                 out.files.push_back(std::move(file));
+            }
+            return out;
+        });
+    });
+}
+
+// P25 trunk following.
+namespace {
+
+void write_trunk_rules(schema::TrunkRules::Builder out, const TrunkRuleSet& rules) {
+    auto allow = out.initAllow(static_cast<unsigned>(rules.allow.size()));
+    for (std::size_t i = 0; i < rules.allow.size(); ++i) {
+        allow.set(static_cast<unsigned>(i), rules.allow[i]);
+    }
+    auto deny = out.initDeny(static_cast<unsigned>(rules.deny.size()));
+    for (std::size_t i = 0; i < rules.deny.size(); ++i) {
+        deny.set(static_cast<unsigned>(i), rules.deny[i]);
+    }
+    auto prio = out.initPriorities(static_cast<unsigned>(rules.priorities.size()));
+    for (std::size_t i = 0; i < rules.priorities.size(); ++i) {
+        prio[static_cast<unsigned>(i)].setTalkgroup(rules.priorities[i].talkgroup);
+        prio[static_cast<unsigned>(i)].setPriority(rules.priorities[i].priority);
+    }
+}
+
+TrunkRuleSet read_trunk_rules(schema::TrunkRules::Reader in) {
+    TrunkRuleSet out;
+    for (const std::uint32_t tg : in.getAllow()) {
+        out.allow.push_back(tg);
+    }
+    for (const std::uint32_t tg : in.getDeny()) {
+        out.deny.push_back(tg);
+    }
+    for (const auto row : in.getPriorities()) {
+        out.priorities.push_back({row.getTalkgroup(), row.getPriority()});
+    }
+    return out;
+}
+
+}  // namespace
+
+Status ClientImpl::set_trunk_follow(std::uint64_t vrx, bool on, std::uint32_t max_followers) {
+    return on_loop("set_trunk_follow", [vrx, on, max_followers](LoopState& state) {
+        auto request = state.session.setTrunkFollowRequest();
+        request.setVrx(vrx);
+        request.setOn(on);
+        request.setMaxFollowers(max_followers);
+        return request.send().ignoreResult();
+    });
+}
+
+Status ClientImpl::set_trunk_rules(const TrunkRuleSet& rules) {
+    return on_loop("set_trunk_rules", [rules](LoopState& state) {
+        auto request = state.session.setTrunkRulesRequest();
+        write_trunk_rules(request.initRules(), rules);
+        return request.send().ignoreResult();
+    });
+}
+
+Expected<TrunkStatusInfo> ClientImpl::trunk_status() {
+    return on_loop("trunkStatus", [](LoopState& state) {
+        return state.session.trunkStatusRequest().send().then([](auto&& response) {
+            const auto in = response.getStatus();
+            TrunkStatusInfo out;
+            out.enabled = in.getEnabled();
+            out.control_vrx = in.getControlVrx();
+            out.max_followers = in.getMaxFollowers();
+            out.tsbks = in.getTsbks();
+            out.grants = in.getGrants();
+            out.revision = in.getRevision();
+            out.rules = read_trunk_rules(in.getRules());
+            out.note = read_text(in.getNote());
+            for (const auto row : in.getCalls()) {
+                TrunkCallInfo call;
+                call.id = row.getId();
+                call.talkgroup = row.getTalkgroup();
+                if (row.getHasSource()) {
+                    call.source = row.getSource();
+                }
+                call.frequency_hz = row.getFrequency();
+                call.start_ns = row.getStartNs();
+                call.end_ns = row.getEndNs();
+                call.active = row.getActive();
+                call.encrypted = row.getEncrypted();
+                call.emergency = row.getEmergency();
+                call.followed = row.getFollowed();
+                call.vrx = row.getVrx();
+                call.skip = read_text(row.getSkip());
+                call.end_reason = read_text(row.getEndReason());
+                call.priority = row.getPriority();
+                out.calls.push_back(std::move(call));
             }
             return out;
         });

@@ -554,6 +554,13 @@ public:
     // rule for an older engine.
     [[nodiscard]] virtual Expected<EnginePlugins> engine_plugins() = 0;
 
+    // P25 trunk following, Session.setTrunkFollow and the two beside it.
+    // max_followers zero keeps the engine's current count.
+    [[nodiscard]] virtual Status set_trunk_follow(std::uint64_t vrx, bool on,
+                                                  std::uint32_t max_followers) = 0;
+    [[nodiscard]] virtual Expected<TrunkStatusInfo> trunk_status() = 0;
+    [[nodiscard]] virtual Status set_trunk_rules(const TrunkRuleSet& rules) = 0;
+
     // The engine's rolling capture: what segments it holds, what was seen in
     // them, and how busy a band was over time. Only the root the engine was
     // started with is reachable, and each is refused in words by an engine

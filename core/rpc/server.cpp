@@ -339,6 +339,10 @@
 #include "core/engine/cpu_budget.h"
 #include "core/engine/load_clock.h"
 #include "core/engine/spsc_ring.h"
+// P25 trunk following.
+#include <chrono>
+#include "core/decode/p25_trunk.h"
+#include "core/engine/trunk_follower.h"
 #include "core/plugin/engine_plugin.h"
 #include "core/plugin/engine_plugin_abi.h"
 #include "core/rpc/convert.h"
@@ -1536,6 +1540,10 @@ public:
     void write_transcription_status(schema::TranscriptionStatus::Builder out) const;
     // setPluginReceivers. Loop thread.
     void set_plugin_receivers(bool allowed);
+    // P25 trunk following, setTrunkFollow and the two beside it. Loop thread.
+    [[nodiscard]] Status trunk_follow(engine::VrxId control, bool on, std::uint32_t max);
+    [[nodiscard]] Status set_trunk_rules(engine::TrunkRules rules);
+    void write_trunk_status(schema::TrunkStatus::Builder out) const;
     [[nodiscard]] Status set_vrx_transcribe(engine::VrxId vrx, TranscribeChoice choice);
     [[nodiscard]] TranscribeChoice transcribe_choice(engine::VrxId vrx) const;
     [[nodiscard]] bool transcribing(engine::VrxId vrx) const {
@@ -1959,6 +1967,40 @@ private:
     std::mutex plugin_command_lock_;
     std::deque<plugin::Command> plugin_commands_;
     bool plugin_commands_closed_ = false;
+
+    // P25 trunk following. Everything but `inbox` is loop thread; the decode
+    // lanes append to the inbox and the loop drains it in drain_trunk. The
+    // follower and its log outlive a stop, so trunkStatus still shows the
+    // calls after following ends.
+    struct TrunkInbox {
+        std::mutex lock;
+        std::deque<DecodedMessage> messages;
+        bool control_ended = false;
+    };
+    struct TrunkState {
+        std::uint64_t session = 0;
+        std::optional<engine::VrxId> control;
+        std::shared_ptr<DecodedNode> control_node;
+        std::map<std::uint64_t, std::shared_ptr<DecodedNode>> voice_nodes;
+        std::unique_ptr<engine::TrunkFollower> follower;
+        decode::P25TrunkReader reader;
+        engine::TrunkRules rules;
+        std::uint32_t max_followers = 2;
+        std::optional<std::pair<std::int64_t, std::int64_t>> span;
+        std::uint64_t tsbks = 0;
+        std::uint64_t grants = 0;
+        std::chrono::steady_clock::time_point epoch;
+        std::int64_t epoch_wall_ns = 0;
+        std::string note;
+        std::shared_ptr<TrunkInbox> inbox = std::make_shared<TrunkInbox>();
+    };
+    TrunkState trunk_;
+    [[nodiscard]] double trunk_now() const;
+    [[nodiscard]] Expected<std::shared_ptr<DecodedNode>> trunk_subscribe(engine::VrxId vrx);
+    void drain_trunk();
+    void trunk_apply();
+    void trunk_stop(const std::string& reason);
+    void trunk_vrx_removed(engine::VrxId vrx);
 
     // Front-end retunes since the source opened, which is what a plugin's
     // SOURCE_RETUNED carries as epoch. Loop thread.
@@ -3433,6 +3475,42 @@ public:
         return kj::READY_NOW;
     }
 
+    // P25 trunk following.
+    kj::Promise<void> setTrunkFollow(SetTrunkFollowContext context) override {
+        const auto params = context.getParams();
+        auto id = to_vrx_id(params.getVrx());
+        if (!id) {
+            return to_exception(id.error());
+        }
+        if (auto set = owner_.trunk_follow(*id, params.getOn(), params.getMaxFollowers()); !set) {
+            return to_exception(set.error());
+        }
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> trunkStatus(TrunkStatusContext context) override {
+        owner_.write_trunk_status(context.getResults().initStatus());
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> setTrunkRules(SetTrunkRulesContext context) override {
+        const auto in = context.getParams().getRules();
+        engine::TrunkRules rules;
+        for (const std::uint32_t tg : in.getAllow()) {
+            rules.allow.insert(tg);
+        }
+        for (const std::uint32_t tg : in.getDeny()) {
+            rules.deny.insert(tg);
+        }
+        for (const auto row : in.getPriorities()) {
+            rules.priority[row.getTalkgroup()] = row.getPriority();
+        }
+        if (auto set = owner_.set_trunk_rules(std::move(rules)); !set) {
+            return to_exception(set.error());
+        }
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> transcriptionStatus(TranscriptionStatusContext context) override {
         owner_.write_transcription_status(context.getResults().initStatus());
         return kj::READY_NOW;
@@ -4687,6 +4765,7 @@ void ServerImpl::after_vrx_removed(engine::VrxId vrx, kj::StringPtr reason) {
         event.text = std::string(reason.cStr(), reason.size());
         emit_plugin_event(event, vrx);
     }
+    trunk_vrx_removed(vrx);  // P25 trunk following
 
     // The clients, on the same terms: the owner they are told is the record's.
     announce_vrx_removed(vrx, reason);
@@ -5252,6 +5331,7 @@ kj::Promise<void> ServerImpl::pump() {
     drain_decoded();
     drain_transcripts();
     drain_plugin_commands();
+    drain_trunk();  // P25 trunk following
     follow_engine_retunes();
 
     // Reconciled on the pump's own heartbeat, which is the spectrum's frame
@@ -7749,6 +7829,10 @@ std::pair<schema::VrxOwnerKind, std::string> ServerImpl::vrx_owner_kind(
     if (creator == asker) {
         return {schema::VrxOwnerKind::THIS_SESSION, {}};
     }
+    // P25 trunk following: adopted by a client the way a plugin's are.
+    if (trunk_.session != 0 && creator == trunk_.session) {
+        return {schema::VrxOwnerKind::PLUGIN, "trunk"};
+    }
     for (const PluginSlot& slot : plugins_) {
         if (slot.session == creator) {
             return {schema::VrxOwnerKind::PLUGIN,
@@ -8261,7 +8345,8 @@ void ServerImpl::set_plugin_receivers(bool allowed) {
         const std::uint64_t session = owner_of(id).session;
         const bool plugins =
             std::any_of(plugins_.begin(), plugins_.end(),
-                        [session](const PluginSlot& slot) { return slot.session == session; });
+                        [session](const PluginSlot& slot) { return slot.session == session; }) ||
+            (trunk_.session != 0 && session == trunk_.session);  // P25 trunk following
         if (plugins && engine_.remove_vrx(id)) {
             after_vrx_removed(id, "plugin receivers were switched off for the client's auto DV");
         }
@@ -8488,6 +8573,375 @@ void ServerImpl::emit_plugin_event(const plugin::Event& event,
             }
         }
         slot.runner->post(std::move(copy));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P25 trunk following
+// ---------------------------------------------------------------------------
+//
+// The decisions are core/engine/trunk_follower.h's; this is the plumbing that
+// feeds it decoded messages and carries out what it asks. Its receivers are
+// opened under a session of their own, the way a plugin's are, so the client
+// adopts them, auto DV switches them off and no client session ending takes
+// them.
+
+double ServerImpl::trunk_now() const {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - trunk_.epoch).count();
+}
+
+Expected<std::shared_ptr<DecodedNode>> ServerImpl::trunk_subscribe(engine::VrxId vrx) {
+    auto status = engine_.vrx_status(vrx);
+    if (!status) {
+        return std::unexpected(status.error());
+    }
+    auto spec = resolve_decoder(engine_, vrx, *status, "p25p1");
+    if (!spec) {
+        return std::unexpected(spec.error());
+    }
+    auto node = std::make_shared<DecodedNode>(schema::DecodedReceiver::Client(nullptr), vrx,
+                                              (*spec)->name);
+    // Bounded: a control channel sends a few dozen blocks a second and the
+    // loop drains every wakeup, so a full inbox is a stalled loop, and the
+    // follower heals from the next grants.
+    node->forward = [this, inbox = trunk_.inbox](const DecodedMessage& message) {
+        {
+            const std::scoped_lock held(inbox->lock);
+            if (inbox->messages.size() >= 4096) {
+                inbox->messages.pop_front();
+            }
+            inbox->messages.push_back(message);
+        }
+        wake_loop();
+    };
+    const bool control = trunk_.control && *trunk_.control == vrx;
+    node->on_ended = [inbox = trunk_.inbox, control](std::string_view) {
+        if (control) {
+            const std::scoped_lock held(inbox->lock);
+            inbox->control_ended = true;
+        }
+    };
+    if (auto added = add_decoded(node, *status, **spec); !added) {
+        return std::unexpected(added.error());
+    }
+    return node;
+}
+
+Status ServerImpl::trunk_follow(engine::VrxId control, bool on, std::uint32_t max) {
+    if (max != 0) {
+        trunk_.max_followers = std::min<std::uint32_t>(max, 16);
+    }
+    if (!on) {
+        trunk_stop("following was switched off");
+        return {};
+    }
+    auto status = engine_.vrx_status(control);
+    if (!status) {
+        return std::unexpected(status.error());
+    }
+    if (status->params.demod != engine::Demod::P25p1) {
+        return fail(std::format("receiver {} is not a p25p1 receiver, and a control channel is "
+                                "followed through its p25p1 decoder",
+                                control.value));
+    }
+    if (trunk_.control) {
+        trunk_stop("following moved to another control channel");
+    }
+    if (trunk_.session == 0) {
+        trunk_.session = open_session();
+    }
+    {
+        const std::scoped_lock held(trunk_.inbox->lock);
+        trunk_.inbox->messages.clear();
+        trunk_.inbox->control_ended = false;
+    }
+    trunk_.control = control;
+    auto node = trunk_subscribe(control);
+    if (!node) {
+        trunk_.control.reset();
+        return std::unexpected(node.error());
+    }
+    trunk_.control_node = *std::move(node);
+
+    engine::TrunkSettings settings;
+    settings.max_followers = trunk_.max_followers;
+    trunk_.follower = std::make_unique<engine::TrunkFollower>(settings);
+    trunk_.epoch = std::chrono::steady_clock::now();
+    trunk_.epoch_wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+    trunk_.follower->set_rules(trunk_.rules, 0.0);
+    trunk_.reader.reset();
+    trunk_.span.reset();
+    trunk_.tsbks = 0;
+    trunk_.grants = 0;
+    trunk_.note.clear();
+    return {};
+}
+
+Status ServerImpl::set_trunk_rules(engine::TrunkRules rules) {
+    trunk_.rules = std::move(rules);
+    if (trunk_.follower != nullptr && trunk_.control) {
+        trunk_.follower->set_rules(trunk_.rules, trunk_now());
+        trunk_apply();
+    }
+    return {};
+}
+
+void ServerImpl::trunk_stop(const std::string& reason) {
+    if (!trunk_.control) {
+        return;
+    }
+    if (trunk_.control_node != nullptr && !trunk_.control_node->cancelled) {
+        trunk_.control_node->ended_sent = true;
+        end_decoded(trunk_.control_node);
+    }
+    trunk_.control_node.reset();
+    trunk_.control.reset();
+    trunk_.note = reason;
+    if (trunk_.follower != nullptr) {
+        trunk_.follower->stop(reason, trunk_now());
+        trunk_apply();
+    }
+}
+
+void ServerImpl::trunk_vrx_removed(engine::VrxId vrx) {
+    if (trunk_.control && *trunk_.control == vrx) {
+        trunk_.control_node.reset();  // its decoder ends with the receiver
+        trunk_stop("the control channel's receiver was removed");
+        return;
+    }
+    const auto node = trunk_.voice_nodes.find(vrx.value);
+    if (node == trunk_.voice_nodes.end()) {
+        return;
+    }
+    trunk_.voice_nodes.erase(node);
+    if (trunk_.follower != nullptr) {
+        trunk_.follower->vrx_gone(vrx.value, trunk_now());
+    }
+}
+
+void ServerImpl::trunk_apply() {
+    // Carrying out one action can produce another, an Open landing for a call
+    // that ended in the meantime among them, so this runs until none is left.
+    for (auto actions = trunk_.follower->take_actions(); !actions.empty();
+         actions = trunk_.follower->take_actions()) {
+        for (const engine::TrunkAction& action : actions) {
+            const auto source_center = static_cast<std::int64_t>(engine_.info().source_center);
+            switch (action.kind) {
+                case engine::TrunkAction::Kind::Open: {
+                    if (!plugin_receivers_allowed_) {
+                        trunk_.follower->open_failed(action.call, trunk_now());
+                        break;
+                    }
+                    engine::VrxParams params;
+                    params.demod = engine::Demod::P25p1;
+                    params.center = static_cast<dsp::Hertz>(action.frequency_hz - source_center);
+                    auto id = engine_.add_vrx(params);
+                    if (!id) {
+                        trunk_.follower->open_failed(action.call, trunk_now());
+                        break;
+                    }
+                    record_vrx(*id, trunk_.session, false);
+                    if (auto node = trunk_subscribe(*id); node) {
+                        trunk_.voice_nodes[id->value] = *std::move(node);
+                    }
+                    trunk_.follower->opened(action.call, id->value);
+                    break;
+                }
+                case engine::TrunkAction::Kind::Retune: {
+                    const engine::VrxId id{static_cast<std::uint32_t>(action.vrx)};
+                    Status moved = [&]() -> Status {
+                        auto status = engine_.vrx_status(id);
+                        if (!status) {
+                            return std::unexpected(status.error());
+                        }
+                        engine::VrxParams params = status->params;
+                        params.center =
+                            static_cast<dsp::Hertz>(action.frequency_hz - source_center);
+                        if (auto applied = engine_.set_vrx_params(id, params); !applied) {
+                            return applied;
+                        }
+                        return after_vrx_retuned(id, params);
+                    }();
+                    if (!moved && engine_.remove_vrx(id)) {
+                        after_vrx_removed(id, "the trunk follower could not retune it");
+                    }
+                    break;
+                }
+                case engine::TrunkAction::Kind::Release: {
+                    const engine::VrxId id{static_cast<std::uint32_t>(action.vrx)};
+                    trunk_.voice_nodes.erase(action.vrx);
+                    if (engine_.remove_vrx(id)) {
+                        after_vrx_removed(id, "the trunk call it followed ended");
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void ServerImpl::drain_trunk() {
+    if (trunk_.follower == nullptr || !trunk_.control) {
+        return;
+    }
+    std::deque<DecodedMessage> batch;
+    bool ended = false;
+    {
+        const std::scoped_lock held(trunk_.inbox->lock);
+        batch.swap(trunk_.inbox->messages);
+        ended = trunk_.inbox->control_ended;
+    }
+    if (ended) {
+        trunk_.control_node.reset();
+        trunk_stop("the control channel's decoder ended");
+        return;
+    }
+    const double now = trunk_now();
+
+    // The span follows the front end; a call outside it cannot be heard
+    // without moving the front end off the control channel.
+    const engine::EngineInfo info = engine_.info();
+    if (info.source_rate == 0) {
+        trunk_stop("the source closed");
+        return;
+    }
+    const auto centre = static_cast<std::int64_t>(info.source_center);
+    const auto half = static_cast<std::int64_t>(info.source_rate) / 2;
+    const auto span = std::make_pair(centre - half, centre + half);
+    if (trunk_.span != span) {
+        trunk_.span = span;
+        trunk_.follower->set_span(span.first, span.second, now);
+    }
+
+    const auto integer = [](const DecodedMessage& m, std::string_view key)
+        -> std::optional<std::int64_t> {
+        const DecodedField* f = m.field(key);
+        const std::int64_t* v = f == nullptr ? nullptr : f->integer();
+        return v == nullptr ? std::nullopt : std::optional<std::int64_t>(*v);
+    };
+    const auto flag = [](const DecodedMessage& m, std::string_view key) {
+        const DecodedField* f = m.field(key);
+        const bool* v = f == nullptr ? nullptr : f->flag();
+        return v != nullptr && *v;
+    };
+
+    for (const DecodedMessage& message : batch) {
+        if (message.vrx == trunk_.control->value) {
+            if (message.kind != "tsbk") {
+                continue;
+            }
+            const DecodedField* octets = message.field("octets");
+            const std::vector<std::uint8_t>* bytes = octets == nullptr ? nullptr : octets->bytes();
+            if (bytes == nullptr || bytes->size() != decode::kP25TsbkOctets) {
+                continue;
+            }
+            std::array<std::uint8_t, decode::kP25TsbkOctets> raw{};
+            std::copy(bytes->begin(), bytes->end(), raw.begin());
+            const decode::P25Tsbk tsbk = decode::p25_tsbk_from_octets(raw);
+            if (!tsbk.crc_ok) {
+                continue;
+            }
+            ++trunk_.tsbks;
+            for (const decode::P25TrunkGrant& g : trunk_.reader.read(tsbk)) {
+                if (!g.frequency_hz) {
+                    continue;
+                }
+                ++trunk_.grants;
+                engine::TrunkGrant grant;
+                grant.talkgroup = g.group;
+                grant.source = g.source;
+                grant.frequency_hz = static_cast<std::int64_t>(*g.frequency_hz);
+                grant.options_known = g.options_known;
+                grant.encrypted = g.encrypted;
+                grant.emergency = g.emergency;
+                grant.initial = g.initial;
+                trunk_.follower->grant(grant, now);
+            }
+            continue;
+        }
+        if (!trunk_.voice_nodes.contains(message.vrx)) {
+            continue;
+        }
+        engine::TrunkVoice voice;
+        if (message.kind == "tdu" || message.kind == "tdulc") {
+            voice.terminator = true;
+        } else if (message.kind == "hdu" || message.kind == "ldu1" || message.kind == "ldu2") {
+            if (const auto tg = integer(message, "talkgroup"); tg) {
+                voice.talkgroup = static_cast<std::uint32_t>(*tg);
+            }
+            if (const auto src = integer(message, "source"); src) {
+                voice.source = static_cast<std::uint32_t>(*src);
+            }
+            // The header's and LDU2's flag come from the ALGID; LDU1's is the
+            // Link Control's, which can be protected over clear voice, as
+            // plugins/p25trunk found.
+            voice.encrypted = message.kind != "ldu1" && flag(message, "encrypted");
+        } else {
+            continue;
+        }
+        trunk_.follower->voice(message.vrx, voice, now);
+    }
+
+    trunk_.follower->tick(now);
+    trunk_apply();
+}
+
+void ServerImpl::write_trunk_status(schema::TrunkStatus::Builder out) const {
+    out.setEnabled(trunk_.control.has_value());
+    out.setControlVrx(trunk_.control ? trunk_.control->value : 0);
+    out.setMaxFollowers(trunk_.max_followers);
+    out.setTsbks(trunk_.tsbks);
+    out.setGrants(trunk_.grants);
+    out.setNote(kj::StringPtr(trunk_.note.c_str()));
+
+    auto rules = out.initRules();
+    auto allow = rules.initAllow(static_cast<unsigned>(trunk_.rules.allow.size()));
+    unsigned i = 0;
+    for (const std::uint32_t tg : trunk_.rules.allow) {
+        allow.set(i++, tg);
+    }
+    auto deny = rules.initDeny(static_cast<unsigned>(trunk_.rules.deny.size()));
+    i = 0;
+    for (const std::uint32_t tg : trunk_.rules.deny) {
+        deny.set(i++, tg);
+    }
+    auto prio = rules.initPriorities(static_cast<unsigned>(trunk_.rules.priority.size()));
+    i = 0;
+    for (const auto& [tg, p] : trunk_.rules.priority) {
+        prio[i].setTalkgroup(tg);
+        prio[i].setPriority(p);
+        ++i;
+    }
+
+    if (trunk_.follower == nullptr) {
+        return;
+    }
+    out.setRevision(trunk_.follower->revision());
+    const auto wall = [this](double s) {
+        return trunk_.epoch_wall_ns + static_cast<std::int64_t>(s * 1e9);
+    };
+    const std::vector<engine::TrunkCall> calls = trunk_.follower->calls();
+    auto list = out.initCalls(static_cast<unsigned>(calls.size()));
+    for (unsigned c = 0; c < list.size(); ++c) {
+        const engine::TrunkCall& call = calls[c];
+        auto row = list[c];
+        row.setId(call.id);
+        row.setTalkgroup(call.talkgroup);
+        row.setHasSource(call.source.has_value());
+        row.setSource(call.source.value_or(0));
+        row.setFrequency(call.frequency_hz);
+        row.setStartNs(wall(call.start_s));
+        row.setEndNs(wall(call.end_s));
+        row.setActive(call.active);
+        row.setEncrypted(call.encrypted);
+        row.setEmergency(call.emergency);
+        row.setFollowed(call.followed);
+        row.setVrx(call.vrx);
+        row.setSkip(engine::trunk_skip_name(call.skip));
+        row.setEndReason(kj::StringPtr(call.end_reason.c_str()));
+        row.setPriority(call.priority);
     }
 }
 

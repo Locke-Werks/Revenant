@@ -1636,6 +1636,48 @@ struct EnginePlugins {
     std::vector<EnginePluginFile> files;
 };
 
+// P25 trunk following: Session.setTrunkFollow, trunkStatus and setTrunkRules
+// in revenant.capnp, which say what each field means.
+struct TrunkPriorityRule {
+    std::uint32_t talkgroup = 0;
+    std::int32_t priority = 0;
+};
+
+struct TrunkRuleSet {
+    std::vector<std::uint32_t> allow;
+    std::vector<std::uint32_t> deny;
+    std::vector<TrunkPriorityRule> priorities;
+};
+
+struct TrunkCallInfo {
+    std::uint64_t id = 0;
+    std::uint32_t talkgroup = 0;
+    std::optional<std::uint32_t> source;
+    std::int64_t frequency_hz = 0;
+    std::int64_t start_ns = 0;
+    std::int64_t end_ns = 0;
+    bool active = false;
+    bool encrypted = false;
+    bool emergency = false;
+    bool followed = false;
+    std::uint64_t vrx = 0;
+    std::string skip;
+    std::string end_reason;
+    std::int32_t priority = 0;
+};
+
+struct TrunkStatusInfo {
+    bool enabled = false;
+    std::uint64_t control_vrx = 0;
+    std::uint32_t max_followers = 0;
+    std::uint64_t tsbks = 0;
+    std::uint64_t grants = 0;
+    std::uint64_t revision = 0;
+    std::vector<TrunkCallInfo> calls;
+    TrunkRuleSet rules;
+    std::string note;
+};
+
 // One decoded-message subscription's running totals.
 struct DecodedStats {
     std::uint64_t messages_sent = 0;
