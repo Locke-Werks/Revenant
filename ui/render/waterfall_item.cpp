@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 
 #include <QColor>
 #include <QCursor>
@@ -252,8 +253,9 @@ void WaterfallItem::setMapPins(ScaleSettings* pins)
         // so it recolours everything at once rather than easing tile by tile.
         connect(map_pins_, &ScaleSettings::waterfallContrastChanged, this,
                 &WaterfallItem::onPinsChanged);
+        drawn_pivot_ = static_cast<float>(map_pins_->waterfallPivot());
         connect(map_pins_, &ScaleSettings::waterfallPivotChanged, this,
-                &WaterfallItem::onPinsChanged);
+                &WaterfallItem::onPivotChanged);
         // A caption held while the zoom moves is grown again at the new size.
         connect(map_pins_, &ScaleSettings::captionZoomChanged, this, [this] {
             if (const std::uint64_t held = captions_.frozen(); held != 0) {
@@ -869,6 +871,20 @@ void WaterfallItem::onPinsChanged()
     update();
 }
 
+void WaterfallItem::onPivotChanged()
+{
+    if (map_pins_ == nullptr) {
+        return;
+    }
+    const auto pivot = static_cast<float>(map_pins_->waterfallPivot());
+    if (map_pins_->waterfallAutoPivot() &&
+        std::abs(pivot - drawn_pivot_) < kAutoPivotRecolourTolerance) {
+        return;
+    }
+    drawn_pivot_ = pivot;
+    onPinsChanged();
+}
+
 void WaterfallItem::recordDetections()
 {
     if (link_ == nullptr || !link_->connected()) {
@@ -1218,6 +1234,11 @@ void WaterfallItem::takeFrame()
                    histogram_.percentile(kHistoryStrongPermille), seconds,
                    histogram_.percentile(kHistoryWeakPermille));
     ends_ = levels_.ends(pinsInForce(), contrastInForce());
+    if (map_pins_ != nullptr && map_pins_->waterfallAutoPivot()) {
+        if (const std::optional<float> pivot = auto_pivot(histogram_, ends_)) {
+            map_pins_->offerAutoPivot(*pivot);
+        }
+    }
 
     // The new row is coloured with the rest of its tile, so a tile is one
     // scale throughout. A tile already out of tolerance is recoloured whole,
