@@ -413,6 +413,7 @@ void EngineLink::supervise()
             apply_call_feeds();
             poll_vocoder_plugins();
             poll_engine_plugins();
+            apply_trunk();  // P25 trunk following
             apply_transcription(false);
             apply_vrx_events(false);
             poll_receiver_status();
@@ -553,6 +554,7 @@ void EngineLink::supervise()
             apply_call_feeds();
             poll_vocoder_plugins();
             poll_engine_plugins();
+            apply_trunk();  // P25 trunk following
 
             // The probe pass reads the recogniser's status as well, which is
             // the once a second the download's progress moves at.

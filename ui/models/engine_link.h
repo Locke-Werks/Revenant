@@ -138,6 +138,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <map>  // P25 trunk following
 #include <optional>
 #include <string>
 #include <string_view>
@@ -5391,6 +5392,76 @@ private:
     // supervisor when it has reconciled. In the wait predicate for the
     // reason audio_work_pending_ is.
     bool transcribe_work_pending_ = false;  // guarded by supervisor_mutex_
+
+    // -----------------------------------------------------------------------
+    // P25 trunk following: the engine's follower (Session.setTrunkFollow),
+    // its call log, and the alias table and talkgroup lists the panel edits.
+    // models/trunk_link.cpp and qml/TrunkPanel.qml.
+    // -----------------------------------------------------------------------
+    Q_PROPERTY(bool trunkEnabled READ trunkEnabled NOTIFY trunkChanged)
+    Q_PROPERTY(QVariantList trunkCalls READ trunkCalls NOTIFY trunkChanged)
+    Q_PROPERTY(QString trunkSummary READ trunkSummary NOTIFY trunkChanged)
+    Q_PROPERTY(QString trunkAliases READ trunkAliases WRITE setTrunkAliases NOTIFY trunkTextChanged)
+    Q_PROPERTY(QString trunkAllow READ trunkAllow WRITE setTrunkAllow NOTIFY trunkTextChanged)
+    Q_PROPERTY(QString trunkDeny READ trunkDeny WRITE setTrunkDeny NOTIFY trunkTextChanged)
+    Q_PROPERTY(QString trunkPriority READ trunkPriority WRITE setTrunkPriority NOTIFY trunkTextChanged)
+    Q_PROPERTY(int trunkMaxFollowers READ trunkMaxFollowers WRITE setTrunkMaxFollowers NOTIFY trunkTextChanged)
+
+public:
+    // On the focused receiver, which must be a p25p1 receiver on a control
+    // channel; off stops following wherever it is.
+    Q_INVOKABLE void setTrunkFollow(bool on);
+    [[nodiscard]] bool trunkEnabled() const { return trunk_status_.enabled; }
+    [[nodiscard]] QVariantList trunkCalls() const { return trunk_rows_; }
+    [[nodiscard]] QString trunkSummary() const;
+    [[nodiscard]] QString trunkAliases() const;
+    void setTrunkAliases(const QString& text);
+    [[nodiscard]] QString trunkAllow() const;
+    void setTrunkAllow(const QString& text);
+    [[nodiscard]] QString trunkDeny() const;
+    void setTrunkDeny(const QString& text);
+    [[nodiscard]] QString trunkPriority() const;
+    void setTrunkPriority(const QString& text);
+    [[nodiscard]] int trunkMaxFollowers() const;
+    void setTrunkMaxFollowers(int count);
+
+signals:
+    void trunkChanged();
+    void trunkTextChanged();
+
+private:
+    void load_trunk_text() const;  // Qt thread, once
+    void store_trunk_rules();      // Qt thread: text to the rules the supervisor sends
+    void apply_trunk();            // supervisor thread
+    void adopt_trunk();            // Qt thread
+    void rebuild_trunk_rows();     // Qt thread
+
+    // Qt thread.
+    mutable bool trunk_loaded_ = false;
+    mutable QString trunk_aliases_text_;
+    mutable QString trunk_allow_text_;
+    mutable QString trunk_deny_text_;
+    mutable QString trunk_priority_text_;
+    mutable int trunk_max_followers_ = 2;
+    mutable std::map<std::uint32_t, std::string> trunk_aliases_;
+    rpc::TrunkStatusInfo trunk_status_;
+    QVariantList trunk_rows_;
+    QString trunk_fault_;
+
+    // Both threads, under trunk_mutex_.
+    std::mutex trunk_mutex_;
+    rpc::TrunkRuleSet trunk_rules_wanted_;
+    std::uint32_t trunk_max_wanted_ = 2;
+    bool trunk_follow_pending_ = false;
+    bool trunk_follow_on_ = false;
+    std::uint64_t trunk_follow_vrx_ = 0;
+    rpc::TrunkStatusInfo trunk_handover_;
+    QString trunk_handover_fault_;
+    bool trunk_has_handover_ = false;
+
+    // Supervisor thread.
+    std::chrono::steady_clock::time_point trunk_next_poll_{};
+    std::uint64_t trunk_revision_posted_ = ~std::uint64_t{0};
 };
 
 }  // namespace revenant::ui
