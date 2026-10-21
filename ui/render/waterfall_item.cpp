@@ -118,6 +118,7 @@ public:
         for (QSGTexture* texture : textures) {
             delete texture;
         }
+        delete scrub_texture;
     }
 
     WaterfallNode() = default;
@@ -152,6 +153,11 @@ public:
     QSGNode* frozen_texts = nullptr;
     std::uint64_t frozen_generation = 0;
     CaptionText frozen;
+
+    // The time-shift preview, over everything while the scrub is held: the
+    // overlay and captions belong to the live rows it covers.
+    QSGImageNode* scrub = nullptr;
+    QSGTexture* scrub_texture = nullptr;
 };
 
 // One contiguous run of ring rows, and where it lands on the display. A tile
@@ -281,6 +287,76 @@ void WaterfallItem::setTimeMarkerSeconds(int seconds)
     marker_labels_.clear();
     emit timeMarkerSecondsChanged();
     update();
+}
+
+void WaterfallItem::setScrubSecondsAgo(double seconds)
+{
+    seconds = std::isfinite(seconds) ? std::max(seconds, 0.0) : 0.0;
+    if (scrub_ago_ == seconds) {
+        return;
+    }
+    scrub_ago_ = seconds;
+    // Pinned to the instant asked for, so rows arriving while the handle is
+    // held do not walk the preview forward under it.
+    scrub_target_ms_ =
+        QDateTime::currentMSecsSinceEpoch() - static_cast<qint64>(std::llround(seconds * 1000.0));
+    scrub_view_dirty_ = true;
+    emit scrubSecondsAgoChanged();
+    update();
+}
+
+void WaterfallItem::keepScrubRow(int wide)
+{
+    if (link_ == nullptr || link_->timeShiftCapacitySeconds() <= 0.0 ||
+        link_->timeShiftReplaying()) {
+        return;
+    }
+    if (scrub_ring_.width() != wide) {
+        scrub_ring_ = QImage(wide, kScrubRows, QImage::Format_RGBX8888);
+        scrub_ring_.fill(kBackground);
+        scrub_ms_.assign(kScrubRows, 0);
+        scrub_write_ = 0;
+        scrub_filled_ = 0;
+    }
+    std::memcpy(scrub_ring_.scanLine(scrub_write_), history_.constScanLine(write_row_),
+                static_cast<std::size_t>(wide) * 4U);
+    scrub_ms_[static_cast<std::size_t>(scrub_write_)] = QDateTime::currentMSecsSinceEpoch();
+    scrub_write_ = (scrub_write_ + 1) % kScrubRows;
+    scrub_filled_ = std::min(scrub_filled_ + 1, kScrubRows);
+}
+
+void WaterfallItem::buildScrubView()
+{
+    scrub_view_dirty_ = false;
+    const int wide = history_.width();
+    const int tall = history_.height();
+    if (wide <= 0 || tall <= 0) {
+        scrub_view_ = QImage();
+        return;
+    }
+    if (scrub_view_.width() != wide || scrub_view_.height() != tall) {
+        scrub_view_ = QImage(wide, tall, QImage::Format_RGBX8888);
+    }
+    scrub_view_.fill(kBackground);
+    if (scrub_ring_.width() != wide || scrub_filled_ == 0) {
+        return;
+    }
+    // Newest first: age 0 is the row just behind the cursor. The top of the
+    // preview is the newest row no later than the target, and older rows
+    // run down from it as they do on the live display.
+    const auto ring_row = [this](int age) {
+        return (scrub_write_ - 1 - age + 2 * kScrubRows) % kScrubRows;
+    };
+    int first = 0;
+    while (first < scrub_filled_ &&
+           scrub_ms_[static_cast<std::size_t>(ring_row(first))] > scrub_target_ms_) {
+        ++first;
+    }
+    const auto bytes = static_cast<std::size_t>(wide) * 4U;
+    for (int row = 0; row < tall && first + row < scrub_filled_; ++row) {
+        std::memcpy(scrub_view_.scanLine(row), scrub_ring_.constScanLine(ring_row(first + row)),
+                    bytes);
+    }
 }
 
 void WaterfallItem::setSelectedDetection(qulonglong id)
@@ -1268,6 +1344,7 @@ void WaterfallItem::takeFrame()
     row_spans_[static_cast<std::size_t>(write_row_)] = RowSpan{frame.start, frame.count};
     tile_dirty_[static_cast<std::size_t>(write_row_ / kTileRows)] = 1;
     marks_.write(write_row_, QDateTime::currentMSecsSinceEpoch(), time_marker_seconds_);
+    keepScrubRow(wide);
 
     write_row_ = (write_row_ + tall - 1) % tall;
     if (filled_rows_ < tall) {
@@ -1726,6 +1803,33 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
         if (node->frozen.opacity->opacity() != frozen_one->opacity) {
             node->frozen.opacity->setOpacity(frozen_one->opacity);
         }
+    }
+
+    if (scrub_ago_ > 0.0) {
+        if (scrub_view_dirty_ || scrub_view_.size() != history_.size()) {
+            buildScrubView();
+            if (!scrub_view_.isNull()) {
+                retired.push_back(node->scrub_texture);
+                node->scrub_texture = window()->createTextureFromImage(scrub_view_.copy());
+            }
+        }
+        if (node->scrub_texture != nullptr) {
+            if (node->scrub == nullptr) {
+                node->scrub = window()->createImageNode();
+                node->scrub->setOwnsTexture(false);
+                node->scrub->setFiltering(QSGTexture::Nearest);
+                node->scrub->setTexture(node->scrub_texture);
+                node->appendChildNode(node->scrub);
+            }
+            node->scrub->setTexture(node->scrub_texture);
+            node->scrub->setRect(QRectF(0.0, 0.0, w, h));
+        }
+    } else if (node->scrub != nullptr) {
+        node->removeChildNode(node->scrub);
+        delete node->scrub;
+        node->scrub = nullptr;
+        retired.push_back(node->scrub_texture);
+        node->scrub_texture = nullptr;
     }
 
     // Every node now points at a live texture, so the ones they were holding

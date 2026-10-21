@@ -213,6 +213,13 @@ class WaterfallItem : public QQuickItem {
     Q_PROPERTY(int timeMarkerSeconds READ timeMarkerSeconds WRITE setTimeMarkerSeconds NOTIFY
                    timeMarkerSecondsChanged)
 
+    // The time-shift scrub's preview: above zero, the display shows the
+    // history as it stood that many seconds ago, from a ring deeper than the
+    // display that keeps every live row for as long as the engine's buffer
+    // reaches. qml/TimeShiftBar.qml sets it while the handle is held.
+    Q_PROPERTY(double scrubSecondsAgo READ scrubSecondsAgo WRITE setScrubSecondsAgo NOTIFY
+                   scrubSecondsAgoChanged)
+
 public:
     explicit WaterfallItem(QQuickItem* parent = nullptr);
 
@@ -246,8 +253,12 @@ public:
     [[nodiscard]] int timeMarkerSeconds() const { return time_marker_seconds_; }
     void setTimeMarkerSeconds(int seconds);
 
+    [[nodiscard]] double scrubSecondsAgo() const { return scrub_ago_; }
+    void setScrubSecondsAgo(double seconds);
+
 signals:
     void timeMarkerSecondsChanged();
+    void scrubSecondsAgoChanged();
     void linkChanged();
     void endsChanged();
     void historyChanged();
@@ -518,6 +529,24 @@ private:
 
     int time_marker_seconds_ = kDefaultTimeMarkerSeconds;
     TimeMarkerRing marks_;
+
+    // The scrub ring: each live row's pixels as coloured when written, and
+    // the wall clock it was written at, oldest overwritten. Allocated only
+    // while the engine keeps a time-shift buffer. Replay rows stay out, so
+    // the ring is one timeline and a stamp lookup finds the right instant.
+    static constexpr int kScrubRows = 4096;
+    QImage scrub_ring_;
+    std::vector<qint64> scrub_ms_;
+    int scrub_write_ = 0;
+    int scrub_filled_ = 0;
+    void keepScrubRow(int wide);
+
+    // The preview the scene graph shows, rebuilt when the target moves.
+    double scrub_ago_ = 0.0;
+    qint64 scrub_target_ms_ = 0;
+    QImage scrub_view_;
+    bool scrub_view_dirty_ = false;
+    void buildScrubView();
     TimeMarkerLabels marker_labels_;
 };
 

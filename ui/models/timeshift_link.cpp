@@ -141,6 +141,11 @@ QString EngineLink::timeShiftLabel(double position) const
         timeshift_label(timeshift_seconds_ago(position, timeshift_view_.held_seconds)));
 }
 
+double EngineLink::timeShiftSecondsAgoAt(double position) const
+{
+    return timeshift_seconds_ago(position, timeshift_view_.held_seconds);
+}
+
 double EngineLink::timeShiftPosition() const
 {
     return timeshift_position(timeshift_view_.seconds_ago, timeshift_view_.held_seconds);

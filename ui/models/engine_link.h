@@ -5558,6 +5558,7 @@ public:
     Q_INVOKABLE void timeShiftScrub(double position);
     Q_INVOKABLE void timeShiftLive();
     Q_INVOKABLE QString timeShiftLabel(double position) const;
+    Q_INVOKABLE double timeShiftSecondsAgoAt(double position) const;
     Q_INVOKABLE double timeShiftPosition() const;
 
 signals:

@@ -4,7 +4,8 @@
 // Released off live, the span switches to a replay of that instant and the
 // receiver in the pane moves onto it, so a click on the span tunes a signal
 // that has already ended exactly as it would a live one. "live" brings both
-// back. While dragging only the label moves; the replay starts on release,
+// back. While dragging, the waterfall slides back through rows it kept
+// itself, which costs the engine nothing; the replay starts on release,
 // because each start is a second graph on the engine and a drag would build
 // dozens. models/timeshift_scrub.h has the arithmetic, timeshift_link.cpp the
 // order a transition happens in.
@@ -22,6 +23,24 @@ RowLayout {
 
     readonly property bool replaying: engineLink.timeShiftReplaying
 
+    // The span's waterfall, which previews the scrub.
+    property var previewTarget: null
+    property bool settling: false
+
+    function endPreview() {
+        bar.settling = false
+        settleLimit.stop()
+        if (bar.previewTarget)
+            bar.previewTarget.scrubSecondsAgo = 0
+    }
+
+    // An engine that never answers still lets the preview go.
+    Timer {
+        id: settleLimit
+        interval: 3000
+        onTriggered: bar.endPreview()
+    }
+
     Label {
         text: "time-shift"
         color: bar.replaying ? Theme.accent : Theme.inkDim
@@ -38,20 +57,41 @@ RowLayout {
         enabled: engineLink.timeShiftAvailable
         tint: bar.replaying ? Theme.accent : Theme.inkDim
 
-        // Follows the replay while nobody holds it.
+        // Follows the replay while nobody holds it, and holds still from a
+        // release until the engine answers, so the handle does not snap
+        // back to live under the pointer while the replay starts.
         value: engineLink.timeShiftPosition()
         Connections {
             target: engineLink
             function onTimeShiftChanged() {
-                if (!scrub.pressed) {
+                if (bar.settling && (engineLink.timeShiftReplaying
+                                     || engineLink.timeShiftNote !== "")) {
+                    bar.endPreview()
+                }
+                if (!scrub.pressed && !bar.settling) {
                     scrub.value = engineLink.timeShiftPosition()
                 }
             }
         }
+        // While held, the waterfall slides back to the instant under the
+        // handle; render/waterfall_item.h, scrubSecondsAgo.
+        onValueChanged: {
+            if (pressed && bar.previewTarget)
+                bar.previewTarget.scrubSecondsAgo = engineLink.timeShiftSecondsAgoAt(value)
+        }
         onPressedChanged: {
-            if (!pressed) {
-                engineLink.timeShiftScrub(value)
+            if (pressed) {
+                bar.settling = false
+                return
             }
+            const ago = engineLink.timeShiftSecondsAgoAt(value)
+            if (ago > 0) {
+                bar.settling = true
+                settleLimit.restart()
+            } else {
+                bar.endPreview()
+            }
+            engineLink.timeShiftScrub(value)
         }
 
         Tip {

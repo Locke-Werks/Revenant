@@ -584,6 +584,7 @@ ColumnLayout {
 
     // Time-shift: the scrub bar, under the history it scrubs.
     TimeShiftBar {
+        previewTarget: waterfall
         Layout.fillWidth: true
         Layout.preferredHeight: visible ? implicitHeight : 0
     }
