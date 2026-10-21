@@ -55,6 +55,7 @@ add_executable(revenant_reference_tests
     reference/gpu_fixture.cpp
     reference/test_context.cpp
     reference/test_cmul.cpp
+    reference/test_carrier_tracker.cpp
     reference/test_comb_kernels.cpp
     reference/test_comb_tracker.cpp
     reference/test_convert.cpp

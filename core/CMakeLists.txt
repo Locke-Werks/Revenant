@@ -142,6 +142,7 @@ add_library(revenant_core STATIC
     identify/identify.cpp
     plugin/dll_scan.cpp
     plugin/engine_plugin.cpp
+    dsp/carrier_tracker.cpp
     dsp/comb_detect.cpp
     dsp/comb_kernels_reference.cpp
     dsp/comb_tracker.cpp
