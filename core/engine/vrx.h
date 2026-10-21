@@ -717,6 +717,18 @@ struct VrxParams {
     // the stereo image.
     bool nr_enabled = false;
     double nr_strength = 0.5;
+
+    // Adaptive noise profile, core/dsp/noise_profile.h. Learns the steady
+    // noise spectrum (hum, whine, birdies) from quiet passages and subtracts
+    // it, up to profile_strength_db of reduction in [0, 20]. Runs on the host
+    // after readback, per receiver; a stereo WFM receiver runs without it.
+    // The two counters are commands: a change from the last value applied
+    // freezes a profile from the next second, or clears it.
+    bool profile_enabled = false;
+    double profile_strength_db = 12.0;
+    bool profile_auto_learn = true;
+    std::uint32_t profile_learn_count = 0;
+    std::uint32_t profile_reset_count = 0;
 };
 
 // How a receiver was actually placed on the grid, which the caller needs to

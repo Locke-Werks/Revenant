@@ -209,6 +209,8 @@ inline void fit_noise_to_mode(rpc::VrxParams& params)
     params.auto_notch_enabled = params.auto_notch_enabled && offer.auto_notch &&
                                 auto_notch_pitch_ok(params);
     params.nr_enabled = params.nr_enabled && offer.reduction;
+    // Adaptive noise profile: offered wherever noise reduction is.
+    params.profile_enabled = params.profile_enabled && offer.reduction;
 
     if (params.demod == rpc::Demod::Usb) {
         params.notch_hz = std::abs(params.notch_hz);

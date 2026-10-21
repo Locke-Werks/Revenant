@@ -1113,6 +1113,23 @@ struct VrxParams {
     # The audio spectrum strip: each PassbandFrame then also carries
     # audioPowerDb. Display only.
     displayAudioSpectrum @22 :Bool = false;
+
+    # Adaptive noise profile: learns the steady noise spectrum from quiet
+    # passages and subtracts it from the audio. Strength is the most
+    # reduction in dB, [0, 20]. The rest of its controls are in
+    # NoiseProfileControl because they share one ordinal.
+    noiseProfile @23 :Bool = false;
+    noiseProfileStrengthDb @24 :Float64 = 12.0;
+    noiseProfileControl @25 :NoiseProfileControl;
+}
+
+# Adaptive noise profile controls. learnCount and resetCount are commands
+# carried as counters: a change from the value last applied is one press,
+# so a retune that resends the same params does not learn again.
+struct NoiseProfileControl {
+    autoLearn @0 :Bool = true;
+    learnCount @1 :UInt32 = 0;
+    resetCount @2 :UInt32 = 0;
 }
 
 struct Notch {

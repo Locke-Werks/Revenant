@@ -597,6 +597,12 @@ static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
     out.notches = resolved_notches(out);
     out.display_split = in.getDisplaySplit();
     out.display_audio_spectrum = in.getDisplayAudioSpectrum();
+    // Adaptive noise profile.
+    out.profile_enabled = in.getNoiseProfile();
+    out.profile_strength_db = in.getNoiseProfileStrengthDb();
+    out.profile_auto_learn = in.getNoiseProfileControl().getAutoLearn();
+    out.profile_learn_count = in.getNoiseProfileControl().getLearnCount();
+    out.profile_reset_count = in.getNoiseProfileControl().getResetCount();
     return out;
 }
 
@@ -632,6 +638,13 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     }
     out.setDisplaySplit(in.display_split);
     out.setDisplayAudioSpectrum(in.display_audio_spectrum);
+    // Adaptive noise profile.
+    out.setNoiseProfile(in.profile_enabled);
+    out.setNoiseProfileStrengthDb(in.profile_strength_db);
+    auto profile = out.initNoiseProfileControl();
+    profile.setAutoLearn(in.profile_auto_learn);
+    profile.setLearnCount(in.profile_learn_count);
+    profile.setResetCount(in.profile_reset_count);
 }
 
 [[nodiscard]] VrxPlacement read_vrx_placement(schema::VrxPlacement::Reader in) {

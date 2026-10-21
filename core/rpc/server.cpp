@@ -4554,6 +4554,7 @@ Expected<std::shared_ptr<RdsRoute>> ServerImpl::open_rds(const engine::VrxStatus
     params.notch_enabled = false;
     params.auto_notch_enabled = false;
     params.nr_enabled = false;
+    params.profile_enabled = false;
 
     auto added = engine_.add_vrx(params);
     if (!added) {

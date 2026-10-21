@@ -682,6 +682,60 @@ ColumnLayout {
                 font.pixelSize: Theme.sizeSmall
             }
         }
+
+        // Adaptive noise profile: learns steady hum and whine from quiet
+        // passages and subtracts it, up to the strength in dB.
+        Label {
+            text: "noise profile"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+        RowLayout {
+            spacing: 8
+            RCheckBox {
+                text: "on"
+                enabled: engineLink.noiseBlankerOffered
+                checked: engineLink.noiseProfile
+                onToggled: engineLink.noiseProfile = checked
+            }
+            RSlider {
+                Layout.preferredWidth: 120
+                visible: engineLink.noiseBlankerOffered
+                enabled: engineLink.noiseProfile
+                from: 0
+                to: 20
+                stepSize: 1
+                value: engineLink.noiseProfileStrengthDb
+                onMoved: engineLink.noiseProfileStrengthDb = value
+            }
+            Label {
+                text: engineLink.noiseBlankerOffered
+                      ? Math.round(engineLink.noiseProfileStrengthDb) + " dB"
+                      : engineLink.noiseNote
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+        RowLayout {
+            spacing: 8
+            visible: engineLink.noiseBlankerOffered
+            RCheckBox {
+                text: "auto learn"
+                enabled: engineLink.noiseProfile
+                checked: engineLink.noiseProfileAutoLearn
+                onToggled: engineLink.noiseProfileAutoLearn = checked
+            }
+            RButton {
+                text: "learn now"
+                enabled: engineLink.noiseProfile
+                onClicked: engineLink.learnNoiseProfile()
+            }
+            RButton {
+                text: "reset"
+                enabled: engineLink.noiseProfile
+                onClicked: engineLink.resetNoiseProfile()
+            }
+        }
     }
 
     Item {

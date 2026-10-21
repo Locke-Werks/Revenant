@@ -229,6 +229,7 @@ qt_add_executable(revenant_ui
     models/auto_filter_link.cpp
     models/noise_controls.h
     models/noise_link.cpp
+    models/noise_profile_link.cpp
     models/dv_spawn.h
     models/label_tune.h
     models/rack_link.cpp

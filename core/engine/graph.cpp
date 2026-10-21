@@ -125,6 +125,7 @@
 #include "core/dsp/comb_spectrum.h"
 #include "core/dsp/convert.h"
 #include "core/dsp/impulse_excision.h"
+#include "core/dsp/noise_profile.h"
 #include "core/dsp/pfb_branch_reference.h"
 #include "core/dsp/pfb_fft_reference.h"
 #include "core/dsp/spectrum_levels_reference.h"
@@ -748,6 +749,10 @@ struct Graph::Impl {
         SquelchGate squelch;
         std::uint64_t squelch_epoch_seen = 0;
 
+        // Adaptive noise profile, completion thread only.
+        dsp::NoiseProfile noise_profile;
+        std::uint64_t noise_profile_epoch = 0;
+
         // WRITTEN ON THE RECORDING THREAD, unlike the two counters above,
         // which move on the completion thread as frames are delivered. A
         // re-anchor is decided while the command buffer is being written and
@@ -825,6 +830,9 @@ struct Graph::Impl {
         Levelling levelling = Levelling::None;
         AgcSettings agc{};
         std::uint64_t listener_restarts = 0;
+
+        // Adaptive noise profile settings, snapshotted on the same terms.
+        dsp::NoiseProfileSettings noise_profile{};
 
         // The passband this frame recorded for this receiver, if any. The
         // view is held by value in the snapshot so that a detach landing
@@ -2562,6 +2570,20 @@ struct Graph::Impl {
             }
             const double level = dbfs_of(std::sqrt(mean_power));
             slot.store_level(level);
+
+            // Adaptive noise profile, after the level so the meter and the
+            // squelch still read the channel, and ahead of the strip and the
+            // sinks so both hear it. Mono audio only, for the reason NR skips
+            // stereo WFM. Quiet is the gate as the previous block left it,
+            // since this block's decision mutes `audio` in place.
+            if (entry.output.channels == 1 && !entry.output.complex_iq) {
+                if (entry.tuning_epoch != slot.noise_profile_epoch) {
+                    slot.noise_profile.retune();
+                    slot.noise_profile_epoch = entry.tuning_epoch;
+                }
+                slot.noise_profile.process(audio, static_cast<double>(entry.output.rate),
+                                           !slot.squelch.open(), entry.noise_profile);
+            }
 
             // The audio strip, fed every frame so its window is contiguous,
             // and ahead of the squelch, which mutes `audio` in place: the
@@ -5298,6 +5320,13 @@ Status Graph::on_block(const source::SourceBlock& block) {
             entry.levelling = levelling_for(slot->recording_params.demod);
             entry.agc = agc_settings_of(slot->recording_params);
             entry.listener_restarts = slot->listener_restarts;
+            // Adaptive noise profile.
+            entry.noise_profile = dsp::NoiseProfileSettings{
+                slot->recording_params.profile_enabled,
+                slot->recording_params.profile_strength_db,
+                slot->recording_params.profile_auto_learn,
+                slot->recording_params.profile_learn_count,
+                slot->recording_params.profile_reset_count};
 
             // Snapshotted the same way the audio sink is, so detaching never
             // races a delivery already under way. The transform itself is
