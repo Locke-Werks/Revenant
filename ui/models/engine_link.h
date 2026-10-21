@@ -1184,6 +1184,12 @@ class EngineLink : public QObject {
                    NOTIFY receiverChanged)
     Q_PROPERTY(double noiseReductionStrength READ noiseReductionStrength
                    WRITE setNoiseReductionStrength NOTIFY receiverChanged)
+    // Adaptive noise profile, models/noise_profile_link.cpp.
+    Q_PROPERTY(bool noiseProfile READ noiseProfile WRITE setNoiseProfile NOTIFY receiverChanged)
+    Q_PROPERTY(double noiseProfileStrengthDb READ noiseProfileStrengthDb
+                   WRITE setNoiseProfileStrengthDb NOTIFY receiverChanged)
+    Q_PROPERTY(bool noiseProfileAutoLearn READ noiseProfileAutoLearn
+                   WRITE setNoiseProfileAutoLearn NOTIFY receiverChanged)
 
     // Which stages this receiver's mode offers, and a few words on why one
     // is greyed out. The blanker and noise reduction are offered together.
@@ -2582,6 +2588,16 @@ public:
     void setNoiseReduction(bool on);
     [[nodiscard]] double noiseReductionStrength() const { return wanted_.nr_strength; }
     void setNoiseReductionStrength(double strength);
+    // Adaptive noise profile. Learn and reset are presses, sent as a bumped
+    // counter in the request.
+    [[nodiscard]] bool noiseProfile() const { return wanted_.profile_enabled; }
+    void setNoiseProfile(bool on);
+    [[nodiscard]] double noiseProfileStrengthDb() const { return wanted_.profile_strength_db; }
+    void setNoiseProfileStrengthDb(double db);
+    [[nodiscard]] bool noiseProfileAutoLearn() const { return wanted_.profile_auto_learn; }
+    void setNoiseProfileAutoLearn(bool on);
+    Q_INVOKABLE void learnNoiseProfile();
+    Q_INVOKABLE void resetNoiseProfile();
     [[nodiscard]] bool noiseBlankerOffered() const;
     [[nodiscard]] bool notchOffered() const;
     [[nodiscard]] bool autoNotchOffered() const;
@@ -3760,6 +3776,8 @@ private:
     // place, or does nothing when there is no receiver or nothing changed.
     // ui/models/noise_link.cpp.
     void change_noise(const rpc::VrxParams& next);
+    // Adaptive noise profile, ui/models/noise_profile_link.cpp.
+    void change_noise_profile(const rpc::VrxParams& next);
     qulonglong receiver_id_ = 0;
 
     // The absolute frequency the pane was last tuned to, kept because it

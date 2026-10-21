@@ -154,6 +154,7 @@ add_library(revenant_core STATIC
     dsp/front_end_correction.cpp
     dsp/front_end_correction_reference.cpp
     dsp/impulse_excision_reference.cpp
+    dsp/noise_profile.cpp
     dsp/noise_reference.cpp
     dsp/pfb_branch_reference.cpp
     dsp/pfb_design.cpp

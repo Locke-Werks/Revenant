@@ -561,6 +561,13 @@ struct VrxParams {
     // The audio spectrum strip: PassbandFrame::audio_power_db is filled only
     // while this is set.
     bool display_audio_spectrum = false;
+
+    // Adaptive noise profile, core/engine/vrx.h has the meaning of each.
+    bool profile_enabled = false;
+    double profile_strength_db = 12.0;
+    bool profile_auto_learn = true;
+    std::uint32_t profile_learn_count = 0;
+    std::uint32_t profile_reset_count = 0;
 };
 
 // All four notches with entry 0 taken from the single notch fields.

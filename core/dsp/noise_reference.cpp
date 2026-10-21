@@ -846,6 +846,16 @@ Status validate_noise_request(const engine::VrxParams& params,
         return fail(std::format("a noise reduction strength of {} is outside [0, 1]",
                                 params.nr_strength));
     }
+    // Adaptive noise profile, core/dsp/noise_profile.h.
+    if (params.profile_enabled && !noise_reduction_offered(params.demod)) {
+        return fail(std::format("the noise profile is not offered on {}, which hands out "
+                                "complex baseband rather than audio",
+                                mode));
+    }
+    if (!(params.profile_strength_db >= 0.0 && params.profile_strength_db <= 20.0)) {
+        return fail(std::format("a noise profile strength of {} dB is outside [0, 20]",
+                                params.profile_strength_db));
+    }
     return {};
 }
 

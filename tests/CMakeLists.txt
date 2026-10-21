@@ -64,6 +64,7 @@ add_executable(revenant_reference_tests
     reference/test_iq_correction.cpp
     reference/test_impulse_excision.cpp
     reference/test_noise.cpp
+    reference/test_noise_profile.cpp
     reference/test_pfb.cpp
     reference/test_spectrum.cpp
     reference/test_spectrum_levels.cpp
