@@ -280,6 +280,37 @@ struct PassbandFrame {
     audioPowerDb @14 :List(Float32);
     audioBinHz @15 :Float64;
     audioNotchHz @16 :List(Float64);
+
+    # Constellation and eye panel (#17). Unset unless the receiver's
+    # displaySymbols is set and its tap has symbols.
+    symbols @17 :SymbolScope;
+}
+
+# A digital receiver's latest symbols, for a scope and nothing else: no bit
+# is sliced. core/engine/symbol_tap.h has the arithmetic.
+enum SymbolKind {
+    none @0;
+    # One level a symbol, FSK family, in units of the inner deviation.
+    levels @1;
+    # One differential I/Q point a symbol, PSK family, unit RMS.
+    constellation @2;
+}
+
+struct SymbolScope {
+    kind @0 :SymbolKind;
+    symbolRateHz @1 :Float64;
+    # Levels: one float a symbol. Constellation: interleaved I and Q.
+    points @2 :List(Float32);
+    ideal @3 :List(Float32);
+    # Eye traces of eyeTraceLength floats each, two symbols centred on a
+    # strobe, back to back.
+    eye @4 :List(Float32);
+    eyeTraceLength @5 :UInt32;
+    # EVM, or the symbol deviation error, as a fraction of the outer ideal.
+    errorRms @6 :Float32;
+    # Timing loop phase in symbols, and its clock error in ppm.
+    timingOffset @7 :Float32;
+    rateErrorPpm @8 :Float32;
 }
 
 struct PassbandNotchMark {
@@ -1113,6 +1144,16 @@ struct VrxParams {
     # The audio spectrum strip: each PassbandFrame then also carries
     # audioPowerDb. Display only.
     displayAudioSpectrum @22 :Bool = false;
+
+    # Held for the features merging alongside #17, which own @23 to @25.
+    # Cap'n Proto refuses a gap in the ordinals; the merge replaces these.
+    heldFor23 @23 :Bool = false;
+    heldFor24 @24 :Bool = false;
+    heldFor25 @25 :Bool = false;
+
+    # Constellation and eye panel (#17): on a digital receiver each
+    # PassbandFrame then also carries symbols. Display only.
+    displaySymbols @26 :Bool = false;
 }
 
 struct Notch {

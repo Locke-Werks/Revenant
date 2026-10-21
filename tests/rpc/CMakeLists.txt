@@ -43,6 +43,7 @@ if(TARGET revenant_rpc_server)
         test_rpc_vrx_events.cpp
         test_rpc_pace.cpp
         test_rpc_audio_spectrum.cpp
+        test_rpc_symbols.cpp
         test_rpc_passband_notch.cpp
         test_rpc_rds.cpp
         test_rpc_session.cpp

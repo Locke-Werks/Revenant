@@ -561,6 +561,10 @@ struct VrxParams {
     // The audio spectrum strip: PassbandFrame::audio_power_db is filled only
     // while this is set.
     bool display_audio_spectrum = false;
+
+    // Constellation and eye panel (#17): PassbandFrame::symbols is filled
+    // only while this is set on a digital receiver.
+    bool display_symbols = false;
 };
 
 // All four notches with entry 0 taken from the single notch fields.
@@ -910,6 +914,26 @@ struct PassbandCarrier {
     friend bool operator==(const PassbandCarrier&, const PassbandCarrier&) = default;
 };
 
+// A digital receiver's latest symbols (#17), core/engine/symbol_tap.h's
+// SymbolScope as a client holds it.
+enum class SymbolKind : std::uint8_t { None, Levels, Constellation };
+
+struct SymbolScope {
+    SymbolKind kind = SymbolKind::None;
+    double symbol_rate_hz = 0.0;
+    // Levels: one float a symbol. Constellation: interleaved I and Q.
+    std::vector<float> points;
+    std::vector<float> ideal;
+    // Traces of eye_trace_length floats each, back to back.
+    std::vector<float> eye;
+    std::uint32_t eye_trace_length = 0;
+    float error_rms = 0.0F;
+    float timing_offset = 0.0F;
+    float rate_error_ppm = 0.0F;
+
+    friend bool operator==(const SymbolScope&, const SymbolScope&) = default;
+};
+
 struct PassbandFrame {
     std::uint64_t vrx = 0;
     std::vector<float> power_db;
@@ -947,6 +971,10 @@ struct PassbandFrame {
     std::vector<float> audio_power_db;
     double audio_bin_hz = 0.0;
     std::vector<double> audio_notch_hz;
+
+    // Constellation and eye panel (#17), empty unless
+    // VrxParams::display_symbols is set and the tap has symbols.
+    std::optional<SymbolScope> symbols;
 };
 
 // One receiver's audio, as it reaches a client.

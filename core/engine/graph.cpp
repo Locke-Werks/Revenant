@@ -134,6 +134,7 @@
 #include "core/engine/listener_level.h"
 #include "core/engine/load_clock.h"
 #include "core/engine/passband_notch.h"
+#include "core/engine/symbol_tap.h"
 #include "core/engine/record_util.h"
 #include "core/engine/signal_meter.h"
 #include "core/engine/spectrum_scale.h"
@@ -726,6 +727,11 @@ struct Graph::Impl {
         std::uint64_t audio_spectrum_epoch = 0;
         std::array<double, kMaxVrxNotches> audio_notch_hz{};
 
+        // Constellation and eye tap (#17), completion thread only, built the
+        // first time a frame asks for it and fed like the strip above.
+        std::optional<SymbolTap> symbol_tap;
+        std::uint64_t symbol_tap_epoch = 0;
+
         // Recording thread only. The completion thread gets its own copy of
         // the pointer in the frame snapshot, so replacing a sink never races
         // a delivery that is already under way.
@@ -849,6 +855,7 @@ struct Graph::Impl {
         dsp::Hertz passband_center = 0;
         bool passband_split = false;
         bool audio_spectrum = false;
+        bool symbol_tap = false;  // #17
     };
 
     struct Frame {
@@ -2579,6 +2586,20 @@ struct Graph::Impl {
                 slot.audio_spectrum->push(audio, entry.output.channels, entry.output.rate);
             }
 
+            // Constellation and eye tap (#17), on the complex baseband ahead
+            // of the squelch for the same reason as the strip.
+            if (entry.symbol_tap && entry.output.complex_iq) {
+                if (!slot.symbol_tap.has_value()) {
+                    slot.symbol_tap.emplace();
+                    slot.symbol_tap_epoch = entry.tuning_epoch;
+                }
+                if (entry.tuning_epoch != slot.symbol_tap_epoch) {
+                    slot.symbol_tap->reset();
+                    slot.symbol_tap_epoch = entry.tuning_epoch;
+                }
+                slot.symbol_tap->push(entry.passband_notch.demod, audio, entry.output.rate);
+            }
+
             // Squelched means muted, not stopped. The level is stored above
             // this and the passband loop below runs whatever the gate did, so
             // a squelched receiver keeps feeding its meter and its display.
@@ -2988,6 +3009,9 @@ struct Graph::Impl {
                 audio_notch_frequencies(entry.passband_notch, slot.audio_notch_hz);
             out.audio_notch_hz =
                 std::span<const double>(slot.audio_notch_hz.data(), ticks);
+        }
+        if (entry.symbol_tap && slot.symbol_tap.has_value()) {  // #17
+            out.symbols = slot.symbol_tap->scope();
         }
 
         Status delivered;
@@ -5314,6 +5338,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
                 entry.passband_center = params.center;
                 entry.passband_split = params.display_split;
                 entry.audio_spectrum = params.display_audio_spectrum;
+                entry.symbol_tap = params.display_symbols;  // #17
             }
             frame.vrxs.push_back(std::move(entry));
         }

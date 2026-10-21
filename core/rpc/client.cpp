@@ -72,6 +72,7 @@
 
 #include "core/error.h"
 #include "core/rpc/revenant.capnp.h"
+#include "core/rpc/symbol_wire.h"
 #include "core/rpc/types.h"
 
 namespace revenant::rpc {
@@ -597,6 +598,7 @@ static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
     out.notches = resolved_notches(out);
     out.display_split = in.getDisplaySplit();
     out.display_audio_spectrum = in.getDisplayAudioSpectrum();
+    out.display_symbols = in.getDisplaySymbols();  // #17
     return out;
 }
 
@@ -632,6 +634,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     }
     out.setDisplaySplit(in.display_split);
     out.setDisplayAudioSpectrum(in.display_audio_spectrum);
+    out.setDisplaySymbols(in.display_symbols);  // #17
 }
 
 [[nodiscard]] VrxPlacement read_vrx_placement(schema::VrxPlacement::Reader in) {
@@ -1158,6 +1161,16 @@ void read_passband_frame(PassbandFrame& out, schema::PassbandFrame::Reader in) {
     out.audio_notch_hz.resize(ticks.size());
     for (unsigned i = 0; i < ticks.size(); ++i) {
         out.audio_notch_hz[i] = ticks[i];
+    }
+
+    // Constellation and eye panel (#17).
+    if (in.hasSymbols()) {
+        if (!out.symbols.has_value()) {
+            out.symbols.emplace();
+        }
+        read_symbol_scope(*out.symbols, in.getSymbols());
+    } else {
+        out.symbols.reset();
     }
 }
 

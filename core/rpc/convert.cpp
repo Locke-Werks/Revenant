@@ -10,6 +10,7 @@
 
 #include "core/dsp/vrx_reference.h"
 #include "core/rpc/plugin_voice.h"
+#include "core/engine/symbol_tap.h"
 
 namespace revenant::rpc {
 namespace {
@@ -596,6 +597,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& i
     }
     out.setDisplaySplit(in.display_split);
     out.setDisplayAudioSpectrum(in.display_audio_spectrum);
+    out.setDisplaySymbols(in.display_symbols);  // #17
 }
 
 void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in,
@@ -709,6 +711,32 @@ void write_passband_frame(schema::PassbandFrame::Builder out,
         for (unsigned i = 0; i < ticks.size(); ++i) {
             ticks.set(i, in.audio_notch_hz[i]);
         }
+    }
+
+    // Constellation and eye panel (#17).
+    if (in.symbols != nullptr) {
+        const engine::SymbolScope& scope = *in.symbols;
+        auto symbols = out.initSymbols();
+        switch (scope.kind) {
+            case engine::SymbolKind::Levels: symbols.setKind(schema::SymbolKind::LEVELS); break;
+            case engine::SymbolKind::Constellation:
+                symbols.setKind(schema::SymbolKind::CONSTELLATION);
+                break;
+            case engine::SymbolKind::None: symbols.setKind(schema::SymbolKind::NONE); break;
+        }
+        symbols.setSymbolRateHz(scope.symbol_rate_hz);
+        const auto put = [](capnp::List<float>::Builder to, const std::vector<float>& from) {
+            for (unsigned i = 0; i < to.size(); ++i) {
+                to.set(i, from[i]);
+            }
+        };
+        put(symbols.initPoints(static_cast<unsigned>(scope.points.size())), scope.points);
+        put(symbols.initIdeal(static_cast<unsigned>(scope.ideal.size())), scope.ideal);
+        put(symbols.initEye(static_cast<unsigned>(scope.eye.size())), scope.eye);
+        symbols.setEyeTraceLength(scope.eye_trace_length);
+        symbols.setErrorRms(scope.error_rms);
+        symbols.setTimingOffset(scope.timing_offset);
+        symbols.setRateErrorPpm(scope.rate_error_ppm);
     }
 }
 
@@ -959,6 +987,7 @@ Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in) {
                                       out.notch_width_hz};
     out.display_split = in.getDisplaySplit();
     out.display_audio_spectrum = in.getDisplayAudioSpectrum();
+    out.display_symbols = in.getDisplaySymbols();  // #17
     return out;
 }
 
