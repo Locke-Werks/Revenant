@@ -66,6 +66,12 @@ target_include_directories(revenant_rpc_client
 
 revenant_apply_warnings(revenant_rpc_client)
 
+# client.cpp crossed COFF's section limit when the passband frame grew its
+# notch, carrier, split and audio fields on 2026-10-20.
+if(MSVC)
+    target_compile_options(revenant_rpc_client PRIVATE /bigobj)
+endif()
+
 add_library(revenant_rpc_server STATIC
     convert.cpp
     listen.cpp

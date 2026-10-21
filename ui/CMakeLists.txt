@@ -157,6 +157,12 @@ if(NOT EXISTS "${REVENANT_SOURCE_DIR}/core/rpc/client.cpp")
     set(revenant_rpc_client_sources "")
 endif()
 
+# Same section limit as core/rpc/CMakeLists.txt, which this project cannot see.
+if(MSVC AND revenant_rpc_client_sources)
+    set_source_files_properties(${revenant_rpc_client_sources}
+        PROPERTIES COMPILE_OPTIONS /bigobj)
+endif()
+
 # ---------------------------------------------------------------------------
 # The client
 # ---------------------------------------------------------------------------
