@@ -1681,7 +1681,9 @@ class EngineLink : public QObject {
 
     // The operator asked for decoding on the pane's receiver. A switch and not
     // a state: it stays on across a receiver change and a reconnect, and not
-    // across a restart, on AFT's terms.
+    // across a restart, on AFT's terms. ON at startup since 2026-10-21, with
+    // the choice on auto: off by default, a cw receiver sat silent beside a
+    // decoder nobody had found the switch for.
     // The vocoder plugins the engine loaded from its vocoders folder at
     // startup, read once per connection; core/decode/vocoder_plugin.h is the
     // loader. vocoderStatus is one line, the loader's own or why there is none
@@ -5230,7 +5232,7 @@ private:
     QString startup_decoder_;
 
     // Written by the Qt thread, read by the supervisor.
-    std::atomic<bool> decode_wanted_{false};
+    std::atomic<bool> decode_wanted_{true};
 
     // The Cap'n Proto loop's hand-off to the Qt thread, and the ended
     // arrivals and the choice for the supervisor, all under one lock: each
