@@ -36,7 +36,9 @@
 #include <QAbstractListModel>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include <QVariantList>
+#include <QVariantMap>
 #include <QtQmlIntegration>
 
 #include "models/memories.h"
@@ -92,7 +94,16 @@ class FrequencyManager : public QAbstractListModel {
     Q_PROPERTY(QVariantList importAdds READ importAdds NOTIFY importChanged)
     Q_PROPERTY(QVariantList importSkips READ importSkips NOTIFY importChanged)
 
+    // "Remember notch and filter per band", off by default. See
+    // noteReceiverSetup for what it does when on.
+    Q_PROPERTY(bool rememberPerBand READ rememberPerBand WRITE setRememberPerBand NOTIFY
+                   presetSettingChanged)
+
 public:
+    // The QSettings key behind rememberPerBand. Here rather than in
+    // models/settings.h until that file takes it.
+    static constexpr const char* kRememberPerBandKey = "memories/rememberNotchPerBand";
+
     enum Role {
         KeyRole = Qt::UserRole + 1,
         NameRole,
@@ -211,7 +222,46 @@ public:
     // Every mode a memory can hold, in the selector's order.
     Q_INVOKABLE QStringList modes() const;
 
+    [[nodiscard]] bool rememberPerBand() const { return remember_per_band_; }
+    void setRememberPerBand(bool on);
+
+    // THE RECEIVER'S SETUP AS IT STANDS, fed by whoever watches the focused
+    // receiver's parameters, every time they change. The map is the preset
+    // shape below. It is what addFromReceiver saves notches from, and with
+    // rememberPerBand on it is the per-band store's only input:
+    //   - same mode and band as the last call: the setup is filed for that
+    //     band, so the store always holds what the operator left there;
+    //   - a different mode or band: this is a tune. The setup is NOT filed,
+    //     because it is the previous band's carried across, and if a preset
+    //     is held for the new band presetForTune is emitted with it.
+    // So a caller needs no separate "tuned" call and cannot get the order of
+    // two calls wrong.
+    Q_INVOKABLE void noteReceiverSetup(const QVariantMap& setup);
+
+    // THE PRESET SHAPE, in and out:
+    //   hz          double, absolute hertz of the receiver
+    //   mode        QString, the engine's demod name
+    //   low, high   int, filter edges from centre, both 0 for the default
+    //   autoNotch   bool
+    //   notches     QVariantList of up to four QVariantMap
+    //               { enabled bool, hz int, depthDb double, widthHz int },
+    //               hz signed from centre as rpc::NotchEntry has it
+    //   source      out only: "memory" or "band"
+    [[nodiscard]] static NotchSetup setup_from_map(const QVariantMap& map);
+    [[nodiscard]] static QVariantMap preset_map(std::int64_t hz, const std::string& mode,
+                                                std::int32_t low, std::int32_t high,
+                                                const NotchSetup& setup, const QString& source);
+
 signals:
+    // Apply this to the focused receiver: the filter edges and all four
+    // notches plus the automatic notch. Emitted on a recall of a memory that
+    // holds notches (after recallPlace, which already set the filter) and on
+    // a tune into a band with a remembered preset. A memory without notches
+    // emits nothing, which is how "leave the receiver's notches alone" is
+    // said.
+    void presetForTune(const QVariantMap& preset);
+    void presetSettingChanged();
+
     void viewChanged();
     void bookChanged();
     void statusChanged();
@@ -243,6 +293,13 @@ private:
         std::vector<SkippedLine> skipped;
     };
     std::optional<PendingImport> pending_import_;
+
+    bool remember_per_band_ = false;
+    std::optional<NotchSetup> current_setup_;
+    std::string current_band_key_;
+    // Band presets are filed on every notch drag; the file is written once
+    // the dragging stops.
+    QTimer* preset_save_ = nullptr;
 
     void load();
     void save();

@@ -47,10 +47,21 @@
 // old list has no creation time, and one that was never recalled has no use.
 // A file whose version is higher than this reader's is refused rather than
 // read, so an older client never rewrites a newer file with fields missing.
+//
+// TWO OPTIONAL ADDITIONS, still version 1. A memory may carry
+//   "notch": { "auto": false, "list": [ { "on": true, "hz": 1000,
+//              "depth": 40, "width": 100 }, ... up to four ] }
+// and the root may carry "band_presets": [ { "key": "usb|Amateur/20 m",
+// "low": 200, "high": 2800, "notch": {...}, "updated": "..." } ]. Not a
+// version bump, because a bump would make every older client refuse the
+// whole file over a convenience; the price is that an older client rewriting
+// the file drops both, which loses presets and never a memory.
 
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -62,6 +73,7 @@
 #include <vector>
 
 #include "core/error.h"
+#include "models/band_plan.h"
 #include "models/bookmarks.h"
 #include "models/frequency_entry.h"
 #include "models/json_lite.h"
@@ -75,6 +87,34 @@ inline constexpr std::int64_t kMemorySchemaVersion = 1;
 // The file's name inside the application data directory.
 inline constexpr std::string_view kMemoryFileName = "memories.json";
 
+// One manual notch as a preset holds it, in rpc::NotchEntry's terms: signed
+// hertz from the receiver's centre, depth in [3, 80] dB, width in [10, 2000]
+// Hz. Mirrored rather than included so the file format does not move when
+// the wire struct does.
+inline constexpr std::size_t kPresetNotches = 4;
+inline constexpr double kNotchDepthMinDb = 3.0;
+inline constexpr double kNotchDepthMaxDb = 80.0;
+inline constexpr std::int64_t kNotchWidthMinHz = 10;
+inline constexpr std::int64_t kNotchWidthMaxHz = 2'000;
+// Wider than any audio passband, so only a hand-edited typo is refused.
+inline constexpr std::int64_t kNotchOffsetMaxHz = 1'000'000;
+
+struct NotchPreset {
+    bool enabled = false;
+    std::int64_t hz = 1'000;
+    double depth_db = 40.0;
+    std::int64_t width_hz = 100;
+
+    friend bool operator==(const NotchPreset&, const NotchPreset&) = default;
+};
+
+struct NotchSetup {
+    std::array<NotchPreset, kPresetNotches> notches{};
+    bool auto_notch = false;
+
+    friend bool operator==(const NotchSetup&, const NotchSetup&) = default;
+};
+
 struct Memory {
     // Stable for the memory's life and never reused within a file, so a scan
     // list can name its members and an undo can put one back where it was.
@@ -86,6 +126,11 @@ struct Memory {
     std::string mode;
     std::int32_t passband_low = 0;
     std::int32_t passband_high = 0;
+
+    // Empty for a memory saved before notches were kept, or imported from a
+    // format that has none. Empty means a recall leaves the receiver's notches
+    // as they are, which is not the same as switching them all off.
+    std::optional<NotchSetup> notch_setup;
 
     // Lower case is not imposed: a tag is shown as it was first typed. Two
     // tags that differ only in case are one tag, see normalise_tags.
@@ -124,9 +169,20 @@ struct ScanList {
     std::string mode;
 };
 
+// The last filter and notches an operator left in one mode on one band, for
+// "remember notch and filter per band". key is band_preset_key's answer.
+struct BandPreset {
+    std::string key;
+    std::int32_t passband_low = 0;
+    std::int32_t passband_high = 0;
+    NotchSetup setup;
+    std::int64_t updated = 0;
+};
+
 struct MemoryBook {
     std::vector<Memory> memories;
     std::vector<ScanList> scan_lists;
+    std::vector<BandPreset> band_presets;
 
     // The next id add_memory hands out. Always above every id in the book.
     std::uint64_t next_id = 1;
@@ -720,6 +776,165 @@ inline constexpr std::int64_t kMaxScanChannels = 100'000;
 }
 
 // ---------------------------------------------------------------------------
+// Notch and filter presets
+// ---------------------------------------------------------------------------
+
+// Every figure brought into range, so a preset applied on tune never asks the
+// engine for something it would refuse.
+[[nodiscard]] inline NotchSetup clamped_setup(NotchSetup setup)
+{
+    for (NotchPreset& notch : setup.notches) {
+        notch.hz = std::clamp(notch.hz, -kNotchOffsetMaxHz, kNotchOffsetMaxHz);
+        notch.depth_db = std::clamp(notch.depth_db, kNotchDepthMinDb, kNotchDepthMaxDb);
+        notch.width_hz = std::clamp(notch.width_hz, kNotchWidthMinHz, kNotchWidthMaxHz);
+    }
+    return setup;
+}
+
+// What the per-band store files a setup under: the mode, then the narrowest
+// band-plan row holding the frequency that is not a single channel, else a
+// bucket. Channels are passed over because a notch tuned out on one repeater
+// output is about the band's interference, not that channel. The bucket is
+// 1 MHz below 30 MHz and 10 MHz above, roughly one HF band and one slice of
+// VHF/UHF, so an unplanned frequency still finds its neighbours' setup.
+[[nodiscard]] inline std::string band_preset_key(std::string_view mode, std::int64_t freq_hz,
+                                                 std::uint32_t region_mask)
+{
+    std::string key = fold_case(mode) + "|";
+    const Band* best = nullptr;
+    for (const Band* band : bands_overlapping(freq_hz, freq_hz + 1, region_mask)) {
+        if (band->kind == BandKind::kChannel) {
+            continue;
+        }
+        // bands_overlapping is widest first, so the last one kept is narrowest.
+        best = band;
+    }
+    if (best != nullptr) {
+        key += std::string(best->group) + "/" + std::string(best->name);
+        return key;
+    }
+    const std::int64_t bucket = freq_hz < 30'000'000 ? 1'000'000 : 10'000'000;
+    key += "bucket/" + std::to_string((freq_hz / bucket) * bucket);
+    return key;
+}
+
+[[nodiscard]] inline const BandPreset* find_band_preset(const MemoryBook& book,
+                                                        std::string_view key)
+{
+    for (const BandPreset& preset : book.band_presets) {
+        if (preset.key == key) {
+            return &preset;
+        }
+    }
+    return nullptr;
+}
+
+// Files the setup under key, replacing what was there. Returns false when
+// nothing changed, so the caller can skip a write.
+inline bool remember_band_preset(MemoryBook& book, std::string_view key, std::int32_t low,
+                                 std::int32_t high, const NotchSetup& setup, std::int64_t now)
+{
+    const NotchSetup clean = clamped_setup(setup);
+    for (BandPreset& preset : book.band_presets) {
+        if (preset.key == key) {
+            if (preset.passband_low == low && preset.passband_high == high &&
+                preset.setup == clean) {
+                return false;
+            }
+            preset.passband_low = low;
+            preset.passband_high = high;
+            preset.setup = clean;
+            preset.updated = now;
+            return true;
+        }
+    }
+    book.band_presets.push_back({std::string(key), low, high, clean, now});
+    return true;
+}
+
+namespace memory_detail {
+
+[[nodiscard]] inline json::Value number(double value)
+{
+    char buffer[32];
+    const auto result = std::to_chars(buffer, buffer + sizeof buffer, value);
+    json::Value out;
+    out.kind = json::Value::Kind::Number;
+    out.text.assign(buffer, result.ptr);
+    return out;
+}
+
+[[nodiscard]] inline std::optional<double> as_double(const json::Value* value)
+{
+    if (value == nullptr || !value->is_number()) {
+        return std::nullopt;
+    }
+    double out = 0.0;
+    const char* end = value->text.data() + value->text.size();
+    const auto result = std::from_chars(value->text.data(), end, out);
+    if (result.ec != std::errc() || result.ptr != end) {
+        return std::nullopt;
+    }
+    return out;
+}
+
+[[nodiscard]] inline json::Value setup_to_json(const NotchSetup& setup)
+{
+    json::Value out = json::object();
+    out.set("auto", json::boolean(setup.auto_notch));
+    json::Value list = json::array();
+    for (const NotchPreset& notch : setup.notches) {
+        json::Value item = json::object();
+        item.set("on", json::boolean(notch.enabled));
+        item.set("hz", json::integer(notch.hz));
+        item.set("depth", number(notch.depth_db));
+        item.set("width", json::integer(notch.width_hz));
+        list.items.push_back(std::move(item));
+    }
+    out.set("list", std::move(list));
+    return out;
+}
+
+// A setup that is not the shape written above reads as absent rather than as
+// a memory to drop: losing a station over a hand-edited notch would be worse
+// than recalling it with the receiver's notches left alone.
+[[nodiscard]] inline std::optional<NotchSetup> setup_from_json(const json::Value* value)
+{
+    if (value == nullptr || !value->is_object()) {
+        return std::nullopt;
+    }
+    NotchSetup setup;
+    if (const json::Value* on = value->find("auto"); on != nullptr && on->is_bool()) {
+        setup.auto_notch = on->boolean;
+    }
+    const json::Value* list = value->find("list");
+    if (list == nullptr || !list->is_array() || list->items.size() > kPresetNotches) {
+        return std::nullopt;
+    }
+    for (std::size_t i = 0; i < list->items.size(); ++i) {
+        const json::Value& item = list->items[i];
+        if (!item.is_object()) {
+            return std::nullopt;
+        }
+        NotchPreset& notch = setup.notches[i];
+        const json::Value* on = item.find("on");
+        const auto hz = json::as_integer(item.find("hz"));
+        const auto depth = as_double(item.find("depth"));
+        const auto width = json::as_integer(item.find("width"));
+        if (on == nullptr || !on->is_bool() || !hz || !depth || !width) {
+            return std::nullopt;
+        }
+        notch.enabled = on->boolean;
+        notch.hz = *hz;
+        notch.depth_db = *depth;
+        notch.width_hz = *width;
+    }
+    return clamped_setup(setup);
+}
+
+}  // namespace memory_detail
+
+// ---------------------------------------------------------------------------
 // The file
 // ---------------------------------------------------------------------------
 
@@ -732,6 +947,9 @@ inline constexpr std::int64_t kMaxScanChannels = 100'000;
     out.set("mode", json::string(memory.mode));
     out.set("low", json::integer(memory.passband_low));
     out.set("high", json::integer(memory.passband_high));
+    if (memory.notch_setup) {
+        out.set("notch", memory_detail::setup_to_json(*memory.notch_setup));
+    }
     json::Value tags = json::array();
     for (const std::string& tag : memory.tags) {
         tags.items.push_back(json::string(tag));
@@ -784,6 +1002,21 @@ inline constexpr std::int64_t kMaxScanChannels = 100'000;
         lists.items.push_back(scan_list_to_json(list));
     }
     root.set("scan_lists", std::move(lists));
+    if (!book.band_presets.empty()) {
+        json::Value presets = json::array();
+        for (const BandPreset& preset : book.band_presets) {
+            json::Value item = json::object();
+            item.set("key", json::string(preset.key));
+            item.set("low", json::integer(preset.passband_low));
+            item.set("high", json::integer(preset.passband_high));
+            item.set("notch", memory_detail::setup_to_json(preset.setup));
+            if (preset.updated != 0) {
+                item.set("updated", json::string(format_utc(preset.updated)));
+            }
+            presets.items.push_back(std::move(item));
+        }
+        root.set("band_presets", std::move(presets));
+    }
     return json::write(root);
 }
 
@@ -846,6 +1079,7 @@ namespace memory_detail {
     }
     memory.passband_low = *low;
     memory.passband_high = *high;
+    memory.notch_setup = memory_detail::setup_from_json(value.find("notch"));
     if (const json::Value* tags = value.find("tags"); tags != nullptr && tags->is_array()) {
         for (const json::Value& tag : tags->items) {
             if (tag.is_string()) {
@@ -953,6 +1187,31 @@ namespace memory_detail {
                 continue;
             }
             out.book.scan_lists.push_back(std::move(list));
+        }
+    }
+
+    // Absent from every file written before presets existed, and a preset is
+    // only a convenience, so a bad one is dropped without a report.
+    if (const json::Value* presets = root->find("band_presets");
+        presets != nullptr && presets->is_array()) {
+        for (const json::Value& item : presets->items) {
+            if (!item.is_object()) {
+                continue;
+            }
+            BandPreset preset;
+            preset.key = memory_detail::string_member(item, "key");
+            const auto low = memory_detail::edge_member(item, "low");
+            const auto high = memory_detail::edge_member(item, "high");
+            const auto setup = memory_detail::setup_from_json(item.find("notch"));
+            if (preset.key.empty() || !low || !high || !setup ||
+                find_band_preset(out.book, preset.key) != nullptr) {
+                continue;
+            }
+            preset.passband_low = *low;
+            preset.passband_high = *high;
+            preset.setup = *setup;
+            preset.updated = parse_utc(memory_detail::string_member(item, "updated")).value_or(0);
+            out.book.band_presets.push_back(std::move(preset));
         }
     }
     return out;

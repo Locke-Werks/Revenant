@@ -80,6 +80,109 @@ FrequencyManager::FrequencyManager(EngineLink& link, Storage storage, QObject* p
 {
     load();
     refresh();
+    // A smoke run has no file, and its setting stays at the default rather
+    // than reading a developer's.
+    if (!storage_.path.isEmpty()) {
+        remember_per_band_ = QSettings().value(QLatin1StringView(kRememberPerBandKey), false).toBool();
+    }
+    preset_save_ = new QTimer(this);
+    preset_save_->setSingleShot(true);
+    preset_save_->setInterval(2000);
+    connect(preset_save_, &QTimer::timeout, this, [this] { save(); });
+}
+
+// ---------------------------------------------------------------------------
+// Notch and filter presets
+// ---------------------------------------------------------------------------
+
+void FrequencyManager::setRememberPerBand(bool on)
+{
+    if (on == remember_per_band_) {
+        return;
+    }
+    remember_per_band_ = on;
+    if (storage_.writable) {
+        QSettings().setValue(QLatin1StringView(kRememberPerBandKey), on);
+    }
+    // Switching on mid-band should file what is on the receiver now, not
+    // treat the next change as a tune.
+    current_band_key_.clear();
+    emit presetSettingChanged();
+}
+
+NotchSetup FrequencyManager::setup_from_map(const QVariantMap& map)
+{
+    NotchSetup setup;
+    setup.auto_notch = map.value(QStringLiteral("autoNotch")).toBool();
+    const QVariantList list = map.value(QStringLiteral("notches")).toList();
+    const qsizetype count = std::min<qsizetype>(list.size(), static_cast<qsizetype>(kPresetNotches));
+    for (qsizetype i = 0; i < count; ++i) {
+        const QVariantMap item = list[i].toMap();
+        NotchPreset& notch = setup.notches[static_cast<std::size_t>(i)];
+        notch.enabled = item.value(QStringLiteral("enabled")).toBool();
+        notch.hz = item.value(QStringLiteral("hz"), 1000).toLongLong();
+        notch.depth_db = item.value(QStringLiteral("depthDb"), 40.0).toDouble();
+        notch.width_hz = item.value(QStringLiteral("widthHz"), 100).toLongLong();
+    }
+    return clamped_setup(setup);
+}
+
+QVariantMap FrequencyManager::preset_map(std::int64_t hz, const std::string& mode,
+                                         std::int32_t low, std::int32_t high,
+                                         const NotchSetup& setup, const QString& source)
+{
+    QVariantList notches;
+    for (const NotchPreset& notch : setup.notches) {
+        notches.append(QVariantMap{
+            {QStringLiteral("enabled"), notch.enabled},
+            {QStringLiteral("hz"), static_cast<qlonglong>(notch.hz)},
+            {QStringLiteral("depthDb"), notch.depth_db},
+            {QStringLiteral("widthHz"), static_cast<qlonglong>(notch.width_hz)},
+        });
+    }
+    return QVariantMap{
+        {QStringLiteral("hz"), static_cast<double>(hz)},
+        {QStringLiteral("mode"), text(mode)},
+        {QStringLiteral("low"), low},
+        {QStringLiteral("high"), high},
+        {QStringLiteral("autoNotch"), setup.auto_notch},
+        {QStringLiteral("notches"), notches},
+        {QStringLiteral("source"), source},
+    };
+}
+
+void FrequencyManager::noteReceiverSetup(const QVariantMap& map)
+{
+    const NotchSetup setup = setup_from_map(map);
+    current_setup_ = setup;
+    if (!remember_per_band_) {
+        return;
+    }
+    const auto hz = static_cast<std::int64_t>(std::llround(map.value(QStringLiteral("hz")).toDouble()));
+    const std::string mode = map.value(QStringLiteral("mode")).toString().toStdString();
+    if (hz <= 0 || mode.empty()) {
+        return;
+    }
+    const std::string key = band_preset_key(mode, hz, ~0u);
+    const auto low = static_cast<std::int32_t>(map.value(QStringLiteral("low")).toInt());
+    const auto high = static_cast<std::int32_t>(map.value(QStringLiteral("high")).toInt());
+    if (key != current_band_key_) {
+        const bool first = current_band_key_.empty();
+        current_band_key_ = key;
+        // The first call after start or after switching on is not a tune:
+        // there is no previous band whose setup this could be.
+        if (!first) {
+            if (const BandPreset* preset = find_band_preset(book_, key); preset != nullptr) {
+                emit presetForTune(preset_map(hz, mode, preset->passband_low,
+                                              preset->passband_high, preset->setup,
+                                              QStringLiteral("band")));
+            }
+            return;
+        }
+    }
+    if (remember_band_preset(book_, key, low, high, setup, now())) {
+        preset_save_->start();
+    }
 }
 
 QString FrequencyManager::defaultPath()
@@ -402,6 +505,7 @@ int FrequencyManager::addFromReceiver(const QString& name)
     memory.mode = link_.receiverDemod().toStdString();
     memory.passband_low = link_.receiverPassbandLow();
     memory.passband_high = link_.receiverPassbandHigh();
+    memory.notch_setup = current_setup_;
     if (const std::string problem = memory_problem(memory); !problem.empty()) {
         say(QStringLiteral("this receiver has %1 to save").arg(text(problem)));
         return -1;
@@ -433,6 +537,15 @@ void FrequencyManager::recall(qulonglong key, bool new_receiver)
     changed();
     link_.recallPlace(static_cast<double>(copy.freq_hz), text(copy.mode), copy.passband_low,
                       copy.passband_high, text(copy.name), new_receiver);
+    if (copy.notch_setup) {
+        // The memory's own setup wins over the band's, so the band store
+        // must not treat the change it causes as a tune.
+        current_band_key_ = remember_per_band_ ? band_preset_key(copy.mode, copy.freq_hz, ~0u)
+                                               : std::string();
+        emit presetForTune(preset_map(copy.freq_hz, copy.mode, copy.passband_low,
+                                      copy.passband_high, *copy.notch_setup,
+                                      QStringLiteral("memory")));
+    }
 }
 
 bool FrequencyManager::setName(qulonglong key, const QString& name)

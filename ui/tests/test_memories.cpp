@@ -421,3 +421,127 @@ TEST_CASE("a scan list is sized and checked before anything scans it", "[memorie
     members.name.clear();
     CHECK_FALSE(scan_list_problem(members).empty());
 }
+
+// ---------------------------------------------------------------------------
+// Notch and filter presets
+// ---------------------------------------------------------------------------
+
+namespace {
+
+[[nodiscard]] revenant::ui::NotchSetup sample_setup()
+{
+    revenant::ui::NotchSetup setup;
+    setup.auto_notch = true;
+    setup.notches[0] = {true, 1'200, 35.5, 80};
+    setup.notches[2] = {true, -650, 60.0, 250};
+    return setup;
+}
+
+}  // namespace
+
+// Rejects a writer that drops the second to fourth notches, or rounds the
+// depth to whole decibels.
+TEST_CASE("a memory's notches and filter survive the file", "[memories][presets]")
+{
+    MemoryBook book;
+    Memory memory;
+    memory.name = "net";
+    memory.freq_hz = 14'230'000;
+    memory.mode = "usb";
+    memory.passband_low = 200;
+    memory.passband_high = 2'800;
+    memory.notch_setup = sample_setup();
+    const std::uint64_t id = add_memory(book, memory, kNow);
+    revenant::ui::remember_band_preset(book, "usb|Amateur HF/20 m", 300, 2'700, sample_setup(),
+                                       kNow);
+
+    const auto loaded = memory_book_from_json(memory_book_to_json(book));
+    REQUIRE(loaded);
+    const Memory* back = revenant::ui::find_memory(loaded->book, id);
+    REQUIRE(back != nullptr);
+    CHECK(back->passband_low == 200);
+    CHECK(back->passband_high == 2'800);
+    REQUIRE(back->notch_setup.has_value());
+    CHECK(*back->notch_setup == sample_setup());
+
+    REQUIRE(loaded->book.band_presets.size() == 1);
+    const auto& preset = loaded->book.band_presets.front();
+    CHECK(preset.key == "usb|Amateur HF/20 m");
+    CHECK(preset.passband_low == 300);
+    CHECK(preset.setup == sample_setup());
+    CHECK(preset.updated == kNow);
+}
+
+// Rejects a reader that treats a missing notch as "all notches off", which
+// would switch off whatever the operator had on every recall of an old memory.
+TEST_CASE("a memory from before notches were kept leaves the receiver alone",
+          "[memories][presets]")
+{
+    const auto loaded = memory_book_from_json(read_file("revenant_memories.json"));
+    REQUIRE(loaded);
+    REQUIRE_FALSE(loaded->book.memories.empty());
+    for (const Memory& memory : loaded->book.memories) {
+        CHECK_FALSE(memory.notch_setup.has_value());
+    }
+    CHECK(loaded->book.band_presets.empty());
+
+    // And a memory without notches is written without the field, so the
+    // file an older client reads is the file it wrote.
+    MemoryBook book;
+    Memory plain;
+    plain.freq_hz = 7'100'000;
+    plain.mode = "lsb";
+    add_memory(book, plain, kNow);
+    CHECK(memory_book_to_json(book).find("\"notch\"") == std::string::npos);
+    CHECK(memory_book_to_json(book).find("band_presets") == std::string::npos);
+}
+
+// Rejects a reader that drops the whole memory over a bad notch, and one that
+// passes an out-of-range depth through to the engine.
+TEST_CASE("a hand-edited notch is clamped or ignored, never the memory",
+          "[memories][presets]")
+{
+    const std::string text = R"({"format":"revenant-memories","version":1,"memories":[
+        {"id":1,"hz":14230000,"mode":"usb","notch":{"auto":false,"list":[{"on":true}]}},
+        {"id":2,"hz":14240000,"mode":"usb","notch":{"auto":true,"list":[
+            {"on":true,"hz":900,"depth":500,"width":1}]}}],
+        "band_presets":[{"key":"","low":0,"high":0,"notch":{"list":[]}},"junk"]})";
+    const auto loaded = memory_book_from_json(text);
+    REQUIRE(loaded);
+    REQUIRE(loaded->book.memories.size() == 2);
+    CHECK_FALSE(loaded->book.memories[0].notch_setup.has_value());
+    REQUIRE(loaded->book.memories[1].notch_setup.has_value());
+    const auto& notch = loaded->book.memories[1].notch_setup->notches[0];
+    CHECK(notch.depth_db == revenant::ui::kNotchDepthMaxDb);
+    CHECK(notch.width_hz == revenant::ui::kNotchWidthMinHz);
+    CHECK(loaded->book.band_presets.empty());
+}
+
+// Rejects a key that ignores the mode, one that splits a band at every
+// kilohertz, and one that files a repeater output on its own channel row.
+TEST_CASE("presets are found by mode and band, else by bucket", "[memories][presets]")
+{
+    using revenant::ui::band_preset_key;
+    const std::string usb = band_preset_key("usb", 14'230'000, ~0u);
+    CHECK(usb.starts_with("usb|"));
+    CHECK(usb.find("20 m") != std::string::npos);
+    CHECK(band_preset_key("USB", 14'235'000, ~0u) == usb);
+    CHECK(band_preset_key("cw", 14'230'000, ~0u) != usb);
+    CHECK(band_preset_key("usb", 7'150'000, ~0u) != usb);
+
+    // Nothing in the plan at 2 GHz plus a little, so the 10 MHz bucket.
+    CHECK(band_preset_key("nfm", 2'901'234'567, ~0u).ends_with("bucket/2900000000"));
+
+    MemoryBook book;
+    CHECK(revenant::ui::find_band_preset(book, usb) == nullptr);
+    CHECK(revenant::ui::remember_band_preset(book, usb, 200, 2'800, sample_setup(), kNow));
+    CHECK_FALSE(revenant::ui::remember_band_preset(book, usb, 200, 2'800, sample_setup(), kNow));
+    revenant::ui::NotchSetup other = sample_setup();
+    other.notches[1] = {true, 400, 20.0, 50};
+    CHECK(revenant::ui::remember_band_preset(book, usb, 200, 2'800, other, kNow + 5));
+    REQUIRE(book.band_presets.size() == 1);
+    const auto* found = revenant::ui::find_band_preset(book, band_preset_key("usb", 14'300'000, ~0u));
+    REQUIRE(found != nullptr);
+    CHECK(found->setup == other);
+    CHECK(found->updated == kNow + 5);
+}
