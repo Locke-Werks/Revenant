@@ -85,9 +85,10 @@ class PassbandWaterfallItem : public QQuickItem {
     Q_PROPERTY(int timeMarkerSeconds READ timeMarkerSeconds WRITE setTimeMarkerSeconds NOTIFY
                    timeMarkerSecondsChanged)
 
-    // The before/after split: the left half of the width draws the frame's
-    // own power, the right half the processed row handed in through
-    // takeSplitRow for the same frame. Both halves keep the one frequency
+    // The before/after split: the right half of the width draws the frame's
+    // own power, which is after the notch, and the left half the row handed
+    // in through takeSplitRow for the same frame, which is before it. The
+    // item takes rpc::PassbandFrame::raw_power_db itself. Both halves keep the one frequency
     // axis, so a carrier straddling the middle shows what the processing did
     // to it. Without a processed row for a frame, the whole row is the frame.
     Q_PROPERTY(bool split READ split WRITE setSplit NOTIFY splitChanged)

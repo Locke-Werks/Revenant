@@ -100,10 +100,11 @@ void place_caption(QSGNode* texts, QQuickWindow* window, QTextLayout* layout, co
 PassbandWaterfallItem::PassbandWaterfallItem(QQuickItem* parent) : QQuickItem(parent)
 {
     setFlag(ItemHasContents, true);
-    caption_raw_ = lay_out_caption(QStringLiteral("raw"), caption_raw_width_);
-    caption_processed_ = lay_out_caption(QStringLiteral("processed"), caption_processed_width_);
+    caption_raw_ = lay_out_caption(QStringLiteral("before notch"), caption_raw_width_);
+    caption_processed_ =
+        lay_out_caption(QStringLiteral("after notch"), caption_processed_width_);
     caption_no_data_ =
-        lay_out_caption(QStringLiteral("processed: no data"), caption_no_data_width_);
+        lay_out_caption(QStringLiteral("before notch: no data"), caption_no_data_width_);
 }
 
 void PassbandWaterfallItem::setLink(EngineLink* link)
@@ -329,6 +330,10 @@ void PassbandWaterfallItem::takeFrame()
         return;
     }
     const rpc::PassbandFrame& frame = link_->passbandFrame();
+    // The engine's before-notch row rides in the frame itself.
+    if (split_ && !frame.raw_power_db.empty()) {
+        takeSplitRow(frame.sequence, frame.raw_power_db);
+    }
     if (frame.power_db.empty()) {
         // The link empties the frame when the receiver changes identity,
         // mode or frequency. The history is not thrown away for that: the
@@ -375,15 +380,15 @@ void PassbandWaterfallItem::takeFrame()
 
     reduce_peak(frame.power_db, columns_);
 
-    // The right half from the processed row, when one came for this frame.
-    // Reduced over the whole width like the frame, so both halves put every
-    // hertz in the same column.
+    // The left half from the before-notch row, when one came for this frame;
+    // the frame itself is after the notch. Reduced over the whole width like
+    // the frame, so both halves put every hertz in the same column.
     const bool split_now = split_ && split_held_ && split_sequence_ == frame.sequence &&
                            split_row_.size() == frame.power_db.size();
     if (split_now) {
         reduce_peak(split_row_, split_columns_);
         const auto half = static_cast<std::ptrdiff_t>(wide / 2);
-        std::copy(split_columns_.begin() + half, split_columns_.end(), columns_.begin() + half);
+        std::copy(split_columns_.begin(), split_columns_.begin() + half, columns_.begin());
     }
     if (split_ && split_watch_.frame(split_now)) {
         emit splitLiveChanged();
@@ -528,21 +533,22 @@ QSGNode* PassbandWaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNo
     const double divider = split_divider_x(wide, w);
     const double line = QFontMetricsF(time_marker_font()).height();
     const double top = 1.0;
-    const double raw_x = divider - kSplitCaptionGap - caption_raw_width_;
+    const double left_width =
+        state == kSplitNoData ? caption_no_data_width_ : caption_raw_width_;
+    const double raw_x = divider - kSplitCaptionGap - left_width;
     const double right_x = divider + kSplitCaptionGap;
-    const double right_width =
-        state == kSplitNoData ? caption_no_data_width_ : caption_processed_width_;
+    const double right_width = caption_processed_width_;
     if (node->split_state != state) {
         while (QSGNode* child = node->split_texts->firstChild()) {
             node->split_texts->removeChildNode(child);
             delete child;
         }
         if (state != kSplitOff) {
-            place_caption(node->split_texts, window(), caption_raw_.get(), kSplitInk, raw_x, top);
             place_caption(node->split_texts, window(),
-                          state == kSplitNoData ? caption_no_data_.get()
-                                                : caption_processed_.get(),
-                          state == kSplitNoData ? kSplitWarn : kSplitInk, right_x, top);
+                          state == kSplitNoData ? caption_no_data_.get() : caption_raw_.get(),
+                          state == kSplitNoData ? kSplitWarn : kSplitInk, raw_x, top);
+            place_caption(node->split_texts, window(), caption_processed_.get(), kSplitInk,
+                          right_x, top);
         }
         node->split_state = state;
     } else if (state != kSplitOff && node->split_texts->childCount() == 2) {
@@ -561,7 +567,7 @@ QSGNode* PassbandWaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNo
     if (state != kSplitOff) {
         split_quads.push_back(OverlayQuad{QRectF(std::floor(divider), 0.0, 1.0, h), kSplitRule});
         split_quads.push_back(OverlayQuad{
-            QRectF(raw_x - 2.0, top, caption_raw_width_ + 4.0, line), kSplitPlate});
+            QRectF(raw_x - 2.0, top, left_width + 4.0, line), kSplitPlate});
         split_quads.push_back(
             OverlayQuad{QRectF(right_x - 2.0, top, right_width + 4.0, line), kSplitPlate});
     }

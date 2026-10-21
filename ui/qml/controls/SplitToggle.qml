@@ -1,12 +1,12 @@
 // The receiver waterfall's before/after split, as one chip for its corner:
-// "split raw | processed", filled while the split is on.
+// "split before | after notch", filled while the split is on.
 //
 // Like RSegmented it does not hold the state. `checked` is bound by the
 // caller to the waterfall's `split`, and `toggled` asks for the other one.
-// `live` is the waterfall's `splitLive`: with the split on and no processed
-// rows coming, the right-hand word dims and reads "no data", the same thing
-// the waterfall's own caption says, so the chip never claims a comparison
-// that is not being drawn.
+// `live` is the waterfall's `splitLive`: with the split on and no
+// before-notch rows coming, the left-hand word dims and reads "no data", the
+// same thing the waterfall's own caption says, so the chip never claims a
+// comparison that is not being drawn.
 
 import QtQuick
 import Revenant
@@ -44,8 +44,10 @@ Rectangle {
         }
 
         Text {
-            text: "raw"
-            color: chip.checked ? Theme.ink : Theme.inkDim
+            text: chip.checked && !chip.live ? "no data" : "before"
+            color: chip.checked && chip.live ? Theme.ink
+                   : chip.checked ? Theme.inkWarn
+                   : Theme.inkDim
             font.family: Theme.uiFont
             font.pixelSize: Theme.sizeBody
         }
@@ -58,10 +60,8 @@ Rectangle {
         }
 
         Text {
-            text: chip.checked && !chip.live ? "no data" : "processed"
-            color: chip.checked && chip.live ? Theme.ink
-                   : chip.checked ? Theme.inkWarn
-                   : Theme.inkDim
+            text: "after notch"
+            color: chip.checked ? Theme.ink : Theme.inkDim
             font.family: Theme.uiFont
             font.pixelSize: Theme.sizeBody
         }
