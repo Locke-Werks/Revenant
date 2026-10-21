@@ -28,6 +28,7 @@
 #include <deque>
 #include <format>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -169,10 +170,15 @@ public:
         }
         const std::int64_t lane = lane_for(obs.center_hz);
         Burst* target = nullptr;
-        for (auto it = bursts_.rbegin(); it != bursts_.rend(); ++it) {
+        // Open bursts are few and nearly always the newest, so the walk
+        // stops once it has passed all of them rather than reading a day of
+        // history per observation.
+        std::size_t opens_seen = 0;
+        for (auto it = bursts_.rbegin(); it != bursts_.rend() && opens_seen < open_count_; ++it) {
             if (!it->open) {
                 continue;
             }
+            ++opens_seen;
             const bool same_source = obs.source != 0 && it->source == obs.source;
             const bool same_lane = it->lane_hz == lane;
             if ((same_source || same_lane) && obs.start_ns <= it->end_ns + config_.hang_ns &&
@@ -209,7 +215,8 @@ public:
                 target->source = obs.source;
             }
         }
-        retry_pending();
+        // Pending attachments are retried on the tick: retrying them here
+        // was every pending one against every burst, per observation.
     }
 
     // Pins a transcript or decoded message to the burst it overlaps in both
@@ -229,10 +236,18 @@ public:
     // attachments that never found a burst, and trims history to its bounds.
     void tick(std::int64_t now_ns)
     {
-        for (Burst& b : bursts_) {
-            if (b.open && now_ns - b.end_ns > config_.hang_ns) {
-                b.open = false;
-                remember_end(b);
+        retry_pending();
+        std::size_t opens_seen = 0;
+        const std::size_t opens = open_count_;
+        for (auto it = bursts_.rbegin(); it != bursts_.rend() && opens_seen < opens; ++it) {
+            if (!it->open) {
+                continue;
+            }
+            ++opens_seen;
+            if (now_ns - it->end_ns > config_.hang_ns) {
+                it->open = false;
+                --open_count_;
+                remember_end(*it);
             }
         }
         while (!pending_.empty() && now_ns - pending_.front().second > config_.pending_ns) {
@@ -244,13 +259,15 @@ public:
         while (!bursts_.empty() &&
                (bursts_.size() > config_.max_bursts ||
                 (!bursts_.front().open && bursts_.front().end_ns < oldest))) {
-            bursts_.pop_front();
+            forget_front();
         }
     }
 
     void clear()
     {
         bursts_.clear();
+        lane_counts_.clear();
+        open_count_ = 0;
         pending_.clear();
         last_ends_.clear();
     }
@@ -259,12 +276,10 @@ public:
     [[nodiscard]] std::vector<std::int64_t> lanes() const
     {
         std::vector<std::int64_t> out;
-        out.reserve(bursts_.size());
-        for (const Burst& b : bursts_) {
-            out.push_back(b.lane_hz);
+        out.reserve(lane_counts_.size());
+        for (const auto& [hz, count] : lane_counts_) {
+            out.push_back(hz);
         }
-        std::sort(out.begin(), out.end());
-        out.erase(std::unique(out.begin(), out.end()), out.end());
         return out;
     }
 
@@ -293,20 +308,47 @@ public:
 private:
     [[nodiscard]] std::int64_t lane_for(std::int64_t hz) const
     {
+        // The nearest lane within tolerance: the first at or above, or the
+        // one below it.
         std::int64_t best = hz;
         std::int64_t best_gap = config_.lane_tolerance_hz + 1;
-        for (const Burst& b : bursts_) {
-            const std::int64_t gap = std::llabs(b.lane_hz - hz);
+        const auto consider = [&](std::int64_t lane) {
+            const std::int64_t gap = std::llabs(lane - hz);
             if (gap <= config_.lane_tolerance_hz && gap < best_gap) {
-                best = b.lane_hz;
+                best = lane;
                 best_gap = gap;
             }
+        };
+        const auto above = lane_counts_.lower_bound(hz);
+        if (above != lane_counts_.end()) {
+            consider(above->first);
+        }
+        if (above != lane_counts_.begin()) {
+            consider(std::prev(above)->first);
         }
         return best;
     }
 
+    void forget_front()
+    {
+        const Burst& b = bursts_.front();
+        if (b.open) {
+            --open_count_;
+        }
+        if (const auto lane = lane_counts_.find(b.lane_hz); lane != lane_counts_.end()) {
+            if (--lane->second == 0) {
+                lane_counts_.erase(lane);
+            }
+        }
+        bursts_.pop_front();
+    }
+
     void insert_sorted(Burst burst)
     {
+        ++lane_counts_[burst.lane_hz];
+        if (burst.open) {
+            ++open_count_;
+        }
         auto at = std::upper_bound(bursts_.begin(), bursts_.end(), burst.start_ns,
                                    [](std::int64_t start, const Burst& b) { return start < b.start_ns; });
         bursts_.insert(at, std::move(burst));
@@ -348,7 +390,15 @@ private:
         Burst* best = nullptr;
         std::int64_t best_overlap = -1;
         std::int64_t best_gap = 0;
-        for (Burst& b : bursts_) {
+        // Newest first, and no further back than an hour before it began: a
+        // burst that started earlier and still overlaps it is a receiver held
+        // open that long, and the walk would otherwise read the whole day.
+        constexpr std::int64_t kReachNs = 3600 * kBurstSecondNs;
+        for (auto it = bursts_.rbegin(); it != bursts_.rend(); ++it) {
+            Burst& b = *it;
+            if (b.start_ns < att.start_ns - kReachNs) {
+                break;
+            }
             const std::int64_t half = std::max(b.bandwidth_hz / 2, config_.lane_tolerance_hz);
             const std::int64_t gap = std::llabs(att.hz - b.center_hz);
             if (gap > half && std::llabs(att.hz - b.lane_hz) > half) {
@@ -390,6 +440,10 @@ private:
 
     BurstConfig config_;
     std::deque<Burst> bursts_;
+    // Kept beside the history so neither a lane lookup nor a walk for open
+    // bursts reads all of it.
+    std::map<std::int64_t, std::size_t> lane_counts_;
+    std::size_t open_count_ = 0;
     std::deque<std::pair<BurstAttachment, std::int64_t>> pending_;
     std::vector<std::pair<std::uint64_t, std::int64_t>> last_ends_;
     std::uint64_t next_id_ = 1;

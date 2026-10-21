@@ -65,23 +65,45 @@ Window {
         }
     }
 
+    // Bars are delegates of barSlots, which only grows or shrinks by the
+    // difference: each delegate reads its burst out of win.shown by index, so
+    // a refresh twice a second moves bars instead of rebuilding every one.
+    ListModel { id: barSlots }
+
     function refresh() {
         if (!win.visible)
             return
-        win.shown = timeline.bursts(win.startMs, win.endMs)
+        // Lanes are reassigned only when they change, so the lane rows are
+        // not rebuilt on every tick and each bar looks its lane up in a map.
+        const lanes = timeline.lanes
+        const key = lanes.map(l => l.hz).join(",")
+        if (key !== win.laneKey) {
+            const at = {}
+            for (let i = 0; i < lanes.length; ++i)
+                at[lanes[i].hz] = i
+            win.laneAt = at
+            win.laneList = lanes
+            win.laneKey = key
+        }
+        const next = timeline.bursts(win.startMs, win.endMs)
+        win.shown = next
+        while (barSlots.count < next.length)
+            barSlots.append({})
+        if (barSlots.count > next.length)
+            barSlots.remove(next.length, barSlots.count - next.length)
     }
 
     function xOf(ms) {
         return (ms - win.startMs) / win.spanMs * plot.width
     }
 
+    property var laneList: []
+    property var laneAt: ({})
+    property string laneKey: ""
+
     function laneIndex(hz) {
-        const lanes = timeline.lanes
-        for (let i = 0; i < lanes.length; ++i) {
-            if (lanes[i].hz === hz)
-                return i
-        }
-        return -1
+        const i = win.laneAt[hz]
+        return i === undefined ? -1 : i
     }
 
     function zoomAround(factor, atMs) {
@@ -141,7 +163,7 @@ Window {
 
             Label {
                 text: timeline.count + (timeline.count === 1 ? " burst, " : " bursts, ")
-                      + timeline.lanes.length + (timeline.lanes.length === 1 ? " lane" : " lanes")
+                      + win.laneList.length + (win.laneList.length === 1 ? " lane" : " lanes")
                 color: Theme.inkDim
                 font.pixelSize: Theme.sizeSmall
             }
@@ -227,14 +249,14 @@ Window {
                 anchors.fill: parent
                 anchors.margins: 1
                 contentWidth: width
-                contentHeight: timeline.lanes.length * win.laneHeight
+                contentHeight: win.laneList.length * win.laneHeight
                 boundsBehavior: Flickable.StopAtBounds
                 interactive: false
                 ScrollBar.vertical: RScrollBar {}
 
                 // Lane labels and their stripes.
                 Repeater {
-                    model: timeline.lanes
+                    model: win.laneList
                     Item {
                         required property var modelData
                         required property int index
@@ -274,10 +296,11 @@ Window {
                     }
 
                     Repeater {
-                        model: win.shown
+                        model: barSlots
                         Rectangle {
                             id: bar
-                            required property var modelData
+                            required property int index
+                            readonly property var modelData: win.shown[index] || ({ laneHz: -1, startMs: 0, endMs: 0, mode: "", open: false, id: 0 })
                             readonly property int lane: win.laneIndex(modelData.laneHz)
                             readonly property double x0: Math.max(0, win.xOf(modelData.startMs))
                             readonly property double x1: Math.min(plot.width, win.xOf(modelData.endMs))

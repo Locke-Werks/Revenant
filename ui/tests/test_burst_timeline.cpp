@@ -127,8 +127,23 @@ TEST_CASE("an attachment that arrives before its burst waits and is placed later
     t.attach(said(144'390'000, 1.0, 2.0, "aprs"), at(2.0));
     CHECK(t.pending() == 1);
     t.observe(seen(9, 144'390'000, 0.5, 2.5));
+    // Retried on the tick, not per observation.
+    t.tick(at(2.6));
     CHECK(t.pending() == 0);
     CHECK(t.bursts()[0].transcript() == "aprs");
+}
+
+TEST_CASE("a lane goes when the last burst on it is trimmed", "[burst]")
+{
+    BurstConfig config;
+    config.max_bursts = 1;
+    BurstTimeline t(config);
+    t.observe(seen(1, 851'000'000, 0.0, 1.0));
+    t.tick(at(10.0));
+    t.observe(seen(2, 852'000'000, 11.0, 12.0));
+    t.tick(at(12.5));
+    REQUIRE(t.lanes().size() == 1);
+    CHECK(t.lanes().front() == 852'000'000);
 }
 
 TEST_CASE("pending attachments that never find a burst expire", "[burst]")
