@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "render/passband_colour.h"
+#include "render/split_watch.h"
 #include "render/time_markers.h"
 #include "render/waterfall_scale.h"
 
@@ -87,4 +88,36 @@ TEST_CASE("time markers off at zero and never on the first row", "[time_markers]
     CHECK(marker_between(9'990, 10'010, 10) == 10'000);
     CHECK(marker_between(10'000, 10'100, 10) == 0);
     CHECK(marker_between(10'100, 10'000, 10) == 0);
+}
+
+TEST_CASE("the split reads no data until processed rows arrive, and again once they stop",
+          "[passband_waterfall]")
+{
+    SplitWatch watch;
+    CHECK_FALSE(watch.live());
+
+    CHECK(watch.frame(true));
+    CHECK(watch.live());
+
+    // A dropped row or a handful does not flicker the caption.
+    for (int at = 0; at < kSplitStaleFrames; ++at) {
+        CHECK_FALSE(watch.frame(false));
+        CHECK(watch.live());
+    }
+    CHECK(watch.frame(false));
+    CHECK_FALSE(watch.live());
+    CHECK_FALSE(watch.frame(false));
+
+    CHECK(watch.frame(true));
+    CHECK(watch.reset());
+    CHECK_FALSE(watch.live());
+    CHECK_FALSE(watch.reset());
+}
+
+TEST_CASE("the divider sits on the first column of the right half", "[passband_waterfall]")
+{
+    CHECK(split_divider_x(0, 300.0) == 0.0);
+    CHECK(split_divider_x(600, 300.0) == 150.0);
+    CHECK(split_divider_x(601, 300.0) == 300.0 * 300.0 / 601.0);
+    CHECK(split_divider_x(1, 50.0) == 0.0);
 }

@@ -46,18 +46,21 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
 #include <QImage>
 #include <QQuickItem>
 #include <QSize>
+#include <QTextLayout>
 #include <QtQmlIntegration>
 
 #include "models/engine_link.h"
 #include "models/scale_settings.h"
 #include "render/history_shift.h"
 #include "render/passband_colour.h"
+#include "render/split_watch.h"
 #include "render/time_marker_node.h"
 #include "render/time_markers.h"
 
@@ -89,6 +92,11 @@ class PassbandWaterfallItem : public QQuickItem {
     // to it. Without a processed row for a frame, the whole row is the frame.
     Q_PROPERTY(bool split READ split WRITE setSplit NOTIFY splitChanged)
 
+    // Whether processed rows are arriving; render/split_watch.h. False while
+    // split is off. The item captions the halves itself; this is for a
+    // control that wants to say the same thing.
+    Q_PROPERTY(bool splitLive READ splitLive NOTIFY splitLiveChanged)
+
 public:
     explicit PassbandWaterfallItem(QQuickItem* parent = nullptr);
 
@@ -110,6 +118,7 @@ public:
 
     [[nodiscard]] bool split() const { return split_; }
     void setSplit(bool split);
+    [[nodiscard]] bool splitLive() const { return split_ && split_watch_.live(); }
 
     // THE SPLIT'S ENTRY POINT. The processed power for the passband frame
     // with this sequence number (rpc::PassbandFrame::sequence), on the same
@@ -125,6 +134,7 @@ signals:
     void scaleSettingsChanged();
     void timeMarkerSecondsChanged();
     void splitChanged();
+    void splitLiveChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
@@ -189,6 +199,16 @@ private:
     std::vector<float> split_row_;
     std::uint64_t split_sequence_ = 0;
     bool split_held_ = false;
+    SplitWatch split_watch_;
+
+    // The three captions, laid out once on the GUI thread; the render thread
+    // only places them. See render/time_marker_node.h for the split.
+    std::unique_ptr<QTextLayout> caption_raw_;
+    std::unique_ptr<QTextLayout> caption_processed_;
+    std::unique_ptr<QTextLayout> caption_no_data_;
+    double caption_raw_width_ = 0.0;
+    double caption_processed_width_ = 0.0;
+    double caption_no_data_width_ = 0.0;
 
     // The absolute axis the stored rows are on. Not the receiver they came
     // from: see takeFrame for why a rebuilt receiver keeps its history.

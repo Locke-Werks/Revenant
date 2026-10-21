@@ -266,6 +266,7 @@ qt_add_executable(revenant_ui
     render/passband_item.h
     render/passband_waterfall_item.cpp
     render/passband_waterfall_item.h
+    render/split_watch.h
     render/spectrum_item.cpp
     render/spectrum_item.h
     render/spectrum_scale.h
@@ -334,6 +335,7 @@ qt_add_qml_module(revenant_ui
         qml/controls/RCheckBox.qml
         qml/controls/RComboBox.qml
         qml/controls/RSegmented.qml
+        qml/controls/SplitToggle.qml
         qml/controls/RSlider.qml
         qml/controls/RTextField.qml
         qml/controls/RScrollBar.qml

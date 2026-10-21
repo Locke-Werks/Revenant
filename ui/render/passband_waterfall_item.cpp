@@ -11,6 +11,10 @@
 #include <QSGTexture>
 
 #include <QDateTime>
+#include <QFontMetricsF>
+#include <QMatrix4x4>
+#include <QSGTextNode>
+#include <QSGTransformNode>
 
 #include "models/frame_stats.h"
 #include "render/history_resize.h"
@@ -48,14 +52,58 @@ public:
     QSGRectangleNode* background = nullptr;
     QSGNode* tiles = nullptr;
     TimeMarkerNode* markers = nullptr;
+    OverlayNode* split_quads = nullptr;
+    QSGNode* split_texts = nullptr;
+    int split_state = -1;
     std::vector<QSGTexture*> textures;
 };
+
+// The divider and caption colours: the time markers' ink and plate, so every
+// piece of text over the waterfall reads as one family.
+const QColor kSplitInk(0xc6, 0xd0, 0xdd, 220);
+const QColor kSplitWarn(0xe0, 0xb0, 0x60, 230);
+const QColor kSplitPlate(6, 8, 16, 200);
+const QColor kSplitRule(0xc6, 0xd0, 0xdd, 150);
+
+// Gap between a caption and the divider, so neither hides the other.
+constexpr double kSplitCaptionGap = 4.0;
+
+enum SplitState : int { kSplitOff = 0, kSplitLive = 1, kSplitNoData = 2 };
+
+std::unique_ptr<QTextLayout> lay_out_caption(const QString& text, double& width)
+{
+    auto layout = std::make_unique<QTextLayout>(text, time_marker_font());
+    layout->beginLayout();
+    QTextLine line = layout->createLine();
+    line.setPosition(QPointF(0.0, 0.0));
+    layout->endLayout();
+    width = line.naturalTextWidth();
+    return layout;
+}
+
+void place_caption(QSGNode* texts, QQuickWindow* window, QTextLayout* layout, const QColor& ink,
+                   double x, double y)
+{
+    QSGTextNode* text = window->createTextNode();
+    text->setColor(ink);
+    text->addTextLayout(QPointF(0.0, 0.0), layout);
+    auto* place = new QSGTransformNode;
+    QMatrix4x4 at;
+    at.translate(static_cast<float>(x), static_cast<float>(y));
+    place->setMatrix(at);
+    place->appendChildNode(text);
+    texts->appendChildNode(place);
+}
 
 }  // namespace
 
 PassbandWaterfallItem::PassbandWaterfallItem(QQuickItem* parent) : QQuickItem(parent)
 {
     setFlag(ItemHasContents, true);
+    caption_raw_ = lay_out_caption(QStringLiteral("raw"), caption_raw_width_);
+    caption_processed_ = lay_out_caption(QStringLiteral("processed"), caption_processed_width_);
+    caption_no_data_ =
+        lay_out_caption(QStringLiteral("processed: no data"), caption_no_data_width_);
 }
 
 void PassbandWaterfallItem::setLink(EngineLink* link)
@@ -116,8 +164,16 @@ void PassbandWaterfallItem::setSplit(bool split)
     if (split_ == split) {
         return;
     }
+    const bool was_live = splitLive();
     split_ = split;
+    // A split turned back on starts at no data, not at whatever the last
+    // session left, so a stalled engine half cannot pass for a live one.
+    split_watch_.reset();
     emit splitChanged();
+    if (splitLive() != was_live) {
+        emit splitLiveChanged();
+    }
+    update();
 }
 
 void PassbandWaterfallItem::takeSplitRow(std::uint64_t sequence, std::span<const float> power_db)
@@ -329,6 +385,9 @@ void PassbandWaterfallItem::takeFrame()
         const auto half = static_cast<std::ptrdiff_t>(wide / 2);
         std::copy(split_columns_.begin() + half, split_columns_.end(), columns_.begin() + half);
     }
+    if (split_ && split_watch_.frame(split_now)) {
+        emit splitLiveChanged();
+    }
 
     // No reduction headroom, for the reason render/passband_item.cpp gives:
     // a column here is a bin or two. The ends are the frame's whole measure,
@@ -379,6 +438,10 @@ QSGNode* PassbandWaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNo
         node->appendChildNode(node->background);
         node->appendChildNode(node->tiles);
         node->appendChildNode(node->markers);
+        node->split_quads = new OverlayNode;
+        node->split_texts = new QSGNode;
+        node->appendChildNode(node->split_quads);
+        node->appendChildNode(node->split_texts);
     }
     node->background->setRect(0.0, 0.0, w, h);
 
@@ -458,6 +521,51 @@ QSGNode* PassbandWaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNo
     }
 
     node->markers->sync(window(), marker_labels_, marks_.visible(read), tall, h);
+
+    // The split's rule and captions. Text nodes are rebuilt only when the
+    // state changes; the quads every frame, since a resize moves them.
+    const int state = !split_ ? kSplitOff : split_watch_.live() ? kSplitLive : kSplitNoData;
+    const double divider = split_divider_x(wide, w);
+    const double line = QFontMetricsF(time_marker_font()).height();
+    const double top = 1.0;
+    const double raw_x = divider - kSplitCaptionGap - caption_raw_width_;
+    const double right_x = divider + kSplitCaptionGap;
+    const double right_width =
+        state == kSplitNoData ? caption_no_data_width_ : caption_processed_width_;
+    if (node->split_state != state) {
+        while (QSGNode* child = node->split_texts->firstChild()) {
+            node->split_texts->removeChildNode(child);
+            delete child;
+        }
+        if (state != kSplitOff) {
+            place_caption(node->split_texts, window(), caption_raw_.get(), kSplitInk, raw_x, top);
+            place_caption(node->split_texts, window(),
+                          state == kSplitNoData ? caption_no_data_.get()
+                                                : caption_processed_.get(),
+                          state == kSplitNoData ? kSplitWarn : kSplitInk, right_x, top);
+        }
+        node->split_state = state;
+    } else if (state != kSplitOff && node->split_texts->childCount() == 2) {
+        const auto move = [](QSGNode* place, double x, double y) {
+            QMatrix4x4 at;
+            at.translate(static_cast<float>(x), static_cast<float>(y));
+            auto* transform = static_cast<QSGTransformNode*>(place);
+            if (transform->matrix() != at) {
+                transform->setMatrix(at);
+            }
+        };
+        move(node->split_texts->childAtIndex(0), raw_x, top);
+        move(node->split_texts->childAtIndex(1), right_x, top);
+    }
+    std::vector<OverlayQuad> split_quads;
+    if (state != kSplitOff) {
+        split_quads.push_back(OverlayQuad{QRectF(std::floor(divider), 0.0, 1.0, h), kSplitRule});
+        split_quads.push_back(OverlayQuad{
+            QRectF(raw_x - 2.0, top, caption_raw_width_ + 4.0, line), kSplitPlate});
+        split_quads.push_back(
+            OverlayQuad{QRectF(right_x - 2.0, top, right_width + 4.0, line), kSplitPlate});
+    }
+    node->split_quads->setQuads(split_quads);
 
     for (QSGTexture* texture : retired) {
         delete texture;
