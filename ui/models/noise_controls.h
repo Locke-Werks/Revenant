@@ -128,6 +128,58 @@ inline constexpr double kNrStrengthMax = 1.0;
     return 0.0;
 }
 
+// The inverse, for a control or a drag that speaks audio hertz: the offset
+// from the centre the engine's notch_hz wants for audio_hz. Either AM
+// sideband is heard at the same frequency, and the upper is the one
+// notch_audio_hz reads back unchanged.
+[[nodiscard]] inline std::int64_t notch_offset_for_audio(rpc::Demod mode, double audio_hz,
+                                                         std::int64_t cw_pitch)
+{
+    const auto f = static_cast<std::int64_t>(std::llround(std::abs(audio_hz)));
+    switch (mode) {
+        case rpc::Demod::Lsb: return -f;
+        case rpc::Demod::Cw: return f - cw_pitch;
+        case rpc::Demod::Usb:
+        case rpc::Demod::Am:
+        case rpc::Demod::Sam:
+        case rpc::Demod::Dsb:
+        case rpc::Demod::Nfm:
+        case rpc::Demod::Raw:
+        case rpc::Demod::Wfm:
+        case rpc::Demod::P25p1:
+        case rpc::Demod::Dstar:
+        case rpc::Demod::Tetra:
+        case rpc::Demod::Dmr: return f;
+    }
+    return f;
+}
+
+// Notch slot i of params, 0 to kMaxNotches - 1. Slot 0 lives in the single
+// notch fields, which stay authoritative for it on the wire (rpc/types.h),
+// and is mirrored into notches[0] so an older peer and a newer one agree.
+[[nodiscard]] inline rpc::NotchEntry notch_slot(const rpc::VrxParams& params, std::size_t i)
+{
+    if (i == 0) {
+        return rpc::NotchEntry{params.notch_enabled, params.notch_hz, params.notch_depth_db,
+                               params.notch_width_hz};
+    }
+    return i < rpc::kMaxNotches ? params.notches[i] : rpc::NotchEntry{};
+}
+
+inline void set_notch_slot(rpc::VrxParams& params, std::size_t i, const rpc::NotchEntry& entry)
+{
+    if (i >= rpc::kMaxNotches) {
+        return;
+    }
+    if (i == 0) {
+        params.notch_enabled = entry.enabled;
+        params.notch_hz = entry.hz;
+        params.notch_depth_db = entry.depth_db;
+        params.notch_width_hz = entry.width_hz;
+    }
+    params.notches[i] = entry;
+}
+
 // The engine guards a CW automatic notch at the pitch so it leaves the
 // signal alone, and refuses one at a pitch of zero, where the signal is at
 // DC and there is nothing to guard. True for every other mode.
@@ -167,6 +219,21 @@ inline void fit_noise_to_mode(rpc::VrxParams& params)
         !(notch_audio_hz(params.demod, params.notch_hz, params.cw_pitch) > 0.0)) {
         params.notch_enabled = false;
     }
+
+    // Slots 1 to 3 by the same rules, and slot 0 mirrored in.
+    for (std::size_t i = 1; i < rpc::kMaxNotches; ++i) {
+        rpc::NotchEntry& notch = params.notches[i];
+        notch.enabled = notch.enabled && offer.notch;
+        if (params.demod == rpc::Demod::Usb) {
+            notch.hz = std::abs(notch.hz);
+        } else if (params.demod == rpc::Demod::Lsb) {
+            notch.hz = -std::abs(notch.hz);
+        }
+        if (notch.enabled && !(notch_audio_hz(params.demod, notch.hz, params.cw_pitch) > 0.0)) {
+            notch.enabled = false;
+        }
+    }
+    params.notches[0] = notch_slot(params, 0);
 }
 
 enum class NoiseStage : std::uint8_t {
@@ -272,10 +339,15 @@ inline bool toggle_noise_stage(rpc::VrxParams& params, NoiseStage stage)
     if (params.nb_enabled && offer.blanker) {
         add("blanker");
     }
-    if (params.notch_enabled && offer.notch) {
-        add(std::format("notch {:.2f} kHz",
-                        notch_audio_hz(params.demod, params.notch_hz, params.cw_pitch) /
-                            1000.0));
+    if (offer.notch) {
+        for (std::size_t i = 0; i < rpc::kMaxNotches; ++i) {
+            const rpc::NotchEntry notch = notch_slot(params, i);
+            if (notch.enabled) {
+                add(std::format("notch {:.2f} kHz",
+                                notch_audio_hz(params.demod, notch.hz, params.cw_pitch) /
+                                    1000.0));
+            }
+        }
     }
     if (params.auto_notch_enabled && offer.auto_notch) {
         add("auto notch");

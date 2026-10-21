@@ -1218,6 +1218,27 @@ class EngineLink : public QObject {
     // hears it as: the same as notchHz on USB and its magnitude elsewhere.
     Q_PROPERTY(double notchAudioHz READ notchAudioHz NOTIFY receiverChanged)
 
+    // All four manual notch slots, as maps of enabled, hz (signed from the
+    // centre), depthDb, widthHz and audioHz. Slot 0 is the single notch
+    // above; the *At invokables below edit any slot.
+    Q_PROPERTY(QVariantList notches READ notches NOTIFY receiverChanged)
+    Q_PROPERTY(int cwPitchHz READ cwPitchHz NOTIFY receiverChanged)
+
+    // The detail view's display taps: the before-notch row for the split
+    // waterfall and the audio spectrum strip. Each costs the engine work
+    // only while set, so the views switch them on while they are shown.
+    Q_PROPERTY(bool displaySplit READ displaySplit WRITE setDisplaySplit NOTIFY receiverChanged)
+    Q_PROPERTY(bool displayAudioSpectrum READ displayAudioSpectrum WRITE setDisplayAudioSpectrum
+                   NOTIFY receiverChanged)
+
+    // The receiver's notch and filter setup in FrequencyManager's preset
+    // shape, for the per-band and per-memory store.
+    Q_PROPERTY(QVariantMap receiverSetup READ receiverSetup NOTIFY receiverChanged)
+
+    // The passband frame's tracked stationary carriers, as PassbandItem's
+    // carriers property takes them: offsetHz, widthHz, levelDb, ageSeconds.
+    Q_PROPERTY(QVariantList passbandCarriers READ passbandCarriers NOTIFY passbandChanged)
+
     // ------------------------------------------------------------------
     // The rack: every receiver this window holds. Implemented in
     // ui/models/rack_link.cpp, with the rules in models/receiver_rack.h.
@@ -2569,6 +2590,33 @@ public:
     [[nodiscard]] QString autoNotchNote() const;
     [[nodiscard]] QString noiseSummary() const;
     [[nodiscard]] double notchAudioHz() const;
+
+    [[nodiscard]] QVariantList notches() const;
+    [[nodiscard]] int cwPitchHz() const { return static_cast<int>(wanted_.cw_pitch); }
+    Q_INVOKABLE void setNotchEnabledAt(int index, bool on);
+    Q_INVOKABLE void setNotchHzAt(int index, int hz);
+    Q_INVOKABLE void setNotchAudioHzAt(int index, double audio_hz);
+    Q_INVOKABLE void setNotchDepthDbAt(int index, double db);
+    Q_INVOKABLE void setNotchWidthHzAt(int index, int hz);
+    // Puts a notch at this audio frequency in the first free slot and
+    // returns the slot, or -1 with all four in use or none offered.
+    Q_INVOKABLE int addNotch(double audio_hz, double width_hz);
+    Q_INVOKABLE void removeNotch(int index);
+    // Maps of audioHz and widthHz, as PassbandItem's notchAllRequested
+    // sends: each one not already notched takes a free slot.
+    Q_INVOKABLE void addNotches(const QVariantList& notches);
+
+    [[nodiscard]] bool displaySplit() const { return wanted_.display_split; }
+    void setDisplaySplit(bool on);
+    [[nodiscard]] bool displayAudioSpectrum() const { return wanted_.display_audio_spectrum; }
+    void setDisplayAudioSpectrum(bool on);
+
+    [[nodiscard]] QVariantMap receiverSetup() const;
+    // FrequencyManager's presetForTune: the filter edges, the automatic
+    // notch and all four slots, applied to the focused receiver at once.
+    Q_INVOKABLE void applyPreset(const QVariantMap& preset);
+
+    [[nodiscard]] QVariantList passbandCarriers() const;
 
     // The AGC switch. Sent as a retune in place, and kept in the request on
     // every mode so a switch made on nfm is still what the receiver has

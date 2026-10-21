@@ -241,3 +241,41 @@ TEST_CASE("a greyed-out stage says why", "[ui][noise]")
     CHECK_FALSE(noise_stage_note(Demod::Wfm, NoiseStage::Notch).empty());
     CHECK_FALSE(noise_stage_note(Demod::Raw, NoiseStage::Blanker).empty());
 }
+
+TEST_CASE("an audio frequency maps to the offset that reads back as it", "[noise_controls]")
+{
+    using revenant::ui::notch_audio_hz;
+    using revenant::ui::notch_offset_for_audio;
+    for (const Demod mode : {Demod::Usb, Demod::Lsb, Demod::Am, Demod::Sam, Demod::Dsb,
+                             Demod::Nfm, Demod::Cw}) {
+        const auto offset = notch_offset_for_audio(mode, 1'300.0, 700);
+        CHECK(notch_audio_hz(mode, offset, 700) == 1'300.0);
+    }
+    CHECK(notch_offset_for_audio(Demod::Lsb, 1'300.0, 0) == -1'300);
+    CHECK(notch_offset_for_audio(Demod::Cw, 800.0, 700) == 100);
+}
+
+TEST_CASE("a mode change applies to every notch slot", "[noise_controls]")
+{
+    VrxParams params;
+    params.demod = Demod::Usb;
+    params.notches[2] = revenant::rpc::NotchEntry{true, 1'500, 30.0, 80};
+    params.demod = Demod::Lsb;
+    fit_noise_to_mode(params);
+    CHECK(params.notches[2].enabled);
+    CHECK(params.notches[2].hz == -1'500);
+
+    params.demod = Demod::Wfm;
+    fit_noise_to_mode(params);
+    CHECK_FALSE(params.notches[2].enabled);
+}
+
+TEST_CASE("the summary names every notch that is on", "[noise_controls]")
+{
+    VrxParams params;
+    params.demod = Demod::Usb;
+    params.notch_enabled = true;
+    params.notch_hz = 1'000;
+    params.notches[1] = revenant::rpc::NotchEntry{true, 2'000, 40.0, 100};
+    CHECK(noise_summary(params) == "notch 1.00 kHz, notch 2.00 kHz");
+}
