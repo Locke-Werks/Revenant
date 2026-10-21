@@ -937,7 +937,10 @@ ColumnLayout {
     Binding {
         target: engineLink
         property: "displayAudioSpectrum"
-        value: audioStrip.visible
+        // The setting, not audioStrip.visible: a write here is a retune that
+        // renotifies receiverId, which visible reads.
+        value: ScaleSettings.showAudioStrip
+        delayed: true
     }
 
     // The readout, which is the whole of what a drag says back.
