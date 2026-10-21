@@ -78,6 +78,7 @@
 #include <QtQmlIntegration>
 
 #include "models/engine_link.h"
+#include "render/passband_marks.h"
 #include "render/spectrum_item.h"
 #include "render/spectrum_scale.h"
 
@@ -169,6 +170,34 @@ class PassbandItem : public QQuickItem {
     Q_PROPERTY(QVariantList scaleLabels READ scaleLabels NOTIFY scaleChanged)
     Q_PROPERTY(int scaleLabelCount READ scaleLabelCount NOTIFY scaleChanged)
 
+    // The manual notches to draw. Each entry is a map with widthHz, depthDb
+    // and either offsetHz (already mapped, one entry per band, with index
+    // naming the notch slot) or audioHz (mapped here by mode); enabled false
+    // skips it and audioOnly true draws the side marker. Until this is
+    // written the link's single notch is drawn, so the pane is right before
+    // anything feeds it.
+    Q_PROPERTY(QVariantList notches READ notches WRITE setNotches NOTIFY marksChanged)
+
+    // Tracked stationary carriers: maps with offsetHz, widthHz, levelDb and
+    // ageSeconds, offsets from the receiver's centre.
+    Q_PROPERTY(QVariantList carriers READ carriers WRITE setCarriers NOTIFY marksChanged)
+
+    // The CW sidetone, which the audio and passband frames differ by on CW.
+    Q_PROPERTY(int cwPitchHz READ cwPitchHz WRITE setCwPitchHz NOTIFY marksChanged)
+
+    // Text the scene graph cannot draw, for QML to lay over the pane: maps of
+    // x (logical px), text and kind, which is "depth", "audioOnly", "auto" or
+    // "carrier".
+    Q_PROPERTY(QVariantList markLabels READ markLabels NOTIFY marksChanged)
+
+    // How many notches "notch all" would ask for; zero hides the affordance.
+    Q_PROPERTY(int notchAllCount READ notchAllCount NOTIFY marksChanged)
+
+    // "peak X dB, floor Y dB, SNR Z dB" for the bin under the pointer, empty
+    // when the pointer is off the trace, and where to put it.
+    Q_PROPERTY(QString hoverReadout READ hoverReadout NOTIFY hoverChanged)
+    Q_PROPERTY(double hoverX READ hoverX NOTIFY hoverChanged)
+
 public:
     explicit PassbandItem(QQuickItem* parent = nullptr);
 
@@ -204,6 +233,20 @@ public:
     // place.
     Q_INVOKABLE void widenPassband(int step_hz);
 
+    [[nodiscard]] QVariantList notches() const { return notches_in_; }
+    void setNotches(const QVariantList& notches);
+    [[nodiscard]] QVariantList carriers() const { return carriers_in_; }
+    void setCarriers(const QVariantList& carriers);
+    [[nodiscard]] int cwPitchHz() const { return cw_pitch_hz_; }
+    void setCwPitchHz(int hz);
+    [[nodiscard]] QVariantList markLabels() const { return mark_labels_; }
+    [[nodiscard]] int notchAllCount() const;
+    [[nodiscard]] QString hoverReadout() const { return hover_readout_; }
+    [[nodiscard]] double hoverX() const { return hover_x_; }
+
+    // Emits notchAllRequested with the strongest tracked carriers.
+    Q_INVOKABLE void notchAll();
+
 protected:
     QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
     void geometryChange(const QRectF& new_geometry, const QRectF& old_geometry) override;
@@ -230,6 +273,18 @@ signals:
     void readoutChanged();
     void selectedEdgeChanged();
     void scaleChanged();
+    void marksChanged();
+    void hoverChanged();
+
+    // A notch band dragged to a new place, as the audio frequency the slot
+    // should now hold. Sent on every move of the drag.
+    void notchMoved(int index, double audioHz);
+
+    // A right click on a peak: notch it at this audio frequency and width.
+    void notchRequested(double audioHz, double widthHz);
+
+    // Maps of audioHz and widthHz, strongest first, at most four.
+    void notchAllRequested(const QVariantList& notches);
 
 private slots:
     void takeFrame();
@@ -349,6 +404,39 @@ private:
     [[nodiscard]] double drawnLow() const;
     [[nodiscard]] double drawnHigh() const;
     [[nodiscard]] double fitEase() const;
+
+    // The notch and carrier marks.
+    struct NotchDraw {
+        int index = -1;
+        double audio_hz = 0.0;
+        double width_hz = 0.0;
+        double depth_db = 0.0;
+        MarkOffsets offsets;
+    };
+    [[nodiscard]] rpc::Demod mode() const;
+    [[nodiscard]] std::vector<NotchDraw> notchesToDraw() const;
+    [[nodiscard]] std::vector<CarrierMark> carrierMarks() const;
+    void rebuildMarks(double h);
+    void updateHover(double x_px);
+    void clickToNotch(double x_px);
+
+    QVariantList notches_in_;
+    bool notches_set_ = false;
+    QVariantList carriers_in_;
+    int cw_pitch_hz_ = 700;
+    QVariantList mark_labels_;
+    std::vector<OverlayQuad> mark_quads_;
+    std::vector<NotchBandPx> notch_bands_;
+
+    // The notch being dragged, and the audio frequency it is drawn at while
+    // the drag runs, so it follows the pointer before the engine answers.
+    int notch_grab_ = -1;
+    double notch_press_offset_ = 0.0;
+    double notch_drag_audio_ = 0.0;
+    std::vector<float> peak_scratch_;
+
+    QString hover_readout_;
+    double hover_x_ = -1.0;
 };
 
 }  // namespace revenant::ui

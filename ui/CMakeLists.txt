@@ -264,6 +264,7 @@ qt_add_executable(revenant_ui
     render/history_shift.h
     render/passband_item.cpp
     render/passband_item.h
+    render/passband_marks.h
     render/passband_waterfall_item.cpp
     render/passband_waterfall_item.h
     render/split_watch.h
@@ -277,6 +278,10 @@ qt_add_executable(revenant_ui
     render/window_pacer.h
     ${revenant_capnp_sources}
     ${revenant_rpc_client_sources}
+
+    # find_nearest_peak, for click-to-notch on the detail spectrum. Pure
+    # arithmetic over a span of floats, with no engine type in it.
+    "${REVENANT_SOURCE_DIR}/core/dsp/carrier_tracker.cpp"
 )
 
 # The palette and the type sizes, as one object every section file reads. A
@@ -744,6 +749,7 @@ if(REVENANT_UI_TESTS)
             tests/test_span_view.cpp
             tests/test_spectrum_scale.cpp
             tests/test_waterfall_scale.cpp
+            tests/test_passband_marks.cpp
             tests/test_passband_waterfall.cpp
             tests/test_squelch_control.cpp
             tests/test_status_summary.cpp

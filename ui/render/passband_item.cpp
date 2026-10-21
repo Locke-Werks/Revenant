@@ -23,8 +23,31 @@
 #include "models/key_map.h"
 #include "models/receiver_palette.h"
 
+#include "core/dsp/carrier_tracker.h"
+
 namespace revenant::ui {
 namespace {
+
+// The notch marks. Dark rather than tinted: a notch is something taken out of
+// the passband, and the trace under it should read as dimmed.
+const QColor kNotchBand{0, 0, 0, 125};
+const QColor kNotchCentre{230, 232, 240, 170};
+const QColor kNotchAudioOnly{170, 172, 184, 110};
+const QColor kCarrierMark{255, 212, 96, 230};
+constexpr double kNotchMinBandPx = 2.0;
+
+// find_nearest_peak wants twice its floor half window, which defaults to 32.
+constexpr std::size_t kPeakScratchBins = 64;
+
+[[nodiscard]] QVariantMap mark_label(double x, double y, const QString& text, const char* kind)
+{
+    QVariantMap label;
+    label.insert(QStringLiteral("x"), x);
+    label.insert(QStringLiteral("y"), y);
+    label.insert(QStringLiteral("text"), text);
+    label.insert(QStringLiteral("kind"), QString::fromLatin1(kind));
+    return label;
+}
 
 // The overlay's colours.
 //
@@ -146,6 +169,7 @@ public:
     OverlayNode* grid = nullptr;
     OverlayNode* band = nullptr;
     PassbandTraceNode* trace = nullptr;
+    OverlayNode* marks = nullptr;
     OverlayNode* rules = nullptr;
 };
 
@@ -154,7 +178,9 @@ public:
 PassbandItem::PassbandItem(QQuickItem* parent) : QQuickItem(parent)
 {
     setFlag(ItemHasContents, true);
-    setAcceptedMouseButtons(Qt::LeftButton);
+    // Right for click-to-notch.
+    setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
+    peak_scratch_.resize(kPeakScratchBins);
     setAcceptHoverEvents(true);
 
     // Focusable so the keyboard equivalent works without QML forwarding
@@ -297,6 +323,7 @@ void PassbandItem::rebuildQuads()
     fill_quads_.clear();
     rule_quads_.clear();
     if (link_ == nullptr || link_->receiverId() == 0 || width() <= 0.0 || height() <= 0.0) {
+        rebuildMarks(0.0);
         return;
     }
 
@@ -305,8 +332,10 @@ void PassbandItem::rebuildQuads()
     // rules would stack on the left edge looking like a filter of zero
     // width parked at the bottom of the band.
     if (!drawnAxis().valid()) {
+        rebuildMarks(0.0);
         return;
     }
+    rebuildMarks(height());
 
     const double h = height();
     const double low_px = pixelAtOffset(drawnLow());
@@ -485,6 +514,9 @@ void PassbandItem::takeFrame()
     // that armed the ease finds out whether the engine changed the rate.
     tryRescale();
 
+    if (hover_x_ >= 0.0) {
+        updateHover(hover_x_);
+    }
     rebuildQuads();
     update();
 }
@@ -548,7 +580,9 @@ void PassbandItem::onConnectionChanged()
     dropFrame();
     grab_ = PassbandGrab::None;
     hovered_ = PassbandGrab::None;
+    notch_grab_ = -1;
     at_limit_ = false;
+    updateHover(-1.0);
     rebuildQuads();
     rebuildReadout();
     emit dragChanged();
@@ -585,6 +619,13 @@ PassbandGrab PassbandItem::grabAt(double x_px) const
 
 void PassbandItem::mousePressEvent(QMouseEvent* event)
 {
+    if (link_ != nullptr && event->button() == Qt::RightButton && grab_ == PassbandGrab::None &&
+        notch_grab_ < 0) {
+        forceActiveFocus();
+        clickToNotch(event->position().x());
+        event->accept();
+        return;
+    }
     if (event->button() != Qt::LeftButton || link_ == nullptr) {
         event->ignore();
         return;
@@ -592,6 +633,31 @@ void PassbandItem::mousePressEvent(QMouseEvent* event)
 
     const double x = event->position().x();
     const PassbandGrab grab = grabAt(x);
+
+    // A filter edge beats a notch under it, since the edge is the thinner
+    // target; anywhere else on a notch band drags the notch.
+    if (grab != PassbandGrab::LowEdge && grab != PassbandGrab::HighEdge) {
+        const int notch = notch_hit(notch_bands_, x);
+        if (notch >= 0) {
+            for (const NotchDraw& drawn : notchesToDraw()) {
+                if (drawn.index == notch) {
+                    notch_grab_ = notch;
+                    notch_drag_audio_ = drawn.audio_hz;
+                    notch_press_offset_ = offsetAtPixel(x);
+                    press_x_ = x;
+                    frozen_ = drawnAxis();
+                    break;
+                }
+            }
+            if (notch_grab_ >= 0) {
+                forceActiveFocus();
+                setCursor(Qt::SizeHorCursor);
+                event->accept();
+                return;
+            }
+        }
+    }
+
     if (grab == PassbandGrab::None) {
         // A press on bare spectrum takes the focus and nothing else. It is
         // deliberately not a retune: this pane is a few kilohertz wide and a
@@ -646,6 +712,24 @@ void PassbandItem::mousePressEvent(QMouseEvent* event)
 
 void PassbandItem::mouseMoveEvent(QMouseEvent* event)
 {
+    if (notch_grab_ >= 0 && link_ != nullptr) {
+        if (frozen_.valid() && width() > 0.0) {
+            const double offset =
+                notch_press_offset_ + (event->position().x() - press_x_) * frozen_.span_hz() / width();
+            const double audio = std::round(audio_at_offset(mode(), offset, cw_pitch_hz_));
+
+            // An offset heard at no audio frequency, past the carrier on a
+            // sideband mode, holds the notch where it last was.
+            if (audio > 0.0 && audio != notch_drag_audio_) {
+                notch_drag_audio_ = audio;
+                emit notchMoved(notch_grab_, audio);
+                rebuildQuads();
+                update();
+            }
+        }
+        event->accept();
+        return;
+    }
     if (grab_ == PassbandGrab::None || link_ == nullptr) {
         event->ignore();
         return;
@@ -691,6 +775,14 @@ void PassbandItem::mouseMoveEvent(QMouseEvent* event)
 
 void PassbandItem::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (notch_grab_ >= 0) {
+        notch_grab_ = -1;
+        setCursor(Qt::ArrowCursor);
+        rebuildQuads();
+        update();
+        event->accept();
+        return;
+    }
     if (grab_ == PassbandGrab::None) {
         event->ignore();
         return;
@@ -881,12 +973,19 @@ void PassbandItem::hoverMoveEvent(QHoverEvent* event)
 {
     const PassbandGrab was = hovered_;
     hovered_ = grabAt(event->position().x());
+    const bool on_notch = hovered_ != PassbandGrab::LowEdge && hovered_ != PassbandGrab::HighEdge &&
+                          notch_hit(notch_bands_, event->position().x()) >= 0;
     switch (hovered_) {
         case PassbandGrab::LowEdge:
         case PassbandGrab::HighEdge: setCursor(Qt::SizeHorCursor); break;
-        case PassbandGrab::Band: setCursor(Qt::SizeAllCursor); break;
-        case PassbandGrab::None: setCursor(Qt::ArrowCursor); break;
+        case PassbandGrab::Band:
+            setCursor(on_notch ? Qt::SizeHorCursor : Qt::SizeAllCursor);
+            break;
+        case PassbandGrab::None:
+            setCursor(on_notch ? Qt::SizeHorCursor : Qt::ArrowCursor);
+            break;
     }
+    updateHover(event->position().x());
     if (hovered_ != was) {
         rebuildQuads();
         update();
@@ -896,6 +995,7 @@ void PassbandItem::hoverMoveEvent(QHoverEvent* event)
 
 void PassbandItem::hoverLeaveEvent(QHoverEvent* event)
 {
+    updateHover(-1.0);
     if (hovered_ != PassbandGrab::None) {
         hovered_ = PassbandGrab::None;
         setCursor(Qt::ArrowCursor);
@@ -1059,6 +1159,286 @@ void PassbandItem::keyPressEvent(QKeyEvent* event)
 }
 
 // ---------------------------------------------------------------------------
+// Notches and carriers
+// ---------------------------------------------------------------------------
+
+void PassbandItem::setNotches(const QVariantList& notches)
+{
+    notches_set_ = true;
+    if (notches == notches_in_) {
+        return;
+    }
+    notches_in_ = notches;
+    rebuildQuads();
+    emit marksChanged();
+    update();
+}
+
+void PassbandItem::setCarriers(const QVariantList& carriers)
+{
+    if (carriers == carriers_in_) {
+        return;
+    }
+    carriers_in_ = carriers;
+    rebuildQuads();
+    emit marksChanged();
+    update();
+}
+
+void PassbandItem::setCwPitchHz(int hz)
+{
+    if (hz == cw_pitch_hz_) {
+        return;
+    }
+    cw_pitch_hz_ = hz;
+    rebuildQuads();
+    emit marksChanged();
+    update();
+}
+
+rpc::Demod PassbandItem::mode() const
+{
+    if (link_ == nullptr) {
+        return rpc::Demod::Raw;
+    }
+    return demod_from_name(link_->receiverDemod()).value_or(rpc::Demod::Raw);
+}
+
+std::vector<PassbandItem::NotchDraw> PassbandItem::notchesToDraw() const
+{
+    std::vector<NotchDraw> out;
+    if (link_ == nullptr) {
+        return out;
+    }
+    const rpc::Demod m = mode();
+    const auto pitch = static_cast<double>(cw_pitch_hz_);
+
+    if (!notches_set_) {
+        // The link's own single notch, until something feeds the list.
+        if (link_->notchEnabled()) {
+            NotchDraw one;
+            one.index = 0;
+            one.audio_hz = link_->notchAudioHz();
+            one.width_hz = link_->notchWidthHz();
+            one.depth_db = link_->notchDepthDb();
+            one.offsets = mark_offsets(m, one.audio_hz, pitch);
+            out.push_back(one);
+        }
+    } else {
+        for (qsizetype i = 0; i < notches_in_.size(); ++i) {
+            const QVariantMap entry = notches_in_.at(i).toMap();
+            if (!entry.value(QStringLiteral("enabled"), true).toBool()) {
+                continue;
+            }
+            const int index = entry.value(QStringLiteral("index"), static_cast<int>(i)).toInt();
+            const double width_hz = entry.value(QStringLiteral("widthHz")).toDouble();
+            const double depth_db = entry.value(QStringLiteral("depthDb")).toDouble();
+            const bool audio_only = entry.value(QStringLiteral("audioOnly")).toBool();
+
+            if (entry.contains(QStringLiteral("offsetHz")) && !audio_only) {
+                // Already mapped, one entry per band: an AM notch's second
+                // sideband joins the first under the same index.
+                const double offset = entry.value(QStringLiteral("offsetHz")).toDouble();
+                const auto same = std::find_if(out.begin(), out.end(), [&](const NotchDraw& other) {
+                    return other.index == index;
+                });
+                if (same != out.end() && same->offsets.count < 2) {
+                    same->offsets.hz[same->offsets.count++] = offset;
+                    continue;
+                }
+                NotchDraw one;
+                one.index = index;
+                one.audio_hz = audio_at_offset(m, offset, pitch);
+                one.width_hz = width_hz;
+                one.depth_db = depth_db;
+                one.offsets.hz[0] = offset;
+                one.offsets.count = 1;
+                out.push_back(one);
+                continue;
+            }
+            NotchDraw one;
+            one.index = index;
+            one.audio_hz = entry.value(QStringLiteral("audioHz")).toDouble();
+            one.width_hz = width_hz;
+            one.depth_db = depth_db;
+            one.offsets = mark_offsets(m, one.audio_hz, pitch);
+            if (audio_only) {
+                one.offsets.count = 0;
+                one.offsets.audio_only = true;
+            }
+            out.push_back(one);
+        }
+    }
+
+    // The notch under the pointer is drawn where the pointer has it, not
+    // where the engine last said, so it does not lag the drag.
+    if (notch_grab_ >= 0) {
+        for (NotchDraw& each : out) {
+            if (each.index == notch_grab_) {
+                each.audio_hz = notch_drag_audio_;
+                each.offsets = mark_offsets(m, notch_drag_audio_, pitch);
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<CarrierMark> PassbandItem::carrierMarks() const
+{
+    std::vector<CarrierMark> out;
+    out.reserve(static_cast<std::size_t>(carriers_in_.size()));
+    for (const QVariant& value : carriers_in_) {
+        const QVariantMap entry = value.toMap();
+        out.push_back(CarrierMark{entry.value(QStringLiteral("offsetHz")).toDouble(),
+                                  entry.value(QStringLiteral("widthHz")).toDouble(),
+                                  entry.value(QStringLiteral("levelDb")).toFloat()});
+    }
+    return out;
+}
+
+void PassbandItem::rebuildMarks(double h)
+{
+    mark_quads_.clear();
+    notch_bands_.clear();
+    QVariantList labels;
+
+    const Axis axis = drawnAxis();
+    if (link_ != nullptr && h > 0.0 && axis.valid()) {
+        const double px_per_hz = width() / axis.span_hz();
+
+        int side_row = 0;
+        for (const NotchDraw& notch : notchesToDraw()) {
+            if (notch.offsets.audio_only) {
+                // No place in the passband to draw it, so a muted tick at the
+                // side says it is on and what it is doing.
+                const double y = 6.0 + 18.0 * side_row++;
+                mark_quads_.push_back(OverlayQuad{QRectF(4.0, y, 6.0, 12.0), kNotchAudioOnly});
+                labels.push_back(mark_label(
+                    14.0, y,
+                    QStringLiteral("notch %1 Hz audio only").arg(std::llround(notch.audio_hz)),
+                    "audioOnly"));
+                continue;
+            }
+            const double half_px =
+                std::max(notch.width_hz * 0.5 * px_per_hz, kNotchMinBandPx * 0.5);
+            for (std::uint8_t i = 0; i < notch.offsets.count; ++i) {
+                const double centre = pixelAtOffset(notch.offsets.hz[i]);
+                if (centre + half_px < 0.0 || centre - half_px > width()) {
+                    continue;
+                }
+                mark_quads_.push_back(
+                    OverlayQuad{QRectF(centre - half_px, 0.0, half_px * 2.0, h), kNotchBand});
+                mark_quads_.push_back(
+                    OverlayQuad{QRectF(centre - 0.5, 0.0, 1.0, h), kNotchCentre});
+                notch_bands_.push_back(NotchBandPx{centre, half_px, notch.index});
+                labels.push_back(mark_label(
+                    centre, 4.0, QStringLiteral("-%1 dB").arg(std::llround(notch.depth_db)),
+                    "depth"));
+            }
+        }
+
+        if (link_->autoNotch()) {
+            // The engine does not report where the automatic notch is
+            // tracking, so all the pane can say is that it is on.
+            labels.push_back(mark_label(width() - 4.0, h - 18.0, QStringLiteral("auto"), "auto"));
+        }
+
+        // A small downward triangle at the top of the pane per carrier, as
+        // three stacked quads so it rides in the same batch as the bands.
+        for (const CarrierMark& carrier : carrierMarks()) {
+            const double x = pixelAtOffset(carrier.offset_hz);
+            if (x < 0.0 || x > width()) {
+                continue;
+            }
+            mark_quads_.push_back(OverlayQuad{QRectF(x - 4.5, 0.0, 9.0, 2.0), kCarrierMark});
+            mark_quads_.push_back(OverlayQuad{QRectF(x - 2.5, 2.0, 5.0, 2.0), kCarrierMark});
+            mark_quads_.push_back(OverlayQuad{QRectF(x - 0.5, 4.0, 1.0, 2.0), kCarrierMark});
+            labels.push_back(mark_label(
+                x, 8.0, QStringLiteral("%1 dB").arg(static_cast<double>(carrier.level_db), 0, 'f', 0),
+                "carrier"));
+        }
+    }
+
+    if (labels != mark_labels_) {
+        mark_labels_ = std::move(labels);
+        emit marksChanged();
+    }
+}
+
+int PassbandItem::notchAllCount() const
+{
+    const std::vector<CarrierMark> marks = carrierMarks();
+    return static_cast<int>(
+        notch_all_requests(marks, mode(), static_cast<double>(cw_pitch_hz_)).size());
+}
+
+void PassbandItem::notchAll()
+{
+    const std::vector<CarrierMark> marks = carrierMarks();
+    QVariantList out;
+    for (const NotchRequest& request :
+         notch_all_requests(marks, mode(), static_cast<double>(cw_pitch_hz_))) {
+        QVariantMap entry;
+        entry.insert(QStringLiteral("audioHz"), std::round(request.audio_hz));
+        entry.insert(QStringLiteral("widthHz"), std::round(request.width_hz));
+        out.push_back(entry);
+    }
+    if (!out.isEmpty()) {
+        emit notchAllRequested(out);
+    }
+}
+
+void PassbandItem::clickToNotch(double x_px)
+{
+    if (link_ == nullptr || !have_frame_ || !frame_axis_.valid()) {
+        return;
+    }
+    const rpc::PassbandFrame& frame = link_->passbandFrame();
+    const double bin_hz = frame.geometry.bin_width.hertz();
+    if (frame.power_db.empty() || !(bin_hz > 0.0)) {
+        return;
+    }
+
+    // frame_axis_ is the frame's bin zero already moved into the receiver's
+    // own frame, so the fit comes back in the frame the notches are in.
+    const dsp::PeakFit fit = dsp::find_nearest_peak(frame.power_db, bin_hz, frame_axis_.low_hz,
+                                                    offsetAtPixel(x_px), peak_scratch_);
+    if (!fit.found) {
+        return;
+    }
+    const double audio = std::round(audio_at_offset(mode(), fit.offset_hz,
+                                                    static_cast<double>(cw_pitch_hz_)));
+    if (audio > 0.0) {
+        emit notchRequested(audio, std::round(click_notch_width(fit.width_hz)));
+    }
+}
+
+void PassbandItem::updateHover(double x_px)
+{
+    QString text;
+    if (x_px >= 0.0 && link_ != nullptr && have_frame_ && frame_axis_.valid()) {
+        const rpc::PassbandFrame& frame = link_->passbandFrame();
+        bool found = false;
+        const float peak = hover_peak_db(frame.power_db, frame.geometry.bin_width.hertz(),
+                                         frame_axis_.low_hz, offsetAtPixel(x_px), found);
+        if (found) {
+            const float floor = frame.percentile_low_db;
+            text = QStringLiteral("peak %1 dB, floor %2 dB, SNR %3 dB")
+                       .arg(static_cast<double>(peak), 0, 'f', 1)
+                       .arg(static_cast<double>(floor), 0, 'f', 1)
+                       .arg(static_cast<double>(peak - floor), 0, 'f', 1);
+        }
+    }
+    const double x = text.isEmpty() ? -1.0 : x_px;
+    if (text == hover_readout_ && x == hover_x_) {
+        return;
+    }
+    hover_readout_ = std::move(text);
+    hover_x_ = x;
+    emit hoverChanged();
+}
+
+// ---------------------------------------------------------------------------
 // The scene graph
 // ---------------------------------------------------------------------------
 
@@ -1090,6 +1470,7 @@ QSGNode* PassbandItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
         node->grid = new OverlayNode;
         node->band = new OverlayNode;
         node->trace = new PassbandTraceNode;
+        node->marks = new OverlayNode;
         node->rules = new OverlayNode;
 
         // The band's fill under the trace, the rules over it: the operator
@@ -1101,6 +1482,7 @@ QSGNode* PassbandItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
         node->appendChildNode(node->grid);
         node->appendChildNode(node->band);
         node->appendChildNode(node->trace);
+        node->appendChildNode(node->marks);
         node->appendChildNode(node->rules);
     }
 
@@ -1127,6 +1509,7 @@ QSGNode* PassbandItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
 
     node->grid->setQuads(grid_quads_);
     node->band->setQuads(fill_quads_);
+    node->marks->setQuads(mark_quads_);
     node->rules->setQuads(rule_quads_);
     return node;
 }
