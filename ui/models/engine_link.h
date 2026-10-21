@@ -1230,6 +1230,9 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool displaySplit READ displaySplit WRITE setDisplaySplit NOTIFY receiverChanged)
     Q_PROPERTY(bool displayAudioSpectrum READ displayAudioSpectrum WRITE setDisplayAudioSpectrum
                    NOTIFY receiverChanged)
+    // Constellation and eye panel (#17), models/symbol_link.cpp.
+    Q_PROPERTY(bool displaySymbols READ displaySymbols WRITE setDisplaySymbols
+                   NOTIFY receiverChanged)
 
     // The receiver's notch and filter setup in FrequencyManager's preset
     // shape, for the per-band and per-memory store.
@@ -2610,6 +2613,8 @@ public:
     void setDisplaySplit(bool on);
     [[nodiscard]] bool displayAudioSpectrum() const { return wanted_.display_audio_spectrum; }
     void setDisplayAudioSpectrum(bool on);
+    [[nodiscard]] bool displaySymbols() const { return wanted_.display_symbols; }  // #17
+    void setDisplaySymbols(bool on);
 
     [[nodiscard]] QVariantMap receiverSetup() const;
     // FrequencyManager's presetForTune: the filter edges, the automatic
