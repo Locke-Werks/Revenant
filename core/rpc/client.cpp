@@ -596,6 +596,7 @@ static_assert(static_cast<std::uint16_t>(schema::DirectSamplingMode::AUTO) ==
     }
     out.notches = resolved_notches(out);
     out.display_split = in.getDisplaySplit();
+    out.display_audio_spectrum = in.getDisplayAudioSpectrum();
     return out;
 }
 
@@ -630,6 +631,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
         notches[i].setWidthHz(resolved[i].width_hz);
     }
     out.setDisplaySplit(in.display_split);
+    out.setDisplayAudioSpectrum(in.display_audio_spectrum);
 }
 
 [[nodiscard]] VrxPlacement read_vrx_placement(schema::VrxPlacement::Reader in) {
@@ -1144,6 +1146,18 @@ void read_passband_frame(PassbandFrame& out, schema::PassbandFrame::Reader in) {
     out.raw_power_db.resize(raw.size());
     for (unsigned i = 0; i < raw.size(); ++i) {
         out.raw_power_db[i] = raw[i];
+    }
+
+    const auto audio = in.getAudioPowerDb();
+    out.audio_power_db.resize(audio.size());
+    for (unsigned i = 0; i < audio.size(); ++i) {
+        out.audio_power_db[i] = audio[i];
+    }
+    out.audio_bin_hz = in.getAudioBinHz();
+    const auto ticks = in.getAudioNotchHz();
+    out.audio_notch_hz.resize(ticks.size());
+    for (unsigned i = 0; i < ticks.size(); ++i) {
+        out.audio_notch_hz[i] = ticks[i];
     }
 }
 

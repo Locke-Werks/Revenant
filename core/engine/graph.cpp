@@ -130,6 +130,7 @@
 #include "core/dsp/spectrum_levels_reference.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/vrx_reference.h"
+#include "core/engine/audio_spectrum.h"
 #include "core/engine/listener_level.h"
 #include "core/engine/load_clock.h"
 #include "core/engine/passband_notch.h"
@@ -718,6 +719,13 @@ struct Graph::Impl {
         std::vector<std::uint8_t> passband_excluded;
         std::array<PassbandCarrier, dsp::CarrierTracker::kMaxReports> passband_carriers{};
 
+        // The audio strip's transform, completion thread only, built the
+        // first time a frame asks for it. Fed from the audio loop and read
+        // by the passband delivery that follows it in the same frame.
+        std::optional<AudioSpectrum> audio_spectrum;
+        std::uint64_t audio_spectrum_epoch = 0;
+        std::array<double, kMaxVrxNotches> audio_notch_hz{};
+
         // Recording thread only. The completion thread gets its own copy of
         // the pointer in the frame snapshot, so replacing a sink never races
         // a delivery that is already under way.
@@ -840,6 +848,7 @@ struct Graph::Impl {
         PassbandNotchRequest passband_notch{};
         dsp::Hertz passband_center = 0;
         bool passband_split = false;
+        bool audio_spectrum = false;
     };
 
     struct Frame {
@@ -2554,6 +2563,22 @@ struct Graph::Impl {
             const double level = dbfs_of(std::sqrt(mean_power));
             slot.store_level(level);
 
+            // The audio strip, fed every frame so its window is contiguous,
+            // and ahead of the squelch, which mutes `audio` in place: the
+            // strip keeps showing the channel while the speaker is muted, as
+            // the passband does.
+            if (entry.audio_spectrum && !entry.output.complex_iq) {
+                if (!slot.audio_spectrum.has_value()) {
+                    slot.audio_spectrum.emplace();
+                    slot.audio_spectrum_epoch = entry.tuning_epoch;
+                }
+                if (entry.tuning_epoch != slot.audio_spectrum_epoch) {
+                    slot.audio_spectrum->reset();
+                    slot.audio_spectrum_epoch = entry.tuning_epoch;
+                }
+                slot.audio_spectrum->push(audio, entry.output.channels, entry.output.rate);
+            }
+
             // Squelched means muted, not stopped. The level is stored above
             // this and the passband loop below runs whatever the gate did, so
             // a squelched receiver keeps feeding its meter and its display.
@@ -2586,6 +2611,7 @@ struct Graph::Impl {
             // and every edge clicked; and the level was the demodulated
             // audio's, which for FM cannot be gated at all. A retune resets
             // the averaged level, because it belongs to the old frequency.
+
             if (entry.tuning_epoch != slot.squelch_epoch_seen) {
                 slot.squelch.reset_level();
                 slot.squelch_epoch_seen = entry.tuning_epoch;
@@ -2953,6 +2979,15 @@ struct Graph::Impl {
                                                         reports.size());
         if (entry.passband_split) {
             out.raw_power_db = raw;
+        }
+        if (entry.audio_spectrum && slot.audio_spectrum.has_value() &&
+            slot.audio_spectrum->compute()) {
+            out.audio_power_db = slot.audio_spectrum->power_db();
+            out.audio_bin_hz = slot.audio_spectrum->bin_hz();
+            const std::size_t ticks =
+                audio_notch_frequencies(entry.passband_notch, slot.audio_notch_hz);
+            out.audio_notch_hz =
+                std::span<const double>(slot.audio_notch_hz.data(), ticks);
         }
 
         Status delivered;
@@ -5278,6 +5313,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
                 entry.passband_notch.notches = dsp::notches_of(params);
                 entry.passband_center = params.center;
                 entry.passband_split = params.display_split;
+                entry.audio_spectrum = params.display_audio_spectrum;
             }
             frame.vrxs.push_back(std::move(entry));
         }

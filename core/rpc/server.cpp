@@ -643,11 +643,15 @@ public:
         raw_.assign(source.raw_power_db.begin(), source.raw_power_db.end());
         marks_.assign(source.notch_marks.begin(), source.notch_marks.end());
         carriers_.assign(source.carriers.begin(), source.carriers.end());
+        audio_.assign(source.audio_power_db.begin(), source.audio_power_db.end());
+        ticks_.assign(source.audio_notch_hz.begin(), source.audio_notch_hz.end());
         frame_ = source;
         frame_.power_db = std::span<const float>(bins_);
         frame_.raw_power_db = std::span<const float>(raw_);
         frame_.notch_marks = std::span<const engine::PassbandNotchMark>(marks_);
         frame_.carriers = std::span<const engine::PassbandCarrier>(carriers_);
+        frame_.audio_power_db = std::span<const float>(audio_);
+        frame_.audio_notch_hz = std::span<const double>(ticks_);
     }
 
     [[nodiscard]] const engine::PassbandFrame& frame() const { return frame_; }
@@ -657,6 +661,8 @@ private:
     std::vector<float> raw_;
     std::vector<engine::PassbandNotchMark> marks_;
     std::vector<engine::PassbandCarrier> carriers_;
+    std::vector<float> audio_;
+    std::vector<double> ticks_;
     engine::PassbandFrame frame_;
 };
 

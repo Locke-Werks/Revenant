@@ -272,6 +272,14 @@ struct PassbandFrame {
     # unless the receiver's displaySplit is set. Both rows read the display
     # tap, which is ahead of the impulse blanker, so neither shows blanking.
     rawPowerDb @13 :List(Float32);
+
+    # The receiver's audio after the notch and noise reduction, as power in
+    # dB where a full-scale sine reads 0. Bin k is k * audioBinHz, DC to the
+    # audio Nyquist. Empty unless the receiver's displayAudioSpectrum is set.
+    # audioNotchHz is each enabled manual notch's audio frequency.
+    audioPowerDb @14 :List(Float32);
+    audioBinHz @15 :Float64;
+    audioNotchHz @16 :List(Float64);
 }
 
 struct PassbandNotchMark {
@@ -1101,6 +1109,10 @@ struct VrxParams {
     # The passband display's split view: each PassbandFrame then also carries
     # rawPowerDb, the passband before notch shaping. Display only.
     displaySplit @21 :Bool = false;
+
+    # The audio spectrum strip: each PassbandFrame then also carries
+    # audioPowerDb. Display only.
+    displayAudioSpectrum @22 :Bool = false;
 }
 
 struct Notch {

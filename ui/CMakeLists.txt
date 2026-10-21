@@ -256,6 +256,9 @@ qt_add_executable(revenant_ui
     models/span_view.h
     models/transcription.h
     models/window_raise.h
+    render/audio_spectrum_item.cpp
+    render/audio_spectrum_item.h
+    render/audio_spectrum_map.h
     render/box_history.h
     render/caption_layout.h
     render/colour_map.h
@@ -749,6 +752,7 @@ if(REVENANT_UI_TESTS)
             tests/test_span_view.cpp
             tests/test_spectrum_scale.cpp
             tests/test_waterfall_scale.cpp
+            tests/test_audio_spectrum_map.cpp
             tests/test_passband_marks.cpp
             tests/test_passband_waterfall.cpp
             tests/test_squelch_control.cpp

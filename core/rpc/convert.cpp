@@ -595,6 +595,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& i
         notches[i].setWidthHz(in.notches[i].width_hz);
     }
     out.setDisplaySplit(in.display_split);
+    out.setDisplayAudioSpectrum(in.display_audio_spectrum);
 }
 
 void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in,
@@ -695,6 +696,18 @@ void write_passband_frame(schema::PassbandFrame::Builder out,
         auto raw = out.initRawPowerDb(static_cast<unsigned>(in.raw_power_db.size()));
         for (unsigned i = 0; i < raw.size(); ++i) {
             raw.set(i, in.raw_power_db[i]);
+        }
+    }
+
+    if (!in.audio_power_db.empty()) {
+        auto audio = out.initAudioPowerDb(static_cast<unsigned>(in.audio_power_db.size()));
+        for (unsigned i = 0; i < audio.size(); ++i) {
+            audio.set(i, in.audio_power_db[i]);
+        }
+        out.setAudioBinHz(in.audio_bin_hz);
+        auto ticks = out.initAudioNotchHz(static_cast<unsigned>(in.audio_notch_hz.size()));
+        for (unsigned i = 0; i < ticks.size(); ++i) {
+            ticks.set(i, in.audio_notch_hz[i]);
         }
     }
 }
@@ -945,6 +958,7 @@ Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in) {
     out.notches[0] = engine::VrxNotch{out.notch_enabled, out.notch_hz, out.notch_depth_db,
                                       out.notch_width_hz};
     out.display_split = in.getDisplaySplit();
+    out.display_audio_spectrum = in.getDisplayAudioSpectrum();
     return out;
 }
 

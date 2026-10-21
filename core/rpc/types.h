@@ -557,6 +557,10 @@ struct VrxParams {
     // The passband display's split view: PassbandFrame::raw_power_db is
     // filled only while this is set.
     bool display_split = false;
+
+    // The audio spectrum strip: PassbandFrame::audio_power_db is filled only
+    // while this is set.
+    bool display_audio_spectrum = false;
 };
 
 // All four notches with entry 0 taken from the single notch fields.
@@ -935,6 +939,14 @@ struct PassbandFrame {
     // The passband before notch shaping, bin for bin with power_db, and
     // empty unless VrxParams::display_split is set.
     std::vector<float> raw_power_db;
+
+    // The audio after the notch and noise reduction, power in dB where a
+    // full-scale sine reads 0, bin k at k * audio_bin_hz from DC to the audio
+    // Nyquist. Empty unless VrxParams::display_audio_spectrum is set.
+    // audio_notch_hz is each enabled manual notch's audio frequency.
+    std::vector<float> audio_power_db;
+    double audio_bin_hz = 0.0;
+    std::vector<double> audio_notch_hz;
 };
 
 // One receiver's audio, as it reaches a client.

@@ -1522,6 +1522,17 @@ struct PassbandFrame {
     // reads the channel ring ahead of the impulse blanker, so this row and
     // power_db both show the air unblanked; they differ by the notches.
     std::span<const float> raw_power_db;
+
+    // The receiver's audio after the notch and noise reduction, as power in
+    // dB where a full-scale sine reads 0, only while
+    // VrxParams::display_audio_spectrum is set and empty otherwise. Bin k is
+    // k * audio_bin_hz, DC to the audio Nyquist. Measured before the
+    // squelch mute, so a closed squelch does not blank it. audio_notch_hz is
+    // each enabled manual notch's audio frequency, for drawing as a tick.
+    // Valid for the call only.
+    std::span<const float> audio_power_db;
+    double audio_bin_hz = 0.0;
+    std::span<const double> audio_notch_hz;
 };
 
 using PassbandSink =std::function<Status(const PassbandFrame&)>;

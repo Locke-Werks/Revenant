@@ -699,6 +699,11 @@ struct VrxParams {
     // nothing; on costs one copy of the frame on the completion thread.
     bool display_split = false;
 
+    // The audio spectrum strip: when set, each PassbandFrame also carries a
+    // power spectrum of the audio after the notch and noise reduction. Off
+    // costs nothing; on costs a 1024 point transform per passband frame.
+    bool display_audio_spectrum = false;
+
     // The automatic notch, an adaptive line enhancer that removes steady
     // tones from the audio. Offered on AM, USB, LSB, DSB, NFM and CW. On CW
     // what it subtracts is guarded at the pitch, where the steady tone is the
