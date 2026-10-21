@@ -225,6 +225,13 @@ inline constexpr unsigned kBandPlanRegionDefault = 3U;  // kRegionUSCA
 inline constexpr QLatin1StringView kShowBandBar{"bands/showBar"};
 inline constexpr bool kShowBandBarDefault = true;
 
+// Band-plan overlay labels on the span: shown or not, and which categories,
+// as models/live_labels.h's LabelCategory bits.
+inline constexpr QLatin1StringView kShowSpanLabels{"bands/showLabels"};
+inline constexpr bool kShowSpanLabelsDefault = true;
+inline constexpr QLatin1StringView kSpanLabelCategories{"bands/labelCategories"};
+inline constexpr unsigned kSpanLabelCategoriesDefault = 0x1FFU;  // kLabelAll
+
 // The rolling capture of an engine this window starts, as the engine's own
 // flag values: whether --capture is passed, the folder it names, and the text
 // of --capture-retain and --capture-max-age. Read when the window starts its
