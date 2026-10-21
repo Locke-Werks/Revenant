@@ -43,6 +43,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "render/colour_map.h"
@@ -260,6 +261,18 @@ public:
 
     [[nodiscard]] std::uint64_t total() const { return total_; }
 
+    [[nodiscard]] std::uint32_t count(std::size_t bin) const
+    {
+        return bin < kBins ? counts_[bin] : 0U;
+    }
+
+    // The level at the middle of a bin, the same one percentile() answers.
+    [[nodiscard]] static float bin_level(std::size_t bin)
+    {
+        return decode_level(static_cast<std::uint16_t>(
+            std::max<std::size_t>(bin * kCodesPerBin + kCodesPerBin / 2, 1)));
+    }
+
     // The level `permille` thousandths of the counted codes sit below, at the
     // middle of its bin. Empty answers the code range's floor; callers check
     // total() first.
@@ -406,5 +419,118 @@ inline constexpr float kRecolourToleranceDb = 0.25F;
 {
     return std::max(std::abs(a.floor_db - b.floor_db), std::abs(a.ceiling_db - b.ceiling_db));
 }
+
+// ---------------------------------------------------------------------------
+// Automatic pivot
+// ---------------------------------------------------------------------------
+
+// Two classes whose means are closer than this are one population. Log power
+// of Gaussian noise spreads with a standard deviation of 5.6 dB, so Otsu cuts
+// any pure noise histogram in two about 6 dB apart; real signals sit well
+// clear of that.
+inline constexpr float kAutoPivotMinSeparationDb = 9.0F;
+// With no signal mode the pivot goes this far above the noise median: about
+// one noise deviation, which puts most of the speckle below the S's turn.
+inline constexpr float kAutoPivotNoiseMarginDb = 6.0F;
+inline constexpr double kAutoPivotSeconds = 2.0;
+
+// The level dividing the noise from the signals in the history.
+//
+// Otsu's two-class threshold over the histogram: the cut that maximises the
+// variance between the classes. It was chosen over a noise percentile plus a
+// fixed margin because the margin that suits a quiet HF band crushes a busy
+// broadcast band, while Otsu reads the gap from the data and needs one pass
+// over the bins. Its known fault is a single mode, which it still splits; the
+// separation test and a floor at the noise median plus a margin catch that. Empty answers nothing and the caller keeps the pivot it has.
+[[nodiscard]] inline std::optional<float> noise_signal_split_db(const LevelHistogram& histogram)
+{
+    const std::uint64_t total = histogram.total();
+    if (total == 0) {
+        return std::nullopt;
+    }
+    double sum_all = 0.0;
+    for (std::size_t bin = 0; bin < LevelHistogram::kBins; ++bin) {
+        sum_all += static_cast<double>(histogram.count(bin)) * LevelHistogram::bin_level(bin);
+    }
+    const auto n = static_cast<double>(total);
+    double weight_low = 0.0;
+    double sum_low = 0.0;
+    double best_between = -1.0;
+    double best_low_mean = 0.0;
+    double best_high_mean = 0.0;
+    std::size_t best_bin = 0;
+    for (std::size_t bin = 0; bin < LevelHistogram::kBins; ++bin) {
+        const auto c = static_cast<double>(histogram.count(bin));
+        if (c == 0.0) {
+            continue;
+        }
+        weight_low += c;
+        sum_low += c * LevelHistogram::bin_level(bin);
+        const double weight_high = n - weight_low;
+        if (weight_high <= 0.0) {
+            break;
+        }
+        const double low_mean = sum_low / weight_low;
+        const double high_mean = (sum_all - sum_low) / weight_high;
+        const double between = weight_low * weight_high * (low_mean - high_mean) * (low_mean - high_mean);
+        if (between > best_between) {
+            best_between = between;
+            best_low_mean = low_mean;
+            best_high_mean = high_mean;
+            best_bin = bin;
+        }
+    }
+    // Log power has a long tail below the noise, and on pure noise Otsu can
+    // cut that tail off as its own class; a cut under the fallback is that.
+    const float fallback = histogram.percentile(500) + kAutoPivotNoiseMarginDb;
+    if (best_between < 0.0 || best_high_mean - best_low_mean < kAutoPivotMinSeparationDb) {
+        return fallback;
+    }
+    // The cut is the top of the last noise bin.
+    const float cut = LevelHistogram::bin_level(best_bin) +
+                      0.5F * static_cast<float>(LevelHistogram::kCodesPerBin) / kLevelCodesPerDb;
+    return cut < fallback ? fallback : cut;
+}
+
+// The split as a pivot: a fraction of the map from its bottom, the unit
+// ContrastCurve::pivot and ScaleSettings::waterfallPivot use, clamped to the
+// pivot's range.
+[[nodiscard]] inline std::optional<float> auto_pivot(const LevelHistogram& histogram,
+                                                     const MapEnds& ends)
+{
+    const std::optional<float> split = noise_signal_split_db(histogram);
+    if (!split || !(ends.span_db() > 0.0F)) {
+        return std::nullopt;
+    }
+    return std::clamp((*split - ends.floor_db) / ends.span_db(), kMinCurvePivot, kMaxCurvePivot);
+}
+
+// Eases the automatic pivot toward each offer with a 2 s time constant, so a
+// burst of signal does not flick the whole history's colours. The first offer
+// is taken as it is.
+class AutoPivotFollower {
+public:
+    [[nodiscard]] bool started() const { return started_; }
+    [[nodiscard]] float value() const { return value_; }
+    void reset() { started_ = false; }
+
+    float step(float target, double seconds)
+    {
+        target = std::clamp(target, kMinCurvePivot, kMaxCurvePivot);
+        if (!started_) {
+            started_ = true;
+            value_ = target;
+            return value_;
+        }
+        const double dt = std::clamp(seconds, 0.0, 10.0 * kAutoPivotSeconds);
+        const auto keep = static_cast<float>(std::exp(-dt / kAutoPivotSeconds));
+        value_ = target + (value_ - target) * keep;
+        return value_;
+    }
+
+private:
+    bool started_ = false;
+    float value_ = kDefaultCurvePivot;
+};
 
 }  // namespace revenant::ui

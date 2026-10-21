@@ -292,6 +292,25 @@ ColumnLayout {
         tip: "Where the S turns, as a height on the colour map. Levels below it go darker and "
              + "above it brighter. Set it just above the noise. Only acts past 100% contrast."
         onMoved: (value) => ScaleSettings.waterfallPivot = value
+        slider.enabled: !ScaleSettings.waterfallAutoPivot
+    }
+
+    // While on, the slider shows where the automatic pivot is and the hand-set
+    // one waits for it to go off; models/scale_settings.h.
+    RCheckBox {
+        text: "automatic pivot"
+        checked: ScaleSettings.waterfallAutoPivot
+        onToggled: {
+            ScaleSettings.waterfallAutoPivot = checked
+            checked = Qt.binding(() => ScaleSettings.waterfallAutoPivot)
+        }
+
+        Tip {
+            visible: parent.hovered
+            delay: 400
+            text: "Sets the pivot from the waterfall itself: the split between the noise and "
+                  + "the signals in its history, eased over a couple of seconds."
+        }
     }
 
     // The contrast curve, input across and output up, each point and the

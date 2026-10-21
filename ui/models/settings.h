@@ -119,6 +119,10 @@ inline constexpr QLatin1StringView kScaleCeilingDb{"display/ceilingDb"};
 inline constexpr QLatin1StringView kWaterfallContrast{"display/waterfallContrast"};
 // Where the waterfall contrast's S turns, past 100%: a fraction of the map.
 inline constexpr QLatin1StringView kWaterfallPivot{"display/waterfallPivot"};
+// Whether the pivot follows the waterfall's own noise and signal split. The
+// automatic value is never written over kWaterfallPivot, so turning this off
+// goes back to the operator's hand-set pivot.
+inline constexpr QLatin1StringView kWaterfallAutoPivot{"display/waterfallAutoPivot"};
 inline constexpr QLatin1StringView kSpectrumRangeFit{"display/spectrumRangeFit"};
 
 // The spectrum trace's smoothing: the release time in seconds, zero for off,

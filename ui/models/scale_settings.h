@@ -19,6 +19,7 @@
 #include <algorithm>
 
 #include <QColor>
+#include <QElapsedTimer>
 #include <QObject>
 #include <QSettings>
 #include <QtQmlIntegration>
@@ -42,6 +43,8 @@ class ScaleSettings : public QObject {
                    NOTIFY waterfallContrastChanged)
     Q_PROPERTY(double waterfallPivot READ waterfallPivot WRITE setWaterfallPivot
                    NOTIFY waterfallPivotChanged)
+    Q_PROPERTY(bool waterfallAutoPivot READ waterfallAutoPivot WRITE setWaterfallAutoPivot
+                   NOTIFY waterfallAutoPivotChanged)
     Q_PROPERTY(double spectrumRangeFit READ spectrumRangeFit WRITE setSpectrumRangeFit
                    NOTIFY spectrumRangeFitChanged)
     Q_PROPERTY(double spectrumSmoothing READ spectrumSmoothing WRITE setSpectrumSmoothing
@@ -70,6 +73,8 @@ public:
         waterfall_contrast_ = clamp_contrast(store.value(settings::kWaterfallContrast, 0.0).toDouble());
         waterfall_pivot_ = clamp_pivot(
             store.value(settings::kWaterfallPivot, kDefaultCurvePivot).toDouble());
+        manual_pivot_ = waterfall_pivot_;
+        waterfall_auto_pivot_ = store.value(settings::kWaterfallAutoPivot, false).toBool();
         spectrum_range_fit_ = clamp_fit(store.value(settings::kSpectrumRangeFit, 0.0).toDouble());
         spectrum_smoothing_ = clamp_smoothing(
             store.value(settings::kSpectrumSmoothing, kDefaultSmoothDecaySeconds).toDouble());
@@ -131,15 +136,65 @@ public:
         emit waterfallContrastChanged();
     }
 
+    // A hand-set pivot while the automatic one is on is remembered for when
+    // it goes off, and does not move the picture now.
     void setWaterfallPivot(double value)
     {
         value = clamp_pivot(value);
-        if (value == waterfall_pivot_) {
+        if (value == manual_pivot_ && (waterfall_auto_pivot_ || value == waterfall_pivot_)) {
             return;
         }
-        waterfall_pivot_ = value;
+        manual_pivot_ = value;
         QSettings().setValue(settings::kWaterfallPivot, value);
-        emit waterfallPivotChanged();
+        if (!waterfall_auto_pivot_ && value != waterfall_pivot_) {
+            waterfall_pivot_ = value;
+            emit waterfallPivotChanged();
+        }
+    }
+
+    [[nodiscard]] bool waterfallAutoPivot() const { return waterfall_auto_pivot_; }
+
+    void setWaterfallAutoPivot(bool on)
+    {
+        if (on == waterfall_auto_pivot_) {
+            return;
+        }
+        waterfall_auto_pivot_ = on;
+        QSettings().setValue(settings::kWaterfallAutoPivot, on);
+        follower_.reset();
+        emit waterfallAutoPivotChanged();
+        if (!on && waterfall_pivot_ != manual_pivot_) {
+            waterfall_pivot_ = manual_pivot_;
+            emit waterfallPivotChanged();
+        }
+    }
+
+    // A waterfall's measured pivot, render/waterfall_scale.h auto_pivot, as
+    // often as it likes. Ignored while the automatic pivot is off. Eased by
+    // AutoPivotFollower on the time between offers, and never persisted.
+    Q_INVOKABLE void offerAutoPivot(double pivot)
+    {
+        if (!waterfall_auto_pivot_ || !(pivot == pivot)) {
+            return;
+        }
+        const double seconds = offer_clock_.isValid() ? offer_clock_.restart() / 1000.0 : 0.0;
+        if (!offer_clock_.isValid()) {
+            offer_clock_.start();
+        }
+        offerAutoPivotAfter(pivot, seconds);
+    }
+
+    // offerAutoPivot with the time since the last offer given, for tests.
+    void offerAutoPivotAfter(double pivot, double seconds)
+    {
+        if (!waterfall_auto_pivot_ || !(pivot == pivot)) {
+            return;
+        }
+        const double next = clamp_pivot(follower_.step(static_cast<float>(pivot), seconds));
+        if (next != waterfall_pivot_) {
+            waterfall_pivot_ = next;
+            emit waterfallPivotChanged();
+        }
     }
 
     void setSpectrumRangeFit(double value)
@@ -221,6 +276,7 @@ signals:
     void pinsChanged();
     void waterfallContrastChanged();
     void waterfallPivotChanged();
+    void waterfallAutoPivotChanged();
     void spectrumRangeFitChanged();
     void spectrumSmoothingChanged();
     void captionZoomChanged();
@@ -274,6 +330,10 @@ private:
     ScalePins pins_;
     double waterfall_contrast_ = 0.0;
     double waterfall_pivot_ = kDefaultCurvePivot;
+    double manual_pivot_ = kDefaultCurvePivot;
+    bool waterfall_auto_pivot_ = false;
+    AutoPivotFollower follower_;
+    QElapsedTimer offer_clock_;
     double spectrum_range_fit_ = 0.0;
     double spectrum_smoothing_ = kDefaultSmoothDecaySeconds;
     bool spectrum_floor_smoothing_ = true;

@@ -677,6 +677,7 @@ if(REVENANT_UI_TESTS)
             tests/test_adopted_receivers.cpp
             tests/test_aft.cpp
             tests/test_audio_counters.cpp
+            tests/test_auto_pivot.cpp
             tests/test_audio_mix.cpp
             tests/test_audio_ring.cpp
             tests/test_drift_trim.cpp
