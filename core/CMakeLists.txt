@@ -181,6 +181,9 @@ add_library(revenant_core STATIC
     engine/graph.cpp
     engine/noise_stage.cpp
     engine/audio_spectrum.cpp
+    # Constellation and eye tap (#17).
+    engine/symbol_tap.cpp
+    dsp/gardner.cpp
     engine/passband_notch.cpp
     engine/probe.cpp
     engine/scheduler.cpp
