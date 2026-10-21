@@ -332,6 +332,26 @@ ColumnLayout {
         }
     }
 
+    // How long the span's persistence view remembers a hit.
+    RowLayout {
+        spacing: 8
+
+        Label {
+            text: "persistence decay"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeBody
+        }
+
+        RSegmented {
+            readonly property var seconds: [0.5, 2, 5, 15]
+            options: ["0.5 s", "2 s", "5 s", "15 s"]
+            current: options[Math.max(0, seconds.indexOf(
+                                          SpanDisplaySettings.persistenceDecaySeconds))]
+            onPicked: (choice) => SpanDisplaySettings.persistenceDecaySeconds =
+                                      seconds[options.indexOf(choice)]
+        }
+    }
+
     RCheckBox {
         text: "remember notch and filter per band"
         checked: frequencyManager.rememberPerBand

@@ -507,6 +507,70 @@ ColumnLayout {
             z: 3
         }
 
+        // PERSISTENCE AND 3D, drawn over the waterfall rather than in place
+        // of it: the waterfall keeps taking frames underneath, and its drawn
+        // ends are the level axis both of these use, so a pin or the
+        // history's own scale moves all three alike. Each item does nothing
+        // while hidden. models/span_display_settings.h holds the choice.
+        PersistenceItem {
+            id: persistence
+            anchors.fill: parent
+            z: 1
+            visible: SpanDisplaySettings.view === "persistence"
+            link: engineLink
+            mapPins: ScaleSettings
+            floorDb: waterfall.drawFloorDb
+            ceilingDb: waterfall.drawCeilingDb
+            decaySeconds: SpanDisplaySettings.persistenceDecaySeconds
+
+            Text {
+                x: 6
+                y: 30
+                text: persistence.ceilingDb.toFixed(0) + " dBFS"
+                color: Theme.inkOff
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+            }
+            Text {
+                x: 6
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 4
+                text: persistence.floorDb.toFixed(0) + " dBFS"
+                color: Theme.inkOff
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+        Surface3DItem {
+            id: surface
+            anchors.fill: parent
+            z: 1
+            visible: SpanDisplaySettings.view === "3D"
+            link: engineLink
+            mapPins: ScaleSettings
+            floorDb: waterfall.drawFloorDb
+            ceilingDb: waterfall.drawCeilingDb
+
+            Text {
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.margins: 6
+                anchors.rightMargin: 24
+                text: "drag to orbit, double click to reset"
+                color: Theme.inkOff
+                font.family: Theme.uiFont
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+        RSegmented {
+            x: 6
+            y: 4
+            z: 4
+            options: ["waterfall", "persistence", "3D"]
+            current: SpanDisplaySettings.view
+            onPicked: (option) => SpanDisplaySettings.view = option
+        }
+
         link: engineLink
         mapPins: ScaleSettings
         timeMarkerSeconds: ScaleSettings.timeMarkerSeconds

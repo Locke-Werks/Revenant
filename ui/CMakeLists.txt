@@ -290,6 +290,14 @@ qt_add_executable(revenant_ui
     render/waterfall_item.h
     render/window_pacer.cpp
     render/window_pacer.h
+    # The span's persistence and 3D views, beside the waterfall.
+    models/span_display_settings.h
+    render/persistence_grid.h
+    render/persistence_item.cpp
+    render/persistence_item.h
+    render/surface3d_item.cpp
+    render/surface3d_item.h
+    render/surface3d_math.h
     ${revenant_capnp_sources}
     ${revenant_rpc_client_sources}
 
@@ -775,6 +783,9 @@ if(REVENANT_UI_TESTS)
             tests/test_window_raise.cpp
             # Burst timeline (feature #4).
             tests/test_burst_timeline.cpp
+            # The span's persistence and 3D views.
+            tests/test_persistence_grid.cpp
+            tests/test_surface3d_math.cpp
         )
 
         target_include_directories(revenant_ui_tests PRIVATE
