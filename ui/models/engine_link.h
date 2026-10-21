@@ -5391,6 +5391,36 @@ private:
     // supervisor when it has reconciled. In the wait predicate for the
     // reason audio_work_pending_ is.
     bool transcribe_work_pending_ = false;  // guarded by supervisor_mutex_
+
+    // ---- burst timeline (feature #4): models/burst_link.cpp ----------------
+    //
+    // The decoded messages as they came off the wire, with when each arrived,
+    // for models/burst_timeline_model.cpp: the log's lines are text for a
+    // person and have lost the fields a burst is labelled with. Qt thread only,
+    // capped, appended by drain_decoded.
+public:
+    struct BurstDecodedEntry {
+        std::uint64_t serial = 0;
+        std::int64_t arrived_ms = 0;
+        rpc::DecodedMessage message;
+    };
+    [[nodiscard]] const std::deque<BurstDecodedEntry>& burstDecodedFeed() const
+    {
+        return burst_decoded_feed_;
+    }
+
+    // The absolute centre of the rack receiver the engine knows by this id,
+    // or zero when the rack holds no such receiver.
+    [[nodiscard]] double burstReceiverHz(std::uint64_t engine_id) const;
+
+signals:
+    void burstDecodedArrived();
+
+private:
+    void note_burst_decoded(const std::vector<rpc::DecodedMessage>& messages,
+                            const std::vector<std::int64_t>& arrived_ms);
+    std::deque<BurstDecodedEntry> burst_decoded_feed_;
+    std::uint64_t burst_decoded_serial_ = 0;
 };
 
 }  // namespace revenant::ui

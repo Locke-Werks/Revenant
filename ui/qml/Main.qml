@@ -167,6 +167,17 @@ ApplicationWindow {
         mainKeyMap: keyMapView
     }
 
+    // Burst timeline (feature #4): its own window, opened from the top bar.
+    BurstWindow {
+        id: burstWindow
+    }
+
+    Shortcut {
+        sequence: "Ctrl+Shift+B"
+        context: Qt.ApplicationShortcut
+        onActivated: burstWindow.toggle()
+    }
+
     CommandPalette {
         id: commandPalette
         commands: keyCommands

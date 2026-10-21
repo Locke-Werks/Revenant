@@ -378,6 +378,9 @@ void EngineLink::drain_decoded()
         return;
     }
 
+    // Burst timeline (feature #4).
+    note_burst_decoded(messages, arrived);
+
     std::vector<DecodedLine> lines;
     lines.reserve(messages.size());
     for (std::size_t i = 0; i < messages.size(); ++i) {

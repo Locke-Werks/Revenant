@@ -256,6 +256,11 @@ qt_add_executable(revenant_ui
     models/span_view.h
     models/transcription.h
     models/window_raise.h
+    # Burst timeline (feature #4).
+    models/burst_link.cpp
+    models/burst_timeline.h
+    models/burst_timeline_model.cpp
+    models/burst_timeline_model.h
     render/audio_spectrum_item.cpp
     render/audio_spectrum_item.h
     render/audio_spectrum_map.h
@@ -335,6 +340,8 @@ qt_add_qml_module(revenant_ui
         qml/Commands.qml
         qml/CommandPalette.qml
         qml/KeyMapView.qml
+        # Burst timeline (feature #4).
+        qml/BurstWindow.qml
         qml/controls/KeyChip.qml
         qml/controls/Popover.qml
         qml/controls/Readout.qml
@@ -760,6 +767,8 @@ if(REVENANT_UI_TESTS)
             tests/test_status_summary.cpp
             tests/test_transcription.cpp
             tests/test_window_raise.cpp
+            # Burst timeline (feature #4).
+            tests/test_burst_timeline.cpp
         )
 
         target_include_directories(revenant_ui_tests PRIVATE

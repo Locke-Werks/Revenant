@@ -257,6 +257,21 @@ Rectangle {
                 }
             }
 
+            // Burst timeline (feature #4): opens BurstWindow.qml, which
+            // Main.qml holds as burstWindow.
+            RButton {
+                flat: true
+                text: "bursts"
+                ink: Theme.inkDim
+                visible: engineLink.connected
+                onClicked: burstWindow.toggle()
+
+                Tip {
+                    visible: parent.hovered
+                    text: "every transmission, a lane per frequency  Ctrl+Shift+B"
+                }
+            }
+
             RButton {
                 id: radioButton
                 flat: true
