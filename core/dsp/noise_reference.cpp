@@ -6,8 +6,10 @@
 #include "core/dsp/noise_reference.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -254,6 +256,10 @@ Status validate(const LineConfig& config, const LineParams& params) {
         return fail("noise line: the normalisation's eps must be positive, or silence divides "
                     "by zero");
     }
+    if ((params.flags & ~(kLineNotch | kLineAle | kLineGuard | kLineNotchCountMask)) != 0U) {
+        return fail(std::format("noise line: flags {:#x} set a bit the kernel does not read",
+                                params.flags));
+    }
     return {};
 }
 
@@ -281,10 +287,17 @@ Status reference_line(const LineConfig& config, const LineParams& params, RealSp
     float* const weights = state.data() + kLineStateWeights;
     float* const history = weights + config.taps;
 
+    const std::uint32_t sections = line_notch_sections(params.flags);
     float x1 = state[0];
     float x2 = state[1];
     float y1 = state[2];
     float y2 = state[3];
+    std::array<std::array<float, 4>, kMaxNotches - 1U> more{};
+    for (std::size_t sec = 0; sec + 1U < sections; ++sec) {
+        for (std::size_t k = 0; k < 4; ++k) {
+            more[sec][k] = state[kLineStateMore + 4U * sec + k];
+        }
+    }
     auto position = static_cast<std::uint32_t>(state[kLineStatePosition]);
     float gx1 = state[kLineStateGuard + 0];
     float gx2 = state[kLineStateGuard + 1];
@@ -313,6 +326,24 @@ Status reference_line(const LineConfig& config, const LineParams& params, RealSp
             y2 = y1;
             y1 = acc;
             v = acc;
+            for (std::uint32_t sec = 0; sec + 1U < sections; ++sec) {
+                const LineSection& c = params.more[sec];
+                std::array<float, 4>& m = more[sec];
+                const float u0 = c.b0 * v;
+                const float u1 = c.b1 * m[0];
+                const float u2 = c.b2 * m[1];
+                const float u3 = c.a1 * m[2];
+                const float u4 = c.a2 * m[3];
+                float sum = u0 + u1;
+                sum = sum + u2;
+                sum = sum - u3;
+                sum = sum - u4;
+                m[1] = m[0];
+                m[0] = v;
+                m[3] = m[2];
+                m[2] = sum;
+                v = sum;
+            }
         }
 
         float out = v;
@@ -377,6 +408,11 @@ Status reference_line(const LineConfig& config, const LineParams& params, RealSp
     state[1] = x2;
     state[2] = y1;
     state[3] = y2;
+    for (std::size_t sec = 0; sec + 1U < sections; ++sec) {
+        for (std::size_t k = 0; k < 4; ++k) {
+            state[kLineStateMore + 4U * sec + k] = more[sec][k];
+        }
+    }
     state[kLineStatePosition] = static_cast<float>(position & history_mask);
     state[kLineStateGuard + 0] = gx1;
     state[kLineStateGuard + 1] = gx2;
@@ -421,6 +457,33 @@ Expected<NotchDesign> design_notch(double audio_hz, double depth_db, double widt
     design.b1 *= scale;
     design.b2 *= scale;
     return design;
+}
+
+double notch_section_db(const NotchDesign& design, double audio_hz, SampleRate audio_rate) {
+    // The kernel's coefficients, so the response drawn is the one heard.
+    const auto r = [](double c) { return static_cast<double>(static_cast<float>(c)); };
+    const double b0 = r(design.b0);
+    const double b1 = r(design.b1);
+    const double b2 = r(design.b2);
+    const double a1 = r(design.a1);
+    const double a2 = r(design.a2);
+    const double omega =
+        2.0 * std::numbers::pi * audio_hz / static_cast<double>(std::max<SampleRate>(audio_rate, 1));
+    const std::complex<double> z1 = std::polar(1.0, -omega);
+    const std::complex<double> z2 = z1 * z1;
+    const std::complex<double> num = b0 + b1 * z1 + b2 * z2;
+    const std::complex<double> den = 1.0 + a1 * z1 + a2 * z2;
+    const double power = std::norm(num) / std::max(std::norm(den), 1.0e-300);
+    return 10.0 * std::log10(std::max(power, 1.0e-30));
+}
+
+Expected<double> notch_response_db(double centre_hz, double depth_db, double width_hz,
+                                   SampleRate audio_rate, double audio_hz) {
+    auto design = design_notch(centre_hz, depth_db, width_hz, audio_rate);
+    if (!design) {
+        return std::unexpected(design.error());
+    }
+    return notch_section_db(*design, audio_hz, audio_rate);
 }
 
 // ---------------------------------------------------------------------------
@@ -702,7 +765,20 @@ std::optional<double> notch_audio_hz(engine::Demod mode, Hertz passband_hz, Hert
     return std::nullopt;
 }
 
+NotchSet notches_of(const engine::VrxParams& params) {
+    NotchSet out{};
+    out[0] = NotchSpec{params.notch_enabled, params.notch_hz, params.notch_depth_db,
+                       params.notch_width_hz};
+    return out;
+}
+
 Status validate_noise_request(const engine::VrxParams& params) {
+    const NotchSet notches = notches_of(params);
+    return validate_noise_request(params, notches);
+}
+
+Status validate_noise_request(const engine::VrxParams& params,
+                              std::span<const NotchSpec> notches) {
     const char* const mode = engine::demod_name(params.demod);
     if (params.nb_enabled && !blanker_offered(params.demod)) {
         return fail(std::format("the noise blanker is not offered on {}: it removes impulses "
@@ -713,7 +789,12 @@ Status validate_noise_request(const engine::VrxParams& params) {
         return fail(std::format("a noise blanker threshold of {} dB is outside [3, 40]",
                                 params.nb_threshold_db));
     }
-    if (params.notch_enabled && !notch_offered(params.demod)) {
+    if (notches.size() > kMaxNotches) {
+        return fail(std::format("{} notches asked for where at most {} run", notches.size(),
+                                kMaxNotches));
+    }
+    const bool any_notch = std::ranges::any_of(notches, &NotchSpec::enabled);
+    if (any_notch && !notch_offered(params.demod)) {
         return fail(std::format("the manual notch is not offered on {}: its audio frequency is "
                                 "not a function of where a signal sits in the passband",
                                 mode));
@@ -729,20 +810,24 @@ Status validate_noise_request(const engine::VrxParams& params) {
                                 "from a mode whose tones sit at a known audio frequency",
                                 mode));
     }
-    if (!(params.notch_depth_db >= 3.0 && params.notch_depth_db <= 80.0)) {
-        return fail(std::format("a notch depth of {} dB is outside [3, 80]",
-                                params.notch_depth_db));
-    }
-    if (params.notch_width_hz < 10 || params.notch_width_hz > 2000) {
-        return fail(std::format("a notch width of {} Hz is outside [10, 2000]",
-                                params.notch_width_hz));
-    }
-    if (params.notch_enabled) {
-        const auto audio = notch_audio_hz(params.demod, params.notch_hz, params.cw_pitch);
-        if (!audio || !(*audio > 0.0)) {
-            return fail(std::format("a notch at {:+} Hz from the carrier lands on no audio "
-                                    "frequency in {}: it is on the side the mode discards",
-                                    params.notch_hz, mode));
+    for (std::size_t i = 0; i < notches.size(); ++i) {
+        const NotchSpec& n = notches[i];
+        // Entry 0 keeps the single notch's wording, which callers already show.
+        const std::string which = i == 0 ? std::string("a notch") : std::format("notch {}", i + 1);
+        if (!(n.depth_db >= 3.0 && n.depth_db <= 80.0)) {
+            return fail(std::format("{} depth of {} dB is outside [3, 80]", which, n.depth_db));
+        }
+        if (n.width_hz < 10 || n.width_hz > 2000) {
+            return fail(std::format("{} width of {} Hz is outside [10, 2000]", which,
+                                    n.width_hz));
+        }
+        if (n.enabled) {
+            const auto audio = notch_audio_hz(params.demod, n.hz, params.cw_pitch);
+            if (!audio || !(*audio > 0.0)) {
+                return fail(std::format("{} at {:+} Hz from the carrier lands on no audio "
+                                        "frequency in {}: it is on the side the mode discards",
+                                        which, n.hz, mode));
+            }
         }
     }
     if (params.nr_enabled && !noise_reduction_offered(params.demod)) {
@@ -759,7 +844,14 @@ Status validate_noise_request(const engine::VrxParams& params) {
 
 Expected<NoisePlan> plan_noise(const engine::VrxParams& params, const VrxPlan& plan,
                                const LineConfig& line) {
-    if (auto valid = validate_noise_request(params); !valid) {
+    const NotchSet notches = notches_of(params);
+    return plan_noise(params, notches, plan, line);
+}
+
+Expected<NoisePlan> plan_noise(const engine::VrxParams& params,
+                               std::span<const NotchSpec> notches, const VrxPlan& plan,
+                               const LineConfig& line) {
+    if (auto valid = validate_noise_request(params, notches); !valid) {
         return std::unexpected(valid.error());
     }
 
@@ -780,27 +872,41 @@ Expected<NoisePlan> plan_noise(const engine::VrxParams& params, const VrxPlan& p
     lp.mu = to_float(kLineMu);
     lp.leak = to_float(kLineLeak);
 
-    if (mono && params.notch_enabled) {
+    std::uint32_t sections = 0;
+    for (const NotchSpec& n : notches) {
+        if (!mono || !n.enabled) {
+            continue;
+        }
         // A notch outside the granted passband sits on audio the filter has
         // already removed, so it is not applied rather than being refused:
         // dragging an edge past it should not fail the drag.
-        const Hertz at = params.notch_hz;
-        const bool inside = at > plan.passband.low && at < plan.passband.high;
-        const auto audio = notch_audio_hz(params.demod, at, params.cw_pitch);
-        if (inside && audio && *audio > 0.0 && *audio < 0.45 * static_cast<double>(fa)) {
-            auto design = design_notch(*audio, params.notch_depth_db,
-                                       static_cast<double>(params.notch_width_hz), fa);
-            if (!design) {
-                return std::unexpected(with_context(design.error(), "receiver notch"));
-            }
-            lp.flags |= kLineNotch;
+        const bool inside = n.hz > plan.passband.low && n.hz < plan.passband.high;
+        const auto audio = notch_audio_hz(params.demod, n.hz, params.cw_pitch);
+        if (!inside || !audio || !(*audio > 0.0) ||
+            !(*audio < 0.45 * static_cast<double>(fa))) {
+            continue;
+        }
+        auto design = design_notch(*audio, n.depth_db, static_cast<double>(n.width_hz), fa);
+        if (!design) {
+            return std::unexpected(with_context(design.error(), "receiver notch"));
+        }
+        if (sections == 0U) {
             lp.b0 = to_float(design->b0);
             lp.b1 = to_float(design->b1);
             lp.b2 = to_float(design->b2);
             lp.a1 = to_float(design->a1);
             lp.a2 = to_float(design->a2);
+        } else {
+            LineSection& c = lp.more[sections - 1U];
+            c.b0 = to_float(design->b0);
+            c.b1 = to_float(design->b1);
+            c.b2 = to_float(design->b2);
+            c.a1 = to_float(design->a1);
+            c.a2 = to_float(design->a2);
         }
+        ++sections;
     }
+    lp.flags |= line_notch_flags(sections);
 
     if (mono && params.auto_notch_enabled) {
         const bool cw = params.demod == engine::Demod::Cw;
@@ -825,8 +931,8 @@ Expected<NoisePlan> plan_noise(const engine::VrxParams& params, const VrxPlan& p
         lp.flags |= kLineAle;
 
         if (cw) {
-            const double half =
-                std::max(static_cast<double>(params.notch_width_hz), kCwGuardMinHz);
+            const Hertz width = notches.empty() ? params.notch_width_hz : notches[0].width_hz;
+            const double half = std::max(static_cast<double>(width), kCwGuardMinHz);
             auto guard = design_notch(static_cast<double>(params.cw_pitch), kCwGuardDepthDb,
                                       2.0 * half, fa);
             if (!guard) {

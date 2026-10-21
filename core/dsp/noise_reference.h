@@ -41,9 +41,11 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -283,11 +285,31 @@ struct LineConfig {
     friend constexpr bool operator==(const LineConfig&, const LineConfig&) = default;
 };
 
+// Up to kMaxNotches manual notches run as a cascade of second-order
+// sections, the first in the b0..a2 words and the rest in LineParams::more.
+// kLineNotch with a zero count field is one section, so a caller that knew
+// only the single notch still means what it meant.
+inline constexpr std::size_t kMaxNotches = 4;
 inline constexpr std::uint32_t kLineNotch = 1U << 0;
 inline constexpr std::uint32_t kLineAle = 1U << 1;
 // The CW guard on the predictor's subtraction. Meaningful only with kLineAle.
 inline constexpr std::uint32_t kLineGuard = 1U << 2;
 inline constexpr std::uint32_t kMaxLineStride = 8;
+// Bits [8, 10) of the flags: sections after the first, 0 to kMaxNotches - 1.
+inline constexpr std::uint32_t kLineNotchCountShift = 8;
+inline constexpr std::uint32_t kLineNotchCountMask = 3U << kLineNotchCountShift;
+
+// The flags for a cascade of `sections` notches, 1 to kMaxNotches.
+[[nodiscard]] constexpr std::uint32_t line_notch_flags(std::uint32_t sections) {
+    return sections == 0U ? 0U : kLineNotch | ((sections - 1U) << kLineNotchCountShift);
+}
+
+// How many sections the flags run: 0 without kLineNotch.
+[[nodiscard]] constexpr std::uint32_t line_notch_sections(std::uint32_t flags) {
+    return (flags & kLineNotch) == 0U
+               ? 0U
+               : 1U + ((flags & kLineNotchCountMask) >> kLineNotchCountShift);
+}
 
 // The guard's narrowest half-width and its depth. 50 Hz either side covers a
 // keyed carrier's own sidebands at ordinary speeds; 40 dB leaves a learned
@@ -299,16 +321,28 @@ inline constexpr double kCwGuardDepthDb = 40.0;
 //   [0, 4)                  the notch's x[n-1], x[n-2], y[n-1], y[n-2]
 //   [4]                     the history write position, an exact integer
 //   [8, 12)                 the guard's x[n-1], x[n-2], y[n-1], y[n-2]
-//   [12, 12 + taps)         the predictor's weights
-//   [12 + taps, + history)  the history ring
+//   [12, 24)                sections 1 to 3's x1, x2, y1, y2, four each
+//   [24, 24 + taps)         the predictor's weights
+//   [24 + taps, + history)  the history ring
 inline constexpr std::size_t kLineStatePosition = 4;
 inline constexpr std::size_t kLineStateGuard = 8;
-inline constexpr std::size_t kLineStateWeights = 12;
+inline constexpr std::size_t kLineStateMore = 12;
+inline constexpr std::size_t kLineStateWeights = kLineStateMore + 4U * (kMaxNotches - 1U);
 [[nodiscard]] constexpr std::size_t line_state_size(const LineConfig& config) {
     return kLineStateWeights + config.taps + config.history;
 }
 
-// Seventeen packed words, the kernel's push constant block.
+// One notch section past the first: y = b0 x + b1 x1 + b2 x2 - a1 y1 - a2 y2.
+struct LineSection {
+    float b0 = 1.0F;
+    float b1 = 0.0F;
+    float b2 = 0.0F;
+    float a1 = 0.0F;
+    float a2 = 0.0F;
+};
+
+// Thirty-two packed words, the kernel's push constant block: 128 bytes, which
+// is all Vulkan promises, so a fifth notch would need a buffer instead.
 struct LineParams {
     std::uint32_t count = 0;
 
@@ -338,10 +372,14 @@ struct LineParams {
     float gb2 = 0.0F;
     float ga1 = 0.0F;
     float ga2 = 0.0F;
+
+    // Sections 1 to 3 of the notch cascade, run after the first in order.
+    std::array<LineSection, kMaxNotches - 1U> more{};
 };
 
-static_assert(sizeof(LineParams) == 17 * sizeof(std::uint32_t),
-              "LineParams must be seventeen packed 32-bit words to alias the kernel's push "
+static_assert(sizeof(LineSection) == 5 * sizeof(float));
+static_assert(sizeof(LineParams) == 32 * sizeof(std::uint32_t),
+              "LineParams must be thirty-two packed 32-bit words to alias the kernel's push "
               "constant block");
 
 // Twin of core/shaders/noise_line.comp. audio is processed in place, count
@@ -364,6 +402,19 @@ struct NotchDesign {
 
 [[nodiscard]] Expected<NotchDesign> design_notch(double audio_hz, double depth_db,
                                                  double width_hz, SampleRate audio_rate);
+
+// The section's power response, 20 log10 |H(e^jw)| in dB, at audio_hz. The
+// coefficients are rounded to float first, as the kernel sees them, so this
+// is the response of the section that actually runs and not of the design.
+// Used to draw a notch's effect on a display without filtering anything.
+[[nodiscard]] double notch_section_db(const NotchDesign& design, double audio_hz,
+                                      SampleRate audio_rate);
+
+// The same for a notch of {depth, width} centred at centre_hz, evaluated at
+// audio_hz: design_notch then notch_section_db.
+[[nodiscard]] Expected<double> notch_response_db(double centre_hz, double depth_db,
+                                                 double width_hz, SampleRate audio_rate,
+                                                 double audio_hz);
 
 // ---------------------------------------------------------------------------
 // Spectral noise reduction
@@ -530,11 +581,33 @@ static_assert(sizeof(SpectralParams) == 10 * sizeof(std::uint32_t),
 [[nodiscard]] std::optional<double> notch_audio_hz(engine::Demod mode, Hertz passband_hz,
                                                    Hertz cw_pitch);
 
+// One manual notch, in the frame of engine::VrxParams::notch_hz: signed
+// hertz from the receiver's centre. Same ranges as the single notch.
+struct NotchSpec {
+    bool enabled = false;
+    Hertz hz = 1'000;
+    double depth_db = 40.0;
+    Hertz width_hz = 100;
+
+    friend constexpr bool operator==(const NotchSpec&, const NotchSpec&) = default;
+};
+
+using NotchSet = std::array<NotchSpec, kMaxNotches>;
+
+// The notches a request carries. engine::VrxParams holds one, so today this
+// is that one in entry 0 and the rest off; once VrxParams carries a list this
+// reads it instead and the callers below need not change.
+[[nodiscard]] NotchSet notches_of(const engine::VrxParams& params);
+
 // Refuses a request whose noise fields are out of range or ask for a stage
 // the mode does not offer. Called by engine::place, so add_vrx and
 // set_vrx_params both answer the caller rather than a stage refusing on the
 // recording thread where nobody hears it.
 [[nodiscard]] Status validate_noise_request(const engine::VrxParams& params);
+// The same with the manual notches taken from `notches` rather than from
+// params' single notch fields, which are then ignored.
+[[nodiscard]] Status validate_noise_request(const engine::VrxParams& params,
+                                            std::span<const NotchSpec> notches);
 
 // What a receiver's stage records, resolved from its request and its plan.
 struct NoisePlan {
@@ -550,6 +623,13 @@ struct NoisePlan {
 };
 
 [[nodiscard]] Expected<NoisePlan> plan_noise(const engine::VrxParams& params,
+                                             const VrxPlan& plan, const LineConfig& line);
+// The same with the manual notches from `notches`, at most kMaxNotches. Each
+// enabled one inside the granted passband becomes a section, in order. The
+// CW guard's width still follows entry 0's width, as it follows the single
+// notch's.
+[[nodiscard]] Expected<NoisePlan> plan_noise(const engine::VrxParams& params,
+                                             std::span<const NotchSpec> notches,
                                              const VrxPlan& plan, const LineConfig& line);
 
 }  // namespace revenant::dsp

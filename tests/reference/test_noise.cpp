@@ -17,6 +17,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstddef>
@@ -28,6 +29,7 @@
 #include <vector>
 
 #include "core/dsp/noise_reference.h"
+#include "core/dsp/notch_map.h"
 #include "core/dsp/types.h"
 #include "core/dsp/vrx_reference.h"
 #include "core/engine/vrx.h"
@@ -327,6 +329,7 @@ TEST_CASE("the blanker finds an impulse against noise and leaves the noise alone
 namespace {
 
 void check_line(std::uint32_t flags, std::uint64_t seed) {
+    const std::uint32_t sections = dsp::line_notch_sections(flags);
     constexpr double kRate = 48'000.0;
     const dsp::LineConfig config{};
 
@@ -341,6 +344,20 @@ void check_line(std::uint32_t flags, std::uint64_t seed) {
     params.b2 = static_cast<float>(design->b2);
     params.a1 = static_cast<float>(design->a1);
     params.a2 = static_cast<float>(design->a2);
+    // Sections past the first, each its own centre, depth and width.
+    constexpr std::array<std::array<double, 3>, 3> kMore{
+        {{2'200.0, 30.0, 80.0}, {3'100.0, 50.0, 150.0}, {450.0, 20.0, 60.0}}};
+    for (std::uint32_t s = 1; s < sections; ++s) {
+        const auto& m = kMore[s - 1U];
+        auto more = dsp::design_notch(m[0], m[1], m[2], 48'000);
+        REQUIRE(more.has_value());
+        dsp::LineSection& c = params.more[s - 1U];
+        c.b0 = static_cast<float>(more->b0);
+        c.b1 = static_cast<float>(more->b1);
+        c.b2 = static_cast<float>(more->b2);
+        c.a1 = static_cast<float>(more->a1);
+        c.a2 = static_cast<float>(more->a2);
+    }
     params.mu = 0.002F;
     params.leak = static_cast<float>(1.0 - 1.0e-5);
     params.eps = 1.0e-6F;
@@ -398,6 +415,9 @@ void check_line(std::uint32_t flags, std::uint64_t seed) {
     if ((flags & dsp::kLineGuard) != 0U) {
         CHECK(cpu_state[dsp::kLineStateGuard + 2] != 0.0F);
     }
+    for (std::uint32_t s = 1; s < sections; ++s) {
+        CHECK(cpu_state[dsp::kLineStateMore + 4U * (s - 1U) + 2U] != 0.0F);
+    }
 }
 
 }  // namespace
@@ -427,6 +447,113 @@ TEST_CASE("the cw guard matches its twin bit-exactly across dispatch boundaries"
     REVENANT_NEEDS_GPU();
     INFO("running on " << test::shared_context_description());
     check_line(dsp::kLineNotch | dsp::kLineAle | dsp::kLineGuard, 0x4E4F495345000009ULL);
+}
+
+TEST_CASE("four notches in cascade match their twin bit-exactly", "[gpu][reference][noise]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+    check_line(dsp::line_notch_flags(4), 0x4E4F49534500000AULL);
+}
+
+TEST_CASE("two notches and the automatic one match their twin bit-exactly",
+          "[gpu][reference][noise]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+    check_line(dsp::line_notch_flags(2) | dsp::kLineAle, 0x4E4F49534500000BULL);
+}
+
+TEST_CASE("the notch count rides in the flags without disturbing one notch",
+          "[reference][noise]") {
+    CHECK(dsp::line_notch_flags(0) == 0U);
+    CHECK(dsp::line_notch_flags(1) == dsp::kLineNotch);
+    for (std::uint32_t n = 1; n <= dsp::kMaxNotches; ++n) {
+        CHECK(dsp::line_notch_sections(dsp::line_notch_flags(n)) == n);
+    }
+    CHECK(dsp::line_notch_sections(dsp::kLineAle) == 0U);
+    // A count without kLineNotch runs nothing.
+    CHECK(dsp::line_notch_sections(dsp::kLineNotchCountMask) == 0U);
+}
+
+namespace {
+
+// A tone's steady-state power through the notch cascade alone, against the
+// same tone untouched, in dB. The first half settles the poles; the second is
+// a whole number of cycles at every frequency used here.
+double measured_db(const dsp::LineParams& base, double hz) {
+    constexpr double kRate = 48'000.0;
+    constexpr std::uint32_t kCount = 96'000;
+    dsp::LineParams params = base;
+    params.count = kCount;
+    const dsp::LineConfig config{};
+    std::vector<float> state(dsp::line_state_size(config), 0.0F);
+    std::vector<float> audio(kCount);
+    auto tone = [&](std::uint32_t n) {
+        return 0.5 * std::sin(2.0 * std::numbers::pi * hz * static_cast<double>(n) / kRate);
+    };
+    for (std::uint32_t n = 0; n < kCount; ++n) {
+        audio[n] = static_cast<float>(tone(n));
+    }
+    REQUIRE(dsp::reference_line(config, params, audio, state).has_value());
+    double in = 0.0;
+    double out = 0.0;
+    for (std::uint32_t n = kCount / 2U; n < kCount; ++n) {
+        in += tone(n) * tone(n);
+        out += static_cast<double>(audio[n]) * static_cast<double>(audio[n]);
+    }
+    return 10.0 * std::log10(out / in);
+}
+
+dsp::LineParams one_notch(const dsp::NotchDesign& d) {
+    dsp::LineParams params;
+    params.flags = dsp::kLineNotch;
+    params.b0 = static_cast<float>(d.b0);
+    params.b1 = static_cast<float>(d.b1);
+    params.b2 = static_cast<float>(d.b2);
+    params.a1 = static_cast<float>(d.a1);
+    params.a2 = static_cast<float>(d.a2);
+    return params;
+}
+
+}  // namespace
+
+// REJECTS an analytic response that is not the section the twin runs: a
+// display drawing the notch from it would show a hole the audio does not have.
+TEST_CASE("the analytic notch response is what a tone through the twin loses",
+          "[reference][noise]") {
+    constexpr dsp::SampleRate kRate = 48'000;
+    struct Case {
+        double hz;
+        double depth;
+        double width;
+    };
+    for (const Case c : {Case{1'000.0, 40.0, 100.0}, Case{2'400.0, 20.0, 200.0},
+                         Case{600.0, 60.0, 50.0}}) {
+        INFO(c.hz << " Hz, " << c.depth << " dB, " << c.width << " Hz wide");
+        auto design = dsp::design_notch(c.hz, c.depth, c.width, kRate);
+        REQUIRE(design.has_value());
+        const dsp::LineParams params = one_notch(*design);
+
+        const auto centre = dsp::notch_response_db(c.hz, c.depth, c.width, kRate, c.hz);
+        REQUIRE(centre.has_value());
+        CHECK(*centre == dsp::notch_section_db(*design, c.hz, kRate));
+        const double heard = measured_db(params, c.hz);
+        INFO("centre: analytic " << *centre << " dB, through the twin " << heard << " dB");
+        CHECK(std::abs(*centre + c.depth) < 1.0);
+        // Float rounding in the recursion sets a floor far below the notch.
+        CHECK(std::abs(heard - *centre) < 0.5);
+
+        for (const double edge : {c.hz - 0.5 * c.width, c.hz + 0.5 * c.width}) {
+            const auto analytic = dsp::notch_response_db(c.hz, c.depth, c.width, kRate, edge);
+            REQUIRE(analytic.has_value());
+            const double through = measured_db(params, edge);
+            INFO("edge " << edge << " Hz: analytic " << *analytic << " dB, through the twin "
+                         << through << " dB");
+            CHECK(*analytic < -1.5);
+            CHECK(*analytic > -4.5);
+            CHECK(std::abs(through - *analytic) < 0.05);
+        }
+    }
+    CHECK_FALSE(dsp::notch_response_db(30'000.0, 40.0, 100.0, kRate, 1'000.0).has_value());
 }
 
 TEST_CASE("the notch cuts to its stated depth and width", "[reference][noise]") {
@@ -547,6 +674,54 @@ namespace {
 }
 
 }  // namespace
+
+// REJECTS a plan that drops a notch after the first, keeps one outside the
+// passband, or loses the order the sections run in.
+TEST_CASE("plan_noise cascades every enabled notch inside the passband",
+          "[reference][noise]") {
+    engine::VrxParams usb;
+    usb.demod = engine::Demod::Usb;
+    dsp::NotchSet notches{};
+    notches[0] = dsp::NotchSpec{true, 1'000, 40.0, 100};
+    notches[1] = dsp::NotchSpec{false, 1'500, 40.0, 100};
+    notches[2] = dsp::NotchSpec{true, 2'200, 30.0, 80};
+    notches[3] = dsp::NotchSpec{true, 5'000, 30.0, 80};  // past the 2.7 kHz edge
+
+    const auto plan = dsp::plan_noise(usb, notches, audio_plan(100, 2'700), dsp::LineConfig{});
+    REQUIRE(plan.has_value());
+    REQUIRE(plan->line);
+    CHECK(dsp::line_notch_sections(plan->line_params.flags) == 2U);
+    auto second = dsp::design_notch(2'200.0, 30.0, 80.0, 48'000);
+    REQUIRE(second.has_value());
+    CHECK(plan->line_params.more[0].b1 == static_cast<float>(second->b1));
+    CHECK(plan->line_params.more[0].a2 == static_cast<float>(second->a2));
+
+    // The single-notch call is entry 0 of the list.
+    usb.notch_enabled = true;
+    usb.notch_hz = 1'000;
+    const auto single = dsp::plan_noise(usb, audio_plan(100, 2'700), dsp::LineConfig{});
+    REQUIRE(single.has_value());
+    CHECK(single->line_params.flags == dsp::kLineNotch);
+    CHECK(single->line_params.b1 == plan->line_params.b1);
+    CHECK(dsp::notches_of(usb)[0] == dsp::NotchSpec{true, 1'000, 40.0, 100});
+    CHECK_FALSE(dsp::notches_of(usb)[1].enabled);
+
+    // A later entry is held to the same ranges as the first.
+    notches[2].depth_db = 90.0;
+    const auto deep = dsp::validate_noise_request(usb, notches);
+    REQUIRE_FALSE(deep.has_value());
+    CHECK(deep.error().message.find("notch 3") != std::string::npos);
+    notches[2].depth_db = 30.0;
+    notches[1] = dsp::NotchSpec{true, -1'500, 40.0, 100};  // the side USB discards
+    CHECK_FALSE(dsp::validate_noise_request(usb, notches).has_value());
+
+    // And the mode still decides whether any of them is offered.
+    engine::VrxParams wfm;
+    wfm.demod = engine::Demod::Wfm;
+    dsp::NotchSet later{};
+    later[3].enabled = true;
+    CHECK_FALSE(dsp::validate_noise_request(wfm, later).has_value());
+}
 
 // REJECTS a table that still refuses the notches on NFM or the automatic one
 // on CW, and one that lets WFM have them.
@@ -795,4 +970,48 @@ TEST_CASE("noise reduction's floor lands on the true noise floor", "[reference][
     const double error_db = 10.0 * std::log10(mean / truth);
     INFO("noise estimate " << mean << " against " << truth << ", " << error_db << " dB");
     CHECK(std::abs(error_db) < 1.5);
+}
+
+// REJECTS a mode table that draws a notch on the wrong side of the carrier,
+// draws one side of a double-sideband mode, or places one on FM.
+TEST_CASE("an audio notch maps to its passband offsets by mode", "[reference][noise]") {
+    using engine::Demod;
+    const auto usb = dsp::notch_offsets(Demod::Usb, 1'200.0);
+    CHECK(usb.count == 1U);
+    CHECK(usb.hz[0] == 1'200.0);
+    CHECK_FALSE(usb.audio_only);
+
+    const auto lsb = dsp::notch_offsets(Demod::Lsb, 1'200.0);
+    CHECK(lsb.count == 1U);
+    CHECK(lsb.hz[0] == -1'200.0);
+
+    for (const Demod both : {Demod::Am, Demod::Sam, Demod::Dsb}) {
+        const auto m = dsp::notch_offsets(both, 900.0);
+        CHECK(m.count == 2U);
+        CHECK(m.hz[0] == -900.0);
+        CHECK(m.hz[1] == 900.0);
+        CHECK_FALSE(m.audio_only);
+    }
+
+    // CW: the inverse of notch_audio_hz, so the drawn offset hears as asked.
+    const auto cw = dsp::notch_offsets(Demod::Cw, 800.0, 700.0);
+    CHECK(cw.count == 1U);
+    CHECK(cw.hz[0] == 100.0);
+    CHECK(dsp::notch_audio_hz(Demod::Cw, 100, 700) == 800.0);
+
+    for (const Demod fm : {Demod::Nfm, Demod::Wfm, Demod::P25p1, Demod::Dstar, Demod::Tetra,
+                           Demod::Dmr}) {
+        const auto m = dsp::notch_offsets(fm, 1'000.0);
+        CHECK(m.count == 0U);
+        CHECK(m.audio_only);
+    }
+    const auto raw = dsp::notch_offsets(Demod::Raw, 1'000.0);
+    CHECK(raw.count == 0U);
+    CHECK_FALSE(raw.audio_only);
+
+    CHECK(dsp::notch_offsets(Demod::Usb, 0.0).count == 0U);
+
+    // USB and LSB round-trip through the engine's own mapping.
+    CHECK(dsp::notch_audio_hz(Demod::Usb, static_cast<dsp::Hertz>(usb.hz[0]), 0) == 1'200.0);
+    CHECK(dsp::notch_audio_hz(Demod::Lsb, static_cast<dsp::Hertz>(lsb.hz[0]), 0) == 1'200.0);
 }

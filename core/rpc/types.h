@@ -23,6 +23,8 @@
 
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -470,6 +472,19 @@ struct SourceStats {
     DirectSamplingMode direct_sampling = DirectSamplingMode::Off;
 };
 
+// One manual notch, in VrxParams' frame: signed hertz from `center`. Depth
+// in [3, 80] dB, width in [10, 2000] Hz, as for the single notch.
+inline constexpr std::size_t kMaxNotches = 4;
+
+struct NotchEntry {
+    bool enabled = false;
+    std::int64_t hz = 1'000;
+    double depth_db = 40.0;
+    std::int64_t width_hz = 100;
+
+    friend bool operator==(const NotchEntry&, const NotchEntry&) = default;
+};
+
 struct VrxParams {
     // Hertz from the SOURCE'S BASEBAND DC, bounded by plus and minus half
     // the source rate. Not an absolute radio frequency: the engine's grid
@@ -523,14 +538,30 @@ struct VrxParams {
     // offer which stage; docs/noise.md has what they do.
     bool nb_enabled = false;
     double nb_threshold_db = 12.0;
+    //
+    // THE SINGLE NOTCH FIELDS ARE NOTCH 1 WHILE THE UI MOVES TO THE LIST. They
+    // stay authoritative for entry 0: every writer today sets them, so
+    // notches[0] is overwritten from them on the way out and mirrored from
+    // them on the way in. Entries 1 to 3 travel in notches. resolved_notches
+    // below is the one place that says which wins; once the UI writes
+    // notches[0] directly these four go.
     bool notch_enabled = false;
     std::int64_t notch_hz = 1'000;
     double notch_depth_db = 40.0;
     std::int64_t notch_width_hz = 100;
+    std::array<NotchEntry, kMaxNotches> notches{};
     bool auto_notch_enabled = false;
     bool nr_enabled = false;
     double nr_strength = 0.5;
 };
+
+// All four notches with entry 0 taken from the single notch fields.
+[[nodiscard]] inline std::array<NotchEntry, kMaxNotches> resolved_notches(const VrxParams& params) {
+    std::array<NotchEntry, kMaxNotches> out = params.notches;
+    out[0] = NotchEntry{params.notch_enabled, params.notch_hz, params.notch_depth_db,
+                        params.notch_width_hz};
+    return out;
+}
 
 struct VrxPlacement {
     std::uint32_t channel = 0;

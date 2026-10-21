@@ -1,8 +1,8 @@
 // The manual notch and the automatic notch, on one receiver's demodulated
 // audio, in place.
 //
-// The notch is a second-order section read off its pole-zero geometry,
-// Oppenheim and Schafer, "Discrete-Time Signal Processing", chapter 5. The
+// The notch is up to four second-order sections in cascade, each read off
+// its pole-zero geometry, Oppenheim and Schafer, "Discrete-Time Signal Processing", chapter 5. The
 // automatic notch is the adaptive line enhancer of Widrow et al., "Adaptive
 // Noise Cancelling: Principles and Applications", Proc. IEEE 63(12), 1975,
 // updated by normalized LMS with leakage as in Haykin, "Adaptive Filter
@@ -44,10 +44,15 @@ const uint kPerLane = kTaps / kLanes;
 const uint kFlagNotch = 1u;
 const uint kFlagAle = 2u;
 const uint kFlagGuard = 4u;
+// Sections after the first, in bits [8, 10); see line_notch_flags.
+const uint kNotchCountShift = 8u;
+const uint kNotchCountMask = 3u;
+const uint kMaxMore = 3u;
 
 const uint kStatePosition = 4u;
 const uint kStateGuard = 8u;
-const uint kStateWeights = 12u;
+const uint kStateMore = 12u;
+const uint kStateWeights = kStateMore + 4u * kMaxMore;
 const uint kStateHistory = kStateWeights + kTaps;
 
 // Audio, one float per sample, read and rewritten in place.
@@ -77,6 +82,8 @@ layout(push_constant) uniform Params {
     float gb2;
     float ga1;
     float ga2;
+    // Sections 1 to 3 of the notch cascade, five words each: b0 b1 b2 a1 a2.
+    float more[15];
 } params;
 
 shared float history[kHistory];
@@ -103,6 +110,7 @@ void main() {
     const uint width = gl_WorkGroupSize.x;
     const bool is_lane = lane < kLanes;
     const bool notch = (params.flags & kFlagNotch) != 0u;
+    const uint extra = notch ? ((params.flags >> kNotchCountShift) & kNotchCountMask) : 0u;
     const bool ale = (params.flags & kFlagAle) != 0u;
     const bool guard = ale && (params.flags & kFlagGuard) != 0u;
     const uint history_mask = kHistory - 1u;
@@ -123,6 +131,10 @@ void main() {
     float x2 = state.values[1];
     float y1 = state.values[2];
     float y2 = state.values[3];
+    float m[4u * kMaxMore];
+    for (uint i = 0u; i < 4u * kMaxMore; ++i) {
+        m[i] = i < 4u * extra ? state.values[kStateMore + i] : 0.0;
+    }
     uint position = uint(state.values[kStatePosition]);
     float gx1 = state.values[kStateGuard + 0u];
     float gx2 = state.values[kStateGuard + 1u];
@@ -149,6 +161,24 @@ void main() {
             y2 = y1;
             y1 = acc;
             v = acc;
+            for (uint s = 0u; s < extra; ++s) {
+                const uint c = 5u * s;
+                const uint q = 4u * s;
+                precise float u0 = params.more[c + 0u] * v;
+                precise float u1 = params.more[c + 1u] * m[q + 0u];
+                precise float u2 = params.more[c + 2u] * m[q + 1u];
+                precise float u3 = params.more[c + 3u] * m[q + 2u];
+                precise float u4 = params.more[c + 4u] * m[q + 3u];
+                precise float sum = u0 + u1;
+                sum = sum + u2;
+                sum = sum - u3;
+                sum = sum - u4;
+                m[q + 1u] = m[q + 0u];
+                m[q + 0u] = v;
+                m[q + 3u] = m[q + 2u];
+                m[q + 2u] = sum;
+                v = sum;
+            }
         }
 
         float out_value = v;
@@ -232,6 +262,9 @@ void main() {
         state.values[1] = x2;
         state.values[2] = y1;
         state.values[3] = y2;
+        for (uint i = 0u; i < 4u * extra; ++i) {
+            state.values[kStateMore + i] = m[i];
+        }
         state.values[kStatePosition] = float(position & history_mask);
         state.values[kStateGuard + 0u] = gx1;
         state.values[kStateGuard + 1u] = gx2;

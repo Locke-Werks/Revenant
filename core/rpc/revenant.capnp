@@ -1055,6 +1055,20 @@ struct VrxParams {
     # Spectral noise reduction, with one strength in [0, 1].
     noiseReduction @18 :Bool = false;
     noiseReductionStrength @19 :Float64 = 0.5;
+
+    # Up to four manual notches, the same fields and ranges as the single one
+    # above. Entry 0 IS that single notch: a writer sets notch, notchHz,
+    # notchDepthDb and notchWidthHz from it as well, and a reader that finds
+    # this list empty, because the peer predates it, takes entry 0 from those
+    # fields and leaves the rest off. Entries past the fourth are refused.
+    notches @20 :List(Notch);
+}
+
+struct Notch {
+    enabled @0 :Bool = false;
+    hz @1 :Int64 = 1000;
+    depthDb @2 :Float64 = 40.0;
+    widthHz @3 :Int64 = 100;
 }
 
 struct VrxPlacement {

@@ -581,6 +581,12 @@ void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& i
     out.setAutoNotch(in.auto_notch_enabled);
     out.setNoiseReduction(in.nr_enabled);
     out.setNoiseReductionStrength(in.nr_strength);
+    // engine::VrxParams holds one notch, so the list carries it alone.
+    auto notches = out.initNotches(1);
+    notches[0].setEnabled(in.notch_enabled);
+    notches[0].setHz(in.notch_hz);
+    notches[0].setDepthDb(in.notch_depth_db);
+    notches[0].setWidthHz(in.notch_width_hz);
 }
 
 void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in,
@@ -891,6 +897,20 @@ Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in) {
     out.auto_notch_enabled = in.getAutoNotch();
     out.nr_enabled = in.getNoiseReduction();
     out.nr_strength = in.getNoiseReductionStrength();
+
+    // Entry 0 is the single notch above, which stays authoritative. The
+    // engine applies one notch until engine::VrxParams carries the list, so
+    // an enabled second notch is refused rather than silently dropped.
+    const auto notches = in.getNotches();
+    if (notches.size() > 4U) {
+        return fail(std::format("{} notches asked for where at most 4 run", notches.size()));
+    }
+    for (std::uint32_t i = 1; i < notches.size(); ++i) {
+        if (notches[i].getEnabled()) {
+            return fail(std::format(
+                "notch {} is enabled, and this engine applies only the first notch", i + 1));
+        }
+    }
     return out;
 }
 
