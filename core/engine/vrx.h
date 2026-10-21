@@ -704,6 +704,12 @@ struct VrxParams {
     // costs nothing; on costs a 1024 point transform per passband frame.
     bool display_audio_spectrum = false;
 
+    // Constellation and eye panel (#17): when set on a digital receiver,
+    // each PassbandFrame also carries a SymbolScope from
+    // core/engine/symbol_tap.h. Off costs nothing; on costs a timing loop
+    // on the completion thread at the receiver's own rate.
+    bool display_symbols = false;
+
     // The automatic notch, an adaptive line enhancer that removes steady
     // tones from the audio. Offered on AM, USB, LSB, DSB, NFM and CW. On CW
     // what it subtracts is guarded at the pitch, where the steady tone is the

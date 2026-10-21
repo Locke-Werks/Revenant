@@ -280,6 +280,37 @@ struct PassbandFrame {
     audioPowerDb @14 :List(Float32);
     audioBinHz @15 :Float64;
     audioNotchHz @16 :List(Float64);
+
+    # Constellation and eye panel (#17). Unset unless the receiver's
+    # displaySymbols is set and its tap has symbols.
+    symbols @17 :SymbolScope;
+}
+
+# A digital receiver's latest symbols, for a scope and nothing else: no bit
+# is sliced. core/engine/symbol_tap.h has the arithmetic.
+enum SymbolKind {
+    none @0;
+    # One level a symbol, FSK family, in units of the inner deviation.
+    levels @1;
+    # One differential I/Q point a symbol, PSK family, unit RMS.
+    constellation @2;
+}
+
+struct SymbolScope {
+    kind @0 :SymbolKind;
+    symbolRateHz @1 :Float64;
+    # Levels: one float a symbol. Constellation: interleaved I and Q.
+    points @2 :List(Float32);
+    ideal @3 :List(Float32);
+    # Eye traces of eyeTraceLength floats each, two symbols centred on a
+    # strobe, back to back.
+    eye @4 :List(Float32);
+    eyeTraceLength @5 :UInt32;
+    # EVM, or the symbol deviation error, as a fraction of the outer ideal.
+    errorRms @6 :Float32;
+    # Timing loop phase in symbols, and its clock error in ppm.
+    timingOffset @7 :Float32;
+    rateErrorPpm @8 :Float32;
 }
 
 struct PassbandNotchMark {
@@ -1121,6 +1152,10 @@ struct VrxParams {
     noiseProfile @23 :Bool = false;
     noiseProfileStrengthDb @24 :Float64 = 12.0;
     noiseProfileControl @25 :NoiseProfileControl;
+
+    # Constellation and eye panel (#17): on a digital receiver each
+    # PassbandFrame then also carries symbols. Display only.
+    displaySymbols @26 :Bool = false;
 }
 
 # Adaptive noise profile controls. learnCount and resetCount are commands

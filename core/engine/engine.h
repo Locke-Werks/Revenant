@@ -1449,6 +1449,9 @@ struct PassbandCarrier {
     float age_seconds = 0.0F;
 };
 
+// core/engine/symbol_tap.h, for PassbandFrame::symbols (#17).
+struct SymbolScope;
+
 struct PassbandFrame {
     VrxId vrx;
 
@@ -1533,6 +1536,11 @@ struct PassbandFrame {
     std::span<const float> audio_power_db;
     double audio_bin_hz = 0.0;
     std::span<const double> audio_notch_hz;
+
+    // Constellation and eye panel (#17): the receiver's latest symbols,
+    // only while VrxParams::display_symbols is set on a digital receiver
+    // and null otherwise. Valid for the call only.
+    const SymbolScope* symbols = nullptr;
 };
 
 using PassbandSink =std::function<Status(const PassbandFrame&)>;

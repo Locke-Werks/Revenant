@@ -339,6 +339,7 @@
 #include "core/engine/cpu_budget.h"
 #include "core/engine/load_clock.h"
 #include "core/engine/spsc_ring.h"
+#include "core/engine/symbol_tap.h"
 #include "core/plugin/engine_plugin.h"
 #include "core/plugin/engine_plugin_abi.h"
 #include "core/rpc/convert.h"
@@ -652,6 +653,14 @@ public:
         frame_.carriers = std::span<const engine::PassbandCarrier>(carriers_);
         frame_.audio_power_db = std::span<const float>(audio_);
         frame_.audio_notch_hz = std::span<const double>(ticks_);
+        // Constellation and eye panel (#17): copied by value, the tap's
+        // own scope is rewritten on the next frame.
+        if (source.symbols != nullptr) {
+            symbols_ = *source.symbols;
+            frame_.symbols = &symbols_;
+        } else {
+            frame_.symbols = nullptr;
+        }
     }
 
     [[nodiscard]] const engine::PassbandFrame& frame() const { return frame_; }
@@ -663,6 +672,7 @@ private:
     std::vector<engine::PassbandCarrier> carriers_;
     std::vector<float> audio_;
     std::vector<double> ticks_;
+    engine::SymbolScope symbols_;  // #17
     engine::PassbandFrame frame_;
 };
 

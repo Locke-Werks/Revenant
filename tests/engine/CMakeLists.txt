@@ -176,6 +176,7 @@ add_executable(revenant_engine_tests
     test_engine_spectrum.cpp
     test_pacing_window.cpp
     test_audio_spectrum.cpp
+    test_symbol_tap.cpp
     test_passband_notch.cpp
     test_front_end_correction.cpp
     test_hackrf_source.cpp

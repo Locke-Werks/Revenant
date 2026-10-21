@@ -997,6 +997,89 @@ ColumnLayout {
         delayed: true
     }
 
+    // Constellation and eye panel (#17): a digital receiver's symbols, timed
+    // by the engine's own loop. Diagnostics only, nothing is decoded here.
+    // Offered on the digital modes and on raw, where the engine estimates
+    // the symbol rate itself; the engine runs the tap only while it is on.
+    ColumnLayout {
+        id: symbolPanel
+
+        readonly property bool offered: engineLink.receiverId > 0
+            && (UiRules.modeIsDigital(engineLink.receiverDemod)
+                || engineLink.receiverDemod === "raw")
+
+        Layout.fillWidth: true
+        visible: offered
+        spacing: 2
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            RCheckBox {
+                text: "symbols"
+                checked: engineLink.displaySymbols
+                onToggled: {
+                    engineLink.displaySymbols = checked
+                    checked = Qt.binding(() => engineLink.displaySymbols)
+                }
+            }
+
+            Label {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                visible: engineLink.displaySymbols
+                elide: Text.ElideRight
+                color: Theme.inkDim
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+                text: !constellation.active
+                      ? "symbols: waiting for a symbol rate"
+                      : (constellation.symbolRateHz / 1000).toFixed(2) + " kBd  ·  "
+                        + (constellation.kind === "levels" ? "deviation error " : "EVM ")
+                        + constellation.errorPercent.toFixed(1) + "%  ·  timing "
+                        + constellation.timingOffset.toFixed(2) + " sym  ·  clock "
+                        + constellation.rateErrorPpm.toFixed(0) + " ppm"
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 140
+            visible: engineLink.displaySymbols
+            spacing: 4
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                color: Theme.background
+                border.color: Theme.border
+
+                ConstellationItem {
+                    id: constellation
+                    anchors.fill: parent
+                    anchors.margins: 2
+                    link: engineLink
+                    tint: detail.tint
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                color: Theme.background
+                border.color: Theme.border
+
+                EyeItem {
+                    anchors.fill: parent
+                    anchors.margins: 2
+                    link: engineLink
+                    tint: detail.tint
+                }
+            }
+        }
+    }
+
     // The readout, which is the whole of what a drag says back.
     // Live while one is running and the granted pair when one is
     // not, so the strip never goes blank and never shows a stale

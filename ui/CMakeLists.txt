@@ -283,6 +283,13 @@ qt_add_executable(revenant_ui
     render/passband_waterfall_item.cpp
     render/passband_waterfall_item.h
     render/split_watch.h
+    # Constellation and eye panel (#17).
+    models/symbol_link.cpp
+    render/constellation_item.cpp
+    render/constellation_item.h
+    render/eye_item.cpp
+    render/eye_item.h
+    render/symbol_scope_map.h
     render/spectrum_item.cpp
     render/spectrum_item.h
     render/spectrum_scale.h
@@ -775,6 +782,7 @@ if(REVENANT_UI_TESTS)
             tests/test_spectrum_scale.cpp
             tests/test_waterfall_scale.cpp
             tests/test_audio_spectrum_map.cpp
+            tests/test_symbol_scope_map.cpp
             tests/test_passband_marks.cpp
             tests/test_notch_map_agree.cpp
             tests/test_passband_waterfall.cpp
