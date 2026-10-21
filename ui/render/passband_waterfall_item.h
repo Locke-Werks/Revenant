@@ -46,6 +46,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include <QImage>
@@ -54,7 +55,11 @@
 #include <QtQmlIntegration>
 
 #include "models/engine_link.h"
+#include "models/scale_settings.h"
 #include "render/history_shift.h"
+#include "render/passband_colour.h"
+#include "render/time_marker_node.h"
+#include "render/time_markers.h"
 
 namespace revenant::ui {
 
@@ -66,6 +71,23 @@ class PassbandWaterfallItem : public QQuickItem {
 
     // How much of the display the history fills, as on the span waterfall.
     Q_PROPERTY(double historyFraction READ historyFraction NOTIFY historyChanged)
+
+    // The span waterfall's scale settings, for its contrast and pivot only:
+    // see render/passband_colour.h for why the pins stay behind. Null draws
+    // at contrast 0, the engine's floor and ceiling as before.
+    Q_PROPERTY(revenant::ui::ScaleSettings* scaleSettings READ scaleSettings WRITE
+                   setScaleSettings NOTIFY scaleSettingsChanged)
+
+    // Seconds between time markers; 0 draws none. render/time_markers.h.
+    Q_PROPERTY(int timeMarkerSeconds READ timeMarkerSeconds WRITE setTimeMarkerSeconds NOTIFY
+                   timeMarkerSecondsChanged)
+
+    // The before/after split: the left half of the width draws the frame's
+    // own power, the right half the processed row handed in through
+    // takeSplitRow for the same frame. Both halves keep the one frequency
+    // axis, so a carrier straddling the middle shows what the processing did
+    // to it. Without a processed row for a frame, the whole row is the frame.
+    Q_PROPERTY(bool split READ split WRITE setSplit NOTIFY splitChanged)
 
 public:
     explicit PassbandWaterfallItem(QQuickItem* parent = nullptr);
@@ -80,9 +102,29 @@ public:
                    : static_cast<double>(filled_rows_) / static_cast<double>(history_.height());
     }
 
+    [[nodiscard]] ScaleSettings* scaleSettings() const { return scale_settings_; }
+    void setScaleSettings(ScaleSettings* settings);
+
+    [[nodiscard]] int timeMarkerSeconds() const { return time_marker_seconds_; }
+    void setTimeMarkerSeconds(int seconds);
+
+    [[nodiscard]] bool split() const { return split_; }
+    void setSplit(bool split);
+
+    // THE SPLIT'S ENTRY POINT. The processed power for the passband frame
+    // with this sequence number (rpc::PassbandFrame::sequence), on the same
+    // bins as that frame. Call it before the link announces the frame, or
+    // for the frame being announced; a row whose sequence does not match the
+    // frame taken is ignored, so a late or missing one never draws against
+    // the wrong frame. Copied, so the caller's buffer need not outlive it.
+    void takeSplitRow(std::uint64_t sequence, std::span<const float> power_db);
+
 signals:
     void linkChanged();
     void historyChanged();
+    void scaleSettingsChanged();
+    void timeMarkerSecondsChanged();
+    void splitChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
@@ -104,6 +146,22 @@ private:
     // Forgets every row without reallocating.
     void clearRows();
 
+    // Every stored row again from its codes, for a contrast or pivot moved.
+    // The span waterfall recolours its whole history then too.
+    void recolourAll();
+
+    [[nodiscard]] float contrastInForce() const
+    {
+        return scale_settings_ == nullptr
+                   ? 0.0F
+                   : static_cast<float>(scale_settings_->waterfallContrast());
+    }
+    [[nodiscard]] float pivotInForce() const
+    {
+        return scale_settings_ == nullptr ? kDefaultCurvePivot
+                                          : static_cast<float>(scale_settings_->waterfallPivot());
+    }
+
     [[nodiscard]] QSize deviceSize() const;
     [[nodiscard]] int readRow() const;
 
@@ -114,6 +172,23 @@ private:
     int filled_rows_ = 0;
     std::vector<std::uint8_t> tile_dirty_;
     std::vector<float> columns_;
+    std::vector<float> split_columns_;
+
+    // The levels behind the pixels, one per pixel in ring order, and each
+    // row's ends, so a contrast change can recolour the history.
+    std::vector<std::uint16_t> codes_;
+    std::vector<PassbandRowScale> row_scales_;
+
+    ScaleSettings* scale_settings_ = nullptr;
+
+    int time_marker_seconds_ = kDefaultTimeMarkerSeconds;
+    TimeMarkerRing marks_;
+    TimeMarkerLabels marker_labels_;
+
+    bool split_ = false;
+    std::vector<float> split_row_;
+    std::uint64_t split_sequence_ = 0;
+    bool split_held_ = false;
 
     // The absolute axis the stored rows are on. Not the receiver they came
     // from: see takeFrame for why a rebuilt receiver keeps its history.

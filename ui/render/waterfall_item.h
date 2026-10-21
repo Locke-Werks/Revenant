@@ -149,6 +149,8 @@
 #include "render/history_shift.h"
 #include "render/spectrum_item.h"
 #include "render/spectrum_scale.h"
+#include "render/time_marker_node.h"
+#include "render/time_markers.h"
 #include "render/waterfall_scale.h"
 
 class QMouseEvent;
@@ -206,6 +208,11 @@ class WaterfallItem : public QQuickItem {
     Q_PROPERTY(QString hoveredCaptionDetail READ hoveredCaptionDetail
                    NOTIFY hoveredCaptionChanged)
 
+    // Seconds between time markers down the left edge; 0 draws none.
+    // render/time_markers.h.
+    Q_PROPERTY(int timeMarkerSeconds READ timeMarkerSeconds WRITE setTimeMarkerSeconds NOTIFY
+                   timeMarkerSecondsChanged)
+
 public:
     explicit WaterfallItem(QQuickItem* parent = nullptr);
 
@@ -236,7 +243,11 @@ public:
     [[nodiscard]] QString hoveredCaptionDetail() const;
     [[nodiscard]] bool captionFrozen() const { return captions_.frozen() != 0; }
 
+    [[nodiscard]] int timeMarkerSeconds() const { return time_marker_seconds_; }
+    void setTimeMarkerSeconds(int seconds);
+
 signals:
+    void timeMarkerSecondsChanged();
     void linkChanged();
     void endsChanged();
     void historyChanged();
@@ -498,6 +509,10 @@ private:
     // under a pointer that has not moved is found under it.
     bool hovering_ = false;
     QPointF hover_position_;
+
+    int time_marker_seconds_ = kDefaultTimeMarkerSeconds;
+    TimeMarkerRing marks_;
+    TimeMarkerLabels marker_labels_;
 };
 
 }  // namespace revenant::ui

@@ -10,6 +10,8 @@
 #include <QSGRectangleNode>
 #include <QSGTexture>
 
+#include <QDateTime>
+
 #include "models/frame_stats.h"
 #include "render/history_resize.h"
 #include "render/spectrum_scale.h"
@@ -45,6 +47,7 @@ public:
 
     QSGRectangleNode* background = nullptr;
     QSGNode* tiles = nullptr;
+    TimeMarkerNode* markers = nullptr;
     std::vector<QSGTexture*> textures;
 };
 
@@ -71,6 +74,76 @@ void PassbandWaterfallItem::setLink(EngineLink* link)
     }
     clearRows();
     emit linkChanged();
+    update();
+}
+
+void PassbandWaterfallItem::setScaleSettings(ScaleSettings* settings)
+{
+    if (scale_settings_ == settings) {
+        return;
+    }
+    if (scale_settings_ != nullptr) {
+        disconnect(scale_settings_, nullptr, this, nullptr);
+    }
+    scale_settings_ = settings;
+    if (scale_settings_ != nullptr) {
+        connect(scale_settings_, &ScaleSettings::waterfallContrastChanged, this,
+                &PassbandWaterfallItem::recolourAll);
+        connect(scale_settings_, &ScaleSettings::waterfallPivotChanged, this,
+                &PassbandWaterfallItem::recolourAll);
+    }
+    recolourAll();
+    emit scaleSettingsChanged();
+}
+
+void PassbandWaterfallItem::setTimeMarkerSeconds(int seconds)
+{
+    seconds = std::max(seconds, 0);
+    if (time_marker_seconds_ == seconds) {
+        return;
+    }
+    time_marker_seconds_ = seconds;
+    // The markers already drawn were spaced by the old interval, and a
+    // history with two spacings in it reads as a stall.
+    marks_.clear();
+    marker_labels_.clear();
+    emit timeMarkerSecondsChanged();
+    update();
+}
+
+void PassbandWaterfallItem::setSplit(bool split)
+{
+    if (split_ == split) {
+        return;
+    }
+    split_ = split;
+    emit splitChanged();
+}
+
+void PassbandWaterfallItem::takeSplitRow(std::uint64_t sequence, std::span<const float> power_db)
+{
+    split_row_.assign(power_db.begin(), power_db.end());
+    split_sequence_ = sequence;
+    split_held_ = true;
+}
+
+void PassbandWaterfallItem::recolourAll()
+{
+    const int wide = history_.width();
+    const int tall = history_.height();
+    if (history_.isNull() ||
+        codes_.size() != static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall)) {
+        return;
+    }
+    const float contrast = contrastInForce();
+    const float pivot = pivotInForce();
+    for (int row = 0; row < tall; ++row) {
+        colour_passband_row(
+            codes_.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(wide), wide,
+            row_scales_[static_cast<std::size_t>(row)], contrast, pivot,
+            reinterpret_cast<std::uint32_t*>(history_.scanLine(row)));
+    }
+    std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
     update();
 }
 
@@ -102,6 +175,10 @@ void PassbandWaterfallItem::rebuild(int columns, int rows)
     const int tall = std::max(rows, 1);
     history_ = QImage(wide, tall, QImage::Format_RGBX8888);
     columns_.assign(static_cast<std::size_t>(wide), kSpectrumFloorDb);
+    split_columns_.assign(static_cast<std::size_t>(wide), kSpectrumFloorDb);
+    codes_.assign(static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall), kNoLevel);
+    row_scales_.assign(static_cast<std::size_t>(tall), PassbandRowScale{});
+    marks_.assign(tall);
     axis_ = {};
     clearRows();
 }
@@ -113,6 +190,9 @@ void PassbandWaterfallItem::clearRows()
     }
     write_row_ = std::max(history_.height() - 1, 0);
     filled_rows_ = 0;
+    std::fill(codes_.begin(), codes_.end(), kNoLevel);
+    marks_.clear();
+    marker_labels_.clear();
     const int tiles = (history_.height() + kTileRows - 1) / kTileRows;
     tile_dirty_.assign(static_cast<std::size_t>(std::max(tiles, 0)), std::uint8_t{1});
     emit historyChanged();
@@ -127,12 +207,22 @@ void PassbandWaterfallItem::resizeRows(int rows)
 
     QImage fresh(wide, tall, QImage::Format_RGBX8888);
     fresh.fill(kBackground);
-    const auto row_bytes = static_cast<std::size_t>(wide) * sizeof(std::uint32_t);
+    const auto row_cells = static_cast<std::size_t>(wide);
+    std::vector<std::uint16_t> codes(row_cells * static_cast<std::size_t>(tall), kNoLevel);
+    std::vector<PassbandRowScale> scales(static_cast<std::size_t>(tall), PassbandRowScale{});
+    const auto row_bytes = row_cells * sizeof(std::uint32_t);
     for (int row = 0; row < plan.rows_kept; ++row) {
-        std::memcpy(fresh.scanLine(row),
-                    history_.constScanLine(history_source_row(plan, old_tall, row)), row_bytes);
+        const int from = history_source_row(plan, old_tall, row);
+        std::memcpy(fresh.scanLine(row), history_.constScanLine(from), row_bytes);
+        std::copy_n(codes_.begin() + static_cast<std::ptrdiff_t>(row_cells * static_cast<std::size_t>(from)),
+                    row_cells,
+                    codes.begin() + static_cast<std::ptrdiff_t>(row_cells * static_cast<std::size_t>(row)));
+        scales[static_cast<std::size_t>(row)] = row_scales_[static_cast<std::size_t>(from)];
     }
+    marks_.remap(plan, old_tall, tall);
     history_ = std::move(fresh);
+    codes_ = std::move(codes);
+    row_scales_ = std::move(scales);
     write_row_ = plan.write_row;
     filled_rows_ = plan.rows_kept;
     const int tiles = (tall + kTileRows - 1) / kTileRows;
@@ -153,6 +243,8 @@ void PassbandWaterfallItem::shiftRows(int pixels)
     for (int row = 0; row < history_.height(); ++row) {
         shift_row(reinterpret_cast<std::uint32_t*>(history_.scanLine(row)), wide, pixels,
                   background);
+        shift_row(codes_.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(wide),
+                  wide, pixels, kNoLevel);
     }
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
 }
@@ -227,28 +319,43 @@ void PassbandWaterfallItem::takeFrame()
 
     reduce_peak(frame.power_db, columns_);
 
+    // The right half from the processed row, when one came for this frame.
+    // Reduced over the whole width like the frame, so both halves put every
+    // hertz in the same column.
+    const bool split_now = split_ && split_held_ && split_sequence_ == frame.sequence &&
+                           split_row_.size() == frame.power_db.size();
+    if (split_now) {
+        reduce_peak(split_row_, split_columns_);
+        const auto half = static_cast<std::ptrdiff_t>(wide / 2);
+        std::copy(split_columns_.begin() + half, split_columns_.end(), columns_.begin() + half);
+    }
+
     // No reduction headroom, for the reason render/passband_item.cpp gives:
-    // a column here is a bin or two.
-    const MapEnds ends = map_ends(frame.floor_db, frame.ceiling_db, 0.0F);
-    const float span = ends.span_db();
-    if (span <= 0.0F) {
+    // a column here is a bin or two. The ends are the frame's whole measure,
+    // not either half's, so the two halves are drawn to one scale.
+    const PassbandRowScale scale = passband_row_scale(
+        frame.floor_db, frame.ceiling_db, frame.percentile_low_db, frame.percentile_high_db);
+    if (scale.padded.span_db() <= 0.0F) {
         return;
     }
 
-    auto* row = reinterpret_cast<std::uint32_t*>(history_.scanLine(write_row_));
+    std::uint16_t* codes =
+        codes_.data() + static_cast<std::size_t>(write_row_) * static_cast<std::size_t>(wide);
     for (int c = 0; c < wide; ++c) {
-        const float level = std::clamp(
-            (columns_[static_cast<std::size_t>(c)] - ends.floor_db) / span, 0.0F, 1.0F);
-        const Rgb rgb = colour_at(level);
-        row[c] = 0xFF000000U | (static_cast<std::uint32_t>(rgb.b) << 16) |
-                 (static_cast<std::uint32_t>(rgb.g) << 8) | static_cast<std::uint32_t>(rgb.r);
+        codes[c] = encode_level(columns_[static_cast<std::size_t>(c)]);
     }
+    row_scales_[static_cast<std::size_t>(write_row_)] = scale;
+    colour_passband_row(codes, wide, scale, contrastInForce(), pivotInForce(),
+                        reinterpret_cast<std::uint32_t*>(history_.scanLine(write_row_)));
+    marks_.write(write_row_, QDateTime::currentMSecsSinceEpoch(), time_marker_seconds_);
+
     tile_dirty_[static_cast<std::size_t>(write_row_ / kTileRows)] = 1;
     write_row_ = (write_row_ + tall - 1) % tall;
     if (filled_rows_ < tall) {
         filled_rows_ += 1;
         emit historyChanged();
     }
+    marker_labels_.sync(marks_.visible(readRow()));
     update();
 }
 
@@ -268,8 +375,10 @@ QSGNode* PassbandWaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNo
         node->background = window()->createRectangleNode();
         node->background->setColor(kBackground);
         node->tiles = new QSGNode;
+        node->markers = new TimeMarkerNode;
         node->appendChildNode(node->background);
         node->appendChildNode(node->tiles);
+        node->appendChildNode(node->markers);
     }
     node->background->setRect(0.0, 0.0, w, h);
 
@@ -347,6 +456,8 @@ QSGNode* PassbandWaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNo
             h * static_cast<qreal>(run.display_row + run.rows) / static_cast<qreal>(tall);
         image->setRect(QRectF(0.0, top, w, bottom - top));
     }
+
+    node->markers->sync(window(), marker_labels_, marks_.visible(read), tall, h);
 
     for (QSGTexture* texture : retired) {
         delete texture;

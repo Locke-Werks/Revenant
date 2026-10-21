@@ -8,6 +8,7 @@
 
 #include <QColor>
 #include <QCursor>
+#include <QDateTime>
 #include <QFont>
 #include <QFontMetricsF>
 #include <QHoverEvent>
@@ -127,6 +128,7 @@ public:
     QSGRectangleNode* background = nullptr;
     QSGNode* tiles = nullptr;
     OverlayNode* overlay = nullptr;
+    TimeMarkerNode* markers = nullptr;
     std::vector<QSGTexture*> textures;
 
     // Over the detection overlay: the captions' leaders, plates and bars as
@@ -264,6 +266,21 @@ void WaterfallItem::setMapPins(ScaleSettings* pins)
     emit mapPinsChanged();
 }
 
+void WaterfallItem::setTimeMarkerSeconds(int seconds)
+{
+    seconds = std::max(seconds, 0);
+    if (time_marker_seconds_ == seconds) {
+        return;
+    }
+    time_marker_seconds_ = seconds;
+    // The markers already drawn were spaced by the old interval, and a
+    // history with two spacings in it reads as a stall.
+    marks_.clear();
+    marker_labels_.clear();
+    emit timeMarkerSecondsChanged();
+    update();
+}
+
 void WaterfallItem::setSelectedDetection(qulonglong id)
 {
     if (selected_detection_ == id) {
@@ -399,6 +416,7 @@ void WaterfallItem::resizeRows(int rows)
     }
 
     history_ = std::move(fresh);
+    marks_.remap(plan, old_tall, tall);
     row_spans_ = std::move(spans);
     codes_ = std::move(codes);
     write_row_ = plan.write_row;
@@ -455,6 +473,8 @@ void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
     filled_rows_ = 0;
     emit historyChanged();
     row_spans_.assign(static_cast<std::size_t>(tall), RowSpan{});
+    marks_.assign(tall);
+    marker_labels_.clear();
     codes_.assign(static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall), kNoLevel);
     histogram_.clear();
     levels_.reset();
@@ -492,6 +512,8 @@ void WaterfallItem::clearHistory()
     filled_rows_ = 0;
     emit historyChanged();
     std::fill(row_spans_.begin(), row_spans_.end(), RowSpan{});
+    marks_.clear();
+    marker_labels_.clear();
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
     std::fill(codes_.begin(), codes_.end(), kNoLevel);
     histogram_.clear();
@@ -1224,12 +1246,14 @@ void WaterfallItem::takeFrame()
     // of which samples a row covers.
     row_spans_[static_cast<std::size_t>(write_row_)] = RowSpan{frame.start, frame.count};
     tile_dirty_[static_cast<std::size_t>(write_row_ / kTileRows)] = 1;
+    marks_.write(write_row_, QDateTime::currentMSecsSinceEpoch(), time_marker_seconds_);
 
     write_row_ = (write_row_ + tall - 1) % tall;
     if (filled_rows_ < tall) {
         filled_rows_ += 1;
         emit historyChanged();
     }
+    marker_labels_.sync(marks_.visible(readRow()));
     forgetScrolledBoxes();
 
     // After the row is in, because the newest row is the leading edge of
@@ -1441,6 +1465,9 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
         node->caption_texts = new QSGNode;
         node->appendChildNode(node->background);
         node->appendChildNode(node->tiles);
+        // Under the detection overlay and the captions, which carry more.
+        node->markers = new TimeMarkerNode;
+        node->appendChildNode(node->markers);
         node->appendChildNode(node->overlay);
         node->appendChildNode(node->caption_quads);
         node->appendChildNode(node->caption_texts);
@@ -1553,6 +1580,7 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
         image->setRect(QRectF(0.0, top, w, bottom - top));
     }
 
+    node->markers->sync(window(), marker_labels_, marks_.visible(read), tall, h);
     node->overlay->setQuads(quads_);
 
     // THE CAPTIONS. Leaders first, so a plate covers the end of its own, then

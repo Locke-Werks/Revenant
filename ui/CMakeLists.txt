@@ -741,6 +741,7 @@ if(REVENANT_UI_TESTS)
             tests/test_span_view.cpp
             tests/test_spectrum_scale.cpp
             tests/test_waterfall_scale.cpp
+            tests/test_passband_waterfall.cpp
             tests/test_squelch_control.cpp
             tests/test_status_summary.cpp
             tests/test_transcription.cpp
