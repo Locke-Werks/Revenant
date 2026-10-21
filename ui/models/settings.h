@@ -151,6 +151,16 @@ inline constexpr QLatin1StringView kCaptionZoom{"display/captionZoom"};
 // short. QJsonDocument owns the escaping.
 inline constexpr QLatin1StringView kBookmarks{"bookmarks/list"};
 
+// Whether the notches and the filter are kept per mode and band and put back
+// on a tune; models/frequency_manager.h. Off by default.
+inline constexpr QLatin1StringView kRememberPerBand{"memories/rememberNotchPerBand"};
+
+// The receiver detail view's audio spectrum strip, shown by default.
+inline constexpr QLatin1StringView kShowAudioStrip{"display/showAudioStrip"};
+
+// Seconds between the waterfalls' time markers, zero for none.
+inline constexpr QLatin1StringView kTimeMarkerSeconds{"display/timeMarkerSeconds"};
+
 // The last engine this client reached, used only when argv names none.
 // An address on the command line always wins: a shortcut or a script that
 // states one is stating it for a reason, and a remembered value that

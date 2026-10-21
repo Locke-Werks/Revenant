@@ -100,10 +100,6 @@ class FrequencyManager : public QAbstractListModel {
                    presetSettingChanged)
 
 public:
-    // The QSettings key behind rememberPerBand. Here rather than in
-    // models/settings.h until that file takes it.
-    static constexpr const char* kRememberPerBandKey = "memories/rememberNotchPerBand";
-
     enum Role {
         KeyRole = Qt::UserRole + 1,
         NameRole,

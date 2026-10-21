@@ -488,6 +488,7 @@ ColumnLayout {
 
         link: engineLink
         mapPins: ScaleSettings
+        timeMarkerSeconds: ScaleSettings.timeMarkerSeconds
         selectedDetection: span.selection.selectedDetection
         onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted, pointerHz) =>
                          span.selection.takeTune(id, centerHz, bandwidthHz, candidates,

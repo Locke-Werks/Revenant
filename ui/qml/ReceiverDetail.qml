@@ -518,43 +518,81 @@ ColumnLayout {
             }
         }
 
+        // Four manual notch slots. The selector picks which one the sliders
+        // edit; a slot that is on reads bold in it. Right-click a carrier on
+        // the display to fill a free slot, or drag a band to move its slot.
         Label {
             text: "notch"
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
         }
         RowLayout {
+            id: notchRow
+
+            property int slot: 0
+            readonly property var entry: engineLink.notches[slot] || ({})
+            readonly property int onCount: {
+                let n = 0
+                for (const each of engineLink.notches) {
+                    if (each.enabled) {
+                        n += 1
+                    }
+                }
+                return n
+            }
+
             spacing: 8
+            RSegmented {
+                visible: engineLink.notchOffered
+                options: ["1", "2", "3", "4"]
+                current: String(notchRow.slot + 1)
+                tint: detail.tint
+                onPicked: (choice) => notchRow.slot = Number(choice) - 1
+            }
             RCheckBox {
                 text: "on"
                 enabled: engineLink.notchOffered
-                checked: engineLink.notchEnabled
-                onToggled: engineLink.notchEnabled = checked
+                checked: notchRow.entry.enabled || false
+                onToggled: {
+                    engineLink.setNotchEnabledAt(notchRow.slot, checked)
+                    checked = Qt.binding(() => notchRow.entry.enabled || false)
+                }
             }
-            // Where the notch sits, in the filter display's frame: hertz
+            // Where the slot sits, in the filter display's frame: hertz
             // from the carrier, across the passband the receiver has.
             RSlider {
-                Layout.preferredWidth: 160
+                Layout.preferredWidth: 140
                 visible: engineLink.notchOffered
                 from: engineLink.receiverPassbandLow
                 to: engineLink.receiverPassbandHigh
                 stepSize: 10
-                value: engineLink.notchHz
-                onMoved: engineLink.notchHz = Math.round(value)
+                value: notchRow.entry.hz || 0
+                onMoved: engineLink.setNotchHzAt(notchRow.slot, Math.round(value))
             }
             Label {
                 text: engineLink.notchOffered
-                      ? (engineLink.notchAudioHz / 1000).toFixed(2) + " kHz in the audio"
+                      ? ((notchRow.entry.audioHz || 0) / 1000).toFixed(2) + " kHz in the audio"
                       : engineLink.notchNote
                 color: Theme.inkDim
                 font.family: Theme.monoFont
                 font.pixelSize: Theme.sizeSmall
             }
+            RButton {
+                flat: true
+                visible: engineLink.notchOffered && notchRow.onCount > 0
+                text: "clear all"
+                ink: Theme.inkDim
+                onClicked: {
+                    for (let i = 0; i < 4; ++i) {
+                        engineLink.removeNotch(i)
+                    }
+                }
+            }
         }
 
         Label {
             visible: engineLink.notchOffered
-            text: "notch depth, width"
+            text: "notch " + (notchRow.slot + 1) + " depth, width"
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
         }
@@ -566,11 +604,11 @@ ColumnLayout {
                 from: 3
                 to: 80
                 stepSize: 1
-                value: engineLink.notchDepthDb
-                onMoved: engineLink.notchDepthDb = value
+                value: notchRow.entry.depthDb || 40
+                onMoved: engineLink.setNotchDepthDbAt(notchRow.slot, value)
             }
             Label {
-                text: engineLink.notchDepthDb.toFixed(0) + " dB"
+                text: (notchRow.entry.depthDb || 40).toFixed(0) + " dB"
                 color: Theme.inkDim
                 font.family: Theme.monoFont
                 font.pixelSize: Theme.sizeSmall
@@ -580,11 +618,11 @@ ColumnLayout {
                 from: 10
                 to: 2000
                 stepSize: 10
-                value: engineLink.notchWidthHz
-                onMoved: engineLink.notchWidthHz = Math.round(value)
+                value: notchRow.entry.widthHz || 100
+                onMoved: engineLink.setNotchWidthHzAt(notchRow.slot, Math.round(value))
             }
             Label {
-                text: engineLink.notchWidthHz + " Hz"
+                text: (notchRow.entry.widthHz || 100) + " Hz"
                 color: Theme.inkDim
                 font.family: Theme.monoFont
                 font.pixelSize: Theme.sizeSmall
@@ -659,6 +697,59 @@ ColumnLayout {
             anchors.fill: parent
             link: engineLink
             scaleLabelHeight: passbandScaleMetrics.height
+            // The requested slots rather than the frame's echo, so a band
+            // drawn under a drag or a slider does not lag it by a frame.
+            notches: engineLink.notches
+            carriers: engineLink.passbandCarriers
+            cwPitchHz: engineLink.cwPitchHz
+
+            onNotchMoved: (index, audioHz) => engineLink.setNotchAudioHzAt(index, audioHz)
+            onNotchRequested: (audioHz, widthHz) => engineLink.addNotch(audioHz, widthHz)
+            onNotchAllRequested: (list) => engineLink.addNotches(list)
+        }
+
+        // The notch depth, audio-only and carrier labels the item places.
+        Repeater {
+            model: engineLink.passbandActive ? passband.markLabels : []
+
+            Text {
+                required property var modelData
+
+                x: modelData.x || 0
+                y: modelData.y || 0
+                text: modelData.text || ""
+                color: modelData.kind === "carrier" ? Theme.inkWarn
+                       : modelData.kind === "audioOnly" ? Theme.inkDim
+                       : Theme.ink
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+                style: Text.Outline
+                styleColor: Theme.background
+            }
+        }
+
+        // Peak, floor and SNR under the pointer, beside it.
+        Text {
+            visible: passband.hoverReadout.length > 0
+            x: Math.max(4, Math.min(parent.width - width - 40, passband.hoverX + 10))
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 4
+            text: passband.hoverReadout
+            color: Theme.ink
+            font.family: Theme.monoFont
+            font.pixelSize: Theme.sizeSmall
+            style: Text.Outline
+            styleColor: Theme.background
+        }
+
+        RButton {
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 6
+            anchors.rightMargin: 48
+            visible: passband.notchAllCount > 0 && engineLink.notchOffered
+            text: "notch all (" + passband.notchAllCount + ")"
+            onClicked: passband.notchAll()
         }
 
         // The level scale up the right edge, the span spectrum's arrangement
@@ -764,6 +855,29 @@ ColumnLayout {
             id: passbandWaterfall
             anchors.fill: parent
             link: engineLink
+            scaleSettings: ScaleSettings
+            timeMarkerSeconds: ScaleSettings.timeMarkerSeconds
+            split: engineLink.displaySplit
+        }
+
+        SplitToggle {
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: 4
+            visible: engineLink.notchOffered
+            checked: passbandWaterfall.split
+            live: passbandWaterfall.splitLive
+            tint: detail.tint
+            onToggled: (on) => engineLink.displaySplit = on
+
+            HoverHandler { id: splitHover }
+
+            Tip {
+                visible: splitHover.hovered
+                text: "Left half before the notches, right half after, on one frequency axis. "
+                      + "The display is taken ahead of the blanker and noise reduction, so "
+                      + "only the notches differ; the audio strip shows the rest."
+            }
         }
 
         // Where the history ends, as on the span waterfall, so an empty
@@ -776,6 +890,54 @@ ColumnLayout {
             height: 1
             color: Theme.border
         }
+    }
+
+    // The audio after the notch and noise reduction, which is the one place
+    // an NFM notch or NR shows. The engine computes it only while shown.
+    Item {
+        id: audioStrip
+
+        Layout.fillWidth: true
+        Layout.preferredHeight: 48
+        visible: ScaleSettings.showAudioStrip && engineLink.receiverId > 0
+
+        AudioSpectrumItem {
+            id: audioSpectrum
+            anchors.fill: parent
+            link: engineLink
+            maxHz: engineLink.receiverDemod === "cw"
+                   ? Math.max(Math.abs(engineLink.receiverPassbandLow),
+                              Math.abs(engineLink.receiverPassbandHigh)) + engineLink.cwPitchHz
+                   : Math.max(Math.abs(engineLink.receiverPassbandLow),
+                              Math.abs(engineLink.receiverPassbandHigh))
+        }
+
+        Text {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.margins: 3
+            text: audioSpectrum.active ? "audio" : "audio: waiting"
+            color: Theme.inkDim
+            font.family: Theme.monoFont
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        Text {
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 3
+            visible: audioSpectrum.active
+            text: (audioSpectrum.topHz / 1000).toFixed(1) + " kHz"
+            color: Theme.inkDim
+            font.family: Theme.monoFont
+            font.pixelSize: Theme.sizeSmall
+        }
+    }
+
+    Binding {
+        target: engineLink
+        property: "displayAudioSpectrum"
+        value: audioStrip.visible
     }
 
     // The readout, which is the whole of what a drag says back.
@@ -798,6 +960,15 @@ ColumnLayout {
             font.pixelSize: Theme.sizeBody
             font.bold: passband.dragging
             elide: Text.ElideRight
+        }
+
+        RCheckBox {
+            text: "audio strip"
+            checked: ScaleSettings.showAudioStrip
+            onToggled: {
+                ScaleSettings.showAudioStrip = checked
+                checked = Qt.binding(() => ScaleSettings.showAudioStrip)
+            }
         }
 
         // Filling the rest of the row and right-aligned in it, so that when

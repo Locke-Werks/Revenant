@@ -54,6 +54,12 @@ class ScaleSettings : public QObject {
     Q_PROPERTY(double captionZoom READ captionZoom WRITE setCaptionZoom NOTIFY captionZoomChanged)
     Q_PROPERTY(double minCaptionZoom READ minCaptionZoom CONSTANT)
     Q_PROPERTY(double maxCaptionZoom READ maxCaptionZoom CONSTANT)
+    // Seconds between both waterfalls' time markers: 0, 5, 10, 30 or 60.
+    Q_PROPERTY(int timeMarkerSeconds READ timeMarkerSeconds WRITE setTimeMarkerSeconds
+                   NOTIFY timeMarkerSecondsChanged)
+    // The audio spectrum strip under the receiver detail view.
+    Q_PROPERTY(bool showAudioStrip READ showAudioStrip WRITE setShowAudioStrip
+                   NOTIFY showAudioStripChanged)
 
 public:
     // The hovered caption's growth over its resting 11 px. 1 is none; the
@@ -81,6 +87,38 @@ public:
         spectrum_floor_smoothing_ = store.value(settings::kSpectrumFloorSmoothing, true).toBool();
         caption_zoom_ =
             clamp_caption_zoom(store.value(settings::kCaptionZoom, kDefaultCaptionZoom).toDouble());
+        time_marker_seconds_ =
+            clamp_marker_seconds(store.value(settings::kTimeMarkerSeconds, 0).toInt());
+        show_audio_strip_ = store.value(settings::kShowAudioStrip, true).toBool();
+    }
+
+    // One of the offered intervals, the nearest below for anything else.
+    [[nodiscard]] static constexpr int clamp_marker_seconds(int seconds)
+    {
+        return seconds >= 60 ? 60 : seconds >= 30 ? 30 : seconds >= 10 ? 10 : seconds >= 5 ? 5 : 0;
+    }
+
+    [[nodiscard]] int timeMarkerSeconds() const { return time_marker_seconds_; }
+    void setTimeMarkerSeconds(int seconds)
+    {
+        seconds = clamp_marker_seconds(seconds);
+        if (seconds == time_marker_seconds_) {
+            return;
+        }
+        time_marker_seconds_ = seconds;
+        QSettings().setValue(settings::kTimeMarkerSeconds, seconds);
+        emit timeMarkerSecondsChanged();
+    }
+
+    [[nodiscard]] bool showAudioStrip() const { return show_audio_strip_; }
+    void setShowAudioStrip(bool on)
+    {
+        if (on == show_audio_strip_) {
+            return;
+        }
+        show_audio_strip_ = on;
+        QSettings().setValue(settings::kShowAudioStrip, on);
+        emit showAudioStripChanged();
     }
 
     [[nodiscard]] double captionZoom() const { return caption_zoom_; }
@@ -280,6 +318,8 @@ signals:
     void spectrumRangeFitChanged();
     void spectrumSmoothingChanged();
     void captionZoomChanged();
+    void timeMarkerSecondsChanged();
+    void showAudioStripChanged();
 
 private:
     [[nodiscard]] static double clamp_caption_zoom(double value)
@@ -338,6 +378,8 @@ private:
     double spectrum_smoothing_ = kDefaultSmoothDecaySeconds;
     bool spectrum_floor_smoothing_ = true;
     double caption_zoom_ = kDefaultCaptionZoom;
+    int time_marker_seconds_ = 0;
+    bool show_audio_strip_ = true;
 };
 
 }  // namespace revenant::ui

@@ -83,12 +83,17 @@ FrequencyManager::FrequencyManager(EngineLink& link, Storage storage, QObject* p
     // A smoke run has no file, and its setting stays at the default rather
     // than reading a developer's.
     if (!storage_.path.isEmpty()) {
-        remember_per_band_ = QSettings().value(QLatin1StringView(kRememberPerBandKey), false).toBool();
+        remember_per_band_ = QSettings().value(settings::kRememberPerBand, false).toBool();
     }
     preset_save_ = new QTimer(this);
     preset_save_->setSingleShot(true);
     preset_save_->setInterval(2000);
     connect(preset_save_, &QTimer::timeout, this, [this] { save(); });
+
+    // The focused receiver is the one presets are taken from and put on.
+    connect(&link_, &EngineLink::receiverChanged, this,
+            [this] { noteReceiverSetup(link_.receiverSetup()); });
+    connect(this, &FrequencyManager::presetForTune, &link_, &EngineLink::applyPreset);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +107,7 @@ void FrequencyManager::setRememberPerBand(bool on)
     }
     remember_per_band_ = on;
     if (storage_.writable) {
-        QSettings().setValue(QLatin1StringView(kRememberPerBandKey), on);
+        QSettings().setValue(settings::kRememberPerBand, on);
     }
     // Switching on mid-band should file what is on the receiver now, not
     // treat the next change as a tune.

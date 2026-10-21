@@ -313,6 +313,42 @@ ColumnLayout {
         }
     }
 
+    // A tick and the clock time down the edge of both waterfalls.
+    RowLayout {
+        spacing: 8
+
+        Label {
+            text: "time markers"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeBody
+        }
+
+        RSegmented {
+            readonly property var seconds: [0, 5, 10, 30, 60]
+            options: ["off", "5 s", "10 s", "30 s", "60 s"]
+            current: options[Math.max(0, seconds.indexOf(ScaleSettings.timeMarkerSeconds))]
+            onPicked: (choice) => ScaleSettings.timeMarkerSeconds =
+                                      seconds[options.indexOf(choice)]
+        }
+    }
+
+    RCheckBox {
+        text: "remember notch and filter per band"
+        checked: frequencyManager.rememberPerBand
+        onToggled: {
+            frequencyManager.rememberPerBand = checked
+            checked = Qt.binding(() => frequencyManager.rememberPerBand)
+        }
+
+        Tip {
+            visible: parent.hovered
+            delay: 400
+            text: "Keeps the notches and the filter you leave on each mode and band, and puts "
+                  + "them back when you tune into that band again. A memory that holds "
+                  + "notches still wins on recall."
+        }
+    }
+
     // The contrast curve, input across and output up, each point and the
     // bars under it in the colour the waterfall gives that output. The
     // dim diagonal is the straight map; the tick is the pivot.
