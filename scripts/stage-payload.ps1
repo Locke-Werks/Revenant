@@ -150,6 +150,7 @@ $qtLibraries = @(
     "Qt6QuickControls2Basic.dll"
     "Qt6QuickControls2Impl.dll"
     "Qt6QuickLayouts.dll"
+    "Qt6QuickShapes.dll"
     "Qt6QuickTemplates2.dll"
     "Qt6Svg.dll"
 
@@ -218,6 +219,9 @@ $qtPlugins = @(
 # resolves its style at run time, and main.cpp pins that to Basic, which is
 # why exactly one of the seven style directories is here.
 #
+# controls/Icon.qml imports QtQuick.Shapes to draw the button icons. 0.3.2
+# shipped without it and the client exited at start with nothing on screen.
+#
 # RecordingSection.qml imports QtQuick.Dialogs for its FileDialog. On Windows
 # that is the native dialog, served by the platform plugin; QtQuick/Dialogs
 # carries its quickimpl fallback with it, which imports Qt.labs.folderlistmodel,
@@ -229,6 +233,7 @@ $qmlModules = @(
     "qml/QtQuick/Controls/impl"
     "qml/QtQuick/Dialogs"
     "qml/QtQuick/Layouts"
+    "qml/QtQuick/Shapes"
     "qml/QtQuick/Templates"
     "qml/QtQuick/Window"
     "qml/Qt/labs/folderlistmodel"

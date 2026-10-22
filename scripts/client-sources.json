@@ -52,6 +52,7 @@
         "Qt6QuickDialogs2QuickImpl.dll",
         "Qt6QuickDialogs2Utils.dll",
         "Qt6QuickLayouts.dll",
+        "Qt6QuickShapes.dll",
         "Qt6QuickTemplates2.dll",
         "qml/Qt/labs/folderlistmodel/qmlfolderlistmodelplugin.dll",
         "qml/QtQml/qmlplugin.dll",
@@ -65,6 +66,7 @@
         "qml/QtQuick/Dialogs/qtquickdialogsplugin.dll",
         "qml/QtQuick/Dialogs/quickimpl/qtquickdialogs2quickimplplugin.dll",
         "qml/QtQuick/Layouts/qquicklayoutsplugin.dll",
+        "qml/QtQuick/Shapes/qmlshapesplugin.dll",
         "qml/QtQuick/Templates/qtquicktemplates2plugin.dll",
         "qml/QtQuick/Window/quickwindowplugin.dll"
       ],
