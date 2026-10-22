@@ -34,6 +34,7 @@ class ReceiverPlacement : public QObject {
     Q_PROPERTY(bool poppedOut READ poppedOut WRITE setPoppedOut NOTIFY poppedOutChanged)
     Q_PROPERTY(bool shown READ shown WRITE setShown NOTIFY shownChanged)
     Q_PROPERTY(double dockHeight READ dockHeight WRITE setDockHeight NOTIFY dockHeightChanged)
+    Q_PROPERTY(double dockWidth READ dockWidth WRITE setDockWidth NOTIFY dockWidthChanged)
     Q_PROPERTY(bool ready READ ready NOTIFY readyChanged)
 
 public:
@@ -47,11 +48,13 @@ public:
         popped_out_ = store.value(settings::kReceiversPoppedOut, false).toBool();
         shown_ = store.value(settings::kReceiversShown, true).toBool();
         dock_height_ = store.value(settings::kReceiversDockHeight, 0.0).toDouble();
+        dock_width_ = store.value(settings::kReceiversDockWidth, 0.0).toDouble();
     }
 
     [[nodiscard]] bool poppedOut() const { return popped_out_; }
     [[nodiscard]] bool shown() const { return shown_; }
     [[nodiscard]] double dockHeight() const { return dock_height_; }
+    [[nodiscard]] double dockWidth() const { return dock_width_; }
     [[nodiscard]] bool ready() const { return ready_; }
 
     void setPoppedOut(bool popped)
@@ -87,6 +90,17 @@ public:
         emit dockHeightChanged();
     }
 
+    // Beside the span, when the main window is tall. Kept apart from the
+    // height, since the two are dragged in different arrangements.
+    void setDockWidth(double width)
+    {
+        if (dock_width_ == width) {
+            return;
+        }
+        dock_width_ = width;
+        emit dockWidthChanged();
+    }
+
     // The receiver window can be shown from here on. See READY above.
     void setReady()
     {
@@ -102,12 +116,16 @@ public:
         if (persist_ && dock_height_ > 0.0) {
             QSettings().setValue(settings::kReceiversDockHeight, dock_height_);
         }
+        if (persist_ && dock_width_ > 0.0) {
+            QSettings().setValue(settings::kReceiversDockWidth, dock_width_);
+        }
     }
 
 signals:
     void poppedOutChanged();
     void shownChanged();
     void dockHeightChanged();
+    void dockWidthChanged();
     void readyChanged();
 
 private:
@@ -115,6 +133,7 @@ private:
     bool popped_out_ = false;
     bool shown_ = true;
     double dock_height_ = 0.0;
+    double dock_width_ = 0.0;
     bool ready_ = false;
 };
 

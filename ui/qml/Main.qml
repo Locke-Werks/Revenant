@@ -50,8 +50,10 @@ import Revenant
 ApplicationWindow {
     id: window
 
-    width: 1280
-    height: 800
+    // The default, inside what the screen has: at 150% a 1080p screen is
+    // 1280 by 720 logical pixels, under the old fixed 800.
+    width: Math.min(1280, Screen.desktopAvailableWidth - 40)
+    height: Math.min(800, Screen.desktopAvailableHeight - 60)
     visible: true
     color: Theme.background
     title: engineLink.connected
@@ -212,15 +214,20 @@ ApplicationWindow {
         // The span over the docked receivers, with a divider between them the
         // operator can drag. SplitView leaves out an item that is not
         // visible, so a hidden or popped-out dock gives the span everything.
+        // In a tall window the dock moves to the span's right instead; see
+        // dock_beside in models/receiver_placement.h.
         SplitView {
             id: split
 
+            readonly property bool beside: UiRules.dockBeside(width, height)
+
             Layout.fillWidth: true
             Layout.fillHeight: true
-            orientation: Qt.Vertical
+            orientation: beside ? Qt.Horizontal : Qt.Vertical
 
             handle: Rectangle {
                 implicitHeight: 5
+                implicitWidth: 5
                 color: SplitHandle.pressed ? Theme.accentDim
                        : SplitHandle.hovered ? Theme.border
                        : Theme.panelSolid
@@ -229,15 +236,17 @@ ApplicationWindow {
                 // that moves rather than as a gap between two displays.
                 Rectangle {
                     anchors.centerIn: parent
-                    width: 36
-                    height: 1
+                    width: split.beside ? 1 : 36
+                    height: split.beside ? 36 : 1
                     color: SplitHandle.pressed ? Theme.accent : Theme.inkOff
                 }
             }
 
             Item {
                 SplitView.fillHeight: true
+                SplitView.fillWidth: true
                 SplitView.minimumHeight: 160
+                SplitView.minimumWidth: 320
 
                 SpanView {
                     id: spanView
@@ -275,7 +284,8 @@ ApplicationWindow {
                         anchors.top: parent.top
                         anchors.margins: 4
                         flat: true
-                        text: "×"
+                        text: "dismiss"
+                        iconName: "x"
                         ink: Theme.inkDim
                         onClicked: tuneSelection.dismiss()
                     }
@@ -288,15 +298,21 @@ ApplicationWindow {
 
                 visible: receiverPlacement.shown && !receiverPlacement.poppedOut
                 color: Theme.background
-                SplitView.minimumHeight: 240
+                SplitView.minimumHeight: split.beside ? 0 : 240
+                SplitView.minimumWidth: split.beside ? 340 : 0
                 SplitView.preferredHeight: UiRules.dockHeight(receiverPlacement.dockHeight, split.height)
+                SplitView.preferredWidth: UiRules.dockWidth(receiverPlacement.dockWidth, split.width)
 
                 // What the operator dragged it to, kept for the next run. Only
                 // while they are dragging, so a window resized or a banner coming
                 // and going does not overwrite what they chose.
                 onHeightChanged: {
-                    if (visible && split.resizing)
+                    if (visible && split.resizing && !split.beside)
                         receiverPlacement.dockHeight = height
+                }
+                onWidthChanged: {
+                    if (visible && split.resizing && split.beside)
+                        receiverPlacement.dockWidth = width
                 }
             }
         }

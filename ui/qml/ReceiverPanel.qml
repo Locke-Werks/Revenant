@@ -13,6 +13,13 @@
 // column of their own on the right. The popped-out window's shape stacks them
 // under it as the window always did. The same three items are moved between
 // the two places rather than drawn twice.
+//
+// AND, SINCE 2026-10-22, A THIRD. The owner asked for a skinny tall window to
+// fold away what it can and keep the receiver readable, so under 640 wide the
+// panel is one column: a short rack over the receiver, whose filter and noise
+// controls collapse behind their expander, over the sections. A dock beside
+// the span in a tall main window is usually this shape as well. A wide short
+// window takes the three columns whatever its aspect.
 
 import QtQuick
 import QtQuick.Controls
@@ -33,25 +40,39 @@ Item {
     readonly property alias dial: detail.dial
     readonly property alias passband: detail.passband
 
-    readonly property bool sideBySide: UiRules.receiverPanelSideBySide(width, height)
+    // models/receiver_placement.h: 0 narrow, 1 stacked, 2 wide.
+    readonly property int arrangement: UiRules.receiverPanelLayout(width, height)
+    readonly property bool narrow: arrangement === 0
+    readonly property bool sideBySide: arrangement === 2
 
-    RowLayout {
+    GridLayout {
         anchors.fill: parent
         anchors.margins: panel.poppedOut ? 12 : Theme.gap
-        spacing: 12
+        columns: panel.narrow ? 1 : 5
+        rowSpacing: 8
+        columnSpacing: 12
 
+        // A share of the column when narrow, scrolled inside, so the
+        // receiver under it keeps most of a tall window. Beside it otherwise,
+        // a little wider than the old fixed 260 when there is room, so a
+        // strip's figures are not cut off at a large display scale.
         ReceiverRack {
-            Layout.preferredWidth: 260
-            Layout.minimumWidth: 260
-            Layout.maximumWidth: 260
-            Layout.fillHeight: true
+            Layout.fillWidth: panel.narrow
+            Layout.fillHeight: !panel.narrow
+            Layout.preferredWidth: panel.narrow ? -1 : Math.max(260, Math.min(320, panel.width * 0.24))
+            Layout.minimumWidth: panel.narrow ? 0 : 260
+            Layout.maximumWidth: panel.narrow ? Number.POSITIVE_INFINITY : 320
+            Layout.preferredHeight: panel.narrow ? Math.max(150, panel.height * 0.3) : -1
+            Layout.maximumHeight: panel.narrow ? Math.max(150, panel.height * 0.3) : Number.POSITIVE_INFINITY
             poppedOut: panel.poppedOut
             onPopToggled: panel.popToggled()
         }
 
         Rectangle {
-            Layout.fillHeight: true
+            Layout.fillHeight: !panel.narrow
+            Layout.fillWidth: panel.narrow
             implicitWidth: 1
+            implicitHeight: 1
             color: Theme.border
         }
 
@@ -70,6 +91,7 @@ Item {
 
             ReceiverDetail {
                 id: detail
+                narrow: panel.narrow
                 Layout.fillWidth: true
                 Layout.minimumWidth: 0
                 Layout.fillHeight: true
@@ -91,6 +113,7 @@ Item {
             visible: panel.sideBySide
             Layout.fillHeight: true
             implicitWidth: 1
+            implicitHeight: 1
             color: Theme.border
         }
 

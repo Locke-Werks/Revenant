@@ -436,6 +436,22 @@ public:
         return dock_height(remembered, available);
     }
 
+    // 0 narrow, 1 stacked, 2 wide: PanelLayout's values.
+    [[nodiscard]] Q_INVOKABLE int receiverPanelLayout(double width, double height) const
+    {
+        return static_cast<int>(receiver_panel_layout(width, height));
+    }
+
+    [[nodiscard]] Q_INVOKABLE bool dockBeside(double width, double height) const
+    {
+        return dock_beside(width, height);
+    }
+
+    [[nodiscard]] Q_INVOKABLE double dockWidth(double remembered, double available) const
+    {
+        return dock_width(remembered, available);
+    }
+
 private:
     [[nodiscard]] static QString to_qstring(std::string_view text)
     {

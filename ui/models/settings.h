@@ -102,6 +102,7 @@ inline constexpr QLatin1StringView kVrxWindowVisibility{"vrxWindow/visibility"};
 inline constexpr QLatin1StringView kReceiversPoppedOut{"receivers/poppedOut"};
 inline constexpr QLatin1StringView kReceiversShown{"receivers/shown"};
 inline constexpr QLatin1StringView kReceiversDockHeight{"receivers/dockHeight"};
+inline constexpr QLatin1StringView kReceiversDockWidth{"receivers/dockWidth"};
 
 // The pins on either end of the span displays' colour map, and the levels
 // they were pinned at. Remembered because the job a pin does, comparing

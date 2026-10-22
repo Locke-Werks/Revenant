@@ -57,3 +57,44 @@ TEST_CASE("a remembered height is kept inside both floors", "[placement]")
     // A window too short for both: the dock keeps its floor.
     CHECK(dock_height(0.0, 300.0) == kDockMinHeight);
 }
+
+using revenant::ui::dock_beside;
+using revenant::ui::dock_width;
+using revenant::ui::kDockMinWidth;
+using revenant::ui::kSpanKeepsWidth;
+using revenant::ui::PanelLayout;
+using revenant::ui::receiver_panel_layout;
+
+// Rejects a receiver window that keeps the rack beside the receiver however
+// skinny it is made, which leaves the receiver's controls a sliver.
+TEST_CASE("a skinny receiver window goes to one column", "[placement]")
+{
+    CHECK(receiver_panel_layout(520.0, 1000.0) == PanelLayout::Narrow);
+    CHECK(receiver_panel_layout(1040.0, 680.0) == PanelLayout::Stacked);
+}
+
+// Rejects stacking in a window made wide and short, where the sections under
+// the receiver would leave its fine-tuning display no height.
+TEST_CASE("a wide short receiver window goes to three columns", "[placement]")
+{
+    CHECK(receiver_panel_layout(1400.0, 380.0) == PanelLayout::Wide);
+    CHECK(receiver_panel_layout(1280.0, 314.0) == PanelLayout::Wide);
+}
+
+// Rejects a dock that stays under the span in a tall window, and one that
+// moves beside it in a window too narrow to hold both.
+TEST_CASE("a tall main window docks the receivers beside the span", "[placement]")
+{
+    CHECK(dock_beside(1000.0, 1000.0));
+    CHECK_FALSE(dock_beside(1280.0, 700.0));
+    CHECK_FALSE(dock_beside(700.0, 1200.0));
+}
+
+// Rejects a remembered width that squeezes the span or the receivers below
+// what each needs.
+TEST_CASE("a remembered dock width is kept inside both floors", "[placement]")
+{
+    CHECK(dock_width(0.0, 1000.0) == 400.0);
+    CHECK(dock_width(10.0, 1000.0) == kDockMinWidth);
+    CHECK(dock_width(5000.0, 1000.0) == 1000.0 - kSpanKeepsWidth);
+}

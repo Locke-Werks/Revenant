@@ -28,10 +28,12 @@ Window {
 
     objectName: "vrxWindow"
     title: "Revenant  ·  receivers"
-    width: 1040
-    height: 680
-    minimumWidth: 720
-    minimumHeight: 460
+    // Any shape from a phone-width column up: ReceiverPanel rearranges for
+    // skinny, ordinary and wide short windows. The default fits the screen.
+    width: Math.min(1040, Screen.desktopAvailableWidth - 40)
+    height: Math.min(680, Screen.desktopAvailableHeight - 60)
+    minimumWidth: 360
+    minimumHeight: 320
     color: Theme.background
     transientParent: null
     visible: false

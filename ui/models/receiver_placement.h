@@ -40,6 +40,61 @@ inline constexpr double kPanelSideBySideAspect = 2.2;
            width >= kPanelSideBySideAspect * height;
 }
 
+// THREE ARRANGEMENTS, from the owner on 2026-10-22, with display scaling at
+// 150%: a receiver window made skinny and tall collapses what it can so the
+// receiver stays readable, and one made wide and short rearranges into
+// columns. Narrow is one column, the rack over the receiver over its
+// sections. Stacked is the rack beside the receiver with the sections under
+// it. Wide is the third column above, also taken when the panel is short
+// enough that stacking would leave the fine-tuning display no height.
+enum class PanelLayout { Narrow = 0, Stacked = 1, Wide = 2 };
+
+// Below this the rack's 260 and the receiver's controls do not fit side by
+// side at a readable width.
+inline constexpr double kPanelNarrowWidth = 640.0;
+
+// Under this height the receiver and its sections do not stack.
+inline constexpr double kPanelShortHeight = 420.0;
+
+[[nodiscard]] constexpr PanelLayout receiver_panel_layout(double width, double height)
+{
+    if (width < kPanelNarrowWidth) {
+        return PanelLayout::Narrow;
+    }
+    if (receiver_panel_side_by_side(width, height) ||
+        (width >= kPanelSideBySideMinWidth && height > 0.0 && height < kPanelShortHeight)) {
+        return PanelLayout::Wide;
+    }
+    return PanelLayout::Stacked;
+}
+
+// THE DOCK BESIDE THE SPAN. Also the owner's, 2026-10-22: when the main
+// window is tall the docked receivers move to its side, where a strip under
+// the span would take height the span needs and leave the receivers a short
+// wide band. Narrower than this ratio of width to height counts as tall; a
+// window too narrow for both side by side keeps the dock underneath.
+inline constexpr double kDockBesideAspect = 1.3;
+inline constexpr double kDockBesideMinWidth = 900.0;
+
+// width and height are what the span and the dock share.
+[[nodiscard]] constexpr bool dock_beside(double width, double height)
+{
+    return height > 0.0 && width >= kDockBesideMinWidth && width < kDockBesideAspect * height;
+}
+
+// The dock's width beside the span, held inside two floors the same way its
+// height is under it.
+inline constexpr double kDockMinWidth = 340.0;
+inline constexpr double kDockDefaultWidthFraction = 0.4;
+inline constexpr double kSpanKeepsWidth = 420.0;
+
+[[nodiscard]] constexpr double dock_width(double remembered, double available)
+{
+    const double wanted = remembered > 0.0 ? remembered : kDockDefaultWidthFraction * available;
+    const double most = std::max(kDockMinWidth, available - kSpanKeepsWidth);
+    return std::clamp(wanted, kDockMinWidth, most);
+}
+
 // THE DOCK'S HEIGHT. A fraction of what the span and the dock share until the
 // operator drags the divider, then what they dragged it to, held inside two
 // floors: the dock keeps enough for the receiver's dial, mode, fine-tuning

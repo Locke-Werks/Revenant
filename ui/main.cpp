@@ -480,6 +480,7 @@ int main(int argc, char* argv[])
     bool startup_rds = false;
     QString grab_receivers;
     QString grab_main;
+    QSize grab_size;
     QString palette_query;
     bool palette_wanted = false;
     bool keymap_wanted = false;
@@ -529,6 +530,15 @@ int main(int argc, char* argv[])
         }
         if (args[i] == QStringLiteral("--grab-main") && i + 1 < args.size()) {
             grab_main = args[++i];
+            continue;
+        }
+        // The grabbed windows' size in logical pixels, WIDTHxHEIGHT, so a
+        // smoke run can photograph each of the receiver panel's arrangements.
+        if (args[i] == QStringLiteral("--grab-size") && i + 1 < args.size()) {
+            const QStringList parts = args[++i].split(QLatin1Char('x'));
+            if (parts.size() == 2) {
+                grab_size = QSize(parts[0].toInt(), parts[1].toInt());
+            }
             continue;
         }
         if (args[i] == QStringLiteral("--palette") && i + 1 < args.size()) {
@@ -997,6 +1007,14 @@ int main(int argc, char* argv[])
             }
         }
         placement.setReady();
+        if (grab_size.isValid()) {
+            if (receivers != nullptr) {
+                receivers->resize(grab_size);
+            }
+            if (!grab_main.isEmpty() && root_window != nullptr) {
+                root_window->resize(grab_size);
+            }
+        }
         QTimer::singleShot(std::chrono::seconds(smoke_seconds), &app,
                            [receivers, grab_receivers, root_window, grab_main] {
             if (receivers != nullptr) {
