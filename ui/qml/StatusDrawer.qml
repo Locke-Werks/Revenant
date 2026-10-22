@@ -144,6 +144,8 @@ ColumnLayout {
 
         RButton {
             text: "release them"
+            iconName: "unlock"
+            label: "release"
             ink: Theme.inkWarn
             onClicked: engineLink.releaseStrandedReceivers()
         }

@@ -60,6 +60,8 @@ ColumnLayout {
 
         RButton {
             text: "open recording…"
+            iconName: "folder"
+            label: "recording"
             font.pixelSize: Theme.sizeBody
             onClicked: dialog.open()
         }
@@ -159,7 +161,7 @@ ColumnLayout {
                 spacing: 8
 
                 Label {
-                    Layout.preferredWidth: 62
+                    Layout.preferredWidth: Math.max(62, implicitWidth)
                     text: fact.modelData[0]
                     color: Theme.inkDim
                     font.pixelSize: Theme.sizeBody

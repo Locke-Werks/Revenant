@@ -27,7 +27,25 @@ Item {
     property string view: "memories"
 
     readonly property var manager: frequencyManager
-    readonly property int rowHeight: 26
+    readonly property int rowHeight: Math.max(26, Math.ceil(bodyMetrics.height) + 8)
+
+    // The table's columns, shared by the heads and the rows so they line up.
+    // Each is its old fixed width or what its widest text measures, whichever
+    // is more: the fixed widths were set at 100% and elided at 150% scaling.
+    readonly property int freqColumn: Math.max(104, Math.ceil(monoMetrics.advanceWidth("00000.000000")) + 4)
+    readonly property int modeColumn: Math.max(58, Math.ceil(bodyMetrics.advanceWidth("DMR-TS2")) + 4)
+    readonly property int usedColumn: Math.max(110, Math.ceil(monoSmallMetrics.advanceWidth("2026-10-22 23:59")) + 4)
+    // recall, rx with its plus and the bare trash, each with RButton's flat
+    // padding, and the row's two gaps.
+    readonly property int actionsColumn: Math.max(96, Math.ceil(bodyMetrics.advanceWidth("recall")
+                                                                + bodyMetrics.advanceWidth("rx"))
+                                                      + 2 * Theme.iconSize + 12 + 12 + 5 + 10 + 4)
+    readonly property int smallRowHeight: Math.max(20, Math.ceil(smallMetrics.height) + 4)
+
+    FontMetrics { id: bodyMetrics; font.family: Theme.uiFont; font.pixelSize: Theme.sizeBody }
+    FontMetrics { id: smallMetrics; font.family: Theme.uiFont; font.pixelSize: Theme.sizeSmall }
+    FontMetrics { id: monoMetrics; font.family: Theme.monoFont; font.pixelSize: Theme.sizeBody }
+    FontMetrics { id: monoSmallMetrics; font.family: Theme.monoFont; font.pixelSize: Theme.sizeSmall }
 
     // The key of the memory the list's current row is on, zero with none.
     readonly property var currentKey: list.currentItem ? list.currentItem.key : 0
@@ -257,6 +275,8 @@ Item {
 
             RButton {
                 text: "save the receiver"
+                iconName: "bookmark-plus"
+                label: "save"
                 enabled: engineLink.receiverId > 0
                 onClicked: {
                     const row = panel.manager.addFromReceiver(saveName.text)
@@ -350,6 +370,8 @@ Item {
                     flat: true
                     visible: panel.manager.selectedTags.length > 0
                     text: "clear tags"
+                    iconName: "eraser"
+                    label: "tags"
                     ink: Theme.inkDim
                     implicitHeight: 20
                     onClicked: panel.manager.clearTags()
@@ -367,11 +389,11 @@ Item {
                 spacing: 10
 
                 Head { key: "name"; Layout.fillWidth: true; Layout.minimumWidth: 120 }
-                Head { key: "frequency"; title: "MHz"; Layout.preferredWidth: 104; horizontalAlignment: Text.AlignRight }
-                Head { key: "mode"; Layout.preferredWidth: 58 }
+                Head { key: "frequency"; title: "MHz"; Layout.preferredWidth: panel.freqColumn; horizontalAlignment: Text.AlignRight }
+                Head { key: "mode"; Layout.preferredWidth: panel.modeColumn }
                 Head { key: "tags"; Layout.preferredWidth: 170 }
-                Head { key: "used"; title: "last used"; Layout.preferredWidth: 110 }
-                Item { Layout.preferredWidth: 96 }
+                Head { key: "used"; title: "last used"; Layout.preferredWidth: panel.usedColumn }
+                Item { Layout.preferredWidth: panel.actionsColumn }
             }
 
             ListView {
@@ -468,7 +490,7 @@ Item {
                         }
 
                         Text {
-                            Layout.preferredWidth: 104
+                            Layout.preferredWidth: panel.freqColumn
                             text: row.freqText
                             horizontalAlignment: Text.AlignRight
                             color: Theme.ink
@@ -477,7 +499,7 @@ Item {
                         }
 
                         Text {
-                            Layout.preferredWidth: 58
+                            Layout.preferredWidth: panel.modeColumn
                             text: row.modeLabel
                             color: Theme.inkDim
                             font.pixelSize: Theme.sizeBody
@@ -492,7 +514,7 @@ Item {
                         }
 
                         Text {
-                            Layout.preferredWidth: 110
+                            Layout.preferredWidth: panel.usedColumn
                             text: row.usedText
                             color: Theme.inkDim
                             font.family: Theme.monoFont
@@ -500,7 +522,7 @@ Item {
                         }
 
                         Row {
-                            Layout.preferredWidth: 96
+                            Layout.preferredWidth: panel.actionsColumn
                             spacing: 2
 
                             RButton {
@@ -513,7 +535,9 @@ Item {
 
                             RButton {
                                 flat: true
-                                text: "+rx"
+                                text: "recall into a new receiver"
+                                iconName: "plus"
+                                label: "rx"
                                 enabled: engineLink.sourceOpen && !engineLink.rackFull
                                 implicitHeight: 22
                                 onClicked: panel.manager.recall(row.key, true)
@@ -521,7 +545,8 @@ Item {
 
                             RButton {
                                 flat: true
-                                text: "×"
+                                text: "remove the memory"
+                                iconName: "trash"
                                 ink: Theme.inkDim
                                 implicitHeight: 22
                                 onClicked: panel.manager.remove(row.key)
@@ -703,6 +728,7 @@ Item {
 
                 RButton {
                     text: "preview"
+                    iconName: "eye"
                     enabled: importPath.text.length > 0
                     onClicked: panel.manager.previewImport(importPath.text)
                 }
@@ -739,7 +765,7 @@ Item {
                             required property var modelData
 
                             width: ListView.view.width
-                            height: 20
+                            height: panel.smallRowHeight
                             spacing: 8
 
                             Text {
@@ -751,7 +777,7 @@ Item {
                                 font.pixelSize: Theme.sizeSmall
                             }
                             Text {
-                                Layout.preferredWidth: 90
+                                Layout.preferredWidth: Math.max(90, implicitWidth)
                                 text: parent.modelData.freqText
                                 horizontalAlignment: Text.AlignRight
                                 color: Theme.ink
@@ -780,11 +806,11 @@ Item {
                             required property var modelData
 
                             width: ListView.view.width
-                            height: 20
+                            height: panel.smallRowHeight
                             spacing: 8
 
                             Text {
-                                Layout.preferredWidth: 44
+                                Layout.preferredWidth: Math.max(44, implicitWidth)
                                 text: parent.modelData.line > 0 ? "line " + parent.modelData.line : ""
                                 color: Theme.inkDim
                                 font.family: Theme.monoFont
@@ -861,6 +887,8 @@ Item {
 
                 RButton {
                     text: "export"
+                    iconName: "export"
+                    label: "export"
                     enabled: panel.manager.listed > 0 && exportPath.text.length > 0
                     onClicked: panel.manager.exportListed(exportPath.text, exportFormat.format)
                 }
@@ -914,7 +942,8 @@ Item {
                     }
                     RButton {
                         flat: true
-                        text: "×"
+                        text: "remove the scan list"
+                        iconName: "trash"
                         ink: Theme.inkDim
                         implicitHeight: 22
                         onClicked: panel.manager.removeScanList(scanRow.index)
@@ -957,6 +986,8 @@ Item {
 
                 RButton {
                     text: "add range"
+                    iconName: "plus"
+                    label: "range"
                     onClicked: scanProblem.text = panel.manager.addScanRange(
                         rangeName.text, rangeLow.text, rangeHigh.text, rangeStep.text,
                         rangeMode.currentText)
@@ -983,6 +1014,7 @@ Item {
                 flat: true
                 visible: panel.manager.canUndo
                 text: panel.manager.undoText
+                iconName: "undo"
                 onClicked: panel.manager.undo()
             }
 

@@ -224,6 +224,8 @@ ColumnLayout {
 
         RButton {
             text: "back to the radio"
+            iconName: "x"
+            label: "back to radio"
             onClicked: if (panel.backToRadio) panel.backToRadio()
         }
     }
@@ -284,15 +286,17 @@ ColumnLayout {
                 anchors.rightMargin: 8
                 spacing: 12
 
+                // Each column grows to its text: the fixed widths were measured
+                // at 100% and cut the figures off at 150% scaling.
                 Label {
-                    Layout.preferredWidth: 64
+                    Layout.preferredWidth: Math.max(64, implicitWidth)
                     text: row.modelData.time
                     color: Theme.ink
                     font.family: Theme.monoFont
                     font.pixelSize: Theme.sizeSmall
                 }
                 Label {
-                    Layout.preferredWidth: 48
+                    Layout.preferredWidth: Math.max(48, implicitWidth)
                     text: row.modelData.duration
                     horizontalAlignment: Text.AlignRight
                     color: Theme.inkDim
@@ -300,7 +304,7 @@ ColumnLayout {
                     font.pixelSize: Theme.sizeSmall
                 }
                 Label {
-                    Layout.preferredWidth: 200
+                    Layout.preferredWidth: Math.max(200, implicitWidth)
                     text: row.modelData.frequency
                     color: Theme.ink
                     font.family: Theme.monoFont
@@ -325,7 +329,7 @@ ColumnLayout {
                     font.pixelSize: Theme.sizeSmall
                 }
                 Label {
-                    Layout.preferredWidth: 40
+                    Layout.preferredWidth: Math.max(40, implicitWidth)
                     text: row.modelData.confidence
                     horizontalAlignment: Text.AlignRight
                     color: Theme.inkDim

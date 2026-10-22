@@ -384,6 +384,8 @@ qt_add_qml_module(revenant_ui
         qml/controls/RTextField.qml
         qml/controls/RScrollBar.qml
         qml/controls/Tip.qml
+        qml/controls/Icon.qml
+        qml/controls/icons.js
 )
 
 # qmlcachegen's output, which compiles each QML file to C++ and is ours no more

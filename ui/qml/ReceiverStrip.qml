@@ -120,54 +120,38 @@ Rectangle {
             // engine beyond the subscription: a receiver nobody hears is not
             // streamed.
             RButton {
-                implicitWidth: 26
-                implicitHeight: 20
                 flat: true
                 checkable: true
                 checked: strip.entry.muted
-                text: "M"
+                text: "mute"
+                iconName: "mute"
                 tint: Theme.inkWarn
                 ink: Theme.inkDim
                 onClicked: engineLink.setReceiverMuted(strip.entry.key, !strip.entry.muted)
-
-                Tip {
-                    visible: parent.hovered
-                    text: strip.entry.muted ? "unmute this receiver" : "mute this receiver"
-                }
+                tip: strip.entry.muted ? "unmute this receiver" : "mute this receiver"
             }
 
             RButton {
-                implicitWidth: 26
-                implicitHeight: 20
                 flat: true
                 checkable: true
                 checked: strip.entry.solo
-                text: "S"
+                text: "solo"
+                iconName: "headphones"
                 tint: strip.tint
                 ink: Theme.inkDim
                 onClicked: engineLink.toggleReceiverSolo(strip.entry.key)
-
-                Tip {
-                    visible: parent.hovered
-                    text: strip.entry.solo ? "stop soloing, so every unmuted receiver is heard"
-                                           : "hear this receiver alone, muted or not"
-                }
+                tip: strip.entry.solo ? "stop soloing, so every unmuted receiver is heard"
+                                      : "hear this receiver alone, muted or not"
             }
 
             // Not on an adopted strip: the plugin removes its own receivers.
             RButton {
                 visible: !strip.adopted
-                implicitWidth: 22
-                implicitHeight: 20
                 flat: true
-                text: "×"
+                text: "remove this receiver"
+                iconName: "trash"
                 ink: Theme.inkDim
                 onClicked: engineLink.dismissReceiver(strip.entry.key)
-
-                Tip {
-                    visible: parent.hovered
-                    text: "remove this receiver"
-                }
             }
         }
 
@@ -205,9 +189,9 @@ Rectangle {
             RButton {
                 visible: strip.entry.refused && !strip.adopted
                 flat: true
-                text: "remove"
+                text: "remove this receiver"
+                iconName: "trash"
                 ink: Theme.inkDim
-                font.pixelSize: Theme.sizeSmall
                 onClicked: engineLink.dismissReceiver(strip.entry.key)
             }
 

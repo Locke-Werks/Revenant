@@ -141,32 +141,30 @@ ColumnLayout {
 
             RButton {
                 flat: true
-                implicitHeight: 20
-                text: "−"
+                text: "zoom out"
+                iconName: "minus"
                 enabled: engineLink.viewZoomed
                 onClicked: engineLink.zoomView(1 / KeyMap.zoomStep, 0.5)
-                Tip { visible: parent.hovered; text: "Zoom out (" + KeyMap.keysText("view.zoom_out") + ", or Ctrl+wheel)" }
+                tip: "Zoom out (" + KeyMap.keysText("view.zoom_out") + ", or Ctrl+wheel)"
             }
             RButton {
                 flat: true
-                implicitHeight: 20
-                text: "+"
+                text: "zoom in"
+                iconName: "plus"
                 onClicked: engineLink.zoomView(KeyMap.zoomStep, 0.5)
-                Tip { visible: parent.hovered; text: "Zoom in (" + KeyMap.keysText("view.zoom_in") + ", or Ctrl+wheel over the pointer). Shift+wheel moves a zoomed view." }
+                tip: "Zoom in (" + KeyMap.keysText("view.zoom_in") + ", or Ctrl+wheel over the pointer). Shift+wheel moves a zoomed view."
             }
             RButton {
                 flat: true
                 implicitHeight: 20
                 text: "full"
+                iconName: "expand"
                 checked: engineLink.viewZoomed
                 enabled: engineLink.viewZoomed
                 onClicked: engineLink.fullSpan()
-                Tip {
-                    visible: parent.hovered
-                    text: (engineLink.viewHoldsBand
-                           ? "Showing the band picked from the menu. "
-                           : "") + "Show the full span (" + KeyMap.keysText("view.full") + ")"
-                }
+                tip: (engineLink.viewHoldsBand
+                      ? "Showing the band picked from the menu. "
+                      : "") + "Show the full span (" + KeyMap.keysText("view.full") + ")"
             }
         }
 
@@ -185,9 +183,10 @@ ColumnLayout {
             flat: true
             implicitHeight: 20
             text: "labels"
+            iconName: "tag"
             checked: SpanLabelSettings.showLabels
             onClicked: SpanLabelSettings.showLabels = !SpanLabelSettings.showLabels
-            Tip { visible: parent.hovered; text: "Show band-plan and identified-signal labels on the span. Click a label to tune there." }
+            tip: "Show band-plan and identified-signal labels on the span. Click a label to tune there."
         }
 
         PinPlate {

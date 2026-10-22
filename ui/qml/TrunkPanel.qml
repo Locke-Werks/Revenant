@@ -43,6 +43,8 @@ ColumnLayout {
             checked: engineLink.trunkEnabled
             enabled: engineLink.trunkEnabled || pane.onControl
             text: "follow"
+            iconName: "crosshair"
+            label: "follow"
             onClicked: engineLink.setTrunkFollow(!engineLink.trunkEnabled)
         }
 
@@ -60,6 +62,8 @@ ColumnLayout {
             checkable: true
             checked: pane.editing
             text: "lists"
+            iconName: "list"
+            label: "lists"
             onClicked: pane.editing = !pane.editing
         }
     }
@@ -73,7 +77,9 @@ ColumnLayout {
 
         Label { text: "followers"; color: Theme.inkDim; font.pixelSize: Theme.sizeSmall }
         RTextField {
-            Layout.preferredWidth: 60
+            // The digits plus the padding, so two of them do not clip when
+            // the font rounds up at 150% display scaling.
+            Layout.preferredWidth: Math.max(60, contentWidth + leftPadding + rightPadding + 4)
             mono: true
             text: engineLink.trunkMaxFollowers
             validator: IntValidator { bottom: 1; top: 16 }
@@ -166,13 +172,16 @@ ColumnLayout {
                 required property var modelData
 
                 width: ListView.view.width
-                height: 20
+                // At least a line of the small mono text, which is taller
+                // than 16 px at 150% display scaling.
+                height: Math.max(20, callRow.implicitHeight + 4)
                 radius: 2
                 color: entry.modelData.hearing
                        ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.14)
                        : "transparent"
 
                 RowLayout {
+                    id: callRow
                     x: 4
                     width: parent.width - 8
                     height: parent.height
@@ -195,7 +204,7 @@ ColumnLayout {
                     }
 
                     Text {
-                        Layout.preferredWidth: 70
+                        Layout.preferredWidth: Math.max(70, implicitWidth)
                         text: entry.modelData.source
                         color: Theme.inkDim
                         font.family: Theme.monoFont

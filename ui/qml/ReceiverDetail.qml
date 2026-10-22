@@ -46,6 +46,12 @@ ColumnLayout {
     readonly property color tint: Theme.receiverColour(engineLink.focusedSlot)
     property bool expanded: false
 
+    // Set by ReceiverPanel when the window is skinny and tall. The dial, the
+    // mode and the display keep the room; the noise block and the symbols
+    // fold behind the filter expander, which starts closed and still opens.
+    property bool narrow: false
+    onNarrowChanged: if (narrow) expanded = false
+
     // Too narrow for the mode selector and the filter's controls on one row,
     // which is the popped-out window at its default size and the docked strip
     // beside RDS, decoding and audio. The mode then has a row to itself.
@@ -223,6 +229,7 @@ ColumnLayout {
         RButton {
             flat: true
             text: "remove"
+            iconName: "trash"
             ink: Theme.inkDim
             onClicked: engineLink.dismissReceiver(0)
         }
@@ -233,7 +240,7 @@ ColumnLayout {
     GridLayout {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
-        columns: detail.compact ? 1 : 2
+        columns: detail.compact || detail.narrow ? 1 : 2
         columnSpacing: 12
         rowSpacing: 6
 
@@ -278,19 +285,22 @@ ColumnLayout {
 
             RButton {
                 implicitWidth: Theme.controlHeight
-                text: "−"
+                text: "narrow the filter"
+                iconName: "minus"
                 onClicked: passband.widenPassband(-100)
             }
 
             RButton {
                 implicitWidth: Theme.controlHeight
-                text: "+"
+                text: "widen the filter"
+                iconName: "plus"
                 onClicked: passband.widenPassband(100)
             }
 
             RButton {
                 flat: true
-                text: "default"
+                text: "default filter width"
+                iconName: "reset"
                 ink: Theme.inkDim
                 onClicked: passband.resetPassband()
             }
@@ -313,7 +323,9 @@ ColumnLayout {
                 flat: true
                 checkable: true
                 checked: detail.expanded
-                text: detail.expanded ? "filter ▾" : "filter ▸"
+                text: "filter"
+                iconName: detail.expanded ? "chevron-down" : "chevron-right"
+                label: "filter"
                 ink: Theme.inkDim
                 tint: detail.tint
                 onClicked: detail.expanded = !detail.expanded
@@ -334,7 +346,7 @@ ColumnLayout {
     GridLayout {
         Layout.fillWidth: true
         visible: detail.expanded
-        columns: 2
+        columns: detail.narrow ? 1 : 2
         columnSpacing: 12
         rowSpacing: 2
 
@@ -580,7 +592,9 @@ ColumnLayout {
             RButton {
                 flat: true
                 visible: engineLink.notchOffered && notchRow.onCount > 0
-                text: "clear all"
+                text: "clear all notches"
+                iconName: "eraser"
+                label: "notches"
                 ink: Theme.inkDim
                 onClicked: {
                     for (let i = 0; i < 4; ++i) {
@@ -731,7 +745,8 @@ ColumnLayout {
                 onClicked: engineLink.learnNoiseProfile()
             }
             RButton {
-                text: "reset"
+                text: "reset noise profile"
+                iconName: "reset"
                 enabled: engineLink.noiseProfile
                 onClicked: engineLink.resetNoiseProfile()
             }
@@ -803,6 +818,9 @@ ColumnLayout {
             anchors.rightMargin: 48
             visible: passband.notchAllCount > 0 && engineLink.notchOffered
             text: "notch all (" + passband.notchAllCount + ")"
+            iconName: "notch"
+            label: "notch all"
+            tip: text
             onClicked: passband.notchAll()
         }
 
@@ -1009,7 +1027,7 @@ ColumnLayout {
                 || engineLink.receiverDemod === "raw")
 
         Layout.fillWidth: true
-        visible: offered
+        visible: offered && (!detail.narrow || detail.expanded)
         spacing: 2
 
         RowLayout {

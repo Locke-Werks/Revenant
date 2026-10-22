@@ -62,6 +62,7 @@ ColumnLayout {
         RButton {
             flat: true
             text: "clear"
+            iconName: "eraser"
             ink: Theme.inkDim
             enabled: pane.table.calls.count > 0
             onClicked: pane.table.clear()
@@ -142,7 +143,9 @@ ColumnLayout {
                 required property var count
 
                 width: ListView.view.width
-                height: 20
+                // At least a line of the small mono text, which is taller
+                // than 16 px at 150% display scaling.
+                height: Math.max(20, callRow.implicitHeight + 4)
                 radius: 2
                 color: entry.active ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.14)
                                     : (hover.hovered ? Theme.controlHover : "transparent")
@@ -150,6 +153,7 @@ ColumnLayout {
                 HoverHandler { id: hover }
 
                 RowLayout {
+                    id: callRow
                     x: 4
                     width: parent.width - 8
                     height: parent.height

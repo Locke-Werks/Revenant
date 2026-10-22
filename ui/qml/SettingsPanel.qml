@@ -139,17 +139,14 @@ ColumnLayout {
         RButton {
             flat: true
             text: "reset to default"
+            iconName: "reset"
+            tip: row.scope === "this radio"
+                 ? "Forget this radio's own value. It goes back to the value for all "
+                   + "radios, or to the default when there is none."
+                 : "Forget the value for all radios and go back to the default."
             ink: Theme.inkDim
             enabled: row.scope !== "default"
             onClicked: engineLink.resetDetectorSetting(row.field)
-
-            Tip {
-                visible: parent.hovered
-                text: row.scope === "this radio"
-                      ? "Forget this radio's own value. It goes back to the value for all "
-                        + "radios, or to the default when there is none."
-                      : "Forget the value for all radios and go back to the default."
-            }
         }
 
         Item { Layout.fillWidth: true }
@@ -780,6 +777,8 @@ ColumnLayout {
         RButton {
             flat: true
             text: "revert"
+            iconName: "undo"
+            label: "revert"
             ink: Theme.inkDim
             enabled: captureSettings.changed
             onClicked: captureSettings.revert()

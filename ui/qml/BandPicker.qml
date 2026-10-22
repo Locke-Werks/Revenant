@@ -414,7 +414,10 @@ RowLayout {
         id: opener
 
         flat: true
-        text: "bands ▾"
+        text: "bands"
+        label: "bands"
+        iconName: "chevron-down"
+        iconAfter: true
         ink: Theme.inkDim
 
         // Open on any source, so the list can be read on a recording too;
@@ -545,8 +548,9 @@ RowLayout {
         x: opener.x
         width: picker.groupWidth + 1 + picker.columnWidth + 2
         // Fixed rather than fitted to the right pane, so switching category
-        // does not resize the menu under the pointer.
-        height: 560
+        // does not resize the menu under the pointer. Capped by the window,
+        // which at 150% scaling can be shorter than the menu.
+        height: Math.min(560, (Overlay.overlay ? Overlay.overlay.height : 800) - 90)
         padding: 1
         focus: true
         // Escape is handled below: first it clears a filter, then it closes.

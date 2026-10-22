@@ -106,6 +106,9 @@ QtObject {
 
     // The shape of a control.
     readonly property int controlHeight: 26
+
+    // A button's icon, inside controlHeight with room to breathe.
+    readonly property int iconSize: 16
     readonly property int radius: 4
     readonly property int gap: 8
 }

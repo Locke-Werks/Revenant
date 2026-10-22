@@ -127,6 +127,8 @@ RowLayout {
         visible: gain.hasStage && engineLink.sourceGainHasAuto && !gain.bypassed
         flat: true
         text: "auto"
+        iconName: "gain"
+        label: "auto"
         checked: engineLink.sourceGainAuto
         ink: Theme.inkDim
         font.pixelSize: Theme.sizeSmall

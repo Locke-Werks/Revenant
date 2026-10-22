@@ -126,9 +126,11 @@ RowLayout {
         flat: true
         implicitHeight: 20
         text: "live"
+        iconName: "live"
+        label: "live"
         enabled: bar.replaying
         onClicked: engineLink.timeShiftLive()
-        Tip { visible: parent.hovered; text: "Back to the live span" }
+        tip: "Back to the live span"
     }
 
     Label {

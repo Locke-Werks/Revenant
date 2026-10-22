@@ -78,6 +78,8 @@ ColumnLayout {
                 checkable: true
                 checked: engineLink.decodeWanted
                 text: "decode"
+                iconName: "text"
+                label: "decode"
                 tint: Theme.receiverColour(engineLink.focusedSlot)
                 ink: Theme.inkDim
                 font.bold: true
@@ -157,6 +159,7 @@ ColumnLayout {
             RButton {
                 flat: true
                 text: "copy all"
+                iconName: "copy"
                 ink: Theme.inkDim
                 enabled: pane.log.count > 0
                 onClicked: pane.log.copyAll()
@@ -165,6 +168,7 @@ ColumnLayout {
             RButton {
                 flat: true
                 text: "clear"
+                iconName: "eraser"
                 ink: Theme.inkDim
                 enabled: pane.log.count > 0 || pane.log.droppedLabel.length > 0
                 onClicked: pane.log.clear()
@@ -317,7 +321,9 @@ ColumnLayout {
 
                     x: 4
                     width: parent.width - 8
-                    height: 20
+                    // A line of the small mono text at the least, which 20
+                    // px is not at 150% display scaling.
+                    height: Math.max(20, implicitHeight + 2)
                     spacing: 10
 
                     Text {
@@ -360,6 +366,7 @@ ColumnLayout {
                         flat: true
                         implicitHeight: 18
                         text: "copy"
+                        iconName: "copy"
                         ink: Theme.inkDim
                         font.pixelSize: Theme.sizeSmall
                         onClicked: pane.log.copyLine(entry.index)

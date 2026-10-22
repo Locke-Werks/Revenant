@@ -35,6 +35,12 @@ ColumnLayout {
 
     spacing: 8
 
+    // Words beside the header's icons only where the rack is wide enough
+    // for them, which is the one-column arrangement. Beside the receiver
+    // the rack is 260 to 320 wide, and at 150% the labels pushed the row
+    // past the rack's edge; their names are in the hovers either way.
+    readonly property bool roomy: width >= 380
+
     RowLayout {
         Layout.fillWidth: true
         spacing: 6
@@ -63,50 +69,43 @@ ColumnLayout {
             checkable: true
             checked: engineLink.autoDv
             text: "auto DV"
+            iconName: "wave"
+            label: rack.roomy ? "auto DV" : ""
             ink: Theme.inkDim
             enabled: engineLink.sourceOpen
             onClicked: engineLink.autoDv = !engineLink.autoDv
-
-            Tip {
-                visible: parent.hovered
-                text: engineLink.autoDv
-                      ? "opening a receiver on every digital voice signal found; a receiver you remove stays removed"
-                      : "open a receiver on every P25, DMR, D-STAR, TETRA and M17 signal the detector finds, and keep it"
-            }
+            tip: "auto DV: " + (engineLink.autoDv
+                 ? "opening a receiver on every digital voice signal found; a receiver you remove stays removed"
+                 : "open a receiver on every P25, DMR, D-STAR, TETRA and M17 signal the detector finds, and keep it")
         }
 
         // The key table's "put a new receiver on the span centre", for a
         // mouse. The span's double click is the other way to add one.
         RButton {
             flat: true
-            text: "+ add"
+            text: "add a receiver"
+            iconName: "plus"
             ink: Theme.inkDim
             enabled: engineLink.sourceOpen && !engineLink.rackFull
             onClicked: engineLink.addReceiver((engineLink.viewLowHz + engineLink.viewHighHz) / 2, "")
-
-            Tip {
-                visible: parent.hovered
-                text: (engineLink.rackFull ? "the rack holds 64"
-                                           : "a new receiver on the span centre")
-                      + "  " + KeyMap.keysText("receiver.add")
-            }
+            tip: (engineLink.rackFull ? "the rack holds 64"
+                                      : "a new receiver on the span centre")
+                 + "  " + KeyMap.keysText("receiver.add")
         }
 
         // Every receiver at once. Turns auto DV off as well, or it would open
         // the digital voice ones again at its next pass.
         RButton {
             flat: true
-            text: "clear"
+            text: "clear all"
+            iconName: "trash"
+            label: rack.roomy ? "clear all" : ""
             ink: Theme.inkDim
             enabled: engineLink.rackClearable || engineLink.autoDv
             onClicked: engineLink.clearReceivers()
-
-            Tip {
-                visible: parent.hovered
-                text: engineLink.autoDv
-                      ? "remove every receiver and turn auto DV off; the trunk tracker stays held until auto DV is turned on and off again"
-                      : "remove every receiver the rack can remove"
-            }
+            tip: "clear all: " + (engineLink.autoDv
+                 ? "remove every receiver and turn auto DV off; the trunk tracker stays held until auto DV is turned on and off again"
+                 : "remove every receiver the rack can remove")
         }
 
         // Out into a window of their own, for a second screen, or back into
@@ -114,15 +113,12 @@ ColumnLayout {
         RButton {
             flat: true
             text: rack.poppedOut ? "dock" : "pop out"
+            iconName: rack.poppedOut ? "dock" : "popout"
             ink: Theme.inkDim
             onClicked: rack.popToggled()
-
-            Tip {
-                visible: parent.hovered
-                text: (rack.poppedOut ? "put the receivers back under the span"
-                                      : "move the receivers into a window of their own")
-                      + "  " + KeyMap.keysText("window.pop")
-            }
+            tip: (rack.poppedOut ? "put the receivers back in the main window"
+                                 : "move the receivers into a window of their own")
+                 + "  " + KeyMap.keysText("window.pop")
         }
     }
 

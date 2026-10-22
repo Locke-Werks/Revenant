@@ -125,11 +125,13 @@ Popup {
                     id: action
 
                     RowLayout {
-                        height: 24
+                        // Grown to the text where 150% display scaling makes
+                        // it taller or wider than the fixed figures.
+                        height: Math.max(24, implicitHeight)
                         spacing: 10
 
                         Text {
-                            Layout.preferredWidth: 90
+                            Layout.preferredWidth: Math.max(90, implicitWidth)
                             text: entry.modelData.group
                             elide: Text.ElideRight
                             color: Theme.inkDim

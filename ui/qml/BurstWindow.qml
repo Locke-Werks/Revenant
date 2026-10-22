@@ -185,6 +185,8 @@ Window {
             RButton {
                 flat: true
                 text: "live"
+                iconName: "live"
+                label: "live"
                 checkable: true
                 checked: win.live
                 onClicked: {
@@ -196,6 +198,8 @@ Window {
             RButton {
                 flat: true
                 text: "export csv"
+                iconName: "export"
+                label: "csv"
                 ink: Theme.inkDim
                 onClicked: saveDialog.open()
             }
@@ -203,6 +207,7 @@ Window {
             RButton {
                 flat: true
                 text: "clear"
+                iconName: "eraser"
                 ink: Theme.inkDim
                 onClicked: timeline.clear()
             }

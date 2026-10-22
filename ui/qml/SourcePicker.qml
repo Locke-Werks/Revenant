@@ -123,6 +123,8 @@ ColumnLayout {
 
         RButton {
             text: sourceRow.open ? "hide" : "change radio"
+            iconName: "antenna"
+            label: text
             font.pixelSize: Theme.sizeBody
             onClicked: {
                 sourceRow.open = !sourceRow.open
@@ -140,6 +142,8 @@ ColumnLayout {
 
         RButton {
             text: "close source"
+            iconName: "power"
+            label: "close"
             font.pixelSize: Theme.sizeBody
             enabled: engineLink.sourceOpen
             onClicked: {
@@ -224,7 +228,9 @@ ColumnLayout {
             RButton {
                 flat: true
                 ink: Theme.inkDim
-                text: (frontEnd.expanded ? "▾ " : "▸ ") + "front end"
+                text: "front end"
+                iconName: frontEnd.expanded ? "chevron-down" : "chevron-right"
+                label: "front end"
                 onClicked: frontEnd.expanded = !frontEnd.expanded
             }
 
@@ -380,7 +386,9 @@ ColumnLayout {
             RButton {
                 flat: true
                 ink: Theme.inkDim
-                text: (calibration.expanded ? "▾ " : "▸ ") + "calibration"
+                text: "calibration"
+                iconName: calibration.expanded ? "chevron-down" : "chevron-right"
+                label: "calibration"
                 onClicked: calibration.expanded = !calibration.expanded
             }
 
@@ -496,6 +504,8 @@ ColumnLayout {
             // measurement. models/calibration.h, CarrierAverage.
             RButton {
                 text: "use"
+                iconName: "check"
+                label: "use"
                 font.pixelSize: Theme.sizeBody
                 enabled: engineLink.knownCarrierReady
                 onClicked: engineLink.applyKnownCarrier()
@@ -563,7 +573,9 @@ ColumnLayout {
             RButton {
                 flat: true
                 ink: Theme.inkDim
-                text: (vocoders.expanded ? "▾ " : "▸ ") + "vocoders"
+                text: "vocoders"
+                iconName: vocoders.expanded ? "chevron-down" : "chevron-right"
+                label: "vocoders"
                 onClicked: vocoders.expanded = !vocoders.expanded
             }
 
@@ -665,7 +677,9 @@ ColumnLayout {
             RButton {
                 flat: true
                 ink: Theme.inkDim
-                text: (enginePlugins.expanded ? "▾ " : "▸ ") + "engine plugins"
+                text: "engine plugins"
+                iconName: enginePlugins.expanded ? "chevron-down" : "chevron-right"
+                label: "engine plugins"
                 onClicked: enginePlugins.expanded = !enginePlugins.expanded
             }
 
@@ -873,6 +887,7 @@ ColumnLayout {
 
             RButton {
                 text: "name it"
+                iconName: "pencil"
                 font.pixelSize: Theme.sizeBody
                 enabled: labelField.enabled
                 onClicked: engineLink.setRadioLabel(identity.row.serial, labelField.text)
@@ -895,21 +910,18 @@ ColumnLayout {
 
             RButton {
                 text: "write to dongle"
+                iconName: "chip"
+                label: "write to dongle"
+                tip: engineLink.sourceOpen
+                     ? "Close the source first: the engine holds the dongle."
+                     : "Writes the serial into the dongle's EEPROM. Unplug and replug it "
+                       + "afterwards. Stock dongles all ship as 00000001, which is why "
+                       + "two of them cannot be told apart."
                 font.pixelSize: Theme.sizeBody
                 enabled: !engineLink.sourceOpen && !engineLink.serialWriteBusy
                          && serialField.text.length > 0
                          && engineLink.serialProblem(serialField.text) === ""
                 onClicked: engineLink.writeRadioSerial(sourceRow.chosen, serialField.text)
-
-                Tip {
-                    visible: parent.hovered
-                    delay: 400
-                    text: engineLink.sourceOpen
-                          ? "Close the source first: the engine holds the dongle."
-                          : "Writes the serial into the dongle's EEPROM. Unplug and replug it "
-                            + "afterwards. Stock dongles all ship as 00000001, which is why "
-                            + "two of them cannot be told apart."
-                }
             }
 
             Label {
@@ -1022,7 +1034,8 @@ ColumnLayout {
                 visible: !!sourceSettings.row
                          && sourceSettings.row.hasGain
                          && !sourceGainAuto.checked
-                Layout.preferredWidth: 70
+                // Room for the figure at 150% display scaling as well.
+                Layout.preferredWidth: Math.max(70, contentWidth + leftPadding + rightPadding + 4)
                 font.pixelSize: Theme.sizeBody
                 placeholderText: "20"
                 selectByMouse: true

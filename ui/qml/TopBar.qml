@@ -185,7 +185,10 @@ Rectangle {
         RowLayout {
             id: rightGroup
             spacing: 12
+            // Less the room the status pill can give up, which it gives before
+            // anything here overlaps.
             Layout.minimumWidth: implicitWidth
+                                 - Math.max(0, pill.Layout.preferredWidth - pill.Layout.minimumWidth)
 
             // The frequency manager. Shown with no engine too: the memories are
             // a file on this machine, and importing, editing and exporting them
@@ -194,15 +197,14 @@ Rectangle {
                 id: memoriesButton
                 flat: true
                 text: "memories"
+                iconName: "bookmark"
                 ink: Theme.inkDim
                 onClicked: memoriesPanel.opened ? memoriesPanel.close() : memoriesPanel.open()
 
                 // Each of the bar's buttons names its key on hover, so the keys
                 // are found where the mouse already is.
-                Tip {
-                    visible: parent.hovered && !memoriesPanel.opened
-                    text: "the frequency manager  " + KeyMap.keysText("panel.memories")
-                }
+                tip: memoriesPanel.opened ? ""
+                     : "the frequency manager  " + KeyMap.keysText("panel.memories")
 
                 // Wider than the bar's other panels, so it is kept inside the
                 // window's left edge as well as opening leftwards from the button:
@@ -230,16 +232,15 @@ Rectangle {
                 id: captureButton
                 flat: true
                 text: "capture"
+                iconName: "record"
                 ink: Theme.inkDim
                 visible: engineLink.connected
                          && (engineLink.captureText !== ""
                              || String(engineLink.openedSource.uri || "").startsWith("capture:"))
                 onClicked: capturePanel.opened ? capturePanel.close() : capturePanel.open()
 
-                Tip {
-                    visible: parent.hovered && !capturePanel.opened
-                    text: "what the capture caught  " + KeyMap.keysText("panel.capture")
-                }
+                tip: capturePanel.opened ? ""
+                     : "what the capture caught  " + KeyMap.keysText("panel.capture")
 
                 Popover {
                     id: capturePanel
@@ -276,14 +277,13 @@ Rectangle {
                 id: radioButton
                 flat: true
                 text: engineLink.sourceOpen ? "radio" : "radio: none open"
+                iconName: "antenna"
+                label: text
                 ink: engineLink.sourceOpen ? Theme.inkDim : Theme.inkWarn
                 visible: engineLink.connected
                 onClicked: radioPanel.opened ? radioPanel.close() : radioPanel.open()
-
-                Tip {
-                    visible: parent.hovered && !radioPanel.opened
-                    text: "choose a radio or open a recording  " + KeyMap.keysText("panel.radio")
-                }
+                tip: radioPanel.opened ? ""
+                     : "choose a radio or open a recording  " + KeyMap.keysText("panel.radio")
 
                 Popover {
                     id: radioPanel
@@ -304,14 +304,12 @@ Rectangle {
                 id: settingsButton
                 flat: true
                 text: "settings"
+                iconName: "gear"
                 ink: Theme.inkDim
                 onClicked: settingsPanel.opened ? settingsPanel.close() : settingsPanel.open()
-
-                Tip {
-                    visible: parent.hovered && !settingsPanel.opened
-                    text: "detection, band plan and speech settings  "
-                          + KeyMap.keysText("panel.settings")
-                }
+                tip: settingsPanel.opened ? ""
+                     : "detection, band plan and speech settings  "
+                       + KeyMap.keysText("panel.settings")
 
                 Popover {
                     id: settingsPanel
@@ -352,15 +350,13 @@ Rectangle {
                 checkable: true
                 checked: receiverPlacement.shown
                 text: "receivers"
+                iconName: "receivers"
+                label: "receivers"
                 ink: Theme.inkDim
                 tint: Theme.receiverColour(engineLink.focusedSlot)
                 onClicked: receiverPlacement.shown = !receiverPlacement.shown
-
-                Tip {
-                    visible: parent.hovered
-                    text: (receiverPlacement.shown ? "hide the receivers  " : "show the receivers  ")
-                          + KeyMap.keysText("window.receivers")
-                }
+                tip: (receiverPlacement.shown ? "hide the receivers  " : "show the receivers  ")
+                     + KeyMap.keysText("window.receivers")
             }
 
             // SPEECH TO TEXT: the engine's one switch, the owner's decision of
@@ -378,22 +374,20 @@ Rectangle {
                 visible: engineLink.connected
                 checked: engineLink.transcriptionOn
                 text: "speech"
+                iconName: "captions"
+                label: "speech"
                 ink: engineLink.transcriptionOffered ? Theme.inkDim : Theme.inkOff
                 onClicked: engineLink.toggleTranscription()
-
-                Tip {
-                    visible: parent.hovered
-                    text: !engineLink.transcriptionOffered
-                          ? engineLink.transcriptionDetail
-                          : (engineLink.transcriptionOn ? "turn speech to text off  "
-                                                         : "turn speech to text on  ")
-                            + KeyMap.keysText("transcription.toggle")
-                            + "\nWhile it is on the engine transcribes every receiver that makes "
-                            + "speech: digital voice by call, analogue by squelch, wfm only where "
-                            + "a receiver is chosen in. The text is drawn on the waterfall beside "
-                            + "its receiver and goes into the decode log. The first time it goes "
-                            + "on the engine downloads its speech model, about 1.6 GB."
-                }
+                tip: !engineLink.transcriptionOffered
+                     ? engineLink.transcriptionDetail
+                     : (engineLink.transcriptionOn ? "turn speech to text off  "
+                                                    : "turn speech to text on  ")
+                       + KeyMap.keysText("transcription.toggle")
+                       + "\nWhile it is on the engine transcribes every receiver that makes "
+                       + "speech: digital voice by call, analogue by squelch, wfm only where "
+                       + "a receiver is chosen in. The text is drawn on the waterfall beside "
+                       + "its receiver and goes into the decode log. The first time it goes "
+                       + "on the engine downloads its speech model, about 1.6 GB."
             }
 
             // The model's download, its loading, a failure, or the queue, in a
@@ -464,8 +458,11 @@ Rectangle {
                 alignment: Text.AlignLeft
 
                 // As wide as the longest headline, so the buttons to its left do
-                // not move each time the rate's digits change.
+                // not move each time the rate's digits change. Only preferred:
+                // at 150% scaling that width is a slice the bar does not have,
+                // and an elided headline still has its sentence on hover.
                 Layout.preferredWidth: widest.advanceWidth + 36
+                Layout.minimumWidth: 60
                 text: bar.status.headline
                 ink: bar.status.level >= 2 ? pill.level : Theme.inkDim
                 onClicked: drawer.opened ? drawer.close() : drawer.open()

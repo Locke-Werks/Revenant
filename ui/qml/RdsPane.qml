@@ -328,6 +328,8 @@ ColumnLayout {
             flat: true
             checkable: true
             text: "payloads"
+            iconName: "list"
+            label: "payloads"
             ink: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
         }

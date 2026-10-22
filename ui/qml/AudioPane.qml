@@ -88,6 +88,7 @@ ColumnLayout {
                 checkable: true
                 checked: engineLink.audioWanted
                 text: "listen"
+                iconName: "speaker"
                 tint: Theme.receiverColour(engineLink.focusedSlot)
                 ink: Theme.inkDim
                 font.bold: true
@@ -113,6 +114,7 @@ ColumnLayout {
                 checkable: true
                 checked: audioPlayer.muted
                 text: "mute"
+                iconName: "mute"
                 tint: Theme.inkWarn
                 ink: Theme.inkDim
                 onClicked: audioPlayer.muted = !audioPlayer.muted
@@ -173,7 +175,9 @@ ColumnLayout {
                 id: deviceBox
 
                 Layout.preferredWidth: 220
-                Layout.minimumWidth: 120
+                // Down to a sliver in a narrow dock at a large display
+                // scale, before the status word at the row's end is cut off.
+                Layout.minimumWidth: 70
                 Layout.fillWidth: pane.compact
                 model: audioPlayer.devices
                 font.pixelSize: Theme.sizeBody
