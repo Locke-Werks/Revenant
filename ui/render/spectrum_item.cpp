@@ -25,7 +25,6 @@
 #include <QSGGeometry>
 #include <QSGRectangleNode>
 #include <QSGTexture>
-#include <QSGTextureMaterial>
 #include <QString>
 #include <QSettings>
 #include <QWheelEvent>
@@ -35,6 +34,7 @@
 #include "models/frame_stats.h"
 #include "models/label_tune.h"
 #include "models/receiver_palette.h"
+#include "render/hdr_map.h"
 
 namespace revenant::ui {
 namespace {
@@ -289,7 +289,7 @@ void push_outline(std::vector<OverlayQuad>& out, const QRectF& rect, double thic
 class SpectrumFillNode : public QSGGeometryNode {
 public:
     SpectrumFillNode()
-        : geometry_(QSGGeometry::defaultAttributes_TexturedPoint2D(), 0)
+        : geometry_(QSGGeometry::defaultAttributes_TexturedPoint2D(), 0), material_(true)
     {
         geometry_.setDrawingMode(QSGGeometry::DrawTriangleStrip);
         material_.setFiltering(QSGTexture::Linear);
@@ -352,7 +352,8 @@ public:
 
 private:
     QSGGeometry geometry_;
-    QSGTextureMaterial material_;
+    // The colour map past SDR white on an HDR window; render/hdr_map.h.
+    hdr::MapMaterial material_;
     QSGTexture* gradient_ = nullptr;
 };
 

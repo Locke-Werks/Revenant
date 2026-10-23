@@ -29,6 +29,7 @@
 #include "models/frame_stats.h"
 #include "models/receiver_palette.h"
 #include "models/transcription.h"
+#include "render/hdr_map.h"
 
 namespace revenant::ui {
 namespace {
@@ -156,7 +157,7 @@ public:
 
     // The time-shift preview, over everything while the scrub is held: the
     // overlay and captions belong to the live rows it covers.
-    QSGImageNode* scrub = nullptr;
+    QSGNode* scrub = nullptr;  // hdr::make_map_image
     QSGTexture* scrub_texture = nullptr;
 };
 
@@ -1639,20 +1640,17 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
     }
 
     while (static_cast<std::size_t>(node->tiles->childCount()) < runs.size()) {
-        QSGImageNode* image = window()->createImageNode();
-        image->setOwnsTexture(false);
         // Nearest, because one stored pixel is one screen pixel and any
         // filtering here would smear a one-bin carrier into something that
-        // reads as bandwidth.
-        image->setFiltering(QSGTexture::Nearest);
-
+        // reads as bandwidth. Through the HDR map where the scene graph can
+        // draw it; render/hdr_map.h.
+        //
         // A texture before it joins the tree, though the loop below sets the
         // right one. Appending tells the renderer about the node at once,
         // and the software scene graph, which the offscreen platform uses,
         // reads the texture then and crashed on a null one; the hardware
         // renderer waits for the next sync and never noticed.
-        image->setTexture(node->textures.front());
-        node->tiles->appendChildNode(image);
+        node->tiles->appendChildNode(hdr::make_map_image(window(), node->textures.front()));
     }
     while (static_cast<std::size_t>(node->tiles->childCount()) > runs.size()) {
         QSGNode* last = node->tiles->lastChild();
@@ -1662,11 +1660,6 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
 
     for (std::size_t at = 0; at < runs.size(); ++at) {
         const TileRun& run = runs[at];
-        auto* image = static_cast<QSGImageNode*>(node->tiles->childAtIndex(static_cast<int>(at)));
-        image->setTexture(node->textures[static_cast<std::size_t>(run.tile)]);
-        image->setSourceRect(0.0, static_cast<qreal>(run.source_row), static_cast<qreal>(wide),
-                             static_cast<qreal>(run.rows));
-
         // Both edges from the same expression, so the bottom of one run and
         // the top of the next are the same number to the last bit. At a
         // fractional device pixel ratio there is no whole logical row to
@@ -1675,7 +1668,11 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
         const qreal top = h * static_cast<qreal>(run.display_row) / static_cast<qreal>(tall);
         const qreal bottom =
             h * static_cast<qreal>(run.display_row + run.rows) / static_cast<qreal>(tall);
-        image->setRect(QRectF(0.0, top, w, bottom - top));
+        hdr::place_map_image(node->tiles->childAtIndex(static_cast<int>(at)),
+                             node->textures[static_cast<std::size_t>(run.tile)],
+                             QRectF(0.0, top, w, bottom - top),
+                             QRectF(0.0, static_cast<qreal>(run.source_row),
+                                    static_cast<qreal>(wide), static_cast<qreal>(run.rows)));
     }
 
     node->markers->sync(window(), marker_labels_, marks_.visible(read), tall, h);
@@ -1815,14 +1812,12 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
         }
         if (node->scrub_texture != nullptr) {
             if (node->scrub == nullptr) {
-                node->scrub = window()->createImageNode();
-                node->scrub->setOwnsTexture(false);
-                node->scrub->setFiltering(QSGTexture::Nearest);
-                node->scrub->setTexture(node->scrub_texture);
+                node->scrub = hdr::make_map_image(window(), node->scrub_texture);
                 node->appendChildNode(node->scrub);
             }
-            node->scrub->setTexture(node->scrub_texture);
-            node->scrub->setRect(QRectF(0.0, 0.0, w, h));
+            const QSize size = node->scrub_texture->textureSize();
+            hdr::place_map_image(node->scrub, node->scrub_texture, QRectF(0.0, 0.0, w, h),
+                                 QRectF(0.0, 0.0, size.width(), size.height()));
         }
     } else if (node->scrub != nullptr) {
         node->removeChildNode(node->scrub);

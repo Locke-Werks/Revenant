@@ -251,6 +251,10 @@ inline constexpr QLatin1StringView kCaptureMaxAge{"capture/maxAge"};
 inline constexpr QLatin1StringView kSpanDisplayView{"display/spanView"};
 inline constexpr QLatin1StringView kPersistenceDecaySeconds{"display/persistenceDecaySeconds"};
 
+// Whether the main window asks for an HDR swapchain at launch. On by default,
+// and an SDR display falls back on its own. render/hdr_output.h.
+inline constexpr QLatin1StringView kHdrOutput{"display/hdrOutput"};
+
 // P25 trunk following, as the trunking panel's text fields hold them:
 // "tg = label" lines, talkgroup lists, "tg=priority" pairs, and the follower
 // receiver count. models/trunk_aliases.h parses them.

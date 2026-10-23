@@ -179,6 +179,7 @@
 #include "models/recording_link.h"
 #include "models/settings.h"
 #include "render/frame_probe.h"
+#include "render/hdr_output.h"
 #include "render/window_pacer.h"
 
 // main() is at global scope, unlike everything it constructs. An alias
@@ -877,6 +878,9 @@ int main(int argc, char* argv[])
     QObject::connect(&app, &QGuiApplication::aboutToQuit, &placement,
                      [&placement] { placement.writeDockHeight(); });
 
+    // Before the engine, so it outlives every binding that reads it.
+    revenant::ui::HdrOutput hdr_output;
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("receiverPlacement"), &placement);
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
@@ -884,6 +888,7 @@ int main(int argc, char* argv[])
     engine.rootContext()->setContextProperty(QStringLiteral("audioPlayer"), &player);
     engine.rootContext()->setContextProperty(QStringLiteral("frequencyManager"), &memories);
     engine.rootContext()->setContextProperty(QStringLiteral("recordingLink"), &recordings);
+    engine.rootContext()->setContextProperty(QStringLiteral("hdrOutput"), &hdr_output);
 
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,
@@ -905,6 +910,10 @@ int main(int argc, char* argv[])
                              }
                          });
     }
+
+    // Before loading, because the main window renders its first frame, and
+    // chooses its swapchain format, while it loads. render/hdr_output.h.
+    hdr_output.prepare();
 
     engine.loadFromModule("Revenant", "Main");
     if (engine.rootObjects().isEmpty()) {
@@ -945,6 +954,9 @@ int main(int argc, char* argv[])
         }
         pacer = std::make_unique<revenant::ui::WindowPacer>(root_window, receiver_window_item);
     }
+
+    // The other half of prepare() above, now there is a window to watch.
+    hdr_output.attach(root_window, &engine);
 
     if (frame_probe != nullptr && root_window != nullptr) {
         frame_probe->watch(root_window, QStringLiteral("main"));

@@ -349,6 +349,27 @@ ColumnLayout {
         }
     }
 
+    // render/hdr_output.h. Read at launch, since the swapchain format is
+    // chosen when the window first renders.
+    RCheckBox {
+        text: "HDR output" + (hdrOutput.active
+                              ? "  (on, " + hdrOutput.sdrWhiteNits.toFixed(0) + " nit white)"
+                              : "")
+        checked: hdrOutput.enabled
+        onToggled: {
+            hdrOutput.enabled = checked
+            checked = Qt.binding(() => hdrOutput.enabled)
+        }
+
+        Tip {
+            visible: parent.hovered
+            delay: 400
+            text: "On an HDR display, strong signals on the spectrum and waterfall are drawn "
+                  + "brighter than the interface's white. Turns itself off on an SDR display. "
+                  + "Takes effect at the next launch."
+        }
+    }
+
     RCheckBox {
         text: "remember notch and filter per band"
         checked: frequencyManager.rememberPerBand

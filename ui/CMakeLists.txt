@@ -100,7 +100,8 @@ endif()
 # windows one still plays audio. It was written to decide the Forge payload and
 # was not measured; the payload decision is the one place it would have done
 # real damage, so it is recorded rather than swapped.
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Multimedia Quick QuickControls2)
+# ShaderTools at build time only, for qsb; nothing of it ships.
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Multimedia Quick QuickControls2 ShaderTools)
 find_package(CapnProto CONFIG REQUIRED)
 
 # ui/tests, which is a separate executable that links no Qt at all. Optional,
@@ -281,6 +282,11 @@ qt_add_executable(revenant_ui
     render/colour_map.h
     render/frame_probe.cpp
     render/frame_probe.h
+    # HDR output on the main window, and the span's colour map past SDR white.
+    render/hdr_map.cpp
+    render/hdr_map.h
+    render/hdr_output.cpp
+    render/hdr_output.h
     render/history_shift.h
     render/passband_item.cpp
     render/passband_item.h
@@ -371,6 +377,8 @@ qt_add_qml_module(revenant_ui
         qml/KeyMapView.qml
         # Burst timeline (feature #4).
         qml/BurstWindow.qml
+        qml/HdrComposite.qml
+        qml/HdrStage.qml
         qml/controls/KeyChip.qml
         qml/controls/Popover.qml
         qml/controls/Readout.qml
@@ -466,6 +474,17 @@ target_link_libraries(revenant_ui
 
 revenant_apply_warnings(revenant_ui)
 
+# The HDR passes, compiled to .qsb at build time and served from :/shaders/.
+# render/hdr_output.h and render/hdr_map.h.
+qt_add_shaders(revenant_ui "revenant_ui_shaders"
+    BATCHABLE
+    PREFIX "/"
+    FILES
+        shaders/hdr_composite.frag
+        shaders/hdr_map.frag
+        shaders/hdr_map.vert
+)
+
 # A GUI subsystem binary, so a double-click does not open a console behind the
 # window. Startup failures before the window exists go to stderr, which is why
 # the ninja preset is the one to use when a connection refuses.
@@ -485,6 +504,7 @@ revenant_embed_version(revenant_ui
 set_source_files_properties("${REVENANT_SOURCE_DIR}/assets/revenant.ico"
     PROPERTIES QT_RESOURCE_ALIAS revenant.ico)
 qt_add_resources(revenant_ui "app_icon"
+    BATCHABLE
     PREFIX "/"
     FILES "${REVENANT_SOURCE_DIR}/assets/revenant.ico")
 
