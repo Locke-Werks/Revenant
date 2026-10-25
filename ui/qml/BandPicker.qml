@@ -8,8 +8,8 @@
 //
 // A band the open device cannot be put on is greyed rather than hidden, so
 // the menu is the same list on every radio and says which parts of it this
-// one reaches. On a source that cannot retune every row is grey, and the
-// tuning row says why beside the dial.
+// one reaches. On a source that cannot retune, a recording, the rows the span
+// already covers stay live and only narrow the view; the rest are grey.
 //
 // A click puts the band on screen: when it fits the span the spectrum and
 // waterfall narrow to it, and when it does not the band's low edge goes to
@@ -91,10 +91,14 @@ RowLayout {
 
     // A map's "index" is its row in kBands, which is what bandReachable takes;
     // its position in this list is not, because the region filter skips rows.
+    // A source that cannot retune reaches what its span already covers, so a
+    // band overlapping the span is a view to narrow to; EngineLink::pickBand.
     function reachable(band) {
-        return engineLink.sourceCanRetune
-               && UiRules.bandReachable(band.index, engineLink.sourceTuneLowHz,
-                                        engineLink.sourceTuneHighHz)
+        if (!engineLink.sourceCanRetune)
+            return engineLink.spanHighHz > engineLink.spanLowHz
+                   && band.high > engineLink.spanLowHz && band.low < engineLink.spanHighHz
+        return UiRules.bandReachable(band.index, engineLink.sourceTuneLowHz,
+                                     engineLink.sourceTuneHighHz)
     }
 
     function tuneTo(band) {
@@ -508,7 +512,7 @@ RowLayout {
                 // Says why the row is grey rather than leaving it to the colour.
                 Text {
                     visible: !entry.live
-                    text: engineLink.sourceCanRetune ? "out of range" : "fixed"
+                    text: engineLink.sourceCanRetune ? "out of range" : "outside span"
                     color: Theme.inkDim
                     font.family: Theme.uiFont
                     font.pixelSize: Theme.sizeSmall

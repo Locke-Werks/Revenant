@@ -11,6 +11,7 @@
 
 #include "models/engine_link.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace revenant::ui {
@@ -37,6 +38,25 @@ void EngineLink::set_view(SpanWindow view, ViewMode mode)
 void EngineLink::pickBand(double low_hz, double high_hz, double centre_hz)
 {
     const double span_hz = spanHighHz() - spanLowHz();
+
+    // A recording cannot be retuned, but it still covers a span, so a band
+    // inside it is a place to look: narrow to the part of the band the span
+    // holds and leave the source alone. The menu greys everything else.
+    if (!sourceCanRetune()) {
+        const double margin = (high_hz - low_hz) * kBandViewMargin;
+        const double low = std::max(low_hz - margin, spanLowHz());
+        const double high = std::min(high_hz + margin, spanHighHz());
+        if (!(high > low)) {
+            return;
+        }
+        band_view_low_hz_ = low;
+        band_view_high_hz_ = high;
+        set_view({}, ViewMode::Band);
+        band_view_armed_ = false;
+        follow_span_for_view();
+        return;
+    }
+
     const BandViewPlan plan = plan_band_view(low_hz, high_hz, centre_hz, span_hz,
                                              sourceTuneLowHz(), sourceTuneHighHz());
 
