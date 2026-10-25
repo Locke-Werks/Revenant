@@ -31,6 +31,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/dsp/spectrum_reference.h"
 #include "core/engine/engine.h"
 #include "core/engine/vrx.h"
 #include "core/source/device_lock.h"
@@ -1333,6 +1334,55 @@ TEST_CASE("an HF recording gets the finer grid its content needs", "[gpu][engine
     // know before they try to place a receiver: more channels is a narrower
     // widest receiver, and the two trade directly.
     CHECK(info.ring.clamp_reason.find("channel spacing") != std::string::npos);
+}
+
+TEST_CASE("a recording too wide for its HF request still opens at the channelizer's cap",
+          "[gpu][engine][m2]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // 61.44 MS/s across 1.8 to 54 MHz would need about 7700 channels to meet
+    // the 7.75 Hz HF request. The widening used to stop at what shared memory
+    // holds, 4096 on a 48 KiB device, and dsp::validate then refused the grid
+    // with "channel count 4096 exceeds 2048", so the file did not open at all.
+    // It has to stop at the channelizer's own cap and open short of the
+    // request instead.
+    const std::filesystem::path path = test::unique_temp_path("revenant_test_wide_hf", ".cf32");
+    {
+        const std::vector<dsp::Complex32> data(400'000, dsp::Complex32{0.0F, 0.0F});
+        std::FILE* file = std::fopen(path.string().c_str(), "wb");
+        REQUIRE(file != nullptr);
+        std::fwrite(data.data(), sizeof(dsp::Complex32), data.size(), file);
+        std::fclose(file);
+    }
+    struct Remove {
+        std::filesystem::path path;
+        ~Remove() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } remove{path};
+
+    const std::string wide = "file:///" + path.generic_string() +
+                             "?rate=61440000&format=cf32&center=27920000";
+
+    engine::EngineConfig config = default_config();
+    config.spectrum_transform = 2048;
+    config.channels = 0;
+
+    auto created = engine::Engine::create(config);
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    const auto opened = eng.open_source(wide);
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+    REQUIRE(eng.source_capabilities().resolution.stated());
+
+    const engine::EngineInfo& info = eng.info();
+    CHECK(info.grid.channels <= dsp::kMaxSpectrumTransform);
+    CHECK(info.grid.channels > engine::default_channel_count(info.source_rate));
 }
 
 TEST_CASE("a VHF source keeps the transform the caller chose", "[gpu][engine][m2]") {

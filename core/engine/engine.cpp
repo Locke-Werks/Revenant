@@ -290,8 +290,13 @@ public:
         // the resolution request can WIDEN the grid and needs the same ceiling
         // the clamp below applies. One number, computed once, so a widening
         // cannot reach past what the clamp would take back.
+        //
+        // Capped at the 2048 that dsp::validate and build_twiddles accept, not
+        // only at what shared memory holds. A device with 48 KiB fits 4096,
+        // and a wide HF recording whose resolution request widened to it then
+        // failed to open on "channel count 4096 exceeds 2048".
         const std::uint32_t transform_ceiling =
-            dsp::max_fft_transform_size(info_.device.max_workgroup_shared_memory);
+            dsp::max_spectrum_transform_size(info_.device.max_workgroup_shared_memory);
         if (transform_ceiling == 0) {
             return fail(std::format("'{}' reports {} bytes of workgroup shared memory, which "
                                     "holds no transform at all",
