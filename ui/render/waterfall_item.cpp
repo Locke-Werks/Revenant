@@ -207,6 +207,21 @@ void WaterfallItem::setLink(EngineLink* link)
 
         connect(link_, &EngineLink::transcriptsArrived, this, &WaterfallItem::takeTranscripts);
 
+        // Kept, the live rows would sit under the first replay rows and the
+        // display would read as live the moment the scrub preview lets go.
+        connect(link_, &EngineLink::timeShiftChanged, this, [this] {
+            const bool replaying = link_->timeShiftReplaying();
+            if (replaying == seen_replaying_) {
+                return;
+            }
+            seen_replaying_ = replaying;
+            clearHistory();
+            last_sample_end_ = 0;
+            boxes_.clear();
+            rebuildOverlay();
+            update();
+        });
+
         // The view narrowed or moved. followAxis slides the history for a
         // pan by whole pixels and clears it for a change of hertz per pixel,
         // which is the same rule a retune follows.
@@ -232,6 +247,7 @@ void WaterfallItem::setLink(EngineLink* link)
     clearHistory();
     seen_connected_ = link_ != nullptr && link_->connected();
     seen_epoch_ = link_ == nullptr ? 0 : static_cast<std::uint64_t>(link_->sourceEpoch());
+    seen_replaying_ = link_ != nullptr && link_->timeShiftReplaying();
     boxes_.clear();
     rebuildOverlay();
     emit linkChanged();
@@ -1260,6 +1276,23 @@ void WaterfallItem::takeFrame()
     const rpc::SpectrumFrame& frame = link_->frame();
     if (frame.power_db.empty()) {
         return;
+    }
+
+    // A scrub while already replaying is a seek, which flips nothing the
+    // timeShiftChanged handler watches. The replay's own clock jumping is
+    // the sign, and the rows below are then another instant's.
+    if (frame.timeshift_replay) {
+        constexpr std::int64_t kSeekJumpNs = 1'000'000'000;
+        const std::int64_t wall = frame.timeshift_wall_ns;
+        if (last_replay_wall_ns_ != 0 &&
+            (wall < last_replay_wall_ns_ || wall - last_replay_wall_ns_ > kSeekJumpNs)) {
+            clearHistory();
+            last_sample_end_ = 0;
+            boxes_.clear();
+        }
+        last_replay_wall_ns_ = wall;
+    } else {
+        last_replay_wall_ns_ = 0;
     }
 
     // Recomputed per frame rather than only on a resize, because the device

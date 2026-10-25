@@ -9,8 +9,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -309,4 +311,106 @@ TEST_CASE("a receiver opened on the time-shift replay hears the past",
     // allowing for the spectrum window and the filter's delay.
     CHECK(first_replay_ns >= from_ns - 50'000'000);
     CHECK(first_replay_ns < from_ns + 500'000'000);
+}
+
+TEST_CASE("the time-shift replay's spectrum is of the samples it says it is",
+          "[gpu][engine][timeshift]") {
+    REVENANT_NEEDS_GPU();
+
+    engine::EngineConfig config;
+    config.channels = 64;
+    config.taps_per_branch = 17;
+    config.ring_seconds = 0.5;
+    config.block_samples = 8'192;
+    config.spectrum_transform = 512;
+    config.gpu_index = -1;
+    config.pace = 1.0;
+    auto created = engine::Engine::create(config);
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+
+    // Several bursty emitters, so the band changes from moment to moment and
+    // a spectrum names the instant it was taken.
+    const std::string uri =
+        "synthetic:wideband?rate=2400000&emitters=6&modes=am&seed=11&noise_dbfs=-90"
+        "&snr_min=20&snr_max=40&samples=19200000";
+    REQUIRE(eng.open_source(uri).has_value());
+
+    struct Row {
+        std::uint64_t start = 0;
+        std::int64_t wall_ns = 0;
+        std::vector<float> bins;
+    };
+    std::mutex lock;
+    std::vector<Row> live;
+    std::vector<Row> replay;
+    REQUIRE(eng.set_spectrum_sink([&](const engine::SpectrumFrame& frame) -> Status {
+                   const std::scoped_lock held(lock);
+                   Row row{frame.start, frame.timeshift_wall_ns,
+                           std::vector<float>(frame.power_db.begin(), frame.power_db.end())};
+                   (frame.timeshift_replay ? replay : live).push_back(std::move(row));
+                   return {};
+               })
+                .has_value());
+
+    std::thread runner([&] { static_cast<void>(eng.run()); });
+
+    engine::TimeShiftExtent extent;
+    for (int i = 0; i < 600; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        auto now = eng.timeshift(std::nullopt);
+        REQUIRE(now.has_value());
+        extent = *now;
+        if (extent.available && extent.newest_ns - extent.oldest_ns > 4'000'000'000) {
+            break;
+        }
+    }
+    REQUIRE(extent.available);
+
+    // Three seconds behind live.
+    const std::int64_t from_ns = extent.newest_ns - 3'000'000'000;
+    REQUIRE(eng.start_timeshift_replay(from_ns, 1.0).has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(1'000));
+    REQUIRE(eng.stop_timeshift_replay().has_value());
+    static_cast<void>(eng.stop());
+    runner.join();
+
+    const std::scoped_lock held(lock);
+    REQUIRE(replay.size() > 10);
+    REQUIRE(live.size() > 100);
+
+    // Each replay row against every live row: the one it matches best is the
+    // instant it was really computed from, whatever it is labelled.
+    const auto distance = [](const std::vector<float>& a, const std::vector<float>& b) {
+        double sum = 0.0;
+        const std::size_t n = std::min(a.size(), b.size());
+        for (std::size_t i = 0; i < n; ++i) {
+            sum += std::abs(static_cast<double>(a[i]) - static_cast<double>(b[i]));
+        }
+        return n == 0 ? 1.0e30 : sum / static_cast<double>(n);
+    };
+    const double rate = 2'400'000.0;
+    std::size_t checked = 0;
+    for (std::size_t r = replay.size() / 2; r < replay.size() && checked < 5; r += 3, ++checked) {
+        std::size_t best = 0;
+        double best_d = 1.0e30;
+        for (std::size_t l = 0; l < live.size(); ++l) {
+            const double d = distance(replay[r].bins, live[l].bins);
+            if (d < best_d) {
+                best_d = d;
+                best = l;
+            }
+        }
+        // Live index the replay row claims, from its wall clock.
+        const double claimed =
+            static_cast<double>(extent.oldest_index) +
+            static_cast<double>(replay[r].wall_ns - extent.oldest_ns) * rate / 1.0e9;
+        const double matched = static_cast<double>(live[best].start);
+        const double seconds_off = (matched - claimed) / rate;
+        UNSCOPED_INFO("replay row " << r << ": best live match is " << seconds_off
+                                    << " s from where it claims to be, distance " << best_d
+                                    << " dB");
+        CHECK(std::abs(seconds_off) < 0.2);
+    }
 }

@@ -481,6 +481,12 @@ private:
     // until a connection has been seen, and after one is lost.
     bool seen_connected_ = false;
     std::uint64_t seen_epoch_ = 0;
+    // Which time-shift stream the history was drawn from. The replay's rows
+    // are another stream's sample indices and another instant's band, so a
+    // switch either way starts the history again.
+    bool seen_replaying_ = false;
+    // The last replay frame's live wall clock, zero on live frames.
+    std::int64_t last_replay_wall_ns_ = 0;
 
     // The detector's live tracks, for picking and labels, and every box drawn
     // from the history, which is what the overlay shows.

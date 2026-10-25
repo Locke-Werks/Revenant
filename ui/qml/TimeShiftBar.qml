@@ -104,8 +104,16 @@ RowLayout {
 
     Label {
         // The drag's target while held, the replay's position otherwise.
-        text: scrub.pressed ? engineLink.timeShiftLabel(scrub.value)
-                            : engineLink.timeShiftLabel(engineLink.timeShiftPosition())
+        // timeShiftPosition() is a call with no notify, so the replay's
+        // properties are read here to make the binding follow it; without
+        // them the label is evaluated once at release, still reading "live".
+        text: {
+            if (scrub.pressed)
+                return engineLink.timeShiftLabel(scrub.value)
+            const ago = engineLink.timeShiftSecondsAgo
+            const held = engineLink.timeShiftHeldSeconds
+            return engineLink.timeShiftLabel(engineLink.timeShiftPosition())
+        }
         color: bar.replaying ? Theme.accent : Theme.ink
         font.family: Theme.monoFont
         font.pixelSize: Theme.sizeSmall
