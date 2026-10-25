@@ -203,6 +203,13 @@ struct EngineConfig {
     // more latency.
     std::size_t block_samples = 65'536;
 
+    // The caller chose block_samples rather than taking the default. The
+    // default block, unnamed and unchanged, is grown for a fast source so the
+    // spectrum does not draw rows nobody sees; any other is kept exactly.
+    // Named exists for a caller who asks for 65536 itself, as
+    // --block-samples 65536 does.
+    bool block_samples_named = false;
+
     // How fast a Demand source is asked to deliver, as a multiple of
     // realtime. Zero, the default, is unthrottled, and unthrottled is still
     // what happens when nothing is holding a stopwatch.

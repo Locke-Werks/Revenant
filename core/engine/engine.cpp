@@ -105,6 +105,12 @@ constexpr std::chrono::milliseconds kCloseStopTimeout{5000};
 // from the number alone: every public receiver method refuses one.
 constexpr std::uint32_t kFirstProbeId = 0x8000'0000U;
 
+// How many times EngineConfig::spectrum_rows_per_second a fast source may draw
+// before open_source grows its block. Four keeps 120 rows a second at the
+// default, which is past what any display shows and leaves an RTL-SDR's
+// 36 rows a second at 2.4 MS/s untouched.
+constexpr double kFastRowFactor = 4.0;
+
 [[nodiscard]] bool is_probe_id(VrxId id) { return id.value >= kFirstProbeId; }
 
 // steady_clock in nanoseconds, the one clock the pacing measurement reads.
@@ -463,6 +469,30 @@ public:
                 frames_in_flight =
                     static_cast<std::uint32_t>(std::clamp<std::size_t>(kept, frames_in_flight, 8));
                 block_samples = hop_block;
+            }
+
+            // THE OTHER DIRECTION, for a fast source. Every block is a full
+            // spectrum row, so 61.44 MS/s in 65536-sample blocks is 937 rows a
+            // second, and on a 2048-channel HF grid each row is two million
+            // bins: measured 2026-10-24 at 0.63x realtime unthrottled, where a
+            // 524288-sample block ran 3.6x. A row rate past four times the
+            // asked one is work nobody sees, so the block grows until it is
+            // not. Only when nobody named a block size, which is the one lever
+            // a caller has and is theirs to keep.
+            const double fast_rows = config_.spectrum_rows_per_second * kFastRowFactor;
+            const double rows_now = static_cast<double>(rate) / static_cast<double>(block_samples);
+            const bool default_block = !config_.block_samples_named &&
+                                       config_.block_samples == EngineConfig{}.block_samples;
+            if (default_block && rows_now > fast_rows) {
+                // Rounded up, so the row rate lands at or under the bound
+                // rather than a hair over it.
+                const auto grown = static_cast<std::size_t>(std::ceil(
+                    static_cast<double>(rate) / fast_rows / static_cast<double>(grid.decimation)));
+                const std::size_t grown_block =
+                    std::max<std::size_t>(1, grown) * static_cast<std::size_t>(grid.decimation);
+                if (grown_block > block_samples) {
+                    block_samples = grown_block;
+                }
             }
         }
 

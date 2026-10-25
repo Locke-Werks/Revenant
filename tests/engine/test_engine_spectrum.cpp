@@ -854,3 +854,29 @@ TEST_CASE("a slow source gets the display rows it was asked for from overlapping
     CHECK(quick.info.block_samples == kBlockSamples);
     CHECK(quick.info.frames_in_flight == 3);
 }
+
+TEST_CASE("a fast source with no block named grows its block so it draws no more rows than are seen",
+          "[gpu][engine][spectrum][m2]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // Rejects: the 65536-sample default at any rate. At 61.44 MS/s that is
+    // 937 rows a second, each a full-span transform, and measured 2026-10-24
+    // it held an HF scene to 0.63x realtime unthrottled.
+    constexpr std::int64_t kFastRate = 20'000'000;
+    engine::EngineConfig config = spectrum_config();
+    config.block_samples = engine::EngineConfig{}.block_samples;
+    config.spectrum_rows_per_second = 30.0;
+    const std::string uri = "synthetic:wideband?rate=" + std::to_string(kFastRate) +
+                            "&emitters=1&modes=am&seed=424242&noise_dbfs=-120&snr_min=60" +
+                            "&snr_max=60&samples=4000000&span_low=-1600&span_high=1600";
+    const auto captured = capture_spectrum(config, uri);
+    REQUIRE(captured.run_status.has_value());
+
+    const double rows = static_cast<double>(kFastRate) /
+                        static_cast<double>(captured.info.block_samples);
+    INFO(std::format("{} samples a block, {:.1f} rows a second", captured.info.block_samples, rows));
+    CHECK(captured.info.block_samples > 65'536);
+    CHECK(rows <= 120.0);
+    CHECK(rows > 60.0);
+}

@@ -317,6 +317,7 @@ struct Options {
     int gpu = -1;
     double ring_seconds = 8.0;
     std::size_t block_samples = 65'536;
+    bool block_samples_named = false;
     double pace = 0.0;
 
     // Points per coarse channel in the full-span transform, or zero for no
@@ -434,8 +435,10 @@ void print_usage()
         "                      REVENANT_GPU_INDEX. See revenant-devices.\n"
         "  --ring-seconds <x>  Capture history the device ring holds, default 8.\n"
         "                      Shrunk to fit the device; what was achieved is printed.\n"
-        "  --block-samples <n> Samples uploaded per submission, default 65536. Smaller\n"
-        "                      is more spectrum frames a second and more submissions.\n"
+        "  --block-samples <n> Samples uploaded per submission, default 65536, grown\n"
+        "                      for a fast source so the spectrum draws no more rows\n"
+        "                      than are seen. Naming one keeps it exactly. Smaller is\n"
+        "                      more spectrum frames a second and more submissions.\n"
         "  --pace <x>          Deliver at x times realtime, default 0 for unthrottled.\n"
         "                      A live radio sets its own rate and ignores this. A file\n"
         "                      or synthetic source served to a live display wants 1.\n"
@@ -731,6 +734,7 @@ void print_usage()
                 return std::unexpected(number.error());
             }
             options.block_samples = static_cast<std::size_t>(*number);
+            options.block_samples_named = true;
             continue;
         }
 
@@ -1193,6 +1197,7 @@ void print_engine_block(const engine::Engine& eng)
     config.taps_per_branch = options.taps_per_branch;
     config.audio_rate = options.audio_rate;
     config.block_samples = options.block_samples;
+    config.block_samples_named = options.block_samples_named;
     config.pace = options.pace;
     config.spectrum_transform = options.spectrum_points;
     config.spectrum_rows_per_second = options.rows_per_second;
