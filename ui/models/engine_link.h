@@ -2175,6 +2175,11 @@ public:
     // pace_link.cpp.
     Q_INVOKABLE void setSourcePace(double pace);
 
+    // Whether the open recording starts over at its end, posted to the
+    // supervisor like a pace. A refusal is logged; RecordingLink owns the
+    // setting and puts it in the next URI regardless.
+    Q_INVOKABLE void setSourceLoop(bool on);
+
     // Asks the engine's capture for hits over a window, one of
     // models/capture_browser.h's labels, no shorter than minDuration, also
     // one of its labels. An empty band is the span now captured; otherwise
@@ -4473,6 +4478,9 @@ private:
     void apply_source_pace();
     void adopt_source_pace();
 
+    // Supervisor thread: a loop setSourceLoop posted. See pace_link.cpp.
+    void apply_source_loop();
+
     // Supervisor thread, then the Qt thread: a capture search searchCapture
     // posted, and its rows. See capture_link.cpp.
     void apply_capture_search();
@@ -4510,6 +4518,8 @@ private:
     bool handover_pace_granted_ = false;  // guarded by pace_mutex_
     double handover_pace_ = 0.0;          // guarded by pace_mutex_
     QString handover_pace_fault_;         // guarded by pace_mutex_
+    bool want_loop_ = false;              // guarded by pace_mutex_
+    bool want_loop_value_ = false;        // guarded by pace_mutex_
 
     // Qt thread only.
     QString pace_fault_;

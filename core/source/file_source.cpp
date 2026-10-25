@@ -555,6 +555,7 @@ public:
 
     [[nodiscard]] std::optional<double> own_pace() const override;
     [[nodiscard]] Status set_pace(double pace) override;
+    [[nodiscard]] Status set_loop(bool on) override;
 
 private:
     void run();
@@ -603,6 +604,9 @@ private:
     // loop reads it on every block.
     std::atomic<double> pace_{0.0};
 
+    // loop= or the last set_loop. Read by the delivery loop at the end.
+    std::atomic<bool> loop_{false};
+
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<dsp::SampleIndex> pending_seek_{kNoPendingSeek};
@@ -610,6 +614,10 @@ private:
     // Owned by the source thread while it runs and by the control plane when
     // it does not; the join is the handoff in both directions.
     dsp::SampleIndex position_ = 0;
+
+    // Samples delivered by every pass before this one, when looping. Added
+    // to position_ in each stamp so the stream index never moves backwards.
+    dsp::SampleIndex loop_base_ = 0;
     Error stop_error_{};
     bool has_stop_error_ = false;
 
@@ -654,6 +662,7 @@ Status FileSource::open(const FileSourceConfig& config, ResolvedFile resolved)
         own_pace_ = config.pace;
         pace_.store(config.pace, std::memory_order_release);
     }
+    loop_.store(config.loop, std::memory_order_release);
 
     ClockModelConfig clock_config;
     clock_config.source = ClockSource::Internal;
@@ -776,6 +785,7 @@ Status FileSource::start(const StreamOptions& options, BlockSink sink)
     sink_ = std::move(sink);
 
     position_ = options.start_index;
+    loop_base_ = 0;
     pending_seek_.store(kNoPendingSeek, std::memory_order_relaxed);
     stop_error_ = Error{};
     has_stop_error_ = false;
@@ -845,6 +855,15 @@ Status FileSource::set_pace(double pace)
     std::scoped_lock lock(control_);
     own_pace_ = pace;
     pace_.store(pace, std::memory_order_release);
+    return {};
+}
+
+Status FileSource::set_loop(bool on)
+{
+    if (length_samples_ <= 0) {
+        return fail("this file's length is not known, so there is no end to loop from");
+    }
+    loop_.store(on, std::memory_order_release);
     return {};
 }
 
@@ -922,6 +941,15 @@ void FileSource::run()
         }
 
         if (length_samples_ > 0 && position_ >= length_samples_) {
+            // A wrap rewinds the file but not the stream: the ring refuses an
+            // index that moves backwards, so every pass is stamped on from
+            // where the last one ended, as though the recording were longer.
+            if (loop_.load(std::memory_order_acquire)) {
+                loop_base_ += position_;
+                position_ = 0;
+                seeked = true;
+                continue;
+            }
             break;  // end of the recording, which is not an error
         }
 
@@ -949,7 +977,7 @@ void FileSource::run()
         }
 
         SourceBlock block;
-        block.stamp = dsp::BlockTimestamp{position_, anchor_ns_, rate_};
+        block.stamp = dsp::BlockTimestamp{loop_base_ + position_, anchor_ns_, rate_};
         block.format = format_;
         block.sample_count = want;
         block.bytes = std::span<const std::byte>(buffer_.data(), want_bytes);
@@ -994,7 +1022,7 @@ void FileSource::run()
         ++sequence;
         blocks_delivered_.fetch_add(1, std::memory_order_relaxed);
         samples_delivered_.fetch_add(want, std::memory_order_relaxed);
-        write_index_.store(position_, std::memory_order_relaxed);
+        write_index_.store(loop_base_ + position_, std::memory_order_relaxed);
     }
 
     running_.store(false, std::memory_order_release);

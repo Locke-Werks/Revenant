@@ -195,6 +195,15 @@ public:
                     "plays");
     }
 
+    // Whether the source starts over from its first sample when it reaches
+    // its last, from now on. A wrap is a seek to zero, so downstream sees
+    // exactly what a client seeking to the start produces. Refused by every
+    // source with no end to reach.
+    [[nodiscard]] virtual Status set_loop(bool on) {
+        static_cast<void>(on);
+        return fail("this source does not loop: only a recording has an end to start over from");
+    }
+
 protected:
     Source() = default;
 };

@@ -10,6 +10,7 @@
 #include <utility>
 
 #include <QMetaObject>
+#include <QtLogging>
 #include <QString>
 
 #include "models/engine_link.h"
@@ -28,6 +29,36 @@ void EngineLink::setSourcePace(double pace) {
         source_work_pending_ = true;
     }
     supervisor_wake_.notify_all();
+}
+
+void EngineLink::setSourceLoop(bool on) {
+    {
+        const std::lock_guard<std::mutex> lock(pace_mutex_);
+        want_loop_ = true;
+        want_loop_value_ = on;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+}
+
+void EngineLink::apply_source_loop() {
+    if (client_ == nullptr) {
+        return;
+    }
+    bool on = false;
+    {
+        const std::lock_guard<std::mutex> lock(pace_mutex_);
+        if (!std::exchange(want_loop_, false)) {
+            return;
+        }
+        on = want_loop_value_;
+    }
+    if (auto set = client_->set_source_loop(on); !set) {
+        qWarning("set_source_loop(%d) refused: %s", on ? 1 : 0, set.error().message.c_str());
+    }
 }
 
 void EngineLink::apply_source_pace() {

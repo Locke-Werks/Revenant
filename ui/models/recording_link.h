@@ -94,6 +94,10 @@ class RecordingLink : public QObject {
     // read. See compare_opened_recording.
     Q_PROPERTY(QString mismatch READ mismatch NOTIFY playbackChanged)
 
+    // Start over at the end. Goes into the URI of every open, and is sent to
+    // the engine at once when changed while a recording plays.
+    Q_PROPERTY(bool loop READ loop WRITE setLoop NOTIFY loopChanged)
+
 public:
     // `persist` false keeps the recent list in memory, which is what a smoke
     // run wants: it writes no settings, for the reason main.cpp gives.
@@ -124,6 +128,8 @@ public:
     [[nodiscard]] bool ended() const { return ended_; }
     [[nodiscard]] double fraction() const { return fraction_; }
     [[nodiscard]] QString mismatch() const { return mismatch_; }
+    [[nodiscard]] bool loop() const { return loop_; }
+    void setLoop(bool on);
 
     void setCenterText(const QString& text);
     void setRateText(const QString& text);
@@ -159,6 +165,7 @@ signals:
     void chosenChanged();
     void entryChanged();
     void playbackChanged();
+    void loopChanged();
 
 private:
     void choose_path(const QString& path);
@@ -170,6 +177,7 @@ private:
     EngineLink& engine_;
     QString engine_address_;
     bool persist_ = false;
+    bool loop_ = false;
 
     std::vector<RecentRecording> recent_;
 

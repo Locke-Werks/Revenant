@@ -1900,6 +1900,10 @@ public:
     // Virtual with a refusal rather than pure, for the reason submit_probe is.
     [[nodiscard]] virtual Expected<double> set_source_pace(double pace);
 
+    // Whether the open recording starts over at its end. Refused before a
+    // source is open and, in the source's words, on one with no end.
+    [[nodiscard]] virtual Status set_source_loop(bool on);
+
     // Adding a receiver must not rebuild the coarse stage, and nothing in
     // VrxParams appears in GridParams, so it cannot.
     //
@@ -2211,6 +2215,11 @@ inline Expected<CalibrationState> Engine::calibration() const {
 inline Expected<double> Engine::set_source_pace(double) {
     return fail("this engine cannot change a source's pace: it was written before "
                 "Engine::set_source_pace existed");
+}
+
+inline Status Engine::set_source_loop(bool) {
+    return fail("this engine cannot loop a source: it was written before "
+                "Engine::set_source_loop existed");
 }
 
 inline Expected<CalibrationState> Engine::set_calibration(const source::DeviceCalibration&) {

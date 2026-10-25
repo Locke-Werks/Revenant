@@ -253,6 +253,10 @@ struct FileSourceConfig {
     // dongle. It changes nothing about what the file delivers, only what the
     // engine does when it cannot take a block.
     bool paced_flow = false;
+
+    // loop=1 in the URI: at the last sample, seek back to the first and keep
+    // playing rather than ending. Source::set_loop changes it while it plays.
+    bool loop = false;
 };
 
 // Maps "cu8", "cs8", "cs16", "cs24", "cf32" onto the enum. Lives here rather than in

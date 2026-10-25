@@ -215,6 +215,10 @@ public:
     // but a file, in the engine's words; nothing else moves.
     [[nodiscard]] virtual Expected<double> set_source_pace(double pace) = 0;
 
+    // Whether the open recording starts over at its end. Refused, in the
+    // engine's words, with nothing open and on anything but a file.
+    [[nodiscard]] virtual Status set_source_loop(bool on) = 0;
+
     // What the OPEN source can do, which is a different question from what
     // list_sources answers.
     //

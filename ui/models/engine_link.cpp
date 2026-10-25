@@ -393,6 +393,7 @@ void EngineLink::supervise()
             apply_source_tune();
             apply_calibration();
             apply_source_pace();
+            apply_source_loop();
             apply_capture_search();
             apply_impulse_excision();
             apply_comb_cancel();
@@ -538,6 +539,7 @@ void EngineLink::supervise()
             apply_source_gain();
             apply_calibration();
             apply_source_pace();
+            apply_source_loop();
             apply_capture_search();
             apply_impulse_excision();
             apply_comb_cancel();

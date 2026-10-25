@@ -3948,6 +3948,12 @@ interface Session {
     # Replaces the allow, deny and priority lists, applied to calls already
     # on the air as well as later ones.
     setTrunkRules @47 (rules :TrunkRules) -> ();
+
+    # Whether the open recording starts over from its first sample when it
+    # reaches its last. The wrap is a seek to zero, so a client sees what a
+    # seek to the start produces. Refused with no source open and on a
+    # source with no end, which is everything but a file.
+    setSourceLoop @48 (on :Bool) -> ();
 }
 
 struct TimeShiftLimits {

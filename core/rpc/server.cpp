@@ -3362,6 +3362,13 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> setSourceLoop(SetSourceLoopContext context) override {
+        if (auto set = owner_.engine().set_source_loop(context.getParams().getOn()); !set) {
+            return to_exception(set.error());
+        }
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> closeSource(CloseSourceContext context) override {
         // The context is unused and named anyway, because the generated
         // signature requires the parameter and a nameless one would read as

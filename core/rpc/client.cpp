@@ -1498,6 +1498,7 @@ public:
     [[nodiscard]] Expected<double> set_source_gain(std::string_view stage, double db) override;
     [[nodiscard]] Status set_source_gain_auto(std::string_view stage, bool on) override;
     [[nodiscard]] Expected<double> set_source_pace(double pace) override;
+    [[nodiscard]] Status set_source_loop(bool on) override;
     [[nodiscard]] Expected<std::optional<SourceDescriptor>> source_descriptor() override;
     [[nodiscard]] Expected<Calibration> calibration() override;
     [[nodiscard]] Expected<Calibration> set_calibration(
@@ -2090,6 +2091,18 @@ Expected<double> ClientImpl::set_source_pace(double pace) {
         request.setPace(pace);
         return request.send().then([](auto&& response) { return response.getPaced(); });
     });
+}
+
+Status ClientImpl::set_source_loop(bool on) {
+    auto done = on_loop("set_source_loop", [on](LoopState& state) {
+        auto request = state.session.setSourceLoopRequest();
+        request.setOn(on);
+        return request.send().then([](auto&&) { return true; });
+    });
+    if (!done) {
+        return std::unexpected(done.error());
+    }
+    return {};
 }
 
 Expected<std::optional<SourceDescriptor>> ClientImpl::source_descriptor() {

@@ -1214,6 +1214,18 @@ public:
         return pace;
     }
 
+    [[nodiscard]] Status set_source_loop(bool on) override {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        if (source_ == nullptr) {
+            return fail("Engine::set_source_loop before a source is open: looping belongs to "
+                        "the recording it repeats");
+        }
+        if (auto set = source_->set_loop(on); !set) {
+            return std::unexpected(with_context(set.error(), "Engine::set_source_loop"));
+        }
+        return {};
+    }
+
     // A control call on the source, with whatever the source counted as lost
     // while it ran excused from the pacing factor, and the factor held where
     // it was while the call runs. An RTL-SDR stops its transfers around every

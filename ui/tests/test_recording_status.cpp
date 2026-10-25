@@ -147,3 +147,23 @@ TEST_CASE("what the engine opened is compared with what the preview read", "[rec
     CHECK(said.find("cs16") != std::string::npos);
     CHECK(said.find("its own machine") != std::string::npos);
 }
+
+TEST_CASE("a looping recording reads within its pass and does not end", "[recording]")
+{
+    // Rejects: a looped file whose strip says "ended" after the first pass,
+    // because the delivered count passed the length and the clamp held it.
+    PlaybackSample sample;
+    sample.rate = 96000;
+    sample.length = 96000u * 60u;
+    sample.delivered = sample.length * 2u + 96000u * 7u;
+    sample.running = true;
+    sample.paced_by = 1.0;
+    sample.loop = true;
+
+    auto line = describe_playback(sample);
+    CHECK_FALSE(line.ended);
+    CHECK(line.position == "0:07 / 1:00");
+
+    sample.running = false;
+    CHECK(describe_playback(sample).ended);
+}

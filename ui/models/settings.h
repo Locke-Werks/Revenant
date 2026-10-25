@@ -216,6 +216,10 @@ inline constexpr QLatin1StringView kSpurCancel{"radio/spurCancel"};
 // ui/models/recent_recordings.h.
 inline constexpr QLatin1StringView kRecentRecordings{"recordings/recent"};
 
+// Whether a recording starts over at its end. Kept across launches because a
+// test scene is usually played on repeat for as long as it is open.
+inline constexpr QLatin1StringView kRecordingLoop{"recordings/loop"};
+
 // Which administrations' band plan the bar and the menu show, as the Region
 // mask in models/band_plan.h. An unset key reads as both, so a fresh install
 // lists every row rather than guessing which side of the border it is on.

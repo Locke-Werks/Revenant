@@ -597,6 +597,10 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     if (!flow_text) {
         return std::unexpected(flow_text.error());
     }
+    auto loop = query->boolean("loop", false);
+    if (!loop) {
+        return std::unexpected(loop.error());
+    }
 
     const bool pace_given = query->present("pace");
     const bool anchor_given = query->present("anchor_ns");
@@ -684,6 +688,7 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     config.pace_given = pace_given;
     config.pace = pace;
     config.paced_flow = paced_flow;
+    config.loop = *loop;
     return config;
 }
 

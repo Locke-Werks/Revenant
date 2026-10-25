@@ -75,6 +75,10 @@ struct PlaybackSample {
     // EngineLink::engineRunning. An engine goes on answering after its source
     // ends, and says it is not running.
     bool running = false;
+
+    // The recording starts over at its end, so delivered keeps climbing past
+    // length and the position is taken within the current pass.
+    bool loop = false;
 };
 
 struct PlaybackLine {
@@ -98,7 +102,9 @@ struct PlaybackLine {
         return line;
     }
 
-    const std::uint64_t at = sample.delivered < sample.length ? sample.delivered : sample.length;
+    const std::uint64_t at = sample.loop ? sample.delivered % sample.length
+                             : sample.delivered < sample.length ? sample.delivered
+                                                                : sample.length;
     line.fraction = static_cast<double>(at) / static_cast<double>(sample.length);
 
     // ENDED IS EITHER HALF. Every sample delivered is the ordinary end. An
@@ -106,7 +112,8 @@ struct PlaybackLine {
     // with this stream: a demand source's last block can land short of the
     // count by the part that did not fill a block, and waiting for a number
     // that will never arrive would leave the strip claiming playback forever.
-    line.ended = sample.delivered >= sample.length || (!sample.running && sample.delivered > 0);
+    line.ended = (!sample.loop && sample.delivered >= sample.length)
+                 || (!sample.running && sample.delivered > 0);
 
     const auto rate = static_cast<std::uint64_t>(sample.rate);
     if (line.ended) {

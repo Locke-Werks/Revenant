@@ -72,6 +72,7 @@ RecordingLink::RecordingLink(EngineLink& engine, QString engine_address, bool pe
       persist_(persist), preview_(empty_preview())
 {
     load_recent();
+    loop_ = QSettings().value(settings::kRecordingLoop, false).toBool();
 
     connect(&engine_, &EngineLink::openedSourceChanged, this, &RecordingLink::refresh_playback);
     connect(&engine_, &EngineLink::pacingChanged, this, &RecordingLink::refresh_playback);
@@ -288,6 +289,9 @@ void RecordingLink::open()
     }
 
     opened_uri_ = qs(plan_.uri);
+    if (loop_) {
+        opened_uri_ += QStringLiteral("&loop=1");
+    }
     opened_plan_ = OpenedRecording{plan_.length_samples, plan_.rate,
                                    recording_format_name(plan_.format), plan_.center_hz};
     mismatch_.clear();
@@ -314,6 +318,21 @@ QStringList RecordingLink::paceOptions() const
         out.append(QString::fromLatin1(option.data(), static_cast<qsizetype>(option.size())));
     }
     return out;
+}
+
+void RecordingLink::setLoop(bool on)
+{
+    if (on == loop_) {
+        return;
+    }
+    loop_ = on;
+    if (persist_) {
+        QSettings().setValue(settings::kRecordingLoop, on);
+    }
+    if (playing_) {
+        engine_.setSourceLoop(on);
+    }
+    emit loopChanged();
 }
 
 void RecordingLink::setPace(const QString& option)
@@ -366,6 +385,7 @@ void RecordingLink::refresh_playback()
     sample.paced_by = engine_.sourcePacedBy();
     sample.realtime_factor = engine_.realtimeFactor();
     sample.running = engine_.engineRunning();
+    sample.loop = loop_;
     const PlaybackLine line = describe_playback(sample);
 
     // Compared once the engine's descriptor is for the URI this window sent,

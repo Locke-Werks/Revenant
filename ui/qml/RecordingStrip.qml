@@ -117,10 +117,15 @@ Rectangle {
             ink: Theme.inkWarn
         }
 
-        Label {
-            text: "plays once"
-            color: Theme.inkDim
-            font.pixelSize: Theme.sizeSmall
+        // Starts over at the end. Takes effect at once while playing and is
+        // kept for the next recording opened.
+        RButton {
+            flat: true
+            checkable: true
+            checked: recordingLink.loop
+            text: "loop"
+            ink: Theme.inkDim
+            onClicked: recordingLink.loop = !recordingLink.loop
         }
 
         // What the engine opened, when it is not what the picker read.
