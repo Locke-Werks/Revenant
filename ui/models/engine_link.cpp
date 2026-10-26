@@ -107,6 +107,13 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
     connect(this, &EngineLink::connectionChanged, this, &EngineLink::follow_span_for_view);
     connect(this, &EngineLink::receiverChanged, this, &EngineLink::check_receiver_in_view);
 
+    // Every strip and every span marker reads rackEntries[index], so one
+    // rackChanged used to rebuild the whole list once per reader. Connected
+    // ahead of QML, so the first reader after a change builds it and the
+    // rest share it.
+    connect(this, &EngineLink::rackChanged, this, [this] { rack_entries_valid_ = false; });
+    connect(this, &EngineLink::receiverChanged, this, [this] { rack_entries_valid_ = false; });
+
     // WHAT THE OPERATOR LEFT SET LAST TIME.
     //
     // Read in the constructor, which runs on the Qt thread before start()

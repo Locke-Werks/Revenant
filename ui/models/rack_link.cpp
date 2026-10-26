@@ -155,6 +155,9 @@ std::vector<RackMarker> EngineLink::rackMarkers() const
 
 QVariantList EngineLink::rackEntries() const
 {
+    if (rack_entries_valid_) {
+        return rack_entries_;
+    }
     QVariantList out;
     const std::vector<RackMarker> markers = rackMarkers();
     for (const RackEntry& entry : rack_.entries()) {
@@ -208,6 +211,8 @@ QVariantList EngineLink::rackEntries() const
             {QStringLiteral("owner"), QString::fromStdString(entry.owner)},
         });
     }
+    rack_entries_ = out;
+    rack_entries_valid_ = true;
     return out;
 }
 

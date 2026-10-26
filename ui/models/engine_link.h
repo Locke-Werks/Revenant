@@ -4239,6 +4239,10 @@ private:
 
     ReceiverRack rack_;
     std::vector<std::pair<std::uint64_t, HeldView>> held_views_;
+
+    // rackEntries as of the last rackChanged; see the constructor.
+    mutable QVariantList rack_entries_;
+    mutable bool rack_entries_valid_ = false;
     std::uint64_t pane_key_ = 0;
     QString rack_note_;
 
