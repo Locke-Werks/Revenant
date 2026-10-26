@@ -189,6 +189,16 @@ namespace settings = revenant::ui::settings;
 
 namespace {
 
+// USAGE at the top of this file, for --help and an unknown option.
+constexpr const char* kUsage =
+    "usage: revenant-ui [address] [port] [--every-nth N] [--smoke-seconds N]\n"
+    "                   [--receiver FREQ:MODE ...] [--decode NAME] [--rds]\n"
+    "                   [--grab-receivers FILE] [--grab-main FILE] [--grab-size WxH]\n"
+    "                   [--palette QUERY] [--keymap] [--frame-stats FILE] [--maximise]\n"
+    "                   [--on-top] [--memories FILE] [--panel NAME]\n"
+    "                   [--preview-import FILE] [--open-recording PATH[:CENTER] ...]\n"
+    "                   [--fake-transcripts]\n";
+
 // The port the engine and this window agree on without either naming one.
 // revenant-engine binds 17690 by default and says why in tools/engined/main.cpp,
 // which cites this constant; --port 0 there still binds whatever is free, for
@@ -586,6 +596,17 @@ int main(int argc, char* argv[])
                 return 2;
             }
             continue;
+        }
+        if (args[i] == QStringLiteral("--help") || args[i] == QStringLiteral("-h")) {
+            std::fputs(kUsage, stdout);
+            return 0;
+        }
+        // Anything else that looks like a flag is a mistake, not an address.
+        // It used to fall through to positional and be remembered as the
+        // engine address, so one mistyped flag broke every later launch.
+        if (args[i].startsWith(QLatin1Char('-'))) {
+            std::fprintf(stderr, "unknown option %s\n%s", qPrintable(args[i]), kUsage);
+            return 2;
         }
         positional.append(args[i]);
     }
