@@ -306,6 +306,56 @@ void PassbandWaterfallItem::shiftRows(int pixels)
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
 }
 
+void PassbandWaterfallItem::rescaleRows(const HistoryAxis& to, int columns)
+{
+    const int old_wide = history_.width();
+    const int tall = history_.height();
+    const int wide = std::max(columns, 1);
+    if (tall <= 0 || old_wide <= 0 || !axis_.valid() || !to.valid() ||
+        codes_.size() != static_cast<std::size_t>(old_wide) * static_cast<std::size_t>(tall)) {
+        axis_ = to;
+        clearRows();
+        return;
+    }
+    std::vector<std::uint16_t> codes(static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall),
+                                     kNoLevel);
+    for (int row = 0; row < tall; ++row) {
+        resample_row(codes_.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(old_wide),
+                     old_wide, axis_,
+                     codes.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(wide),
+                     wide, to, kNoLevel);
+    }
+    codes_ = std::move(codes);
+    axis_ = to;
+    if (wide != old_wide) {
+        history_ = QImage(wide, tall, QImage::Format_RGBX8888);
+        history_.fill(kBackground);
+        columns_.assign(static_cast<std::size_t>(wide), kSpectrumFloorDb);
+        split_columns_.assign(static_cast<std::size_t>(wide), kSpectrumFloorDb);
+    }
+    // Each row keeps its own scale; only its pixels moved.
+    recolourAll();
+}
+
+void PassbandWaterfallItem::resizeHistory(QSize wanted)
+{
+    if (wanted == history_.size()) {
+        return;
+    }
+    if (history_.isNull() || link_ == nullptr || !axis_.valid()) {
+        rebuild(wanted.width(), wanted.height());
+        return;
+    }
+    if (wanted.width() != history_.width()) {
+        rescaleRows(history_axis(link_->passbandFrequencyAtFraction(0.0),
+                                 link_->passbandFrequencyAtFraction(1.0), wanted.width()),
+                    wanted.width());
+    }
+    if (wanted.height() != history_.height()) {
+        resizeRows(wanted.height());
+    }
+}
+
 void PassbandWaterfallItem::geometryChange(const QRectF& new_geometry,
                                            const QRectF& old_geometry)
 {
@@ -313,13 +363,7 @@ void PassbandWaterfallItem::geometryChange(const QRectF& new_geometry,
     if (new_geometry.size() == old_geometry.size()) {
         return;
     }
-    const QSize wanted = deviceSize();
-    if (!history_.isNull() && wanted.width() == history_.width() &&
-        wanted.height() != history_.height()) {
-        resizeRows(wanted.height());
-    } else if (wanted != history_.size()) {
-        rebuild(wanted.width(), wanted.height());
-    }
+    resizeHistory(deviceSize());
     update();
 }
 
@@ -351,13 +395,7 @@ void PassbandWaterfallItem::takeFrame()
     }
 
     const QSize wanted = deviceSize();
-    if (history_.size() != wanted) {
-        if (!history_.isNull() && wanted.width() == history_.width()) {
-            resizeRows(wanted.height());
-        } else {
-            rebuild(wanted.width(), wanted.height());
-        }
-    }
+    resizeHistory(wanted);
     const int wide = history_.width();
     const int tall = history_.height();
 
@@ -371,7 +409,11 @@ void PassbandWaterfallItem::takeFrame()
     const HistoryShift plan =
         plan_history_shift(axis_, link_->passbandFrequencyAtFraction(0.0),
                            link_->passbandFrequencyAtFraction(1.0), wide);
-    if (plan.reset) {
+    if (plan.reset && !plan.beyond && axis_.valid()) {
+        // A rung change: the same band at another hertz per pixel, redrawn
+        // rather than thrown away.
+        rescaleRows(plan.axis, wide);
+    } else if (plan.reset) {
         clearRows();
     } else {
         shiftRows(plan.shift_px);

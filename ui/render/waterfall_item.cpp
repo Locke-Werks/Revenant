@@ -471,11 +471,12 @@ void WaterfallItem::geometryChange(const QRectF& newGeometry, const QRectF& oldG
     // own layout settled in a second pass. The pane is in a window of its
     // own since 2026-09-22; the status banner above the span opens and
     // closes the same way now, so the case is as ordinary as it was.
-    if (wanted.width() == history_.width() && wanted.height() != history_.height()) {
-        resizeRows(wanted.height());
-    } else if (wanted != history_.size()) {
-        rebuild(wanted.width(), wanted.height(), reduced_bins_);
-    }
+    //
+    // A WIDTH CHANGE NO LONGER THROWS THE ROWS AWAY EITHER. The rows are kept
+    // as levels on a known axis, so they are redrawn onto the new width the
+    // way a zoom redraws them; render/history_shift.h has the rule. Only a
+    // history with no axis yet is rebuilt.
+    resizeHistory(wanted);
 
     rebuildOverlay();
     update();
@@ -578,9 +579,6 @@ void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
     tile_dirty_.assign(static_cast<std::size_t>(tiles), std::uint8_t{1});
     tile_ends_.assign(static_cast<std::size_t>(tiles), ends_);
 
-    columns_.assign(static_cast<std::size_t>(wide), kSpectrumFloorDb);
-    reduced_bins_ = bins;
-
     // The rows are gone, so the axis they were on and the boxes drawn over
     // them go too. The next frame starts both again. The captions go with
     // them for the boxes' reason: pinned to rows that no longer exist, every
@@ -589,13 +587,74 @@ void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
     box_history_.clear();
     clearCaptions();
 
+    resetReduction(wide, bins);
+    emit endsChanged();
+}
+
+void WaterfallItem::resetReduction(int columns, std::size_t bins)
+{
+    const int wide = std::max(columns, 1);
+    columns_.assign(static_cast<std::size_t>(wide), kSpectrumFloorDb);
+    reduced_bins_ = bins;
     const std::size_t bins_per_column =
         bins == 0 ? 1
                   : std::max<std::size_t>(
                         1, (link_ == nullptr ? bins : link_->viewBins(bins).count()) /
                                static_cast<std::size_t>(wide));
     headroom_db_ = peak_reduction_headroom_db(bins_per_column);
-    emit endsChanged();
+}
+
+void WaterfallItem::resizeHistory(QSize wanted)
+{
+    if (wanted == history_.size()) {
+        return;
+    }
+    if (history_.isNull() || link_ == nullptr || !axis_.valid()) {
+        rebuild(wanted.width(), wanted.height(), reduced_bins_);
+        return;
+    }
+    if (wanted.width() != history_.width()) {
+        rescaleRows(history_axis(link_->viewLowHz(), link_->viewHighHz(), wanted.width()),
+                    wanted.width());
+    }
+    if (wanted.height() != history_.height()) {
+        resizeRows(wanted.height());
+    }
+}
+
+void WaterfallItem::rescaleRows(const HistoryAxis& to, int columns)
+{
+    const int old_wide = history_.width();
+    const int tall = history_.height();
+    const int wide = std::max(columns, 1);
+    if (tall <= 0 || old_wide <= 0 || !axis_.valid() || !to.valid() ||
+        codes_.size() != static_cast<std::size_t>(old_wide) * static_cast<std::size_t>(tall)) {
+        clearHistory();
+        return;
+    }
+
+    std::vector<std::uint16_t> codes(static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall),
+                                     kNoLevel);
+    for (int row = 0; row < tall; ++row) {
+        resample_row(codes_.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(old_wide),
+                     old_wide, axis_,
+                     codes.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(wide),
+                     wide, to, kNoLevel);
+    }
+    codes_ = std::move(codes);
+    axis_ = to;
+
+    if (wide != old_wide) {
+        history_ = QImage(wide, tall, QImage::Format_RGBX8888);
+        history_.fill(kBackground);
+        resetReduction(wide, reduced_bins_);
+    }
+    std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
+
+    // The pixels are recoloured from the moved levels against the ends in
+    // force, as a height change does.
+    rebuildHistogram();
+    recolourAll();
 }
 
 void WaterfallItem::clearHistory()
@@ -867,10 +926,13 @@ void WaterfallItem::followAxis()
             std::fill(codes_.begin(), codes_.end(), kNoLevel);
             histogram_.clear();
         } else if (axis_.valid()) {
-            // Hertz per pixel changed with the width and the bins unchanged,
-            // which only a new span does: a different picture, so a fresh
-            // history. A first frame, with no axis yet, has nothing to clear.
-            clearHistory();
+            // Hertz per pixel changed, a zoom or a new span: the rows are
+            // redrawn on the new axis rather than thrown away. A first frame,
+            // with no axis yet, has nothing to move.
+            //
+            // WHAT THIS USED TO DO: clearHistory(), so every zoom was a blank
+            // waterfall.
+            rescaleRows(plan.axis, history_.width());
         }
     } else if (plan.shift_px != 0) {
         shiftRows(plan.shift_px);
@@ -1301,9 +1363,13 @@ void WaterfallItem::takeFrame()
     const QSize wanted = deviceSize();
     const int wide = wanted.width();
     const int tall = wanted.height();
-    if (history_.width() != wide || history_.height() != tall ||
-        reduced_bins_ != frame.power_db.size()) {
-        rebuild(wide, tall, frame.power_db.size());
+    if (history_.width() != wide || history_.height() != tall) {
+        resizeHistory(wanted);
+    }
+    // A new bin count is a new reduction over the same hertz, so the stored
+    // rows, which are on an axis in hertz, still stand.
+    if (reduced_bins_ != frame.power_db.size()) {
+        resetReduction(wide, frame.power_db.size());
     }
 
     // Onto the axis this frame is drawn against, before its row goes in, so

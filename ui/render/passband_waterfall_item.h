@@ -154,6 +154,14 @@ private:
     // Moves every stored row sideways; see render/history_shift.h.
     void shiftRows(int pixels);
 
+    // Redraws every stored row onto a new axis and width, for a rung change
+    // or a width change; render/history_shift.h has the rule.
+    void rescaleRows(const HistoryAxis& to, int columns);
+
+    // Brings the ring to `wanted` device pixels, keeping the rows wherever
+    // there is an axis to keep them on.
+    void resizeHistory(QSize wanted);
+
     // Forgets every row without reallocating.
     void clearRows();
 

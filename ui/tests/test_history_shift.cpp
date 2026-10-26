@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 #include "render/history_shift.h"
 
@@ -203,4 +204,107 @@ TEST_CASE("shift_row moves pixels and fills what comes in from outside", "[histo
     shift_row(still, 3, 0, kFill);
     CHECK(still[0] == 7);
     CHECK(still[2] == 9);
+}
+
+// resample_row: what a zoom or a width change does to a stored row.
+
+TEST_CASE("a narrower row keeps the loudest of what each pixel covers", "[historyshift]")
+{
+    // Rejects averaging or taking the first, which would dim a one-pixel
+    // signal or lose it at every zoom out.
+    using revenant::ui::resample_row;
+    const std::uint16_t from[6] = {1, 9, 2, 2, 7, 3};
+    std::uint16_t to[3] = {};
+    resample_row(from, 6, HistoryAxis{0.0, 10.0}, to, 3, HistoryAxis{0.0, 20.0},
+                 std::uint16_t{0});
+    CHECK(to[0] == 9);
+    CHECK(to[1] == 2);
+    CHECK(to[2] == 7);
+}
+
+TEST_CASE("a wider row repeats each pixel where it was", "[historyshift]")
+{
+    // Rejects a stretch that shifts the row by half a pixel.
+    using revenant::ui::resample_row;
+    const std::uint16_t from[3] = {4, 5, 6};
+    std::uint16_t to[6] = {};
+    resample_row(from, 3, HistoryAxis{0.0, 20.0}, to, 6, HistoryAxis{0.0, 10.0},
+                 std::uint16_t{0});
+    const std::uint16_t want[6] = {4, 4, 5, 5, 6, 6};
+    for (int c = 0; c < 6; ++c) {
+        CHECK(to[c] == want[c]);
+    }
+}
+
+TEST_CASE("what the old axis never covered is the fill", "[historyshift]")
+{
+    // Rejects clamping to the edge pixel, which would smear the last column
+    // across hertz nothing was measured at.
+    using revenant::ui::resample_row;
+    const std::uint16_t from[4] = {3, 3, 3, 3};
+    std::uint16_t to[4] = {};
+    resample_row(from, 4, HistoryAxis{100.0, 10.0}, to, 4, HistoryAxis{80.0, 20.0},
+                 std::uint16_t{0});
+    CHECK(to[0] == 0);
+    CHECK(to[1] == 3);
+    CHECK(to[2] == 3);
+    CHECK(to[3] == 0);
+}
+
+TEST_CASE("the same axis is a copy", "[historyshift]")
+{
+    // Rejects an edge slack wide enough to take a neighbour.
+    using revenant::ui::resample_row;
+    const std::uint16_t from[5] = {1, 2, 3, 4, 5};
+    std::uint16_t to[5] = {};
+    resample_row(from, 5, HistoryAxis{50.0, 7.0}, to, 5, HistoryAxis{50.0, 7.0},
+                 std::uint16_t{0});
+    for (int c = 0; c < 5; ++c) {
+        CHECK(to[c] == from[c]);
+    }
+}
+
+TEST_CASE("a spike lands at its own hertz at an uneven ratio", "[historyshift]")
+{
+    // Rejects index scaling that ignores the axes, which drifts a signal
+    // across the row as the ratio departs from a whole number.
+    using revenant::ui::resample_row;
+    std::uint16_t from[30] = {};
+    from[21] = 100;  // 210 to 220 Hz
+    std::uint16_t to[20] = {};
+    resample_row(from, 30, HistoryAxis{0.0, 10.0}, to, 20, HistoryAxis{0.0, 15.0},
+                 std::uint16_t{0});
+    for (int c = 0; c < 20; ++c) {
+        // Pixel 14 spans 210 to 225 Hz.
+        CHECK(to[c] == (c == 14 ? 100 : 0));
+    }
+}
+
+TEST_CASE("a drag narrower one pixel at a time does not widen a signal", "[historyshift]")
+{
+    // Rejects taking every overlapped pixel, which widened a signal by a
+    // pixel at each step of a drag.
+    using revenant::ui::HistoryAxis;
+    using revenant::ui::history_axis;
+    using revenant::ui::resample_row;
+    constexpr double kSpanLow = 851'000'000.0;
+    constexpr double kSpanHigh = 853'400'000.0;
+    std::vector<std::uint16_t> row(1400, 0);
+    row[700] = 100;
+    row[701] = 100;
+    HistoryAxis axis = history_axis(kSpanLow, kSpanHigh, 1400);
+    for (int wide = 1399; wide >= 700; --wide) {
+        const HistoryAxis next = history_axis(kSpanLow, kSpanHigh, wide);
+        std::vector<std::uint16_t> out(static_cast<std::size_t>(wide), 0);
+        resample_row(row.data(), static_cast<int>(row.size()), axis, out.data(), wide, next,
+                     std::uint16_t{0});
+        row = std::move(out);
+        axis = next;
+    }
+    int lit = 0;
+    for (const std::uint16_t cell : row) {
+        lit += cell != 0 ? 1 : 0;
+    }
+    CHECK(lit >= 1);
+    CHECK(lit <= 2);
 }
