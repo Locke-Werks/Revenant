@@ -74,6 +74,7 @@ void PersistenceItem::setMapPins(ScaleSettings* pins)
         };
         connect(map_pins_, &ScaleSettings::waterfallContrastChanged, this, recolour);
         connect(map_pins_, &ScaleSettings::waterfallPivotChanged, this, recolour);
+        connect(map_pins_, &ScaleSettings::waterfallThemeChanged, this, recolour);
     }
     emit mapPinsChanged();
 }
@@ -182,10 +183,10 @@ void PersistenceItem::buildImage()
         image_ = QImage(wide, tall, QImage::Format_RGBX8888);
     }
 
-    const std::uint32_t background = pack_rgbx(colour_map::kBottom);
+    const std::uint32_t background = pack_rgbx(colour_map::bottom());
     const float peak = grid_.peak();
     if (grid_.columns() == 0 || !(peak > 0.0F)) {
-        image_.fill(QColor(colour_map::kBottom.r, colour_map::kBottom.g, colour_map::kBottom.b));
+        image_.fill(QColor(colour_map::bottom().r, colour_map::bottom().g, colour_map::bottom().b));
         image_dirty_ = true;
         return;
     }

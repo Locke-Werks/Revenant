@@ -22,6 +22,7 @@
 #include <QElapsedTimer>
 #include <QObject>
 #include <QSettings>
+#include <QStringList>
 #include <QtQmlIntegration>
 
 #include "models/settings.h"
@@ -45,6 +46,14 @@ class ScaleSettings : public QObject {
                    NOTIFY waterfallPivotChanged)
     Q_PROPERTY(bool waterfallAutoPivot READ waterfallAutoPivot WRITE setWaterfallAutoPivot
                    NOTIFY waterfallAutoPivotChanged)
+    // The colour map theme, an index into waterfallThemeNames; every span
+    // display and the passband waterfall draw with it.
+    Q_PROPERTY(int waterfallTheme READ waterfallTheme WRITE setWaterfallTheme
+                   NOTIFY waterfallThemeChanged)
+    Q_PROPERTY(QStringList waterfallThemeNames READ waterfallThemeNames CONSTANT)
+    // The OLED black interface: qml/Theme.qml draws every surface #000000 and
+    // the colour map's bottom drops to black with it.
+    Q_PROPERTY(bool oledBlack READ oledBlack WRITE setOledBlack NOTIFY oledBlackChanged)
     Q_PROPERTY(double spectrumRangeFit READ spectrumRangeFit WRITE setSpectrumRangeFit
                    NOTIFY spectrumRangeFitChanged)
     Q_PROPERTY(double spectrumSmoothing READ spectrumSmoothing WRITE setSpectrumSmoothing
@@ -90,6 +99,58 @@ public:
         time_marker_seconds_ =
             clamp_marker_seconds(store.value(settings::kTimeMarkerSeconds, 0).toInt());
         show_audio_strip_ = store.value(settings::kShowAudioStrip, true).toBool();
+        colour_map::set_theme(colour_map::theme_by_id(
+            store.value(settings::kWaterfallTheme).toString().toStdString()));
+        colour_map::set_black_bottom(store.value(settings::kOledBlack, false).toBool());
+    }
+
+    [[nodiscard]] static bool oledBlack() { return colour_map::black_bottom(); }
+
+    // Recolours like a theme change, since the map's bottom moves with it.
+    void setOledBlack(bool on)
+    {
+        if (on == oledBlack()) {
+            return;
+        }
+        colour_map::set_black_bottom(on);
+        QSettings().setValue(settings::kOledBlack, on);
+        emit oledBlackChanged();
+        emit waterfallThemeChanged();
+    }
+
+    [[nodiscard]] static int waterfallTheme()
+    {
+        return static_cast<int>(colour_map::theme_index());
+    }
+
+    void setWaterfallTheme(int index)
+    {
+        if (index < 0 || index >= static_cast<int>(colour_map::kThemeCount) ||
+            index == waterfallTheme()) {
+            return;
+        }
+        colour_map::set_theme(static_cast<std::size_t>(index));
+        QSettings().setValue(settings::kWaterfallTheme,
+                             QString::fromLatin1(colour_map::kThemes[index].id));
+        emit waterfallThemeChanged();
+    }
+
+    [[nodiscard]] static QStringList waterfallThemeNames()
+    {
+        QStringList names;
+        for (const colour_map::Theme& theme : colour_map::kThemes) {
+            names.append(QString::fromLatin1(theme.name));
+        }
+        return names;
+    }
+
+    // A theme's colour at a point of the map, for the swatches in the picker.
+    Q_INVOKABLE static QColor themeColourAt(int theme, double x)
+    {
+        const colour_map::Srgb8 c = colour_map::colour_at(
+            static_cast<float>(x), theme < 0 ? colour_map::kDefaultTheme
+                                             : static_cast<std::size_t>(theme));
+        return QColor(c.r, c.g, c.b);
     }
 
     // One of the offered intervals, the nearest below for anything else.
@@ -315,6 +376,8 @@ signals:
     void waterfallContrastChanged();
     void waterfallPivotChanged();
     void waterfallAutoPivotChanged();
+    void waterfallThemeChanged();
+    void oledBlackChanged();
     void spectrumRangeFitChanged();
     void spectrumSmoothingChanged();
     void captionZoomChanged();

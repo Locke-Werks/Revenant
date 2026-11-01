@@ -112,6 +112,50 @@ TEST_CASE("the map never passes through the detection magenta", "[colourmap]")
     }
 }
 
+// Every theme, on either bottom, keeps the rules the default keeps. Rejects a
+// theme with its own lightness ramp, which the HDR shader would lift at the
+// wrong levels, and one that strays near the detection magenta.
+TEST_CASE("every theme rises linearly from its bottom and avoids the magenta", "[colourmap]")
+{
+    const cm::Lab tune = cm::srgb8_to_oklab(cm::Srgb8{0xff, 0x58, 0xc8});
+    const double tune_hue = std::atan2(tune.b, tune.a) * 180.0 / 3.14159265358979323846;
+    for (std::size_t theme = 0; theme < cm::kThemeCount; ++theme) {
+        for (const bool black : {false, true}) {
+            const double bottom = cm::srgb8_to_oklab(cm::bottom(black)).l;
+            double previous = -1.0;
+            for (int i = 0; i < 256; ++i) {
+                const double level = static_cast<double>(i) / 255.0;
+                const cm::Lab lab = cm::oklab_at(level, theme, black);
+                INFO(cm::kThemes[theme].id << (black ? " black " : " ") << i);
+                CHECK_THAT(lab.l, WithinAbs(bottom + (cm::kTopLightness - bottom) * level, 1e-9));
+                CHECK(lab.l > previous);
+                previous = lab.l;
+                const double chroma = std::hypot(lab.a, lab.b);
+                if (chroma >= 0.03) {
+                    double gap = std::fabs(std::atan2(lab.b, lab.a) * 180.0 / 3.14159265358979323846 -
+                                           tune_hue);
+                    gap = std::fmin(gap, 360.0 - gap);
+                    CHECK(gap > 60.0);
+                }
+            }
+            const cm::Srgb8 first = cm::table(theme, black).front();
+            const cm::Srgb8 want = cm::bottom(black);
+            CHECK((first.r == want.r && first.g == want.g && first.b == want.b));
+        }
+    }
+}
+
+// Rejects an id that does not round-trip, which would lose the operator's
+// choice at the next launch, and an unknown id that is not the default.
+TEST_CASE("themes are found by id", "[colourmap]")
+{
+    for (std::size_t theme = 0; theme < cm::kThemeCount; ++theme) {
+        CHECK(cm::theme_by_id(cm::kThemes[theme].id) == theme);
+    }
+    CHECK(cm::theme_by_id("no such theme") == cm::kDefaultTheme);
+    CHECK(cm::theme_by_id("") == cm::kDefaultTheme);
+}
+
 // The displays read the map through spectrum_scale.h's colour_at, so the two
 // must be the same function.
 TEST_CASE("the span displays read this map", "[colourmap]")

@@ -94,17 +94,20 @@ inline constexpr float kLevelCodesPerDb = 64.0F;
 
 using PackedPalette = std::array<std::uint32_t, colour_map::kTableSize>;
 
+// The palette of the theme in force; every theme is packed once, together.
 [[nodiscard]] inline const PackedPalette& packed_palette()
 {
-    static const PackedPalette built = [] {
-        PackedPalette packed{};
-        const colour_map::Table& table = colour_map::table();
-        for (std::size_t i = 0; i < packed.size(); ++i) {
-            packed[i] = pack_rgbx(table[i]);
+    static const std::array<PackedPalette, colour_map::kTableCount> built = [] {
+        std::array<PackedPalette, colour_map::kTableCount> all{};
+        const auto& tables = colour_map::all_tables();
+        for (std::size_t slot = 0; slot < all.size(); ++slot) {
+            for (std::size_t i = 0; i < tables[slot].size(); ++i) {
+                all[slot][i] = pack_rgbx(tables[slot][i]);
+            }
         }
-        return packed;
+        return all;
     }();
-    return built;
+    return built[colour_map::table_slot(colour_map::theme_index(), colour_map::black_bottom())];
 }
 
 // The contrast past 1 as a colourist's S: an amount and a pivot, the pivot a
@@ -155,7 +158,7 @@ class CodeColourer {
 public:
     explicit CodeColourer(const MapEnds& ends, const ContrastCurve& curve = {})
         : palette_(packed_palette()),
-          background_(pack_rgbx(colour_map::kBottom))
+          background_(pack_rgbx(colour_map::bottom()))
     {
         // The curve is folded into a palette of its own, so the per-pixel
         // work is the same with it as without.

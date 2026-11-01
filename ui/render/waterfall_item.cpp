@@ -98,7 +98,11 @@ const QColor kCaptionInkDim(0x6f, 0x7b, 0x8c);
 // and not pure black, so the bottom of the colour map is still
 // distinguishable from nothing drawn." It was (4, 6, 16), which was also the
 // old map's own bottom stop, so the two were never distinguishable.
-const QColor kBackground(colour_map::kBottom.r, colour_map::kBottom.g, colour_map::kBottom.b);
+QColor map_background()
+{
+    const colour_map::Srgb8 c = colour_map::bottom();
+    return QColor(c.r, c.g, c.b);
+}
 
 // The item's own node, so the parts are named rather than fetched back out
 // of the child list by index.
@@ -279,6 +283,8 @@ void WaterfallItem::setMapPins(ScaleSettings* pins)
         drawn_pivot_ = static_cast<float>(map_pins_->waterfallPivot());
         connect(map_pins_, &ScaleSettings::waterfallPivotChanged, this,
                 &WaterfallItem::onPivotChanged);
+        connect(map_pins_, &ScaleSettings::waterfallThemeChanged, this,
+                &WaterfallItem::onPinsChanged);
         // A caption held while the zoom moves is grown again at the new size.
         connect(map_pins_, &ScaleSettings::captionZoomChanged, this, [this] {
             if (const std::uint64_t held = captions_.frozen(); held != 0) {
@@ -330,7 +336,7 @@ void WaterfallItem::keepScrubRow(int wide)
     }
     if (scrub_ring_.width() != wide) {
         scrub_ring_ = QImage(wide, kScrubRows, QImage::Format_RGBX8888);
-        scrub_ring_.fill(kBackground);
+        scrub_ring_.fill(map_background());
         scrub_ms_.assign(kScrubRows, 0);
         scrub_write_ = 0;
         scrub_filled_ = 0;
@@ -354,7 +360,7 @@ void WaterfallItem::buildScrubView()
     if (scrub_view_.width() != wide || scrub_view_.height() != tall) {
         scrub_view_ = QImage(wide, tall, QImage::Format_RGBX8888);
     }
-    scrub_view_.fill(kBackground);
+    scrub_view_.fill(map_background());
     if (scrub_ring_.width() != wide || scrub_filled_ == 0) {
         return;
     }
@@ -492,7 +498,7 @@ void WaterfallItem::resizeRows(int rows)
         plan_history_resize(old_tall, write_row_, filled_rows_, tall);
 
     QImage fresh(wide, tall, QImage::Format_RGBX8888);
-    fresh.fill(kBackground);
+    fresh.fill(map_background());
     std::vector<RowSpan> spans(static_cast<std::size_t>(tall), RowSpan{});
     std::vector<std::uint16_t> codes(static_cast<std::size_t>(wide) * static_cast<std::size_t>(tall),
                                      kNoLevel);
@@ -560,7 +566,7 @@ void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
     // way to the GPU, which would be a second pass over every tile uploaded.
     // No alpha channel, so the history composites without blending.
     history_ = QImage(wide, tall, QImage::Format_RGBX8888);
-    history_.fill(kBackground);
+    history_.fill(map_background());
 
     // The cursor decrements, so it starts at the last row and the first
     // frame written lands there. The display reads from just past it, which
@@ -646,7 +652,7 @@ void WaterfallItem::rescaleRows(const HistoryAxis& to, int columns)
 
     if (wide != old_wide) {
         history_ = QImage(wide, tall, QImage::Format_RGBX8888);
-        history_.fill(kBackground);
+        history_.fill(map_background());
         resetReduction(wide, reduced_bins_);
     }
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
@@ -660,7 +666,7 @@ void WaterfallItem::rescaleRows(const HistoryAxis& to, int columns)
 void WaterfallItem::clearHistory()
 {
     if (!history_.isNull()) {
-        history_.fill(kBackground);
+        history_.fill(map_background());
     }
     write_row_ = std::max(history_.height() - 1, 0);
     filled_rows_ = 0;
@@ -921,7 +927,7 @@ void WaterfallItem::followAxis()
             // more, but every row still stands for the time it was written at,
             // so the pixels go and the sample ranges stay, and the boxes, which
             // are in absolute hertz, fall off the edge on their own.
-            history_.fill(kBackground);
+            history_.fill(map_background());
             std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
             std::fill(codes_.begin(), codes_.end(), kNoLevel);
             histogram_.clear();
@@ -947,9 +953,9 @@ void WaterfallItem::shiftRows(int pixels)
         return;
     }
     const auto background = static_cast<std::uint32_t>(
-        0xFF000000U | (static_cast<std::uint32_t>(kBackground.blue()) << 16U) |
-        (static_cast<std::uint32_t>(kBackground.green()) << 8U) |
-        static_cast<std::uint32_t>(kBackground.red()));
+        0xFF000000U | (static_cast<std::uint32_t>(map_background().blue()) << 16U) |
+        (static_cast<std::uint32_t>(map_background().green()) << 8U) |
+        static_cast<std::uint32_t>(map_background().red()));
     for (int row = 0; row < history_.height(); ++row) {
         shift_row(reinterpret_cast<std::uint32_t*>(history_.scanLine(row)), wide, pixels,
                   background);
@@ -1656,7 +1662,7 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
     if (node == nullptr) {
         node = new WaterfallNode;
         node->background = window()->createRectangleNode();
-        node->background->setColor(kBackground);
+        node->background->setColor(map_background());
         node->tiles = new QSGNode;
         node->overlay = new OverlayNode;
         node->caption_quads = new OverlayNode;

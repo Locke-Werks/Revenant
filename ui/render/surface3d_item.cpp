@@ -73,6 +73,7 @@ void Surface3DItem::setMapPins(ScaleSettings* pins)
         connect(map_pins_, &ScaleSettings::waterfallContrastChanged, this,
                 [this] { update(); });
         connect(map_pins_, &ScaleSettings::waterfallPivotChanged, this, [this] { update(); });
+        connect(map_pins_, &ScaleSettings::waterfallThemeChanged, this, [this] { update(); });
     }
     emit mapPinsChanged();
 }
@@ -175,7 +176,7 @@ QSGNode* Surface3DItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
         node = new SurfaceNode;
         node->background = window()->createRectangleNode();
         node->background->setColor(
-            QColor(colour_map::kBottom.r, colour_map::kBottom.g, colour_map::kBottom.b));
+            QColor(colour_map::bottom().r, colour_map::bottom().g, colour_map::bottom().b));
         node->appendChildNode(node->background);
 
         node->mesh = new QSGGeometryNode;

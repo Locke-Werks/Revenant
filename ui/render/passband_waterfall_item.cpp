@@ -26,7 +26,11 @@ namespace {
 // Rows per uploaded tile, as on the span waterfall and for the same trade.
 constexpr int kTileRows = 64;
 
-const QColor kBackground(colour_map::kBottom.r, colour_map::kBottom.g, colour_map::kBottom.b);
+QColor map_background()
+{
+    const colour_map::Srgb8 c = colour_map::bottom();
+    return QColor(c.r, c.g, c.b);
+}
 
 // Owns the tile textures, which may only be destroyed on the render thread;
 // see the same class in render/waterfall_item.cpp.
@@ -140,6 +144,8 @@ void PassbandWaterfallItem::setScaleSettings(ScaleSettings* settings)
                 &PassbandWaterfallItem::recolourAll);
         connect(scale_settings_, &ScaleSettings::waterfallPivotChanged, this,
                 &PassbandWaterfallItem::recolourAll);
+        connect(scale_settings_, &ScaleSettings::waterfallThemeChanged, this,
+                &PassbandWaterfallItem::recolourAll);
     }
     recolourAll();
     emit scaleSettingsChanged();
@@ -243,7 +249,7 @@ void PassbandWaterfallItem::rebuild(int columns, int rows)
 void PassbandWaterfallItem::clearRows()
 {
     if (!history_.isNull()) {
-        history_.fill(kBackground);
+        history_.fill(map_background());
     }
     write_row_ = std::max(history_.height() - 1, 0);
     filled_rows_ = 0;
@@ -263,7 +269,7 @@ void PassbandWaterfallItem::resizeRows(int rows)
     const HistoryRemap plan = plan_history_resize(old_tall, write_row_, filled_rows_, tall);
 
     QImage fresh(wide, tall, QImage::Format_RGBX8888);
-    fresh.fill(kBackground);
+    fresh.fill(map_background());
     const auto row_cells = static_cast<std::size_t>(wide);
     std::vector<std::uint16_t> codes(row_cells * static_cast<std::size_t>(tall), kNoLevel);
     std::vector<PassbandRowScale> scales(static_cast<std::size_t>(tall), PassbandRowScale{});
@@ -294,9 +300,9 @@ void PassbandWaterfallItem::shiftRows(int pixels)
         return;
     }
     const auto background = static_cast<std::uint32_t>(
-        0xFF000000U | (static_cast<std::uint32_t>(kBackground.blue()) << 16U) |
-        (static_cast<std::uint32_t>(kBackground.green()) << 8U) |
-        static_cast<std::uint32_t>(kBackground.red()));
+        0xFF000000U | (static_cast<std::uint32_t>(map_background().blue()) << 16U) |
+        (static_cast<std::uint32_t>(map_background().green()) << 8U) |
+        static_cast<std::uint32_t>(map_background().red()));
     for (int row = 0; row < history_.height(); ++row) {
         shift_row(reinterpret_cast<std::uint32_t*>(history_.scanLine(row)), wide, pixels,
                   background);
@@ -329,7 +335,7 @@ void PassbandWaterfallItem::rescaleRows(const HistoryAxis& to, int columns)
     axis_ = to;
     if (wide != old_wide) {
         history_ = QImage(wide, tall, QImage::Format_RGBX8888);
-        history_.fill(kBackground);
+        history_.fill(map_background());
         columns_.assign(static_cast<std::size_t>(wide), kSpectrumFloorDb);
         split_columns_.assign(static_cast<std::size_t>(wide), kSpectrumFloorDb);
     }
@@ -479,7 +485,7 @@ QSGNode* PassbandWaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNo
     if (node == nullptr) {
         node = new PassbandWaterfallNode;
         node->background = window()->createRectangleNode();
-        node->background->setColor(kBackground);
+        node->background->setColor(map_background());
         node->tiles = new QSGNode;
         node->markers = new TimeMarkerNode;
         node->appendChildNode(node->background);

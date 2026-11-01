@@ -1799,7 +1799,6 @@ QSGNode* SpectrumItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
 
         // Opaque and covering the item, so the scene graph composites this
         // without reading what is behind it.
-        node->background->setColor(QColor(8, 10, 14));
         node->grid = new OverlayNode;
         node->fill = new SpectrumFillNode;
         node->noise = new OverlayNode;
@@ -1814,6 +1813,8 @@ QSGNode* SpectrumItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
         node->appendChildNode(node->overlay);
     }
 
+    // Pure black under the OLED interface, where an unlit pixel is the point.
+    node->background->setColor(colour_map::black_bottom() ? QColor(0, 0, 0) : QColor(8, 10, 14));
     node->background->setRect(0.0, 0.0, w, h);
     node->fill->ensureGradient(window());
 

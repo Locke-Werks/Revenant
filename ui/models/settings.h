@@ -124,6 +124,10 @@ inline constexpr QLatin1StringView kWaterfallPivot{"display/waterfallPivot"};
 // automatic value is never written over kWaterfallPivot, so turning this off
 // goes back to the operator's hand-set pivot.
 inline constexpr QLatin1StringView kWaterfallAutoPivot{"display/waterfallAutoPivot"};
+// The colour map theme, by its id in render/colour_map.h kThemes.
+inline constexpr QLatin1StringView kWaterfallTheme{"display/waterfallTheme"};
+// The OLED black interface; models/scale_settings.h oledBlack.
+inline constexpr QLatin1StringView kOledBlack{"display/oledBlack"};
 inline constexpr QLatin1StringView kSpectrumRangeFit{"display/spectrumRangeFit"};
 
 // The spectrum trace's smoothing: the release time in seconds, zero for off,

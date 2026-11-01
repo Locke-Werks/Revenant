@@ -51,9 +51,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace revenant::ui::colour_map {
 
@@ -72,6 +74,35 @@ struct Srgb8 {
 // Theme.background in qml/Theme.qml, #06080e. The bottom of the map is this
 // colour exactly, so the two have to be changed together.
 inline constexpr Srgb8 kBottom{6, 8, 14};
+
+// The bottom under the OLED black interface, where Theme.background is
+// #000000: an empty band is then an unlit pixel. The lightness ramp starts
+// from whichever bottom is in force, so it stays linear either way.
+inline constexpr Srgb8 kBlackBottom{0, 0, 0};
+
+// Whether the black bottom is in force; set from ScaleSettings with the theme.
+inline std::atomic<bool> g_black{false};
+
+[[nodiscard]] inline bool black_bottom()
+{
+    return g_black.load(std::memory_order_relaxed);
+}
+
+inline void set_black_bottom(bool on)
+{
+    g_black.store(on, std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline Srgb8 bottom(bool black)
+{
+    return black ? kBlackBottom : kBottom;
+}
+
+// The bottom in force, which every display fills an empty row with.
+[[nodiscard]] inline Srgb8 bottom()
+{
+    return bottom(black_bottom());
+}
 
 // The lightness the top of the map reaches, and the hue and chroma it has
 // there.
@@ -140,13 +171,120 @@ struct ControlPoint {
     double chroma;
 };
 
-// Everything but the two ends, which come from kBottom and the kTop constants.
-inline constexpr std::array<ControlPoint, 4> kInterior{{
-    {0.20, 250.0, 0.10},
-    {0.45, 200.0, 0.12},
-    {0.70, 135.0, 0.17},
-    {0.88, 100.0, 0.15},
+// ---------------------------------------------------------------------------
+// Themes
+// ---------------------------------------------------------------------------
+//
+// The operator picks one of these; the owner asked for a wide choice on
+// 2026-10-31. Every theme is a path of the same kind as the one described at
+// the top: the lightness ramp is shared and only hue and chroma differ. Three
+// things depend on that and would break for a theme that did otherwise:
+//
+//   the ramp is linear, so equal steps in level look like equal steps in
+//   brightness whatever the theme;
+//   shaders/hdr_map.frag recovers the level from a texel's lightness against
+//   kBottom and kTopLightness, so a theme with another ramp would be lifted
+//   at the wrong levels on an HDR display;
+//   the bottom is the window background, so an empty band recedes.
+//
+// And every theme keeps more than 60 degrees of hue away from the detection
+// magenta wherever it has visible chroma, for the reason given above. That
+// rules out the purple-through-red heat maps; the warm themes start at orange.
+//
+// The first stretch, from the background to a theme's first control point, is
+// interpolated in a and b rather than in hue, so a theme whose first hue is
+// far round the circle from the background's blue does not sweep through
+// every hue between them on the way; it passes near grey instead, where the
+// chroma is small anyway.
+
+inline constexpr std::size_t kMaxInterior = 6;
+
+struct Theme {
+    const char* id;    // stored in the settings; never change one
+    const char* name;  // shown to the operator
+    std::size_t count;
+    std::array<ControlPoint, kMaxInterior> interior;
+    double top_hue;
+    double top_chroma;
+};
+
+inline constexpr std::array<Theme, 14> kThemes{{
+    // The original map, and the default.
+    {"aurora", "Aurora", 4,
+     {{{0.20, 250.0, 0.10}, {0.45, 200.0, 0.12}, {0.70, 135.0, 0.17}, {0.88, 100.0, 0.15}}},
+     kTopHue, kTopChroma},
+    {"glacier", "Glacier", 3,
+     {{{0.25, 262.0, 0.11}, {0.55, 225.0, 0.12}, {0.82, 205.0, 0.08}}},
+     200.0, 0.025},
+    {"deep_sea", "Deep sea", 4,
+     {{{0.20, 255.0, 0.10}, {0.45, 235.0, 0.12}, {0.70, 190.0, 0.13}, {0.88, 170.0, 0.10}}},
+     160.0, 0.03},
+    {"phosphor", "Phosphor", 3,
+     {{{0.25, 150.0, 0.08}, {0.60, 145.0, 0.20}, {0.85, 140.0, 0.18}}},
+     135.0, 0.06},
+    {"amber", "Amber", 3,
+     {{{0.25, 65.0, 0.07}, {0.60, 70.0, 0.15}, {0.85, 78.0, 0.15}}},
+     90.0, 0.05},
+    {"ember", "Ember", 4,
+     {{{0.20, 55.0, 0.06}, {0.45, 58.0, 0.12}, {0.70, 68.0, 0.17}, {0.88, 85.0, 0.16}}},
+     95.0, 0.05},
+    {"dusk", "Dusk", 4,
+     {{{0.20, 265.0, 0.11}, {0.45, 215.0, 0.08}, {0.70, 90.0, 0.12}, {0.88, 75.0, 0.12}}},
+     80.0, 0.04},
+    {"prism", "Prism", 5,
+     {{{0.15, 262.0, 0.12},
+       {0.35, 215.0, 0.13},
+       {0.55, 145.0, 0.18},
+       {0.75, 105.0, 0.17},
+       {0.90, 65.0, 0.14}}},
+     70.0, 0.05},
+    {"toxic", "Toxic", 3,
+     {{{0.25, 195.0, 0.08}, {0.60, 130.0, 0.20}, {0.85, 110.0, 0.19}}},
+     105.0, 0.07},
+    {"cobalt", "Cobalt", 3,
+     {{{0.25, 262.0, 0.13}, {0.60, 255.0, 0.15}, {0.85, 245.0, 0.08}}},
+     240.0, 0.02},
+    {"copper", "Copper", 3,
+     {{{0.25, 55.0, 0.05}, {0.60, 60.0, 0.09}, {0.85, 70.0, 0.08}}},
+     80.0, 0.03},
+    {"jade", "Jade", 3,
+     {{{0.25, 200.0, 0.07}, {0.60, 170.0, 0.12}, {0.85, 160.0, 0.08}}},
+     150.0, 0.03},
+    {"sand", "Sand", 3,
+     {{{0.25, 80.0, 0.02}, {0.60, 85.0, 0.05}, {0.85, 90.0, 0.06}}},
+     95.0, 0.03},
+    {"greyscale", "Greyscale", 1, {{{0.5, 0.0, 0.0}}}, 0.0, 0.0},
 }};
+
+inline constexpr std::size_t kThemeCount = kThemes.size();
+inline constexpr std::size_t kDefaultTheme = 0;
+
+// The theme in force for every display, set from ScaleSettings. Read on the
+// render thread and written on the GUI thread; the tables it indexes are
+// immutable once built, so the index is all that has to be atomic.
+inline std::atomic<std::size_t> g_theme{kDefaultTheme};
+
+[[nodiscard]] inline std::size_t theme_index()
+{
+    return g_theme.load(std::memory_order_relaxed);
+}
+
+inline void set_theme(std::size_t index)
+{
+    g_theme.store(index < kThemeCount ? index : kDefaultTheme, std::memory_order_relaxed);
+}
+
+// The index of the theme with this id, or the default for one not known, such
+// as a hand-edited setting or one from a later build.
+[[nodiscard]] inline std::size_t theme_by_id(std::string_view id)
+{
+    for (std::size_t i = 0; i < kThemeCount; ++i) {
+        if (id == kThemes[i].id) {
+            return i;
+        }
+    }
+    return kDefaultTheme;
+}
 
 // Where the path wants to be at a level, before any chroma is given up to fit
 // sRGB: L, C and h.
@@ -156,22 +294,33 @@ struct Lch {
     double h = 0.0;
 };
 
-[[nodiscard]] inline Lch path_at(double level)
+[[nodiscard]] inline Lch path_at(double level, std::size_t theme_at = kDefaultTheme,
+                            bool black = false)
 {
+    constexpr double kDegrees = 180.0 / 3.14159265358979323846;
+    const Theme& theme = kThemes[theme_at < kThemeCount ? theme_at : kDefaultTheme];
     const double t = std::clamp(level, 0.0, 1.0);
-    const Lab bottom = srgb8_to_oklab(kBottom);
-    const double bottom_chroma = std::hypot(bottom.a, bottom.b);
-    const double bottom_hue = std::atan2(bottom.b, bottom.a) * 180.0 / 3.14159265358979323846;
+    const Lab bottom = srgb8_to_oklab(colour_map::bottom(black));
 
-    std::array<ControlPoint, kInterior.size() + 2> points{};
-    points.front() = ControlPoint{0.0, bottom_hue < 0.0 ? bottom_hue + 360.0 : bottom_hue,
-                                  bottom_chroma};
-    std::copy(kInterior.begin(), kInterior.end(), points.begin() + 1);
-    points.back() = ControlPoint{1.0, kTopHue, kTopChroma};
+    std::array<ControlPoint, kMaxInterior + 1> points{};
+    std::copy_n(theme.interior.begin(), theme.count, points.begin());
+    points[theme.count] = ControlPoint{1.0, theme.top_hue, theme.top_chroma};
+    const std::size_t last = theme.count;
 
     Lch out;
     out.l = bottom.l + (kTopLightness - bottom.l) * t;
-    for (std::size_t i = 1; i < points.size(); ++i) {
+
+    // From the background to the first point, straight across in a and b.
+    if (t <= points[0].level) {
+        const double u = t / points[0].level;
+        const double h = points[0].hue_degrees / kDegrees;
+        const double a = bottom.a + (points[0].chroma * std::cos(h) - bottom.a) * u;
+        const double b = bottom.b + (points[0].chroma * std::sin(h) - bottom.b) * u;
+        out.c = std::hypot(a, b);
+        out.h = std::atan2(b, a) * kDegrees;
+        return out;
+    }
+    for (std::size_t i = 1; i <= last; ++i) {
         if (t <= points[i].level) {
             const ControlPoint& from = points[i - 1];
             const ControlPoint& to = points[i];
@@ -181,8 +330,8 @@ struct Lch {
             return out;
         }
     }
-    out.h = kTopHue;
-    out.c = kTopChroma;
+    out.h = theme.top_hue;
+    out.c = theme.top_chroma;
     return out;
 }
 
@@ -202,9 +351,10 @@ struct Lch {
 // The colour at a level, in OKLab, after any chroma sRGB cannot show has been
 // given up. Its L is the path's L exactly: this is the unquantised map, which
 // is what the lightness test samples.
-[[nodiscard]] inline Lab oklab_at(double level)
+[[nodiscard]] inline Lab oklab_at(double level, std::size_t theme = kDefaultTheme,
+                            bool black = false)
 {
-    const Lch want = path_at(level);
+    const Lch want = path_at(level, theme, black);
     double low = 0.0;
     double high = want.c;
     if (in_gamut(oklab_to_linear_srgb(lch_to_lab(want.l, want.c, want.h)))) {
@@ -242,32 +392,68 @@ inline constexpr std::size_t kTableSize = 1024;
 
 using Table = std::array<Srgb8, kTableSize>;
 
-[[nodiscard]] inline Table build_table()
+[[nodiscard]] inline Table build_table(std::size_t theme = kDefaultTheme, bool black = false)
 {
     Table table{};
     for (std::size_t i = 0; i < kTableSize; ++i) {
-        table[i] = to_srgb8(oklab_at(static_cast<double>(i) / (kTableSize - 1)));
+        table[i] = to_srgb8(oklab_at(static_cast<double>(i) / (kTableSize - 1), theme, black));
     }
     // The ends exactly, rather than whatever a round trip through OKLab and
     // back lands on, because the bottom has to be the window's background to
     // the bit.
-    table.front() = kBottom;
+    table.front() = bottom(black);
     return table;
 }
 
-// Built on first use and shared, since C++11 statics are initialised once and
-// thread-safely.
+// Every theme's table, built together on first use and shared, since C++11
+// statics are initialised once and thread-safely. Each theme twice, once per
+// bottom: 28 tables of 3 KB.
+inline constexpr std::size_t kTableCount = 2 * kThemeCount;
+
+[[nodiscard]] inline std::size_t table_slot(std::size_t theme, bool black)
+{
+    return (theme < kThemeCount ? theme : kDefaultTheme) + (black ? kThemeCount : 0);
+}
+
+[[nodiscard]] inline const std::array<Table, kTableCount>& all_tables()
+{
+    static const std::array<Table, kTableCount> built = [] {
+        std::array<Table, kTableCount> tables{};
+        for (std::size_t i = 0; i < kThemeCount; ++i) {
+            tables[table_slot(i, false)] = build_table(i, false);
+            tables[table_slot(i, true)] = build_table(i, true);
+        }
+        return tables;
+    }();
+    return built;
+}
+
+[[nodiscard]] inline const Table& table(std::size_t theme, bool black)
+{
+    return all_tables()[table_slot(theme, black)];
+}
+
+[[nodiscard]] inline const Table& table(std::size_t theme)
+{
+    return table(theme, black_bottom());
+}
+
+// The table of the theme and bottom in force.
 [[nodiscard]] inline const Table& table()
 {
-    static const Table built = build_table();
-    return built;
+    return table(theme_index());
+}
+
+[[nodiscard]] inline Srgb8 colour_at(float level, std::size_t theme)
+{
+    const float t = std::clamp(level, 0.0F, 1.0F);
+    const auto index = static_cast<std::size_t>(std::lround(t * static_cast<float>(kTableSize - 1)));
+    return table(theme)[index];
 }
 
 [[nodiscard]] inline Srgb8 colour_at(float level)
 {
-    const float t = std::clamp(level, 0.0F, 1.0F);
-    const auto index = static_cast<std::size_t>(std::lround(t * static_cast<float>(kTableSize - 1)));
-    return table()[index];
+    return colour_at(level, theme_index());
 }
 
 }  // namespace revenant::ui::colour_map

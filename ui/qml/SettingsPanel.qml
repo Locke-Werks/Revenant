@@ -268,6 +268,94 @@ ColumnLayout {
         }
     }
 
+    // The colour map theme, each one shown as its own ramp from the noise to
+    // the strongest level. render/colour_map.h kThemes.
+    RowLayout {
+        spacing: 8
+
+        Label {
+            text: "colour theme"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeBody
+            Layout.minimumWidth: 150
+            Layout.alignment: Qt.AlignTop
+        }
+
+        GridLayout {
+            columns: 4
+            columnSpacing: 6
+            rowSpacing: 6
+
+            Repeater {
+                model: ScaleSettings.waterfallThemeNames
+
+                delegate: Rectangle {
+                    id: swatch
+                    required property int index
+                    required property string modelData
+                    readonly property bool chosen: ScaleSettings.waterfallTheme === index
+
+                    implicitWidth: 112
+                    implicitHeight: 38
+                    radius: 4
+                    color: "transparent"
+                    border.width: chosen ? 2 : 1
+                    border.color: chosen ? Theme.ink
+                                         : swatchMouse.containsMouse ? Theme.inkDim : Theme.border
+
+                    Canvas {
+                        id: ramp
+                        anchors { left: parent.left; right: parent.right; top: parent.top
+                                  margins: 4 }
+                        height: 14
+                        onPaint: {
+                            const ctx = getContext("2d")
+                            const steps = Math.max(1, Math.floor(width))
+                            for (let i = 0; i < steps; ++i) {
+                                ctx.fillStyle = ScaleSettings.themeColourAt(swatch.index,
+                                                                            i / (steps - 1))
+                                ctx.fillRect(i, 0, 1, height)
+                            }
+                        }
+                        onWidthChanged: requestPaint()
+                    }
+
+                    Label {
+                        anchors { left: parent.left; bottom: parent.bottom
+                                  leftMargin: 6; bottomMargin: 3 }
+                        text: swatch.modelData
+                        color: swatch.chosen ? Theme.ink : Theme.inkDim
+                        font.pixelSize: Theme.sizeSmall
+                    }
+
+                    MouseArea {
+                        id: swatchMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: ScaleSettings.waterfallTheme = swatch.index
+                    }
+                }
+            }
+        }
+    }
+
+    RCheckBox {
+        text: "OLED black"
+        checked: ScaleSettings.oledBlack
+        onToggled: {
+            ScaleSettings.oledBlack = checked
+            checked = Qt.binding(() => ScaleSettings.oledBlack)
+        }
+
+        Tip {
+            visible: parent.hovered
+            delay: 400
+            text: "Pure black behind everything, including the empty parts of the waterfall, "
+                  + "with brighter text and framed controls."
+        }
+    }
+
     FitRow {
         id: contrastRow
         label: "waterfall contrast"

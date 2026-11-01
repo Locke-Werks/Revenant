@@ -52,7 +52,7 @@ public:
         block.opacity = state.opacity();
         block.headroom = headroom();
         block.knee = kKnee;
-        block.bottom_l = static_cast<float>(colour_map::srgb8_to_oklab(colour_map::kBottom).l);
+        block.bottom_l = static_cast<float>(colour_map::srgb8_to_oklab(colour_map::bottom()).l);
         block.top_l = static_cast<float>(colour_map::kTopLightness);
         std::memcpy(data->data(), &block, sizeof(block));
         return true;

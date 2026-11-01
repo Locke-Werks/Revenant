@@ -14,6 +14,7 @@ Canvas {
         target: ScaleSettings
         function onWaterfallContrastChanged() { curveCanvas.requestPaint() }
         function onWaterfallPivotChanged() { curveCanvas.requestPaint() }
+        function onWaterfallThemeChanged() { curveCanvas.requestPaint() }
     }
 
     onPaint: {
