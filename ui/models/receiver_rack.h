@@ -96,7 +96,7 @@ struct RackEntry {
 
 // What the strip, the audio section and a transcript's hover card call an
 // entry. "RX 3" for one this client made; the plugin's name and the same
-// number for one it adopted, "p25trunk 3", so a voice call the operator did
+// number for one it adopted, "trunk 3", so a voice call the operator did
 // not open says who opened it. The number is the slot's in both, which is
 // what tells two strips of one colour apart.
 [[nodiscard]] inline std::string rack_entry_label(const RackEntry& entry)

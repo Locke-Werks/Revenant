@@ -3116,13 +3116,14 @@ control" or a plain "P25" whose next step leans to "control", since a control
 channel carries no voice. A receiver the switch opened that a later pass finds
 on one is removed; that is the only removal it makes.
 
-Auto DV and the trunk tracker, `plugins/p25trunk`, are one or the other, so
-they never open two receivers on one call. Since 2026-10-10 turning the
-switch on tells the engine plugins may not open receivers (`setPluginReceivers`
-in `core/rpc/revenant.capnp`): the tracker's receivers close at once and it
+Auto DV and the engine's trunk follower, `core/engine/trunk_follower.h`, are
+one or the other, so they never open two receivers on one call. Since
+2026-10-10 turning the switch on tells the engine plugins may not open
+receivers (`setPluginReceivers` in `core/rpc/revenant.capnp`), and the
+follower's receivers count as plugin receivers: they close at once and it
 opens no more, though it still decodes the control channel and logs grants.
 Auto DV then opens a receiver on every trunked voice channel it detects, the
-same as a conventional one. Turning the switch off gives the tracker its
+same as a conventional one. Turning the switch off gives the follower its
 receivers back. One removed by hand stays removed until the switch is
 turned on again, and the switch is not remembered across a restart.
 `ui/models/dv_spawn.h` has the rule. The rack's limit went from eight

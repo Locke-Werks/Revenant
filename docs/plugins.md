@@ -84,46 +84,16 @@ Receivers a plugin opened are removed when the engine stops it.
 ## Plugins in this tree
 
 `plugins/` builds each one into `plugins` beside `revenant-engine.exe`, so a
-dev build runs with them loaded. None links `revenant_core`.
+dev build runs with them loaded. None links `revenant_core`. No plugin is
+built at present.
 
-### p25trunk
-
-`plugins/p25trunk/p25trunk.cpp`, a P25 Phase 1 trunk tracker. Open a p25p1
-receiver on a control channel; the plugin subscribes to every p25p1 receiver it
-did not open, takes the first that delivers a good TSBK as the control channel,
-and opens a p25p1 receiver on each group voice grant for as long as the call
-lasts. A call ends two seconds after a voice terminator, after
-`hang_seconds` with no grant, update or voice frame, when its channel goes to
-a talkgroup it would not follow, or when its receiver is removed. Removing the
-control channel's receiver removes every voice receiver it opened, and the
-plugin looks for a control channel again among the p25p1 receivers still open.
-
-Time comes from the control channel's sample count, so while the control
-channel is not decoding no time passes and open calls stay open.
-
-It does not retune the front end, so only voice channels inside the span are
-followed; the rest are refused by the engine and logged. It does not follow
-Phase 2 grants or adjacent sites, and it does not decrypt. The voice is the
-engine's own: a p25p1 receiver decodes IMBE with `core/decode/imbe.h`, so a
-followed call plays with nothing in `vocoders`.
-
-Optional settings in `p25trunk.ini` beside the DLL, one `key=value` per line:
-
-| Key | Default | |
-| --- | --- | --- |
-| `talkgroups` | all | comma-separated talkgroups to follow |
-| `follow_encrypted` | `0` | `1` opens receivers on encrypted calls, which stay silent |
-| `max_calls` | `6` | voice receivers open at once |
-| `hang_seconds` | `2.5` | silence before a call is released |
-| `control_frequency_hz` | none | a control channel the plugin opens itself whenever a source is open, for an engine with no client |
-
-`tests/plugin/test_p25trunk.cpp` drives the DLL through a host table of its
-own with hand-built events. It has not yet run against a live control channel.
+The P25 Phase 1 trunk tracker that used to be here, `plugins/p25trunk`, was
+retired in favour of the engine's built-in follower,
+`core/engine/trunk_follower.h`.
 
 ## Writing your own
 
-Start from `plugins/p25trunk/p25trunk.cpp`. Comments marked `TEMPLATE` are
-about the ABI and hold for any plugin; the rest is trunking. The shape:
+The shape:
 
 1. Copy `core/plugin/engine_plugin_abi.h` into your project. It includes
    `<stdint.h>` and nothing else. Define `RV_ENGINE_PLUGIN_BUILDING_PLUGIN`
@@ -149,9 +119,9 @@ Points that catch people:
 - **There is no timer.** You are called when an event arrives. If you need
   time, take it from a decoder you are subscribed to:
   `end_sample / sample_rate` advances with the signal, and each receiver's
-  count starts at its own zero. p25trunk clocks everything off the control
-  channel and takes only forward steps, so switching to another receiver's
-  count cannot run its clock backwards.
+  count starts at its own zero. Clock off one receiver and take only forward
+  steps, so switching to another receiver's count cannot run the clock
+  backwards.
 - **Match results on the tag, not the subject.** A result names the request
   it answers. Two requests about the same frequency or receiver can be in
   flight at once, and the older result must not be taken for the newer.
@@ -170,7 +140,7 @@ Points that catch people:
 - **Dropped events.** `events_dropped_before` says how many you lost. Design
   state that heals from the next events rather than trusting you saw
   everything.
-- **Settings.** The plugin has no config channel. p25trunk finds its own path
+- **Settings.** The plugin has no config channel. A plugin can find its own path
   with `GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, ...)` and
   reads an `.ini` of the same name.
 - **Runtimes.** Build `/MT` or `/MD`, either works, because nothing is freed
@@ -183,7 +153,7 @@ beside the engine and look for its line in the engine's startup output or the
 radio panel's "engine plugins" list.
 
 To test without a radio, load the DLL and hand it a host table of your own, as
-`tests/plugin/test_p25trunk.cpp` does: record what it asks for, feed it events
+the fixtures in `tests/plugin/` do: record what it asks for, feed it events
 with the field keys `core/rpc/decoders.h` documents, and check the requests.
 
 ## Not decided

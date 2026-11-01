@@ -3923,8 +3923,9 @@ interface Session {
     # granted channel inside the span, moves or removes it as calls come and
     # go, and keeps a log of every call it saw, followed or not.
     # core/engine/trunk_follower.h has the rules and core/decode/p25_trunk.h
-    # the grant reading. Built in, beside plugins/p25trunk rather than in it,
-    # so a client can switch it and edit its talkgroup lists over RPC.
+    # the grant reading. Built in rather than a plugin, as the retired
+    # p25trunk plugin was, so a client can switch it and edit its talkgroup
+    # lists over RPC.
     #
     # vrx is an open p25p1 receiver on the control channel. on = false stops
     # following and removes every receiver it opened; the call log stays.
@@ -3935,7 +3936,7 @@ interface Session {
     #
     # Encrypted calls are logged and never followed or played.
     #
-    # While it runs, an engine plugin (plugins/p25trunk) may not open a p25p1
+    # While it runs, an engine plugin may not open a p25p1
     # receiver, and the ones plugins already had open, the control channel
     # aside, are removed, so no call is followed twice.
     setTrunkFollow @45 (vrx :UInt64, on :Bool, maxFollowers :UInt32) -> ();

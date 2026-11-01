@@ -177,7 +177,7 @@ Using it:
 - [docs/detection.md](docs/detection.md), wideband detection, click-to-tune and auto DV
 - [docs/noise.md](docs/noise.md), the impulse blanker, notches and noise reduction
 - [docs/calibration.md](docs/calibration.md), frequency correction, DC removal and I/Q correction
-- [docs/plugins.md](docs/plugins.md), engine plugins, including the P25 trunk tracker
+- [docs/plugins.md](docs/plugins.md), engine plugins
 - [docs/ambe.md](docs/ambe.md), why DMR and D-STAR voice need a vocoder plugin
 - [docs/recordings.md](docs/recordings.md), the IQ recordings the engine reads
 

@@ -1,8 +1,8 @@
 // Receivers an engine plugin opened, and the rack taking them in. Qt-free, so
 // ui/tests holds the rules; ui/models/rack_link.cpp applies them.
 //
-// WHY THE RACK ADOPTS ANYTHING. The trunk tracker, plugins/p25trunk, runs
-// inside the engine and opens a P25 receiver on every voice call it follows,
+// WHY THE RACK ADOPTS ANYTHING. The trunk tracker, then the p25trunk plugin
+// and now the engine's built-in follower, runs inside the engine and opens a P25 receiver on every voice call it follows,
 // then removes it when the call ends. The rack showed only the receivers this
 // client opened, so those calls were transcribed (the transcript subscription
 // is engine-wide) and never heard. The engine now tells every session about

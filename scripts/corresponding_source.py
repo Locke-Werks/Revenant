@@ -754,13 +754,13 @@ def self_test() -> int:
         (stage / "avcodec-61.dll").write_bytes(b"binary")
 
         (stage / "plugins").mkdir()
-        (stage / "plugins" / "p25trunk.dll").write_bytes(b"binary")
-        report = coverage(stage, pins, own={"plugins/p25trunk.dll"})
+        (stage / "plugins" / "logger.dll").write_bytes(b"binary")
+        report = coverage(stage, pins, own={"plugins/logger.dll"})
         expect("an engine plugin Revenant builds needs no pin",
                "Revenant's own engine plugins: 1 DLLs, source in the corresponding-source archive" in report)
         (stage / "plugins" / "other.dll").write_bytes(b"binary")
         try:
-            coverage(stage, pins, own={"plugins/p25trunk.dll"})
+            coverage(stage, pins, own={"plugins/logger.dll"})
             expect("a plugin Revenant does not build fails the payload", False)
         except SourceError as error:
             expect("a plugin Revenant does not build fails the payload", "plugins/other.dll" in str(error))
@@ -770,14 +770,14 @@ def self_test() -> int:
         cmake.write_text(
             "function(revenant_engine_plugin target)\nendfunction()\n"
             "# revenant_engine_plugin(retired retired.cpp)\n"
-            "revenant_engine_plugin(p25trunk p25trunk/p25trunk.cpp)\n"
+            "revenant_engine_plugin(scanner scanner/scanner.cpp)\n"
             "  revenant_engine_plugin( logger logger/logger.cpp)\n",
             encoding="utf-8",
         )
         expect("the plugins are read from their calls, not the definition or a comment",
-               own_plugin_dlls(cmake) == {"plugins/p25trunk.dll", "plugins/logger.dll"})
-        expect("this checkout's plugins/CMakeLists.txt declares p25trunk",
-               "plugins/p25trunk.dll" in own_plugin_dlls())
+               own_plugin_dlls(cmake) == {"plugins/scanner.dll", "plugins/logger.dll"})
+        expect("this checkout's plugins/CMakeLists.txt declares no plugin yet",
+               own_plugin_dlls() == set())
 
         qt = scratch / "Qt" / "6.8.3" / "msvc2022_64"
         (qt / "sbom").mkdir(parents=True)

@@ -16,8 +16,8 @@
 // Channel (T) and Channel (R), the subscriber's transmit and receive
 // channels (AABC-B clause 4.2.3). A receiver listens where the subscriber
 // does, so the grant here is Channel (R), resolved with clause 2.3.9.2 like
-// any other. plugins/p25trunk follows Channel (T) and says it never checked
-// that reading; this file reads the figure.
+// any other. The retired p25trunk plugin followed Channel (T) and said it never
+// checked that reading; this file reads the figure.
 //
 // WHAT THIS DOES NOT DO
 //

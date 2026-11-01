@@ -315,11 +315,11 @@ if ($Only -in @("both", "engine")) {
     Copy-Item -LiteralPath $serialExe -Destination (Join-Path $outDir "revenant-rtl-serial.exe") -Force
 
     # The engine plugins plugins/CMakeLists.txt builds, in the folder the
-    # engine scans beside itself. No settings file ships: p25trunk with none
-    # follows whichever p25p1 receiver a client opens on a control channel.
+    # engine scans beside itself. None ship at present; add each DLL's name
+    # to the list when one is declared there.
     $pluginOut = Join-Path $outDir "plugins"
     New-Item -ItemType Directory -Force -Path $pluginOut | Out-Null
-    foreach ($name in @("p25trunk.dll")) {
+    foreach ($name in @()) {
         $plugin = Join-Path $engineDir "tools/engined/plugins/$name"
         if (-not (Test-Path -LiteralPath $plugin)) {
             throw "$name is not at $plugin. It builds with the engine."

@@ -24,9 +24,10 @@ ColumnLayout {
     property string view: "calls"
     readonly property var rows: view === "calls" ? table.calls : table.groups
 
-    // The engine's follower, not a loaded p25trunk plugin: the plugin loads
-    // with every engine, and counting it held this pane open over CW and SSB
-    // work with nothing digital anywhere. A plugin's receivers show as feeds.
+    // The engine's follower, not any loaded plugin: the retired p25trunk
+    // plugin loaded with every engine, and counting it held this pane open
+    // over CW and SSB work with nothing digital anywhere. A plugin's
+    // receivers show as feeds.
     readonly property bool trunking: engineLink.trunkEnabled
 
     Layout.fillWidth: true
