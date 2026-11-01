@@ -14,6 +14,8 @@
 #include <QVariantMap>
 
 #include <algorithm>
+#include <set>
+#include <vector>
 
 #include "models/settings.h"
 #include "models/trunk_aliases.h"
@@ -79,6 +81,12 @@ void EngineLink::store_trunk_rules()
     rpc::TrunkRuleSet rules;
     rules.allow = parse_trunk_groups(trunk_allow_text_.toStdString()).value;
     rules.deny = parse_trunk_groups(trunk_deny_text_.toStdString()).value;
+    // A solo replaces the allow list and beats the deny list: clicking a
+    // talkgroup is the operator saying exactly what they want to hear.
+    if (!trunk_solo_.empty()) {
+        rules.allow.assign(trunk_solo_.begin(), trunk_solo_.end());
+        std::erase_if(rules.deny, [this](std::uint32_t tg) { return trunk_solo_.contains(tg); });
+    }
     for (const auto& [tg, priority] : parse_trunk_priorities(trunk_priority_text_.toStdString()).value) {
         rules.priorities.push_back({tg, priority});
     }
@@ -89,6 +97,9 @@ void EngineLink::store_trunk_rules()
 
 void EngineLink::setTrunkFollow(bool on)
 {
+    if (!on) {
+        trunk_solo_.clear();
+    }
     store_trunk_rules();
     {
         const std::lock_guard<std::mutex> lock(trunk_mutex_);
@@ -101,6 +112,22 @@ void EngineLink::setTrunkFollow(bool on)
         source_work_pending_ = true;
     }
     supervisor_wake_.notify_all();
+}
+
+void EngineLink::toggleTrunkSolo(qulonglong talkgroup)
+{
+    const auto tg = static_cast<std::uint32_t>(talkgroup);
+    if (!trunk_solo_.erase(tg)) {
+        trunk_solo_.insert(tg);
+    }
+    store_trunk_rules();
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+    rebuild_trunk_rows();
+    emit trunkChanged();
 }
 
 QString EngineLink::trunkAliases() const
@@ -291,7 +318,23 @@ void EngineLink::rebuild_trunk_rows()
 {
     load_trunk_text();
     trunk_rows_.clear();
+    // Following stopped by itself (span, receiver gone): the solo goes with
+    // it, like everything else in trunk following.
+    if (!trunk_status_.enabled) {
+        trunk_solo_.clear();
+    }
+    // Soloed talkgroups lead, on the air or not; one that is not gets a
+    // placeholder row, drawn dotted until it is heard again.
+    std::vector<const rpc::TrunkCallInfo*> soloed;
+    std::vector<const rpc::TrunkCallInfo*> others;
     for (const rpc::TrunkCallInfo& call : trunk_status_.calls) {
+        (trunk_solo_.contains(call.talkgroup) ? soloed : others).push_back(&call);
+    }
+    std::set<std::uint32_t> heard;
+    for (const rpc::TrunkCallInfo* call : soloed) {
+        heard.insert(call->talkgroup);
+    }
+    const auto add = [this](const rpc::TrunkCallInfo& call) {
         QVariantMap row;
         row[QStringLiteral("talkgroup")] = static_cast<qulonglong>(call.talkgroup);
         row[QStringLiteral("label")] =
@@ -309,7 +352,36 @@ void EngineLink::rebuild_trunk_rows()
         row[QStringLiteral("followed")] = call.followed;
         row[QStringLiteral("hearing")] = call.vrx != 0;
         row[QStringLiteral("note")] = QString::fromStdString(call.active ? call.skip : call.end_reason);
+        row[QStringLiteral("solo")] = trunk_solo_.contains(call.talkgroup);
+        row[QStringLiteral("present")] = true;
         trunk_rows_.push_back(row);
+    };
+    for (const rpc::TrunkCallInfo* call : soloed) {
+        add(*call);
+    }
+    for (const std::uint32_t tg : trunk_solo_) {
+        if (heard.contains(tg)) {
+            continue;
+        }
+        QVariantMap row;
+        row[QStringLiteral("talkgroup")] = static_cast<qulonglong>(tg);
+        row[QStringLiteral("label")] = QString::fromStdString(trunk_group_label(trunk_aliases_, tg));
+        row[QStringLiteral("source")] = QString();
+        row[QStringLiteral("frequency")] = QString();
+        row[QStringLiteral("start")] = QStringLiteral("--:--:--");
+        row[QStringLiteral("seconds")] = 0;
+        row[QStringLiteral("active")] = false;
+        row[QStringLiteral("encrypted")] = false;
+        row[QStringLiteral("emergency")] = false;
+        row[QStringLiteral("followed")] = false;
+        row[QStringLiteral("hearing")] = false;
+        row[QStringLiteral("note")] = QStringLiteral("waiting");
+        row[QStringLiteral("solo")] = true;
+        row[QStringLiteral("present")] = false;
+        trunk_rows_.push_back(row);
+    }
+    for (const rpc::TrunkCallInfo* call : others) {
+        add(*call);
     }
 }
 

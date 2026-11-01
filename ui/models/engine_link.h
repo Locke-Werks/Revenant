@@ -139,6 +139,7 @@
 #include <memory>
 #include <mutex>
 #include <map>  // P25 trunk following
+#include <set>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -5480,6 +5481,9 @@ public:
     // On the focused receiver, which must be a p25p1 receiver on a control
     // channel; off stops following wherever it is.
     Q_INVOKABLE void setTrunkFollow(bool on);
+    // Solo: while any talkgroup is soloed only soloed talkgroups get a
+    // receiver. Held in memory for this run of following and never stored.
+    Q_INVOKABLE void toggleTrunkSolo(qulonglong talkgroup);
     [[nodiscard]] bool trunkEnabled() const { return trunk_status_.enabled; }
     [[nodiscard]] QVariantList trunkCalls() const { return trunk_rows_; }
     [[nodiscard]] QString trunkSummary() const;
@@ -5513,6 +5517,7 @@ private:
     mutable QString trunk_priority_text_;
     mutable int trunk_max_followers_ = 2;
     mutable std::map<std::uint32_t, std::string> trunk_aliases_;
+    std::set<std::uint32_t> trunk_solo_;  // Qt thread
     rpc::TrunkStatusInfo trunk_status_;
     QVariantList trunk_rows_;
     QString trunk_fault_;

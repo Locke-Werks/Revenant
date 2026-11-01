@@ -7,12 +7,18 @@
 // is a dim chip and is never followed or played. A call with no receiver says
 // why in its last column: denied, every follower busy, outside the span.
 //
+// SOLO. Clicking a call solos its talkgroup, amber, and while anything is
+// soloed only soloed talkgroups get a receiver. A soloed talkgroup stays at
+// the top when it goes off the air, outlined dotted, and turns solid when it
+// is heard again. Clicking it again lifts the solo.
+//
 // The alias table is this client's, kept in settings, and lines that do not
 // read as "talkgroup = label" are ignored.
 
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Shapes
 import Revenant
 
 ColumnLayout {
@@ -176,10 +182,42 @@ ColumnLayout {
                 // At least a line of the small mono text, which is taller
                 // than 16 px at 150% display scaling.
                 height: Math.max(20, callRow.implicitHeight + 4)
+                readonly property bool solo: entry.modelData.solo === true
+                readonly property bool present: entry.modelData.present !== false
+
                 radius: 2
-                color: entry.modelData.hearing
-                       ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.14)
-                       : "transparent"
+                color: entry.solo && entry.present
+                       ? Qt.rgba(Theme.inkWarn.r, Theme.inkWarn.g, Theme.inkWarn.b, 0.22)
+                       : entry.modelData.hearing
+                         ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.14)
+                         : "transparent"
+                border.width: entry.solo && entry.present ? 1 : 0
+                border.color: Theme.inkWarn
+
+                // Rectangle borders cannot dash, so the off-air outline is a
+                // shape.
+                Shape {
+                    anchors.fill: parent
+                    visible: entry.solo && !entry.present
+                    ShapePath {
+                        strokeColor: Theme.inkWarn
+                        strokeWidth: 1
+                        strokeStyle: ShapePath.DashLine
+                        dashPattern: [3, 3]
+                        fillColor: "transparent"
+                        startX: 0.5; startY: 0.5
+                        PathLine { x: entry.width - 0.5; y: 0.5 }
+                        PathLine { x: entry.width - 0.5; y: entry.height - 0.5 }
+                        PathLine { x: 0.5; y: entry.height - 0.5 }
+                        PathLine { x: 0.5; y: 0.5 }
+                    }
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: engineLink.toggleTrunkSolo(entry.modelData.talkgroup)
+                }
 
                 RowLayout {
                     id: callRow
@@ -234,7 +272,8 @@ ColumnLayout {
                     Text {
                         Layout.fillWidth: true
                         Layout.minimumWidth: 0
-                        text: entry.modelData.seconds + " s  " + entry.modelData.note
+                        text: entry.present ? entry.modelData.seconds + " s  " + entry.modelData.note
+                                            : entry.modelData.note
                         color: Theme.inkDim
                         font.family: Theme.monoFont
                         font.pixelSize: Theme.sizeSmall
