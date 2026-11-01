@@ -73,13 +73,9 @@ TEST_CASE("trunk follower: a grant opens a receiver and a terminator releases it
     CHECK(actions[0].kind == TrunkAction::Kind::Release);
     CHECK(actions[0].vrx == 10);
 
-    const auto log = f.calls();
-    REQUIRE(log.size() == 1);
-    CHECK_FALSE(log[0].active);
-    CHECK(log[0].followed);
-    CHECK(log[0].end_reason == "call ended");
-    CHECK(log[0].start_s == 0.0);
-    CHECK(log[0].end_s == 1.0);
+    // Nothing is kept once a call ends.
+    CHECK(f.calls().empty());
+    CHECK(f.last_end_reason() == "call ended");
 }
 
 TEST_CASE("trunk follower: an initial grant during the hold keeps the receiver",
@@ -106,7 +102,8 @@ TEST_CASE("trunk follower: hang time ends a call nobody hears", "[trunk_follower
     const auto actions = f.take_actions();
     REQUIRE(actions.size() == 1);
     CHECK(actions[0].kind == TrunkAction::Kind::Release);
-    CHECK(f.calls().front().end_reason == "nothing heard");
+    CHECK(f.calls().empty());
+    CHECK(f.last_end_reason() == "nothing heard");
 }
 
 TEST_CASE("trunk follower: encrypted calls are logged and never followed", "[trunk_follower]") {
@@ -232,7 +229,8 @@ TEST_CASE("trunk follower: a reassigned channel keeps its receiver", "[trunk_fol
     CHECK(f.take_actions().empty());
     REQUIRE(active_tg(f, 200) != nullptr);
     CHECK(active_tg(f, 200)->vrx == 1);
-    CHECK(f.calls().back().end_reason == "channel reassigned");
+    CHECK(f.calls().size() == 1);
+    CHECK(f.last_end_reason() == "channel reassigned");
 
     // The voice naming a denied talkgroup takes it away.
     TrunkRules rules;
@@ -275,5 +273,6 @@ TEST_CASE("trunk follower: stop and an outside removal", "[trunk_follower]") {
     REQUIRE(actions.size() == 1);
     CHECK(actions[0].vrx == 2);
     CHECK(f.active().empty());
-    CHECK(f.calls().front().end_reason == "control channel lost");
+    CHECK(f.calls().empty());
+    CHECK(f.last_end_reason() == "control channel lost");
 }

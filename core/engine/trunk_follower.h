@@ -8,7 +8,7 @@
 // open a receiver here, move that one there, remove that one, which the
 // server carries out and reports back. Kept apart from the server so tests/
 // engine/test_trunk_follower.cpp can drive every transition with made-up
-// grants and times, which is how plugins/p25trunk was debugged against a
+// grants and times, which is how the retired p25trunk plugin was debugged against a
 // live system and should not have had to be.
 //
 // THE RULES, in the order they are applied to a grant:
@@ -28,7 +28,7 @@
 //               removed and reopened; otherwise it waits, and takes the next
 //               receiver to come free while it is still on the air.
 //
-// WHEN A CALL ENDS, as plugins/p25trunk measured on air on 2026-10-06:
+// WHEN A CALL ENDS, as the retired p25trunk plugin measured on air on 2026-10-06:
 //   a terminator (TDU or TDULC) on the voice channel, held terminator_hold_s
 //   in case the talkgroup keys up again at once, which only an initial grant
 //   cancels, because control channels keep sending updates for a while after
@@ -40,7 +40,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <map>
 #include <optional>
 #include <set>
@@ -82,7 +81,6 @@ struct TrunkSettings {
     double hang_s = 2.5;
     double terminator_hold_s = 2.0;
     double refusal_backoff_s = 5.0;
-    std::size_t recent_limit = 200;
 };
 
 // Why an active call has no receiver.
@@ -160,8 +158,11 @@ public:
 
     [[nodiscard]] std::vector<TrunkAction> take_actions();
 
-    // Active calls, oldest first, then ended ones, newest first.
+    // Active calls, oldest first. Nothing is kept once a call ends: the
+    // follower holds what is on the air and no history.
     [[nodiscard]] std::vector<TrunkCall> calls() const;
+    // Why the most recent call ended, for tests and diagnostics.
+    [[nodiscard]] const std::string& last_end_reason() const { return last_end_reason_; }
     [[nodiscard]] const std::vector<TrunkCall>& active() const { return active_; }
     // Bumped on every change a client would want to redraw for.
     [[nodiscard]] std::uint64_t revision() const { return revision_; }
@@ -193,7 +194,7 @@ private:
     std::optional<std::pair<std::int64_t, std::int64_t>> span_;
 
     std::vector<TrunkCall> active_;
-    std::deque<TrunkCall> recent_;
+    std::string last_end_reason_;
     std::vector<TrunkAction> actions_;
 
     // Calls with an Open outstanding, and Opens whose call has ended.

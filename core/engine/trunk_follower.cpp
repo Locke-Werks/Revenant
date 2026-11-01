@@ -182,11 +182,7 @@ std::uint64_t TrunkFollower::end_call(std::size_t index, const std::string& reas
     const std::uint64_t vrx = call.vrx;
     call.vrx = 0;
     call.active = false;
-    call.end_reason = reason;
-    recent_.push_front(std::move(call));
-    while (recent_.size() > settings_.recent_limit) {
-        recent_.pop_back();
-    }
+    last_end_reason_ = reason;
     ++revision_;
     if (vrx != 0 && !keep) {
         hand_off(vrx, 0.0);
@@ -417,9 +413,7 @@ std::vector<TrunkAction> TrunkFollower::take_actions() {
 }
 
 std::vector<TrunkCall> TrunkFollower::calls() const {
-    std::vector<TrunkCall> out(active_.begin(), active_.end());
-    out.insert(out.end(), recent_.begin(), recent_.end());
-    return out;
+    return active_;
 }
 
 }  // namespace revenant::engine

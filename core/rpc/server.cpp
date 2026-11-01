@@ -299,6 +299,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <format>
@@ -1979,9 +1980,9 @@ private:
     bool plugin_commands_closed_ = false;
 
     // P25 trunk following. Everything but `inbox` is loop thread; the decode
-    // lanes append to the inbox and the loop drains it in drain_trunk. The
-    // follower and its log outlive a stop, so trunkStatus still shows the
-    // calls after following ends.
+    // lanes append to the inbox and the loop drains it in drain_trunk. A stop
+    // tears all of it down: nothing carries from one run of following to the
+    // next, and the follower only ever holds the calls on the air.
     struct TrunkInbox {
         std::mutex lock;
         std::deque<DecodedMessage> messages;
@@ -2003,6 +2004,13 @@ private:
         std::int64_t epoch_wall_ns = 0;
         std::string note;
         std::shared_ptr<TrunkInbox> inbox = std::make_shared<TrunkInbox>();
+        // Bumped on every start and stop and folded into the revision
+        // trunkStatus reports, so a client polling by revision sees following
+        // switch on and off even when no call changed.
+        std::uint64_t generation = 0;
+        // Where the control channel's receiver sat when following started,
+        // absolute, so a retune can tell a fine-tuning nudge from a move.
+        std::int64_t control_hz = 0;
     };
     TrunkState trunk_;
     [[nodiscard]] double trunk_now() const;
@@ -8157,6 +8165,21 @@ Status ServerImpl::after_vrx_retuned(engine::VrxId vrx, const engine::VrxParams&
     // carry once the graph has applied everything queued for it, so it is the
     // number the decoder waits to see. Reading it before the retune would
     // fence against the tuning being left.
+    // Tuning the control channel's receiver anywhere else, or to another
+    // mode, ends following outright. A follower reading another channel's
+    // blocks, or none, would only keep its receivers on stale grants.
+    // A nudge under half a 12.5 kHz channel, fine tuning or AFT, is not a
+    // move.
+    if (trunk_.control && *trunk_.control == vrx) {
+        const std::int64_t hz = static_cast<std::int64_t>(engine_.info().source_center) +
+                                static_cast<std::int64_t>(params.center);
+        if (params.demod != engine::Demod::P25p1 || std::llabs(hz - trunk_.control_hz) > 6250) {
+            trunk_stop("the control channel's receiver was retuned");
+        } else {
+            trunk_.control_hz = hz;
+        }
+    }
+
     auto status = engine_.vrx_status(vrx);
     if (!status) {
         return std::unexpected(status.error());
@@ -8205,6 +8228,17 @@ void ServerImpl::follow_engine_retunes() {
 
 void ServerImpl::after_source_retuned(const engine::SourceRetune& landed,
                                       std::vector<std::string>& reasons) {
+    // Trunk following ends here rather than at the next drain when the move
+    // left the control channel outside the span.
+    if (trunk_.control) {
+        const engine::EngineInfo info = engine_.info();
+        const auto centre = static_cast<std::int64_t>(info.source_center);
+        const auto half = static_cast<std::int64_t>(info.source_rate) / 2;
+        if (info.source_rate == 0 || trunk_.control_hz < centre - half ||
+            trunk_.control_hz > centre + half) {
+            trunk_stop("the control channel is outside the span");
+        }
+    }
     // Every receiver the engine removed gets the cleanup removeVrx gives one,
     // because it has been removed just as surely. Before 2026-09-23 this
     // answer was discarded and none of that happened: an audio subscriber
@@ -8447,7 +8481,7 @@ Expected<std::uint32_t> ServerImpl::plugin_add_vrx(std::size_t plugin,
     if (!plugin_receivers_allowed_) {
         return fail("plugin receivers are switched off while the client's auto DV is on");
     }
-    // The built-in follower and plugins/p25trunk both open a p25p1 receiver
+    // The built-in follower and a trunking plugin would both open a p25p1 receiver
     // per voice grant. With both on one control channel every call would be
     // opened twice, so while the follower runs it owns P25 voice: a plugin's
     // p25p1 receiver is refused, and trunk_follow removes the ones already
@@ -8744,12 +8778,13 @@ Status ServerImpl::trunk_follow(engine::VrxId control, bool on, std::uint32_t ma
     if (trunk_.session == 0) {
         trunk_.session = open_session();
     }
-    {
-        const std::scoped_lock held(trunk_.inbox->lock);
-        trunk_.inbox->messages.clear();
-        trunk_.inbox->control_ended = false;
-    }
+    // A fresh inbox, so a decoder callback still in flight from an earlier
+    // run lands in one nobody reads instead of ending this one.
+    trunk_.inbox = std::make_shared<TrunkInbox>();
+    ++trunk_.generation;
     trunk_.control = control;
+    trunk_.control_hz = static_cast<std::int64_t>(engine_.info().source_center) +
+                        static_cast<std::int64_t>(status->params.center);
     auto node = trunk_subscribe(control);
     if (!node) {
         trunk_.control.reset();
@@ -8808,11 +8843,31 @@ void ServerImpl::trunk_stop(const std::string& reason) {
     }
     trunk_.control_node.reset();
     trunk_.control.reset();
-    trunk_.note = reason;
     if (trunk_.follower != nullptr) {
         trunk_.follower->stop(reason, trunk_now());
         trunk_apply();
     }
+    // Any follower receiver the releases above did not reach goes too, so
+    // the next start begins from nothing.
+    std::vector<std::uint64_t> left;
+    for (const auto& [vrx, node] : trunk_.voice_nodes) {
+        left.push_back(vrx);
+    }
+    trunk_.voice_nodes.clear();
+    for (const std::uint64_t vrx : left) {
+        const engine::VrxId id{static_cast<std::uint32_t>(vrx)};
+        if (engine_.remove_vrx(id)) {
+            after_vrx_removed(id, "trunk following stopped");
+        }
+    }
+    trunk_.follower.reset();
+    trunk_.reader.reset();
+    trunk_.span.reset();
+    trunk_.tsbks = 0;
+    trunk_.grants = 0;
+    trunk_.inbox = std::make_shared<TrunkInbox>();
+    trunk_.note = reason;
+    ++trunk_.generation;
 }
 
 void ServerImpl::trunk_vrx_removed(engine::VrxId vrx) {
@@ -8920,6 +8975,12 @@ void ServerImpl::drain_trunk() {
     const auto centre = static_cast<std::int64_t>(info.source_center);
     const auto half = static_cast<std::int64_t>(info.source_rate) / 2;
     const auto span = std::make_pair(centre - half, centre + half);
+    // The front end moved so the control channel is outside the span: there
+    // is nothing left to follow, whether or not the engine kept the receiver.
+    if (trunk_.control_hz < span.first || trunk_.control_hz > span.second) {
+        trunk_stop("the control channel is outside the span");
+        return;
+    }
     if (trunk_.span != span) {
         trunk_.span = span;
         trunk_.follower->set_span(span.first, span.second, now);
@@ -8986,7 +9047,7 @@ void ServerImpl::drain_trunk() {
             }
             // The header's and LDU2's flag come from the ALGID; LDU1's is the
             // Link Control's, which can be protected over clear voice, as
-            // plugins/p25trunk found.
+            // the retired p25trunk plugin found.
             voice.encrypted = message.kind != "ldu1" && flag(message, "encrypted");
         } else {
             continue;
@@ -9025,10 +9086,13 @@ void ServerImpl::write_trunk_status(schema::TrunkStatus::Builder out) const {
         ++i;
     }
 
+    // The follower's revision restarts with each run, so the generation
+    // sits in the high bits.
+    out.setRevision((trunk_.generation << 40) |
+                    (trunk_.follower == nullptr ? 0 : trunk_.follower->revision()));
     if (trunk_.follower == nullptr) {
         return;
     }
-    out.setRevision(trunk_.follower->revision());
     const auto wall = [this](double s) {
         return trunk_.epoch_wall_ns + static_cast<std::int64_t>(s * 1e9);
     };

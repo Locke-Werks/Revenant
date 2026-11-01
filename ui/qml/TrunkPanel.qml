@@ -39,7 +39,8 @@ ColumnLayout {
 
         RButton {
             flat: true
-            checkable: true
+            // Not checkable: a click would flip `checked` itself and break the
+            // binding, leaving the button out of step with the engine.
             checked: engineLink.trunkEnabled
             enabled: engineLink.trunkEnabled || pane.onControl
             text: "follow"
