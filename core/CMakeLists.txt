@@ -108,6 +108,7 @@ add_library(revenant_core STATIC
     decode/ax25.cpp
     decode/bch.cpp
     decode/crc.cpp
+    decode/cvsd.cpp
     decode/cw.cpp
     decode/dmr.cpp
     decode/dsc.cpp
