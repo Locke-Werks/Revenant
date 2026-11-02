@@ -147,6 +147,7 @@ add_executable(revenant_decode_tests
     test_dstar_blocking.cpp
     test_imbe.cpp
     test_navtex.cpp
+    test_ofdm.cpp
     test_m17.cpp
     test_m17_noise.cpp
     test_p25_trunk.cpp
