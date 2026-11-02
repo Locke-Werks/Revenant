@@ -119,6 +119,7 @@ add_library(revenant_core STATIC
     decode/ble.cpp
     decode/bch.cpp
     decode/crc.cpp
+    decode/dab.cpp
     decode/cvsd.cpp
     decode/cw.cpp
     decode/dmr.cpp
@@ -214,6 +215,7 @@ add_library(revenant_core STATIC
     dsp/synth/mil110_mod.cpp
     dsp/synth/channel.cpp
     dsp/synth/cw_mod.cpp
+    dsp/synth/dab_mod.cpp
     dsp/synth/dmr_mod.cpp
     dsp/synth/dpmr_mod.cpp
     dsp/synth/dsc_mod.cpp

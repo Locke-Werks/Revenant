@@ -148,6 +148,7 @@ add_executable(revenant_decode_tests
     test_cvsd.cpp
     test_cw.cpp
     test_cw_band.cpp
+    test_dab.cpp
     test_dmr.cpp
     test_dmr_blocking.cpp
     test_dpmr.cpp
