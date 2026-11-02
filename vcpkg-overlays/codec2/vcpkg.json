@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "codec2",
+  "version-string": "1.2.0",
+  "description": "libcodec2, the Codec 2 speech codec. Revenant overlay: the vocoder alone, from drowe67/codec2 1.2.0, without the FreeDV modems",
+  "homepage": "https://github.com/drowe67/codec2",
+  "license": "LGPL-2.1-only",
+  "dependencies": [
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ]
+}

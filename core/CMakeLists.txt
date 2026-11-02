@@ -21,6 +21,10 @@ find_package(rtlsdr CONFIG REQUIRED)
 # registry has no port. docs/hackrf-provenance.md has the pin.
 find_package(hackrf CONFIG REQUIRED)
 
+# libcodec2 1.2.0, LGPL-2.1, the vocoder alone from vcpkg-overlays/codec2: the
+# linked exception docs/modes.md records under "Digital voice, collected".
+find_package(codec2 CONFIG REQUIRED)
+
 # characterise/ is the waveform characteriser: what a signal IS, without
 # decoding it. It reads complex baseband rather than the power spectrum,
 # because symbol rate, modulation order, tone structure and frame period are
@@ -140,6 +144,7 @@ add_library(revenant_core STATIC
     decode/opulent_voice.cpp
     decode/m17.cpp
     decode/mfsk_demod.cpp
+    decode/codec2_voice.cpp
     decode/p25_trunk.cpp
     decode/p25_tsbk.cpp
     decode/p25p1.cpp
@@ -278,6 +283,9 @@ target_link_libraries(revenant_core PRIVATE
 
 # PRIVATE for the same reason: hackrf.h is source/hackrf_source.cpp's alone.
 target_link_libraries(revenant_core PRIVATE HackRF::hackrf)
+
+# PRIVATE: codec2.h is decode/codec2_voice.cpp's alone.
+target_link_libraries(revenant_core PRIVATE codec2::codec2)
 
 revenant_add_shaders(revenant_core
     TARGET_ENV vulkan1.3
