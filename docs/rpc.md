@@ -864,6 +864,7 @@ fifteenth and sixteenth, the same day.
 | `dsc_hf` | The same calls on MF and HF, 100 baud about 1700 Hz | Audio of a `usb` or `lsb` receiver |
 | `sstv` | Images by VIS code, through the image sink | Audio of a `usb`, `lsb` or `nfm` receiver |
 | `ft8`, `ft4` | Each decode with SNR, DT, frequency and the message's calls, grid and report; slots timed from the wall clock | Audio of a `usb` receiver at 12000 S/s or a multiple |
+| `wspr`, `jt9a`, `jt4a` to `jt4g`, `jt65a` to `jt65c` | Each decode with SNR, DT, drift, frequency and the message; WSPR adds call, grid and power, JT65 its erasure trials. 120 s slots for WSPR, 60 s for the rest, timed from the wall clock | Audio of a `usb` receiver at 12000 S/s or a multiple |
 | `ale_2g` | Each 2G ALE call or sounding with its addresses | Audio of a `usb` receiver |
 | `ale_3g` | Each 3G ALE PDU with its fields | Audio of a `usb` receiver |
 | `mil110`, `mil110c`, `mil_39tone` | Each MIL-STD-188-110 serial tone (A/B, C) or 39-tone transmission's data bytes, rate and interleave | Audio of a `usb` receiver |
@@ -878,6 +879,7 @@ fifteenth and sixteenth, the same day.
 | `dpmr` | Headers with called and own IDs, late entry, end frames | Complex baseband of a `p25p1` receiver, or a `raw` tap up to 192000 S/s |
 | `drm` | FAC, SDC, text messages and data units as they change; no audio | A `raw` tap at exactly 48000 S/s |
 | `vdes`, `funcube`, `cospas_sarsat` | VDES ASM bursts; FUNcube telemetry frames; 406 MHz beacon IDs and positions | A `raw` tap up to 192000 S/s; `vdes` at 38400 or more |
+| `cospas_sarsat_sgb` | Second-generation 406 MHz beacon IDs, types and positions | A `raw` tap at 76800 or 153600 S/s |
 
 Since 2026-11-02 `ais` also names Messages 14 (`safety_broadcast`) and 27
 (`long_range_position`) and reports `locating_device` from the MMSI.

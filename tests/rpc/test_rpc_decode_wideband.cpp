@@ -178,6 +178,11 @@ TEST_CASE("the raw-tap decoders take the rates they say", "[rpc][decode]") {
         CHECK_FALSE(builds(name, 384'000));
     }
     CHECK_FALSE(builds("vdes", 24'000));
+    CHECK(builds("cospas_sarsat_sgb", 76'800));
+    CHECK(builds("cospas_sarsat_sgb", 153'600));
+    CHECK_FALSE(builds("cospas_sarsat_sgb", 48'000));
+    CHECK_FALSE(builds("cospas_sarsat_sgb", 150'000));
+    CHECK_FALSE(builds("cospas_sarsat_sgb", 307'200));
 }
 
 TEST_CASE("a wideband decoder is refused on a receiver, and a receiver decoder on a tap",

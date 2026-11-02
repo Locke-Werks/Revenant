@@ -143,6 +143,9 @@
 #include "core/decode/glonass_l1.h"
 #include "core/decode/gps_lnav.h"
 #include "core/decode/hrpt.h"
+#include "core/decode/jt4.h"
+#include "core/decode/jt65.h"
+#include "core/decode/jt9.h"
 #include "core/decode/m17.h"
 #include "core/decode/mil110.h"
 #include "core/decode/psk_demod.h"
@@ -158,6 +161,7 @@
 #include "core/decode/sitor_b.h"
 #include "core/decode/sstv.h"
 #include "core/decode/wefax.h"
+#include "core/decode/wspr.h"
 #include "core/rpc/image_bridge.h"
 #include "core/decode/tetra.h"
 #include "core/dsp/types.h"
@@ -4309,6 +4313,156 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// WSPR, JT9, JT4 and JT65
+// ---------------------------------------------------------------------------
+//
+// Reads a usb receiver's audio at 12000 S/s or a whole multiple,
+// core/decode/wspr.h, jt9.h, jt4.h and jt65.h. One message per decode when
+// its slot ends: 120 s for WSPR, 60 s for the others. The slot clock is the
+// wall clock at the first chunk after a build or a reset, as for ft8.
+//
+// A row per submode only where the submode changes the tone spacing the
+// receiver searches: jt4a to jt4g, jt65a to jt65c. JT9 has one row, jt9a:
+// its B to H submodes widen the spacing too, but they are EME and microwave
+// modes and eight rows for them would bury the list.
+//
+// Every message:
+//   text                 text   the message as WSJT-X prints it
+//   frequency_hz         real   tone 0 in the audio, mid transmission
+//   dt_seconds           real   start against the nominal
+//   drift_hz             real   over the transmission
+//   snr_db               real   in 2500 Hz
+//   slot_utc             real   Unix seconds of the slot's start
+//   slot_sample          int    receiver-stream index of the slot's start
+// WSPR: call, grid (text), power_dbm (int), odd_power (flag, a power not
+// ending in 0, 3 or 7). JT9, JT4, JT65: plain_text, standard (flag). JT65
+// also: ooo (flag), trials, hard_errors (int).
+enum class SlowWsjt : std::uint8_t { Wspr, Jt9, Jt4, Jt65 };
+
+template <SlowWsjt Kind, int Submode>
+class SlowWsjtChunkDecoder final : public ChunkDecoder {
+    static constexpr std::string_view kJt4Names[] = {"jt4a", "jt4b", "jt4c", "jt4d",
+                                                     "jt4e", "jt4f", "jt4g"};
+    static constexpr std::string_view kJt65Names[] = {"jt65a", "jt65b", "jt65c"};
+
+    using Decoder = std::conditional_t<
+        Kind == SlowWsjt::Wspr, decode::WsprDecoder,
+        std::conditional_t<Kind == SlowWsjt::Jt9, decode::Jt9Decoder,
+                           std::conditional_t<Kind == SlowWsjt::Jt4, decode::Jt4Decoder,
+                                              decode::Jt65Decoder>>>;
+    using Decode = std::conditional_t<
+        Kind == SlowWsjt::Wspr, decode::WsprDecode,
+        std::conditional_t<Kind == SlowWsjt::Jt65, decode::Jt65Decode, decode::Wsjt72Decode>>;
+
+public:
+    static constexpr std::string_view kName = Kind == SlowWsjt::Wspr  ? std::string_view("wspr")
+                                              : Kind == SlowWsjt::Jt9 ? std::string_view("jt9a")
+                                              : Kind == SlowWsjt::Jt4 ? kJt4Names[Submode]
+                                                                      : kJt65Names[Submode];
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (build.rate <= 0 || build.rate % decode::kWsjtRate != 0) {
+            return fail(std::format("the {} decoder reads audio at 12000 S/s or a whole "
+                                    "multiple of it, and this receiver delivers {}",
+                                    kName, build.rate));
+        }
+        std::unique_ptr<SlowWsjtChunkDecoder> adapter(new SlowWsjtChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail(std::format("the {} decoder could not be rebuilt after a reset", kName));
+        }
+        base_.observe(chunk);
+        decodes_.clear();
+        if (auto processed = decoder_->process(chunk.samples, decodes_); !processed) {
+            return processed;
+        }
+        for (const Decode& d : decodes_) {
+            out.push_back(describe(d, chunk));
+        }
+        return {};
+    }
+
+    // A new slot clock as well, read from the wall clock at the next chunk.
+    void reset() override {
+        base_.reset();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    explicit SlowWsjtChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        auto config = [] {
+            if constexpr (Kind == SlowWsjt::Wspr) {
+                return decode::WsprConfig{};
+            } else if constexpr (Kind == SlowWsjt::Jt9) {
+                return decode::Jt9Config{.submode = Submode};
+            } else if constexpr (Kind == SlowWsjt::Jt4) {
+                return decode::Jt4Config{.submode = Submode};
+            } else {
+                return decode::Jt65Config{.submode = Submode};
+            }
+        }();
+        config.rate = rate_;
+        config.utc_of_sample = decode::wsjt_wall_clock();
+        auto built = Decoder::create(std::move(config));
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    [[nodiscard]] DecodedMessage describe(const Decode& d, const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        DecodedMessage message = stamped(kName, "message", chunk);
+        message.fields.push_back(text_field("text", d.message.text));
+        message.fields.push_back(real_field("frequency_hz", d.frequency_hz));
+        message.fields.push_back(real_field("dt_seconds", d.dt_seconds));
+        message.fields.push_back(real_field("drift_hz", d.drift_hz));
+        message.fields.push_back(real_field("snr_db", d.snr_db));
+        message.fields.push_back(real_field("slot_utc", d.slot_utc));
+        message.fields.push_back(integer_field(
+            "slot_sample", static_cast<std::int64_t>(base_.at(
+                               static_cast<std::uint64_t>(d.slot_start_sample)))));
+        if constexpr (Kind == SlowWsjt::Wspr) {
+            message.fields.push_back(text_field("call", d.message.call));
+            message.fields.push_back(text_field("grid", d.message.grid));
+            message.fields.push_back(integer_field("power_dbm", d.message.power_dbm));
+            message.fields.push_back(flag_field("odd_power", d.message.odd_power));
+        } else {
+            message.fields.push_back(flag_field("plain_text", d.message.plain_text));
+            message.fields.push_back(flag_field("standard", d.message.standard));
+        }
+        if constexpr (Kind == SlowWsjt::Jt65) {
+            message.fields.push_back(flag_field("ooo", d.ooo));
+            message.fields.push_back(integer_field("trials", d.trials));
+            message.fields.push_back(integer_field("hard_errors", d.hard_errors));
+        }
+        message.text = std::format("{:+.0f} dB {:+.1f} s {:.0f} Hz {}", d.snr_db, d.dt_seconds,
+                                   d.frequency_hz, d.message.text);
+        return message;
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<Decoder> decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<Decode> decodes_;
+};
+
+// ---------------------------------------------------------------------------
 // 2G ALE
 // ---------------------------------------------------------------------------
 //
@@ -5197,6 +5351,8 @@ private:
 //   application_data     bytes  when sent
 //   cfo_hz, sinr_db      real
 //   cqi                  int
+//   turbo_iterations     int    Link IDs 5 to 7, iterations the turbo
+//                               decoder ran
 //   began_sample         int    stream index of the sync
 template <bool Wideband>
 class VdesChunkDecoder final : public ChunkDecoder {
@@ -5264,6 +5420,10 @@ public:
             message.fields.push_back(real_field("cfo_hz", b.cfo_hz));
             message.fields.push_back(real_field("sinr_db", b.sinr_db));
             message.fields.push_back(integer_field("cqi", b.cqi));
+            if (b.turbo_iterations > 0) {
+                message.fields.push_back(integer_field(
+                    "turbo_iterations", static_cast<std::int64_t>(b.turbo_iterations)));
+            }
             message.fields.push_back(integer_field(
                 "began_sample",
                 static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(b.sync_sample)))));
@@ -5496,6 +5656,126 @@ private:
     decoders_detail::StreamBase base_;
     std::vector<dsp::Complex32> iq_;
     std::vector<decode::CsBurst> bursts_;
+};
+
+// ---------------------------------------------------------------------------
+// Cospas-Sarsat 406 MHz, second generation
+// ---------------------------------------------------------------------------
+//
+// Reads a raw tap at 76800 or 153600 S/s, core/decode/cospas_sarsat.h, C/S
+// T.018: the DSSS-OQPSK second-generation beacons. The decoder wants a whole,
+// even number of samples per 38400 chip/s chip, so a multiple of 76800, and
+// under kRawTapRateCap that leaves those two. A raw tap is the grid's channel
+// rate, source rate times two over the channel count, so a source at 2457600
+// S/s on 32 channels or 1228800 on 16 delivers 153600; other rates are refused
+// and auto passes the row by. Not a wideband row: the tap there runs at the
+// source rate over a whole number, which lands on a multiple of 76800 no more
+// often than the grid does. One "beacon" per burst whose BCH checked,
+// reported and nothing more:
+//
+//   hex_id               text   the 23-character beacon ID
+//   beacon_type          text   bits 138-140
+//   country_code, tac, serial, vessel_id_type, rotating_field  int
+//   self_test, homing, rls, test_protocol, cancellation  flag
+//   identity             text   when the vessel ID carries one
+//   mmsi, aircraft_address  int  when carried
+//   latitude, longitude  real   when encoded
+//   bch_corrected        int
+//   frequency_offset_hz, chip_rate, sync_metric  real
+//   bits                 bytes  one bit per byte, bit 1 first
+//   began_sample         int    stream index of the first preamble chip
+class SgbChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "cospas_sarsat_sgb";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto allowed = decoders_detail::raw_tap_capped(kName, build.mode, build.rate);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+        decode::SgbDecoderConfig config;
+        config.rate = build.rate;
+        auto built = decode::SgbDecoder::create(config);
+        if (!built) {
+            return std::unexpected(with_context(
+                built.error(),
+                std::format("building the {} decoder, which reads 76800 or 153600 S/s", kName)));
+        }
+        return std::unique_ptr<ChunkDecoder>(new SgbChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        bursts_.clear();
+        decoder_.push(iq_, bursts_);
+        using namespace decoders_detail;
+        for (const decode::SgbBurst& b : bursts_) {
+            const decode::SgbMessage& m = b.message;
+            DecodedMessage message = stamped(kName, "beacon", chunk);
+            message.fields.push_back(text_field("hex_id", m.hex_id));
+            message.fields.push_back(
+                text_field("beacon_type", decode::sgb_beacon_type_name(m.beacon_type)));
+            message.fields.push_back(integer_field("country_code", m.country_code));
+            message.fields.push_back(integer_field("tac", m.tac));
+            message.fields.push_back(integer_field("serial", m.serial));
+            message.fields.push_back(integer_field("vessel_id_type", m.vessel_id_type));
+            message.fields.push_back(integer_field("rotating_field", m.rotating_field));
+            message.fields.push_back(flag_field("self_test", m.self_test));
+            message.fields.push_back(flag_field("homing", m.homing));
+            message.fields.push_back(flag_field("rls", m.rls));
+            message.fields.push_back(flag_field("test_protocol", m.test_protocol));
+            message.fields.push_back(flag_field("cancellation", m.cancellation));
+            if (!m.identity.empty()) {
+                message.fields.push_back(text_field("identity", m.identity));
+            }
+            if (m.mmsi) {
+                message.fields.push_back(integer_field("mmsi", *m.mmsi));
+            }
+            if (m.aircraft_address) {
+                message.fields.push_back(integer_field("aircraft_address", *m.aircraft_address));
+            }
+            if (m.latitude && m.longitude) {
+                message.fields.push_back(real_field("latitude", *m.latitude));
+                message.fields.push_back(real_field("longitude", *m.longitude));
+            }
+            message.fields.push_back(
+                integer_field("bch_corrected", static_cast<std::int64_t>(m.bch_corrected)));
+            message.fields.push_back(real_field("frequency_offset_hz", b.frequency_offset_hz));
+            message.fields.push_back(real_field("chip_rate", b.chip_rate));
+            message.fields.push_back(real_field("sync_metric", b.sync_metric));
+            message.fields.push_back(bytes_field("bits", m.bits));
+            message.fields.push_back(integer_field(
+                "began_sample", static_cast<std::int64_t>(base_.at(b.sample_position))));
+            message.text = std::format(
+                "{} {}{}{}", m.hex_id, decode::sgb_beacon_type_name(m.beacon_type),
+                m.self_test ? ", self test" : "",
+                m.latitude && m.longitude
+                    ? std::format(", {:.4f} {:.4f}", *m.latitude, *m.longitude)
+                    : std::string());
+            out.push_back(std::move(message));
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    SgbChunkDecoder(dsp::SampleRate rate, decode::SgbDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    dsp::SampleRate rate_;
+    decode::SgbDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::SgbBurst> bursts_;
 };
 
 // ====================================================================// Wideband decoders. Each reads the source's own stream through
@@ -7701,6 +7981,40 @@ private:
          "its SNR, DT and audio frequency. Slots are timed from the wall clock. Reads a usb "
          "receiver's audio at 12000 S/s or a multiple",
          &FtChunkDecoder<true>::make, decoders_detail::kUsbModes},
+        {SlowWsjtChunkDecoder<SlowWsjt::Wspr, 0>::kName, DecoderInput::RealAudio,
+         "WSPR, 120 s slots, 4-FSK at 1.46 Hz spacing, K=32 convolutional code: each spot's "
+         "call, grid and power with SNR, DT and drift. Slots are timed from the wall clock. "
+         "Reads a usb receiver's audio at 12000 S/s or a multiple",
+         &SlowWsjtChunkDecoder<SlowWsjt::Wspr, 0>::make, decoders_detail::kUsbModes},
+        {SlowWsjtChunkDecoder<SlowWsjt::Jt9, 0>::kName, DecoderInput::RealAudio,
+         "JT9 submode A, 60 s slots, 9-FSK at 1.74 Hz spacing, 72-bit messages: each decode "
+         "with SNR, DT and audio frequency. Slots are timed from the wall clock. Reads a usb "
+         "receiver's audio at 12000 S/s or a multiple",
+         &SlowWsjtChunkDecoder<SlowWsjt::Jt9, 0>::make, decoders_detail::kUsbModes},
+#define REVENANT_JT4_ROW(N, L)                                                                  \
+    {SlowWsjtChunkDecoder<SlowWsjt::Jt4, N>::kName, DecoderInput::RealAudio,                    \
+     "JT4 submode " L ", 60 s slots, 4-FSK, 72-bit messages: each decode with SNR, DT and "     \
+     "audio frequency. Slots are timed from the wall clock. Reads a usb receiver's audio at "   \
+     "12000 S/s or a multiple",                                                                 \
+     &SlowWsjtChunkDecoder<SlowWsjt::Jt4, N>::make, decoders_detail::kUsbModes}
+        REVENANT_JT4_ROW(0, "A"),
+        REVENANT_JT4_ROW(1, "B"),
+        REVENANT_JT4_ROW(2, "C"),
+        REVENANT_JT4_ROW(3, "D"),
+        REVENANT_JT4_ROW(4, "E"),
+        REVENANT_JT4_ROW(5, "F"),
+        REVENANT_JT4_ROW(6, "G"),
+#undef REVENANT_JT4_ROW
+#define REVENANT_JT65_ROW(N, L)                                                                 \
+    {SlowWsjtChunkDecoder<SlowWsjt::Jt65, N>::kName, DecoderInput::RealAudio,                   \
+     "JT65 submode " L ", 60 s slots, 65-FSK, Reed-Solomon (63,12) with soft erasures: each "   \
+     "decode with SNR, DT and audio frequency. Slots are timed from the wall clock. Reads a "   \
+     "usb receiver's audio at 12000 S/s or a multiple",                                         \
+     &SlowWsjtChunkDecoder<SlowWsjt::Jt65, N>::make, decoders_detail::kUsbModes}
+        REVENANT_JT65_ROW(0, "A"),
+        REVENANT_JT65_ROW(1, "B"),
+        REVENANT_JT65_ROW(2, "C"),
+#undef REVENANT_JT65_ROW
         {AleChunkDecoder::kName, DecoderInput::RealAudio,
          "2G ALE, MIL-STD-188-141 Appendix A: 8-FSK at 125 baud, each call or sounding with its "
          "TO and TIS or TWAS addresses. Reads a usb receiver's audio",
@@ -7759,6 +8073,10 @@ private:
          "Cospas-Sarsat 406 MHz first-generation beacons, C/S T.001: hex ID, protocol, "
          "country, identity and encoded position. Reads a raw tap up to 192000 S/s",
          &CospasChunkDecoder::make, decoders_detail::kRawModes},
+        {SgbChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "Cospas-Sarsat 406 MHz second-generation beacons, C/S T.018: hex ID, beacon type, "
+         "country, identity and encoded position. Reads a raw tap at 76800 or 153600 S/s",
+         &SgbChunkDecoder::make, decoders_detail::kRawModes},
         {HrptChunkDecoder::kName, DecoderInput::ComplexBaseband,
          "NOAA HRPT, 665.4 kbit/s split-phase AVHRR: images of all five channels and a frame "
          "message a second. Reads a wideband tap at 2661600 S/s or more",
