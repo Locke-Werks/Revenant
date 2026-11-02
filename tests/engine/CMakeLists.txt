@@ -158,6 +158,7 @@ add_executable(revenant_engine_tests
     ../characterise/signal_lab.cpp
     test_audio_egress.cpp
     test_audio_fanout.cpp
+    test_wideband_tap.cpp
     test_audio_wasapi.cpp
     test_calibration.cpp
     test_channel_ring.cpp

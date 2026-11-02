@@ -135,6 +135,7 @@
 #include "core/engine/probe.h"
 #include "core/engine/timeshift.h"
 #include "core/engine/vrx.h"
+#include "core/engine/wideband_tap.h"
 #include "core/error.h"
 #include "core/gpu/context.h"
 #include "core/source/calibration.h"
@@ -1985,6 +1986,22 @@ public:
     // opened and adding one later would mean rebuilding it, which is the one
     // thing the graph promises never to do while a stream is running.
     [[nodiscard]] virtual Status set_spectrum_sink(SpectrumSink sink) = 0;
+
+    // The source's own stream, before the channelizer, for a decoder wider
+    // than any receiver: mixed by config.offset, decimated by an integer to
+    // config.output_rate and delivered on the tap's own thread.
+    // core/engine/wideband_tap.h has the path, the rate rule and what a slow
+    // consumer costs, which is its own samples and nobody else's.
+    //
+    // Refused before a source is open, since the tap is built for the open
+    // source's rate and format. close_source stops and drops every tap; a
+    // client attaches again after opening the next source.
+    [[nodiscard]] virtual Expected<WidebandTapId> attach_wideband_tap(
+        const WidebandTapConfig& config, WidebandSink sink) = 0;
+
+    // Stops the tap and joins its thread. Returns the tap's own error if it
+    // ended on one. A token that is not attached is an error.
+    [[nodiscard]] virtual Status detach_wideband_tap(WidebandTapId id) = 0;
 
     // Routes one receiver's passband to a callback, and is the per-receiver
     // opt-in: until a sink is attached that receiver records no transform and

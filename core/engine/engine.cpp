@@ -748,6 +748,7 @@ public:
         // graph is about to destroy. See Engine::drop_audio_fanouts for why
         // attach_audio_sink's on-demand pruning does not cover this.
         drop_audio_fanouts();
+        drop_wideband_taps();
 
         // Time-shift: the replay and what it replays belong to this stream.
         timeshift_close();
@@ -1388,6 +1389,83 @@ public:
         return graph_->set_audio_sink(id, std::move(sink));
     }
 
+    [[nodiscard]] Expected<WidebandTapId> attach_wideband_tap(const WidebandTapConfig& config,
+                                                              WidebandSink sink) override {
+        // Under the lifecycle lock so the rate and format read here are the
+        // open source's, and a close cannot slip between the read and the
+        // publish and leave a tap built for a source that is gone.
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        if (source_ == nullptr) {
+            return fail("Engine::attach_wideband_tap before a source is open: the tap is built "
+                        "for the open source's rate and sample format");
+        }
+        auto made = WidebandTap::create(config, info_.source_rate, capabilities_.native_format,
+                                        std::move(sink));
+        if (!made) {
+            return std::unexpected(with_context(made.error(), "Engine::attach_wideband_tap"));
+        }
+        const std::scoped_lock held(wideband_lock_);
+        const WidebandTapId id = next_wideband_++;
+        auto next = std::make_shared<WidebandList>(*wideband_live_.load());
+        next->push_back({id, std::shared_ptr<WidebandTap>(std::move(*made))});
+        wideband_live_.store(std::move(next));
+        return id;
+    }
+
+    [[nodiscard]] Status detach_wideband_tap(WidebandTapId id) override {
+        std::shared_ptr<WidebandTap> gone;
+        {
+            const std::scoped_lock held(wideband_lock_);
+            auto current = wideband_live_.load();
+            auto next = std::make_shared<WidebandList>();
+            for (const auto& entry : *current) {
+                if (entry.first == id) {
+                    gone = entry.second;
+                } else {
+                    next->push_back(entry);
+                }
+            }
+            if (gone == nullptr) {
+                return fail(std::format("Engine::detach_wideband_tap: tap {} is not attached", id));
+            }
+            wideband_live_.store(std::move(next));
+        }
+        // Outside the lock: the join waits for the worker's current pass and
+        // the delivery thread may still hold its own reference for one push,
+        // which the shared_ptr keeps safe.
+        return gone->stop();
+    }
+
+    // Every tap, for close_source. Errors are dropped: the source is going
+    // and each consumer learns that from its own end of the stream.
+    void drop_wideband_taps() {
+        std::shared_ptr<const WidebandList> current;
+        {
+            const std::scoped_lock held(wideband_lock_);
+            current = wideband_live_.load();
+            wideband_live_.store(std::make_shared<const WidebandList>());
+        }
+        for (const auto& entry : *current) {
+            static_cast<void>(entry.second->stop());
+        }
+    }
+
+    // After every other consumer on the delivery thread. One atomic load a
+    // block when no tap is attached.
+    [[nodiscard]] source::BlockSink wideband_wrap(source::BlockSink inner) {
+        return [this, inner = std::move(inner)](const source::SourceBlock& block) {
+            Status fed = inner(block);
+            const std::shared_ptr<const WidebandList> taps = wideband_live_.load();
+            if (!taps->empty()) {
+                const dsp::Hertz centre = capture_center_for(block);
+                for (const auto& entry : *taps) {
+                    entry.second->push(block, centre);
+                }
+            }
+            return fed;
+        };
+    }
+
     [[nodiscard]] Status set_spectrum_sink(SpectrumSink sink) override {
         if (graph_ == nullptr) {
             return fail("Engine::set_spectrum_sink before a source is open: the spectrum stage "
@@ -1549,6 +1627,7 @@ public:
         }
         // Time-shift: every block is kept, after whatever else saw it.
         sink = timeshift_wrap(std::move(sink));
+        sink = wideband_wrap(std::move(sink));
         auto started = source_->start(options, std::move(sink));
         if (!started) {
             stop_capture();
@@ -2362,6 +2441,12 @@ private:
         timeshift_end_replay();
         timeshift_buffer_.release();
     }
+
+    using WidebandList = std::vector<std::pair<WidebandTapId, std::shared_ptr<WidebandTap>>>;
+    std::mutex wideband_lock_;
+    std::atomic<std::shared_ptr<const WidebandList>> wideband_live_{
+        std::make_shared<const WidebandList>()};
+    WidebandTapId next_wideband_ = 1;
 
     TimeShiftBuffer timeshift_buffer_;
     mutable std::mutex timeshift_lock_;

@@ -196,6 +196,7 @@ add_library(revenant_core STATIC
     engine/vrx_place.cpp
     engine/vrx_stage.cpp
     engine/wav_writer.cpp
+    engine/wideband_tap.cpp
     gpu/buffer.cpp
     gpu/context.cpp
     gpu/kernel.cpp

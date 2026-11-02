@@ -144,6 +144,13 @@ public:
     [[nodiscard]] Status set_audio_sink(engine::VrxId id, engine::AudioSink sink) override {
         return inner_->set_audio_sink(id, std::move(sink));
     }
+    [[nodiscard]] Expected<engine::WidebandTapId> attach_wideband_tap(
+        const engine::WidebandTapConfig& config, engine::WidebandSink sink) override {
+        return inner_->attach_wideband_tap(config, std::move(sink));
+    }
+    [[nodiscard]] Status detach_wideband_tap(engine::WidebandTapId id) override {
+        return inner_->detach_wideband_tap(id);
+    }
     [[nodiscard]] Status set_spectrum_sink(engine::SpectrumSink sink) override {
         return inner_->set_spectrum_sink(std::move(sink));
     }
