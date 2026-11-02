@@ -13,7 +13,9 @@ struct Piece {
     std::vector<double> pixels;   // when not empty, hz per pixel across the piece
 };
 
-double frequency(double value) { return decode::kSstvBlackHz + value * decode::kSstvHzPerLevel; }
+double frequency(const decode::SstvMode& mode, double value) {
+    return mode.black_hz + value * (mode.white_hz - mode.black_hz) / 255.0;
+}
 
 }  // namespace
 
@@ -36,19 +38,48 @@ Expected<std::vector<float>> sstv_render(const SstvModConfig& config, const deco
             pieces.push_back({2.05, 1500.0, {}});
         }
     } else if (config.vis) {
-        // "VIS Code and Robot calibration header".
-        pieces.push_back({decode::kVisLeaderMs, 1900.0, {}});
-        pieces.push_back({decode::kVisBreakMs, 1200.0, {}});
-        pieces.push_back({decode::kVisLeaderMs, 1900.0, {}});
-        pieces.push_back({decode::kVisBitMs, 1200.0, {}});
-        int ones = 0;
-        for (int k = 0; k < 7; ++k) {
-            const int bit = (mode.vis >> k) & 1;
-            ones += bit;
-            pieces.push_back({decode::kVisBitMs, bit != 0 ? decode::kVisOneHz : decode::kVisZeroHz, {}});
+        // Handbook 4.2.5: AVT sends the VIS three times.
+        for (int repeat = 0; repeat < (mode.avt_header ? 3 : 1); ++repeat) {
+            // "VIS Code and Robot calibration header".
+            pieces.push_back({decode::kVisLeaderMs, 1900.0, {}});
+            pieces.push_back({decode::kVisBreakMs, 1200.0, {}});
+            pieces.push_back({decode::kVisLeaderMs, 1900.0, {}});
+            pieces.push_back({decode::kVisBitMs, 1200.0, {}});
+            const auto bit_tone = [&](int bit) {
+                pieces.push_back(
+                    {decode::kVisBitMs, bit != 0 ? decode::kVisOneHz : decode::kVisZeroHz, {}});
+            };
+            if (mode.vis16()) {
+                // Handbook 4.4.3: sixteen bits LSB first; each byte of the
+                // code already carries its parity bit.
+                for (int k = 0; k < 16; ++k) {
+                    bit_tone((mode.vis >> k) & 1);
+                }
+            } else {
+                int ones = 0;
+                for (int k = 0; k < 7; ++k) {
+                    const int bit = (mode.vis >> k) & 1;
+                    ones += bit;
+                    bit_tone(bit);
+                }
+                bit_tone(ones & 1);
+            }
+            pieces.push_back({decode::kVisBitMs, 1200.0, {}});
         }
-        pieces.push_back({decode::kVisBitMs, (ones & 1) != 0 ? decode::kVisOneHz : decode::kVisZeroHz, {}});
-        pieces.push_back({decode::kVisBitMs, 1200.0, {}});
+    }
+    if (mode.avt_header) {
+        // Handbook 4.2.5 and figure 4.7: 32 frames of a 1900 Hz pulse, the
+        // mode and count, and the same inverted, most significant bit first.
+        const double zero = mode.black_hz == 1500.0 ? 1600.0 : 1700.0;
+        const double one = mode.black_hz == 1500.0 ? 2200.0 : 2100.0;
+        for (int count = 0; count < decode::kAvtFrames; ++count) {
+            pieces.push_back({decode::kAvtBitMs, 1900.0, {}});
+            const int byte = (mode.avt_family << 5) | count;
+            const int word = (byte << 8) | (~byte & 0xFF);
+            for (int b = 15; b >= 0; --b) {
+                pieces.push_back({decode::kAvtBitMs, ((word >> b) & 1) != 0 ? one : zero, {}});
+            }
+        }
     }
     for (const decode::SstvSegment& s : mode.lead) {
         pieces.push_back({s.ms, s.hz, {}});
@@ -64,7 +95,13 @@ Expected<std::vector<float>> sstv_render(const SstvModConfig& config, const deco
             static_cast<std::size_t>(p - (blank ? p : static_cast<std::uint32_t>(mode.skip_periods))) * lpp;
         for (const decode::SstvSegment& s : mode.period) {
             if (!s.scan()) {
-                pieces.push_back({s.ms, s.hz, {}});
+                // A tone of 0 Hz holds the last pixel's frequency (handbook
+                // 4.4.3, the MR and ML gaps).
+                double hz = s.hz;
+                if (hz <= 0.0 && !pieces.empty()) {
+                    hz = pieces.back().pixels.empty() ? pieces.back().hz : pieces.back().pixels.back();
+                }
+                pieces.push_back({s.ms, hz, {}});
                 continue;
             }
             Piece piece{s.ms, 0.0, std::vector<double>(w)};
@@ -73,10 +110,10 @@ Expected<std::vector<float>> sstv_render(const SstvModConfig& config, const deco
                 if (!blank) {
                     switch (mode.colour) {
                         case decode::SstvColour::Rgb:
-                            v = pixel(first, x, s.channel);
+                            v = pixel(mode.row_of(static_cast<std::uint32_t>(first)), x, s.channel);
                             break;
                         case decode::SstvColour::Gray:
-                            v = pixel(first, x, 1);
+                            v = pixel(mode.row_of(static_cast<std::uint32_t>(first)), x, 1);
                             break;
                         case decode::SstvColour::Ycc: {
                             if (s.channel == 0) {
@@ -99,7 +136,7 @@ Expected<std::vector<float>> sstv_render(const SstvModConfig& config, const deco
                         }
                     }
                 }
-                piece.pixels[x] = frequency(v);
+                piece.pixels[x] = frequency(mode, v);
             }
             pieces.push_back(std::move(piece));
         }

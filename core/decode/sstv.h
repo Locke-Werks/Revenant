@@ -62,13 +62,61 @@
 // header is recognised by its mean of 1900 Hz and by the frequency half a
 // tone cycle apart being on opposite sides of it for a second at a time.
 //
-// Modes outside the Dayton paper, the 16-bit VIS extension among them, are
-// not here. They are in Bruchanov's handbook, which has not been read for
-// this file.
+// SECOND SPECIFICATION
+//
+// Martin Bruchanov (OK2MNM), "Image Communication on Short Waves", the English
+// edition published at https://www.sstv-handbook.com/download/sstv-handbook.pdf
+// (2012 text, 2019 PDF build), read on 2026-11-02, free to read. Sections used:
+//
+//   4.2.5 "Amiga Video Transceiver" and table 4.6: no line sync; R, G, B
+//   scans of 62.5, 125.0, 156.25 and 156.25 ms for AVT 24, 90, 94 and 188,
+//   one 312.5 ms scan for AVT 125 BW; the narrow variant at 1700 Hz black and
+//   2100 Hz white; the QRM variant sending odd lines first and even lines
+//   second; the VIS sent three times; the digital header of 32 frames, each a
+//   1900 Hz pulse then eight bits and the same eight inverted, 1600 Hz for 0
+//   and 2200 Hz for 1 (1700 and 2100 narrow), at 2048/20 = 102.4 Bd; the
+//   first three bits naming the mode (010, 011, 101) and the last five
+//   counting 0 to 31, the image following the frame that reaches 31.
+//   Figure 4.7 shows the pulse one bit long and the bits sent in the order
+//   the text writes them, most significant first.
+//   Chapter 5, note a: the four VIS codes per AVT mode are normal, narrow,
+//   QRM, narrow and QRM. Note b: AVT 188 and Scottie DX share 76.
+//   4.4.1 "MSCAN TV": TV-1 and TV-2 at the line timing of Wraase SC-180 and
+//   Martin M1, the image in four quarter-frames sent top to bottom; chapter
+//   5 gives VIS 104 and 105.
+//   4.4.3 "Modes MP, MR, ML" and table 4.10: the 16-bit VIS, low byte 0x23,
+//   each byte seven bits and an odd parity bit; MP as PD with a 9.0 ms sync
+//   and 1.0 ms 1500 Hz gap; MR and ML as 4:2:2 with 0.1 ms gaps after Y,
+//   R-Y and B-Y at the frequency of the last pixel before them.
+//
+// DEVIATIONS FROM THE HANDBOOK, AND WHERE IT DISAGREES WITH ITSELF
+//
+// AVT 24 is 128x120 here, as table 4.6 has it; chapter 5 lists 128x128.
+// The 640x496 MMSSTV modes are ML180 to ML320 as table 4.10 names them;
+// chapter 5 calls them MR180 to MR320 under the same VIS codes.
+// MP73 is in chapter 5 (0x2523, 73 s, 210.526 lpm) but not in table 4.10;
+// its 140.0 ms scans are those table 4.10 gives MP73-N, and they reproduce
+// the 210.526 lpm.
+// The order of rows inside an MSCAN quarter-frame is not stated. Rows q,
+// q + 4, q + 8 and so on make quarter q here, the reading under which the
+// handbook's "four bars" appear on a receiver that ignores the interlace.
+// TV-2 uses Martin M1's period although chapter 5 lists 134.530 lpm
+// against M1's 134.395; the section's text says they are the same.
+//
+// Not here: the narrowband MMSSTV modes (MP-N, MC-N), whose N-VIS bit order
+// the handbook leaves to a figure reference it does not resolve; Proskan
+// J120, for which the handbook gives a VIS code and a total time but no line
+// structure. VIS 76 opens AVT 188 when an AVT digital header follows it and
+// Scottie DX otherwise.
+//
+// AVT has no line sync to fit, so its slant correction comes from the
+// header instead: a straight line through the frames found, against their
+// count, gives both where the image starts and the sample clock ratio.
 //
 // CLEAN ROOM
 //
 // No SSTV implementation was read: not MMSSTV, QSSTV, slowrx or any other.
+// The handbook's tables and figures were read; no code that accompanies it.
 
 #pragma once
 
@@ -91,6 +139,13 @@ inline constexpr double kSstvWhiteHz = 2300.0;
 inline constexpr double kSstvHzPerLevel = 3.1372549;
 inline constexpr double kSstvSyncHz = 1200.0;
 inline constexpr double kSstvLeaderHz = 1900.0;
+// Handbook 4.2.5: the AVT digital header.
+inline constexpr double kAvtBitMs = 1000.0 / 102.4;
+inline constexpr int kAvtFrameBits = 17;   // the 1900 Hz pulse and sixteen bits
+inline constexpr int kAvtFrames = 32;
+inline constexpr double kAvtFrameMs = kAvtFrameBits * kAvtBitMs;
+// Handbook 4.4.3: the low byte of every 16-bit VIS code.
+inline constexpr int kVis16Low = 0x23;
 // "VIS Code and Robot calibration header".
 inline constexpr double kVisOneHz = 1100.0;
 inline constexpr double kVisZeroHz = 1300.0;
@@ -136,6 +191,30 @@ struct SstvMode {
 
     // Opened by the fax start tone and phasing rather than a VIS code.
     bool fax_start = false;
+
+    // Black and white, 1500 and 2300 Hz except the AVT narrow variants.
+    double black_hz = 1500.0;
+    double white_hz = 2300.0;
+
+    // Transmitted lines are sent as `interlace` fields, field f carrying rows
+    // f, f + interlace, ... in turn: 2 for the AVT QRM variants, 4 for MSCAN.
+    int interlace = 1;
+
+    // AVT: no line sync; the VIS three times, then the digital header, whose
+    // first three bits are `avt_family`. sync_ms is 0.
+    bool avt_header = false;
+    int avt_family = 0;
+
+    // A 16-bit VIS code: `vis` holds both bytes, low byte 0x23.
+    [[nodiscard]] bool vis16() const { return vis > 0x7F; }
+    [[nodiscard]] std::uint32_t row_of(std::uint32_t line) const {
+        if (interlace <= 1) {
+            return line;
+        }
+        const std::uint32_t k = static_cast<std::uint32_t>(interlace);
+        const std::uint32_t per = (height + k - 1) / k;
+        return (line / per) + k * (line % per);
+    }
 
     [[nodiscard]] double period_ms() const;
     [[nodiscard]] double lead_ms() const;
@@ -232,6 +311,10 @@ private:
     [[nodiscard]] double cumulative(double at) const;
     [[nodiscard]] double mean_deviation(double from, double to) const;
     bool fax_header(double at);
+    // The AVT header after a VIS ending at `after`: true with the image start
+    // and period ratio when frames of `family` were found.
+    bool find_avt_header(double after, double offset_hz, const SstvMode& mode, double& start,
+                    double& ratio) const;
     [[nodiscard]] double mean(double from, double to) const;
     [[nodiscard]] double ms(double milliseconds) const { return milliseconds * work_rate_ / 1000.0; }
     [[nodiscard]] double fit(double period) const;

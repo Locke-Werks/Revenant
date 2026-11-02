@@ -2,7 +2,9 @@
 //
 // Written from the same sections of the Dayton paper as core/decode/sstv.h,
 // and from the same mode table, so a failing round trip means one end misread
-// the paper. Continuous-phase FM, every tone and pixel placed at its exact
+// the paper. The modes from Bruchanov's handbook, AVT's repeated VIS and
+// digital header and the 16-bit VIS among them, come from the sections
+// core/decode/sstv.h cites. Continuous-phase FM, every tone and pixel placed at its exact
 // time in the paper's milliseconds.
 
 #pragma once

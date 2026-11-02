@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <deque>
 #include <cmath>
 #include <numbers>
 #include <string>
@@ -82,6 +83,75 @@ SstvMode pd(std::string_view name, int vis, std::uint32_t width, std::uint32_t h
     return m;
 }
 
+// Handbook 4.2.5 and table 4.6: R, G, B with no sync and no gaps, or one Y
+// scan for AVT 125 BW. Chapter 5 note a gives the four codes in the order
+// normal, narrow, QRM, narrow and QRM.
+void avt(std::vector<SstvMode>& modes, std::deque<std::string>& names, std::string_view base,
+         int vis, std::uint32_t width, std::uint32_t height, double scan_ms, int family,
+         bool gray) {
+    static constexpr std::string_view kSuffix[] = {"", " Narrow", " QRM", " Narrow QRM"};
+    for (int v = 0; v < 4; ++v) {
+        names.push_back(std::string(base) + std::string(kSuffix[v]));
+        SstvMode m;
+        m.name = names.back();
+        m.vis = vis + v;
+        m.width = width;
+        m.height = height;
+        if (gray) {
+            m.colour = SstvColour::Gray;
+            m.period = {scan(scan_ms, 0)};
+        } else {
+            m.period = {scan(scan_ms, kR), scan(scan_ms, kG), scan(scan_ms, kB)};
+        }
+        m.sync_ms = 0.0;
+        m.avt_header = true;
+        m.avt_family = family;
+        if ((v & 1) != 0) {
+            // "Narrowband variant ... from 1700 Hz for black to 2100 Hz for white".
+            m.black_hz = 1700.0;
+            m.white_hz = 2100.0;
+        }
+        if ((v & 2) != 0) {
+            m.interlace = 2;
+        }
+        modes.push_back(std::move(m));
+    }
+}
+
+// Handbook 4.4.3: "MP modes use the same principle as PD modes", a 9.0 ms
+// sync and a 1.0 ms 1500 Hz gap.
+SstvMode mp(std::string_view name, int vis, double scan_ms) {
+    SstvMode m;
+    m.name = name;
+    m.vis = vis;
+    m.width = 320;
+    m.height = 256;
+    m.lines_per_period = 2;
+    m.colour = SstvColour::Ycc;
+    m.period = {tone(9.0, 1200),    tone(1.0, 1500),    scan(scan_ms, kY, 0),
+                scan(scan_ms, kRy), scan(scan_ms, kBy), scan(scan_ms, kY, 1)};
+    m.sync_ms = 9.0;
+    return m;
+}
+
+// Handbook 4.4.3: MR and ML, the MP sync and gap, then Y, R-Y and B-Y each
+// followed by 0.1 ms held at the last pixel's frequency, written here as a
+// tone of 0 Hz.
+SstvMode mr(std::string_view name, int vis, std::uint32_t width, std::uint32_t height,
+            double y_ms) {
+    SstvMode m;
+    m.name = name;
+    m.vis = vis;
+    m.width = width;
+    m.height = height;
+    m.colour = SstvColour::Ycc;
+    m.period = {tone(9.0, 1200),       tone(1.0, 1500),       scan(y_ms, kY),
+                tone(0.1, 0.0),        scan(y_ms / 2.0, kRy), tone(0.1, 0.0),
+                scan(y_ms / 2.0, kBy), tone(0.1, 0.0)};
+    m.sync_ms = 9.0;
+    return m;
+}
+
 std::vector<SstvMode> build_modes() {
     std::vector<SstvMode> modes;
     modes.push_back(martin("Martin 1", 44, 146.432));
@@ -154,6 +224,47 @@ std::vector<SstvMode> build_modes() {
         m.fax_start = true;
         modes.push_back(std::move(m));
     }
+
+    // Bruchanov's handbook from here on. The names the views point into live
+    // as long as the table does.
+    static std::deque<std::string> names;
+    avt(modes, names, "AVT 24", 64, 128, 120, 62.5, 0b010, false);
+    avt(modes, names, "AVT 90", 68, 256, 240, 125.0, 0b101, false);
+    avt(modes, names, "AVT 94", 72, 320, 200, 156.25, 0b011, false);
+    avt(modes, names, "AVT 188", 76, 320, 400, 156.25, 0b011, false);
+    avt(modes, names, "AVT 125 BW", 80, 320, 400, 312.5, 0b011, true);
+
+    // 4.4.1: the line timing of Wraase SC-180 and Martin M1 in quarter-frames.
+    {
+        SstvMode m;
+        m.name = "MSCAN TV-1";
+        m.vis = 104;
+        m.width = 320;
+        m.height = 256;
+        m.period = {tone(5.5225, 1200), tone(0.5, 1500), scan(235.0, kR), scan(235.0, kG),
+                    scan(235.0, kB)};
+        m.sync_ms = 5.5225;
+        m.interlace = 4;
+        modes.push_back(std::move(m));
+        SstvMode m2 = martin("MSCAN TV-2", 105, 146.432);
+        m2.interlace = 4;
+        modes.push_back(std::move(m2));
+    }
+
+    // Table 4.10 and chapter 5, 16-bit VIS codes.
+    modes.push_back(mp("MP73", 0x2523, 140.0));
+    modes.push_back(mp("MP115", 0x2923, 223.0));
+    modes.push_back(mp("MP140", 0x2a23, 270.0));
+    modes.push_back(mp("MP175", 0x2c23, 340.0));
+    modes.push_back(mr("MR73", 0x4523, 320, 256, 138.0));
+    modes.push_back(mr("MR90", 0x4623, 320, 256, 171.0));
+    modes.push_back(mr("MR115", 0x4923, 320, 256, 220.0));
+    modes.push_back(mr("MR140", 0x4a23, 320, 256, 269.0));
+    modes.push_back(mr("MR175", 0x4c23, 320, 256, 337.0));
+    modes.push_back(mr("ML180", 0x8523, 640, 496, 176.5));
+    modes.push_back(mr("ML240", 0x8623, 640, 496, 236.5));
+    modes.push_back(mr("ML280", 0x8923, 640, 496, 277.5));
+    modes.push_back(mr("ML320", 0x8a23, 640, 496, 317.5));
     return modes;
 }
 
@@ -163,8 +274,13 @@ constexpr double kPassHz = 1200.0;
 constexpr double kTransitionHz = 900.0;
 constexpr double kWorkRateTarget = 16'000.0;
 
-std::uint8_t level(double hz) {
-    const double v = (hz - kSstvBlackHz) / kSstvHzPerLevel;
+// Handbook 4.2.5: the VIS three times, so the header's first frame can start
+// up to two whole VIS transmissions after the end of the one that was read.
+constexpr double kVisTotalMs = 2.0 * kVisLeaderMs + kVisBreakMs + 10.0 * kVisBitMs;
+constexpr double kAvtHeaderSearchMs = 2.0 * kVisTotalMs + 100.0 + kAvtFrames * kAvtFrameMs;
+
+std::uint8_t level(const SstvMode& mode, double hz) {
+    const double v = (hz - mode.black_hz) * 255.0 / (mode.white_hz - mode.black_hz);
     return static_cast<std::uint8_t>(std::clamp(std::lround(v), 0L, 255L));
 }
 
@@ -195,7 +311,14 @@ std::span<const SstvMode> sstv_modes() {
     return modes;
 }
 
+// Where two modes share a code, the one without an AVT header: Scottie DX
+// before AVT 188.
 const SstvMode* sstv_mode_by_vis(int vis) {
+    for (const SstvMode& m : sstv_modes()) {
+        if (m.vis == vis && !m.avt_header) {
+            return &m;
+        }
+    }
     for (const SstvMode& m : sstv_modes()) {
         if (m.vis == vis) {
             return &m;
@@ -430,17 +553,73 @@ bool SstvDecoder::hunt(const ImageSink& sink) {
                 code |= bit << k;
             }
         }
-        const double stop = mean(s + ms(kVisBitMs * 9 + 5.0), s + ms(kVisBitMs * 10 - 5.0)) - offset;
-        shaped = shaped && std::abs(stop - kSstvSyncHz) < 150.0;
-        // Even parity over the seven bits and the parity bit together.
-        if (!shaped || (ones & 1) != 0) {
+        if (!shaped) {
             continue;
+        }
+        const auto stop_at = [&](int bits) {
+            const double hz = mean(s + ms(kVisBitMs * (bits + 1) + 5.0),
+                                   s + ms(kVisBitMs * (bits + 2) - 5.0)) - offset;
+            return std::abs(hz - kSstvSyncHz) < 150.0;
+        };
+        int bits = 8;
+        if (code == kVis16Low && ones == 3) {
+            // Handbook 4.4.3: low byte 0x23 with odd parity, so a second byte
+            // follows, also seven bits and an odd parity bit.
+            if (s + ms(kVisBitMs * 19.0 + 10.0) > end()) {
+                hunt_at_ = c;
+                trim(c - ms(kVisLeaderMs + 50.0));
+                return false;
+            }
+            int high = 0;
+            int high_ones = 0;
+            for (int k = 0; k < 8; ++k) {
+                const double a = s + ms(kVisBitMs * (k + 9) + 5.0);
+                const double hz = mean(a, a + ms(kVisBitMs - 10.0)) - offset;
+                shaped = shaped && hz > 1000.0 && hz < 1400.0;
+                const int bit = hz < 1200.0 ? 1 : 0;
+                high_ones += bit;
+                high |= bit << k;
+            }
+            if (!shaped || (high_ones & 1) == 0 || !stop_at(16)) {
+                continue;
+            }
+            code |= high << 8;
+            bits = 16;
+        } else if (!stop_at(8) || (ones & 1) != 0) {
+            // Even parity over the seven bits and the parity bit together.
+            continue;
+        }
+        const double after = s + ms(kVisBitMs * (bits + 2));
+
+        // An AVT mode is known by its header, so it is looked for first and
+        // the audio waited for until the header could all be in.
+        const SstvMode* mode = nullptr;
+        double image_start = 0.0;
+        double ratio = 1.0;
+        for (const SstvMode& m : sstv_modes()) {
+            if (m.vis != code || !m.avt_header) {
+                continue;
+            }
+            if (after + ms(kAvtHeaderSearchMs) + ms(kAvtFrameMs) > end()) {
+                hunt_at_ = c;
+                trim(c - ms(kVisLeaderMs + 50.0));
+                return false;
+            }
+            if (find_avt_header(after, offset, m, image_start, ratio)) {
+                mode = &m;
+            }
+            break;
         }
         ++stats_.vis_codes;
         stats_.last_vis = code;
         stats_.last_offset_hz = offset;
-        const SstvMode* mode = sstv_mode_by_vis(code);
-        const double after = s + ms(kVisBitMs * 10.0);
+        if (mode == nullptr) {
+            mode = sstv_mode_by_vis(code);
+            if (mode != nullptr && mode->avt_header) {
+                mode = nullptr;
+            }
+            image_start = mode != nullptr ? after + ms(mode->lead_ms()) : 0.0;
+        }
         if (mode == nullptr) {
             ++stats_.unknown_vis;
             hunt_at_ = after;
@@ -448,11 +627,12 @@ bool SstvDecoder::hunt(const ImageSink& sink) {
         }
         Image image;
         image.mode = mode;
-        image.start = after + ms(mode->lead_ms());
+        image.start = image_start;
         image.nominal = ms(mode->period_ms());
         image.offset_hz = offset;
         image.fit_start = image.start;
-        image.fit_period = image.nominal;
+        image.fit_period = image.nominal * ratio;
+        stats_.last_period_ratio = ratio;
         image_ = std::move(image);
         scans_.assign(3, std::vector<std::vector<std::uint8_t>>(
                              static_cast<std::size_t>(mode->lines_per_period),
@@ -475,6 +655,114 @@ double SstvDecoder::mean_deviation(double from, double to) const {
         return 0.0;
     }
     return (dev_sum_[b] - dev_sum_[a]) / static_cast<double>(b - a);
+}
+
+// Handbook 4.2.5. A frame at `q` is a 1900 Hz pulse one bit long, then
+// sixteen bits most significant first, above 1900 Hz for 1 in both the
+// normal and narrow variants; the second byte the first inverted, the first
+// three bits the mode. Every alignment that reads as a frame is gathered,
+// the run of alignments on one frame is reduced to its middle, and a line
+// through the frames' times against their counts gives the image start, one
+// frame after count 31, and the clock.
+bool SstvDecoder::find_avt_header(double after, double offset_hz, const SstvMode& mode,
+                                  double& start, double& ratio) const {
+    const double bit = ms(kAvtBitMs);
+    const double frame = ms(kAvtFrameMs);
+    struct Hit {
+        double first;
+        double last;
+        int count;
+        int word;
+    };
+    std::vector<Hit> hits;
+    const double limit = after + ms(kAvtHeaderSearchMs) - frame;
+    for (double q = std::floor(after); q <= limit; q += 1.0) {
+        const double pulse = mean(q + 0.2 * bit, q + 0.8 * bit) - offset_hz;
+        if (std::abs(pulse - kSstvLeaderHz) > 120.0) {
+            continue;
+        }
+        int word = 0;
+        bool clear = true;
+        for (int b = 0; b < 16 && clear; ++b) {
+            const double hz = mean(q + (b + 1.25) * bit, q + (b + 1.75) * bit) - offset_hz;
+            clear = std::abs(hz - kSstvLeaderHz) > 80.0;
+            word = (word << 1) | (hz > kSstvLeaderHz ? 1 : 0);
+        }
+        const int hi = word >> 8;
+        const int lo = word & 0xFF;
+        if (!clear || (hi ^ lo) != 0xFF || (hi >> 5) != mode.avt_family) {
+            continue;
+        }
+        const int count = hi & 0x1F;
+        if (!hits.empty() && hits.back().count == count && q - hits.back().last <= 2.0) {
+            hits.back().last = q;
+        } else {
+            hits.push_back(Hit{q, q, count, word});
+        }
+    }
+    if (hits.size() < 4) {
+        return false;
+    }
+    // The run of alignments places a frame to a sample or so, and a sample
+    // across five seconds of header is 20 ppm at 12 kS/s, two milliseconds by
+    // the end of AVT 188. So each frame is placed again to a fraction of a
+    // sample: the sum of its bits signed by their values peaks, as a tent, at
+    // the true alignment, and a ternary search finds the top.
+    const auto place = [&](const Hit& h) {
+        const auto score = [&](double tau) {
+            double e = 0.0;
+            for (int b = 0; b < 16; ++b) {
+                const double hz = mean(tau + (b + 1) * bit, tau + (b + 2) * bit) - offset_hz -
+                                  kSstvLeaderHz;
+                e += ((h.word >> (15 - b)) & 1) != 0 ? hz : -hz;
+            }
+            return e;
+        };
+        const double middle = 0.5 * (h.first + h.last);
+        double lo = middle - 0.3 * bit;
+        double hi = middle + 0.3 * bit;
+        for (int i = 0; i < 40; ++i) {
+            const double a = lo + (hi - lo) / 3.0;
+            const double b = hi - (hi - lo) / 3.0;
+            if (score(a) < score(b)) {
+                lo = a;
+            } else {
+                hi = b;
+            }
+        }
+        return 0.5 * (lo + hi);
+    };
+    // Each frame's own estimate of where count 0 began; the median rejects a
+    // frame read by chance off the wrong alignment.
+    std::vector<std::pair<double, double>> pts;
+    std::vector<double> origins;
+    for (const Hit& h : hits) {
+        const double t = place(h);
+        pts.emplace_back(static_cast<double>(h.count), t);
+        origins.push_back(t - h.count * frame);
+    }
+    std::ranges::sort(origins);
+    const double median = origins[origins.size() / 2];
+    double sk = 0, st = 0, skk = 0, skt = 0, n = 0;
+    for (const auto& [k, t] : pts) {
+        if (std::abs(t - k * frame - median) < ms(3.0)) {
+            sk += k;
+            st += t;
+            skk += k * k;
+            skt += k * t;
+            n += 1.0;
+        }
+    }
+    if (n < 4.0) {
+        return false;
+    }
+    const double den = n * skk - sk * sk;
+    double period = den > 0.0 && n >= 6.0 ? (n * skt - sk * st) / den : frame;
+    period = std::clamp(period, frame * 0.99, frame * 1.01);
+    const double origin = (st - period * sk) / n;
+    start = origin + kAvtFrames * period;
+    ratio = period / frame;
+    return true;
 }
 
 // "FAX480 mode", HEADER: 2.05 ms of 2300 Hz and 2.05 ms of 1500 Hz, 1220
@@ -608,6 +896,10 @@ bool SstvDecoder::step_image(const ImageSink& sink, bool at_end) {
         }
     };
 
+    if (mode.avt_header) {
+        // No line sync: the header placed every line.
+        im.next_search = periods;
+    }
     for (;;) {
         emit_ready();
         if (im.next_search >= periods) {
@@ -676,7 +968,7 @@ void SstvDecoder::emit_period(std::uint32_t period, const ImageSink& sink) {
             for (std::uint32_t i = 0; i < mode.width; ++i) {
                 const double a = base + scale * ms(offset_ms + i * pixel_ms);
                 const double b = base + scale * ms(offset_ms + (i + 1) * pixel_ms);
-                line[i] = level(mean(a, b) - im.offset_hz);
+                line[i] = level(mode, mean(a, b) - im.offset_hz);
             }
         }
         offset_ms += seg.ms;
@@ -684,10 +976,10 @@ void SstvDecoder::emit_period(std::uint32_t period, const ImageSink& sink) {
     const std::uint32_t lpp = static_cast<std::uint32_t>(mode.lines_per_period);
     const std::uint32_t first = (period - static_cast<std::uint32_t>(mode.skip_periods)) * lpp;
     for (std::uint32_t l = 0; l < lpp; ++l) {
-        const std::uint32_t row = first + l;
-        if (row >= mode.height) {
+        if (first + l >= mode.height) {
             break;
         }
+        const std::uint32_t row = mode.row_of(first + l);
         if (mode.colour == SstvColour::Gray) {
             row_on(sink, row, scans_[0][l]);
             continue;

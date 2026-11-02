@@ -7,6 +7,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <bit>
+#include <tuple>
 #include <cmath>
 #include <cstdint>
 #include <format>
@@ -309,4 +311,108 @@ TEST_CASE("a stream that stops mid-image closes it incomplete", "[decode][sstv]"
     CHECK(got.closes == 1);
     CHECK_FALSE(got.complete);
     CHECK(got.rows.size() > 80);
+}
+
+// Bruchanov's handbook from here on.
+
+TEST_CASE("the handbook's modes reproduce its transfer times and line rates",
+          "[decode][sstv][handbook]") {
+    // Table 4.6 and chapter 5. AVT's include the three VIS codes and the
+    // digital header, about eight seconds; the handbook's own totals are
+    // rounded to the second, so the tolerance is 2 %.
+    const double vis_ms = 2.0 * decode::kVisLeaderMs + decode::kVisBreakMs + 10.0 * decode::kVisBitMs;
+    const double avt_lead_ms = 3.0 * vis_ms + decode::kAvtFrames * decode::kAvtFrameMs;
+    const std::tuple<std::string_view, double, double> printed[] = {
+        {"AVT 24", 31.0, 960.000 / 3.0}, {"AVT 90", 98.0, 480.000 / 3.0},
+        {"AVT 94", 102.0, 384.000 / 3.0}, {"AVT 188", 196.0, 384.000 / 3.0},
+        {"AVT 125 BW", 133.0, 192.000},  {"MP73", 73.0, 210.526},
+        {"MP115", 115.0, 133.038},       {"MP140", 140.0, 110.092},
+        {"MP175", 175.0, 87.591},        {"MR73", 73.0, 419.141},
+        {"MR90", 90.0, 340.619},         {"MR115", 115.0, 266.489},
+        {"MR140", 140.0, 218.858},       {"MR175", 175.0, 175.362},
+        {"ML180", 180.0, 330.306},       {"ML240", 240.0, 248.293},
+        {"ML280", 280.0, 212.277},       {"ML320", 320.0, 185.960}};
+    for (const auto& [name, seconds, lpm] : printed) {
+        const decode::SstvMode* mode = decode::sstv_mode_by_name(name);
+        REQUIRE(mode != nullptr);
+        const double lead = mode->avt_header ? avt_lead_ms : 0.0;
+        const double total = (lead + mode->period_ms() * mode->periods()) / 1000.0;
+        // The handbook counts MMSSTV lines as luminance scans: two per PD-style
+        // period for MP, and twice the period rate for MR and ML.
+        const double rate = 60'000.0 / mode->period_ms() *
+                            (mode->name.starts_with("MR") || mode->name.starts_with("ML") ? 2.0 : 1.0) *
+                            mode->lines_per_period;
+        INFO(std::format("{}: {:.2f} s against {} s, {:.3f} lpm against {}", name, total, seconds,
+                         rate, lpm));
+        CHECK(std::abs(total - seconds) / seconds < 0.02);
+        CHECK(std::abs(rate - lpm) / lpm < 0.001);
+    }
+}
+
+TEST_CASE("each AVT variant and each 16-bit code names its own mode", "[decode][sstv][handbook]") {
+    for (const char* name : {"AVT 90", "AVT 90 Narrow", "AVT 90 QRM", "AVT 90 Narrow QRM"}) {
+        const decode::SstvMode& mode = *decode::sstv_mode_by_name(name);
+        CHECK(decode::sstv_mode_by_vis(mode.vis) == &mode);
+    }
+    // Chapter 5 note b: AVT 188 shares 76 with Scottie DX, so the table lookup
+    // answers Scottie DX and the decoder tells them apart by the AVT header.
+    CHECK(decode::sstv_mode_by_vis(76)->name == "Scottie DX");
+    for (const decode::SstvMode& mode : decode::sstv_modes()) {
+        if (mode.vis16()) {
+            CHECK((mode.vis & 0xFF) == decode::kVis16Low);
+            CHECK(std::popcount(static_cast<unsigned>(mode.vis >> 8)) % 2 == 1);
+        }
+    }
+}
+
+TEST_CASE("AVT 90 against noise, mistuning and a clock error, measured",
+          "[decode][sstv][handbook][avt]") {
+    constexpr dsp::SampleRate kRate = 12'000;
+    for (const char* name : {"AVT 90", "AVT 90 Narrow QRM"}) {
+        const decode::SstvMode& mode = *decode::sstv_mode_by_name(name);
+        const auto want = test_image(mode.width, mode.height);
+        // Loose floors, a few dB under what was measured.
+        const std::pair<double, double> points[] = {{30.0, 28.0}, {15.0, 16.0}, {8.0, 10.0}};
+        for (const auto& [snr, floor] : points) {
+            auto audio = render(mode, kRate, 35.0);
+            add_noise(audio, snr, kRate, 0xA417);
+            decode::SstvStats stats;
+            const Collected got = decode_audio(audio, kRate, &stats);
+            const double score = psnr(got, mode, want);
+            WARN(std::format("{} at {} dB/2500 Hz, 35 Hz high: PSNR {:.1f} dB, offset {:.1f} Hz",
+                             name, snr, score, stats.last_offset_hz));
+            CHECK(got.opens == 1);
+            CHECK(got.mode == mode.name);
+            CHECK(score >= floor);
+        }
+        for (const double ppm : {-400.0, 250.0}) {
+            const auto audio = render(mode, kRate * (1.0 + ppm * 1.0e-6));
+            decode::SstvStats stats;
+            const Collected got = decode_audio(audio, kRate, &stats);
+            const double score = psnr(got, mode, want);
+            WARN(std::format("{} at {} ppm: header ratio {:.6f}, PSNR {:.1f} dB", name, ppm,
+                             stats.last_period_ratio, score));
+            CHECK(std::abs(stats.last_period_ratio - (1.0 + ppm * 1.0e-6)) < 1.0e-5);
+            CHECK(score > 24.0);
+        }
+    }
+}
+
+TEST_CASE("MP115 and AVT 24 rows do not depend on how the audio is cut",
+          "[decode][sstv][handbook]") {
+    constexpr dsp::SampleRate kRate = 12'000;
+    for (const char* name : {"MP115", "AVT 24 QRM"}) {
+        const decode::SstvMode& mode = *decode::sstv_mode_by_name(name);
+        auto audio = render(mode, kRate);
+        add_noise(audio, 12.0, kRate, 0xC4C5);
+        const Collected whole = decode_audio(audio, kRate);
+        CHECK(whole.opens == 1);
+        for (const std::size_t max_chunk : {std::size_t{1}, std::size_t{97}, std::size_t{4096}}) {
+            const Collected cut = decode_audio(audio, kRate, nullptr, max_chunk, max_chunk);
+            INFO(name << ", chunks up to " << max_chunk);
+            const bool same = cut.rows == whole.rows;
+            CHECK(same);
+            CHECK(cut.complete == whole.complete);
+        }
+    }
 }
