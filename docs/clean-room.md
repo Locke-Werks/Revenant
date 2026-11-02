@@ -1166,6 +1166,78 @@ code.
   5.1 (2008) and BDS-SIS-ICD-B1I-3.0 (February 2019). No implementation source
   read.
 
+Later the same day, for the decoders merged after those. Same rules: fetched
+2026-11-02, clauses in each header, no implementation of the mode read. One
+further exposure, in the SSDV line, and it reached no code.
+
+- MFSK16 and MFSK8: Greenman, "MFSK16 Technical Specification" Rev 1.2 (11 July
+  2000, reformatted 15 October 2009); Porcino and Greenman, "The IZ8BLY MFSK
+  Varicode" 1.0 (10 July 2000); "The MFSK FEC Coder" 1.0 (11 July 2000);
+  Porcino, "The IZ8BLY Diagonal Interleaver" (7 July 2000); all at
+  qsl.net/zl1bpu. The varicode page says its table was cut from its authors'
+  program's source; it was read as the published document it is. fldigi,
+  gmfsk, Stream and MultiPSK not read.
+- DominoEX: Greenman, "DominoEX Technical Information" (1997 to 2009) and
+  "DominoEX Varicode Table" 2.0 (28 July 2009). fldigi and ZL2AFP's program not
+  read.
+- FSQ: Greenman, "FSQ" (FSQweb.htm) and "WSQ Varicode V3.0" (December 2013), a
+  PNG transcribed by eye. The FSQCALL source linked from the page was not
+  opened.
+- Feld-Hell: Greenman, "Feld-Hell", qsl.net/zl1bpu/HELL/Feld.htm. The 1998
+  technical specification answers 404.
+- MIL-STD-188-110 tracking and Appendix C: MIL-STD-188-110C with Change Notice 1
+  (3 January 2012), including Appendix C, distribution A. STANAG 4539 not read.
+- 39-tone: MIL-STD-188-110B (27 April 2000) Appendix B, distribution A.
+- 3G ALE: MIL-STD-188-141B (1 March 1999) Appendix C, distribution A, because
+  141D's Appendix C now points to STANAG 4538. STANAG 4538 not held.
+- Link-11 CLEW: MIL-STD-188-203-1A (8 January 1988), distribution A, a scan.
+  MIL-STD-6011 not held.
+- SSTV handbook modes: Bruchanov, "Image Communication on Short Waves" (2012
+  text, 2019 PDF build). MMSSTV, QSSTV and slowrx not read.
+- Radiofax: WMO-No. 386 Volume I (2009) Part III section 5, the NWS copy; NWS
+  "Worldwide Marine Radiofacsimile Broadcast Schedules" (7 March 2025);
+  Bruchanov 11.2.2. No fax decoder read.
+- Baseline JPEG: ITU-T T.81 (09/92), the W3C copy, and T.871 (05/2011). libjpeg
+  and stb_image not read.
+- Meteor-M LRPT: CCSDS 131.0-B-5, 732.0-B-4 and 133.0-B-2 again; no Roshydromet
+  document obtained. SatDump, meteor_demod, meteor_decoder and LeanHRPT not
+  read.
+- Metop AHRPT: EUMETSAT TD 18, "Metop Direct Readout AHRPT Technical
+  Description", EUM/OPS/TEN/08/1663 v3A (12 July 2021); CGMS LRIT/HRIT Global
+  Specification 2.8. MO-IF-MMT-SY-0001 is not public and EPS.ASPI.DS.0675 did
+  not resolve. SatDump, AAPP and MetopDump not read.
+- GK-2A LRIT: NMSC/KMA "GK2A LRIT Mission Specification Document" 1.0 (31 May
+  2019); CGMS 2.8. xrit-rx, goestools and SatDump not read.
+- GOES HRIT and EMWIN: Aerospace ATR-2010(5482)-1 (10 October 2009); CGMS
+  LRIT/HRIT Global Specification 2.8 (30 October 2013), CGMS/DOC/12/0017; the
+  NOAA OSPO page. No NOAA HRIT/EMWIN product specification was located. Two
+  sample files from that page,
+  `A_WWUS53KDVN102359_C_KWIN_20260311000017_940099-1-SVSDVNIA.lrit` and
+  `Z_QATA00KWBC110845_C_KWIN_20260311204545_011287-3-RADSMSVY.lrit`, were read
+  as bytes for header type 129; that layout is observation. goestools, SatDump
+  and xrit-rx not read.
+- GOES GRB and DVB-S2: GOES-R PUG Volume 4, 416-R-PUG-GRB-0348 Rev 2.3 (1 June
+  2020); ETSI EN 302 307-1 V1.4.1 (2014-11). Annex B tables B.6 and B.11 are
+  transcribed into `core/decode/dvbs2_tables.cpp` under an ETSI copyright note,
+  for the owner. leandvb, gr-dvbs2rx, gr-dtv, goesrecv and SatDump not read.
+- WSPR, JT9, JT4: G4JNT, "The WSPR Coding Process" (June 2009), "The JT9 Coding
+  Process" (March 2016), "The JT4 Coding Process" (July 2009). WSJT-X not read.
+- JT65: K1JT, "The JT65 Communications Protocol", QEX September/October 2005;
+  Franke and Taylor, "Open Source Soft-Decision Decoder for the JT65 (63,12)
+  Reed-Solomon Code", QEX May/June 2016. Both defer details to the WSJT source,
+  which was not read; the Reed-Solomon parameters were derived from the 2005
+  paper's Figure 2.
+- VDES turbo: ITU-R M.2092-2 (02/2026) again, Annex 2 A2-1.2.4 and Annex 4. No
+  VDES or turbo implementation read.
+- Cospas-Sarsat second generation: C/S T.018 Issue 1 Revision 7 (March 2021),
+  from cospas-sarsat.int, watermarked as superseded. dec406 and gr-satellites
+  not read.
+- SSDV, not written: the UKHAS wiki `guides:ssdv` page. Exposure: one web search
+  returned a summary paraphrasing RadioLib's `SSDV.h`, ssdv-fec and
+  bristol-seds/ssdv, naming packet types 0x68 and 0x69 and the CRC's coverage.
+  The pages were not opened and nothing from the summary is used; SSDV stays
+  blocked on its document.
+
 **FT8 and FT4 generator matrices: the public-domain basis.** `ft4_ft8_protocols.tgz`
 is no longer served at the princeton.edu or ARRL QEX paths; it was read from
 the Wayback Machine's capture of 2020-01-07. The archive itself carries no

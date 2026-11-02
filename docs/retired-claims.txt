@@ -2507,3 +2507,37 @@ phrase: Eight entries, all self-reported by the person who did it
 retired: 2026-11-02
 commit: "Document the decoders merged on 2026-11-02"
 instead: The disclosure log in docs/clean-room.md has nine entries.
+
+phrase: RS(255,223) interleave 4, so about 146 ksym/s
+retired: 2026-11-02
+commit: "Correct scope rows from the second documentation pass"
+instead: The GK2A LRIT Mission Specification Document gives 128 ksym/s.
+
+phrase: MIL-STD-188-141D Appendix C, free. STANAG 4538 is the NATO twin
+retired: 2026-11-02
+commit: "Correct scope rows from the second documentation pass"
+instead: 141D Appendix C points to STANAG 4538; the 3G ALE waveforms are read
+    from MIL-STD-188-141B (1999) Appendix C, BW0 to BW4.
+
+phrase: 5 to 7 are turbo coded and reported without payload
+retired: 2026-11-02
+commit: "Document the decoders merged later on 2026-11-02"
+instead: VDES Link IDs 5 to 7 decode through core/decode/turbo.h,
+    tests/decode/test_vdes.cpp.
+
+phrase: fixed frequency only, no Appendix C rates above 4800
+retired: 2026-11-02
+commit: "Document the decoders merged later on 2026-11-02"
+instead: The 110C receiver tracks symbol timing and core/decode/mil110c.h
+    decodes Appendix C at 3200 to 12800 bit/s.
+
+phrase: modes outside the Dayton paper and the 16-bit VIS extension are not done
+retired: 2026-11-02
+commit: "Document the decoders merged later on 2026-11-02"
+instead: AVT, MMSSTV MP/MR/ML and MSCAN decode from Bruchanov's handbook, with
+    the 16-bit VIS extension.
+
+phrase: GOES Rebroadcast Downlink specification at goes-r.gov
+retired: 2026-11-02
+commit: "Document the decoders merged later on 2026-11-02"
+instead: GRB is written from GOES-R PUG Volume 4, 416-R-PUG-GRB-0348 Rev 2.3.

@@ -111,18 +111,24 @@ std::complex<double> interp(std::span<const Complex32> block, double t) {
     return {a.real() + f * (b.real() - a.real()), a.imag() + f * (b.imag() - a.imag())};
 }
 
+// The block resampled to a power-of-two number of samples per code period.
+// Spectra are made one Doppler bin at a time and shared by every signal being
+// searched, so the memory is a few periods of one bin, not the whole grid: a
+// 20 ms L2 CM period over a 10 kHz span at 25 Hz steps would otherwise hold
+// gigabytes.
 struct SearchGrid {
     std::size_t nfft = 0;
     double samples_per_period = 0.0;
     double period_s = 0.0;
+    double offset_hz = 0.0;
     std::vector<double> dopplers;
-    // spectra[bin][period] for one offset_hz
-    std::vector<std::vector<std::vector<characterise::Complex64>>> spectra;
+    std::vector<std::vector<characterise::Complex64>> resampled;  // [period]
 };
 
-void build_spectra(std::span<const Complex32> block, dsp::SampleRate rate, double period_s,
-                   double offset_hz, const AcquisitionConfig& cfg, SearchGrid& g) {
+void build_grid(std::span<const Complex32> block, dsp::SampleRate rate, double period_s,
+                double offset_hz, const AcquisitionConfig& cfg, SearchGrid& g) {
     g.period_s = period_s;
+    g.offset_hz = offset_hz;
     g.samples_per_period = static_cast<double>(rate) * period_s;
     g.nfft = next_pow2(static_cast<std::size_t>(std::ceil(g.samples_per_period)));
     g.dopplers.clear();
@@ -134,33 +140,31 @@ void build_spectra(std::span<const Complex32> block, dsp::SampleRate rate, doubl
     const auto avail = static_cast<unsigned>(
         std::floor((static_cast<double>(block.size()) - 1.0) / g.samples_per_period));
     const unsigned m = std::min(cfg.noncoherent_periods, avail);
-    std::vector<std::vector<characterise::Complex64>> resampled(m);
+    g.resampled.assign(m, {});
     const double step = g.samples_per_period / static_cast<double>(g.nfft);
     for (unsigned k = 0; k < m; ++k) {
-        resampled[k].resize(g.nfft);
+        g.resampled[k].resize(g.nfft);
         for (std::size_t j = 0; j < g.nfft; ++j) {
-            resampled[k][j] = interp(block, static_cast<double>(k) * g.samples_per_period +
-                                                static_cast<double>(j) * step);
+            g.resampled[k][j] = interp(block, static_cast<double>(k) * g.samples_per_period +
+                                                  static_cast<double>(j) * step);
         }
     }
-    g.spectra.assign(g.dopplers.size(), {});
-    const double dt = period_s / static_cast<double>(g.nfft);
-    for (std::size_t b = 0; b < g.dopplers.size(); ++b) {
-        const double f = offset_hz + g.dopplers[b];
-        g.spectra[b].resize(m);
-        for (unsigned k = 0; k < m; ++k) {
-            auto& x = g.spectra[b][k];
-            x.resize(g.nfft);
-            const double t0 = static_cast<double>(k) * period_s;
-            const std::complex<double> step_rot = std::polar(1.0, -kTwoPi * f * dt);
-            std::complex<double> rot = std::polar(1.0, -kTwoPi * f * t0);
-            for (std::size_t j = 0; j < g.nfft; ++j) {
-                x[j] = resampled[k][j] * rot;
-                rot *= step_rot;
-            }
-            characterise::fft_in_place(x);
-        }
+}
+
+// The spectrum of period k wiped off at Doppler bin b.
+void bin_spectrum(const SearchGrid& g, std::size_t b, unsigned k,
+                  std::vector<characterise::Complex64>& x) {
+    const double f = g.offset_hz + g.dopplers[b];
+    const double dt = g.period_s / static_cast<double>(g.nfft);
+    x.resize(g.nfft);
+    const double t0 = static_cast<double>(k) * g.period_s;
+    const std::complex<double> step_rot = std::polar(1.0, -kTwoPi * f * dt);
+    std::complex<double> rot = std::polar(1.0, -kTwoPi * f * t0);
+    for (std::size_t j = 0; j < g.nfft; ++j) {
+        x[j] = g.resampled[k][j] * rot;
+        rot *= step_rot;
     }
+    characterise::fft_in_place(x);
 }
 
 std::vector<characterise::Complex64> code_spectrum_conj(const SignalSpec& spec, std::size_t nfft) {
@@ -178,82 +182,166 @@ std::vector<characterise::Complex64> code_spectrum_conj(const SignalSpec& spec, 
     return c;
 }
 
-AcquisitionEvent search(const SearchGrid& g, const SignalSpec& spec,
-                        const AcquisitionConfig& cfg) {
-    AcquisitionEvent ev;
-    ev.id = spec.id;
-    const auto cconj = code_spectrum_conj(spec, g.nfft);
-    const auto m = static_cast<unsigned>(g.spectra.empty() ? 0 : g.spectra.front().size());
-    if (m == 0) {
-        return ev;
+// A code long enough that every period carries a symbol or overlay edge
+// somewhere inside the block's periods, as L2 CM's 20 ms does with its 50 sps.
+constexpr double kLongCodeS = 0.004;
+
+// The prompt over block periods re-cut to start on the found code epoch, so
+// no symbol edge falls inside one, at carrier offset f.
+std::complex<double> aligned_prompt(const SearchGrid& g, const SignalSpec& spec,
+                                    std::size_t epoch_idx, unsigned j, double f) {
+    const std::size_t n0 = epoch_idx + static_cast<std::size_t>(j) * g.nfft;
+    const double dt = g.period_s / static_cast<double>(g.nfft);
+    const double len = static_cast<double>(spec.code.size());
+    const double w = -kTwoPi * (g.offset_hz + f) * dt;
+    std::complex<double> rot = std::polar(1.0, w * static_cast<double>(n0));
+    const std::complex<double> step = std::polar(1.0, w);
+    std::complex<double> acc{};
+    for (std::size_t q = 0; q < g.nfft; ++q) {
+        const std::size_t n = n0 + q;
+        const std::size_t k = n / g.nfft;
+        if (k >= g.resampled.size()) {
+            break;
+        }
+        const auto chip = static_cast<std::size_t>(static_cast<double>(q) * len /
+                                                   static_cast<double>(g.nfft));
+        acc += g.resampled[k][n % g.nfft] * rot *
+               static_cast<double>(spec.code[std::min(chip, spec.code.size() - 1)]);
+        rot *= step;
     }
+    return acc;
+}
+
+// For long codes the block's periods each straddle a symbol edge, which
+// splits the correlation peak in frequency and can leave the best bin half a
+// coherent bandwidth, 1/(2T), off: exactly where the squared-phase refinement
+// and the tracker's FLL are both blind. So the bin is re-chosen among d and
+// d +- 1/(2T) on epoch-aligned periods, then refined on those.
+double refine_aligned(const SearchGrid& g, const SignalSpec& spec, std::size_t best_idx,
+                      double d) {
+    const auto periods = static_cast<unsigned>(g.resampled.size() - 1);
+    const double half = 0.5 / g.period_s;
+    double best = -1.0;
+    double f_best = d;
+    for (double f : {d - half, d, d + half}) {
+        double p = 0.0;
+        for (unsigned j = 0; j < periods; ++j) {
+            p += std::norm(aligned_prompt(g, spec, best_idx, j, f));
+        }
+        if (p > best) {
+            best = p;
+            f_best = f;
+        }
+    }
+    std::complex<double> sum{};
+    std::complex<double> last = aligned_prompt(g, spec, best_idx, 0, f_best);
+    for (unsigned j = 1; j < periods; ++j) {
+        const auto p = aligned_prompt(g, spec, best_idx, j, f_best);
+        const auto dd = p * std::conj(last);
+        sum += dd * dd;
+        last = p;
+    }
+    return f_best + std::arg(sum) / 2.0 / (kTwoPi * g.period_s);
+}
+
+std::vector<AcquisitionEvent> search(const SearchGrid& g, std::span<const SignalSpec* const> specs,
+                                     const AcquisitionConfig& cfg) {
+    struct State {
+        std::vector<characterise::Complex64> cconj;
+        double best = -1.0;
+        std::size_t best_bin = 0;
+        std::size_t best_idx = 0;
+        double total = 0.0;
+        std::size_t cells = 0;
+    };
+    std::vector<AcquisitionEvent> events(specs.size());
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        events[i].id = specs[i]->id;
+    }
+    const auto m = static_cast<unsigned>(g.resampled.size());
+    if (m == 0) {
+        return events;
+    }
+    std::vector<State> st(specs.size());
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        st[i].cconj = code_spectrum_conj(*specs[i], g.nfft);
+    }
+    std::vector<std::vector<characterise::Complex64>> spectra(m);
     std::vector<double> power(g.nfft);
     std::vector<characterise::Complex64> y(g.nfft);
-    double best = -1.0;
-    std::size_t best_bin = 0;
-    std::size_t best_idx = 0;
-    double total = 0.0;
-    std::size_t cells = 0;
     const double inv_n = 1.0 / static_cast<double>(g.nfft);
     for (std::size_t b = 0; b < g.dopplers.size(); ++b) {
-        std::fill(power.begin(), power.end(), 0.0);
         for (unsigned k = 0; k < m; ++k) {
-            const auto& x = g.spectra[b][k];
-            for (std::size_t j = 0; j < g.nfft; ++j) {
-                y[j] = std::conj(x[j] * cconj[j]);  // inverse via the conjugate trick
-            }
-            characterise::fft_in_place(y);
-            for (std::size_t j = 0; j < g.nfft; ++j) {
-                power[j] += std::norm(y[j]) * inv_n * inv_n;
-            }
+            bin_spectrum(g, b, k, spectra[k]);
         }
-        for (std::size_t j = 0; j < g.nfft; ++j) {
-            total += power[j];
-            if (power[j] > best) {
-                best = power[j];
-                best_bin = b;
-                best_idx = j;
+        for (auto& s : st) {
+            std::fill(power.begin(), power.end(), 0.0);
+            for (unsigned k = 0; k < m; ++k) {
+                const auto& x = spectra[k];
+                for (std::size_t j = 0; j < g.nfft; ++j) {
+                    y[j] = std::conj(x[j] * s.cconj[j]);  // inverse via the conjugate trick
+                }
+                characterise::fft_in_place(y);
+                for (std::size_t j = 0; j < g.nfft; ++j) {
+                    power[j] += std::norm(y[j]) * inv_n * inv_n;
+                }
             }
+            for (std::size_t j = 0; j < g.nfft; ++j) {
+                s.total += power[j];
+                if (power[j] > s.best) {
+                    s.best = power[j];
+                    s.best_bin = b;
+                    s.best_idx = j;
+                }
+            }
+            s.cells += g.nfft;
         }
-        cells += g.nfft;
     }
-    const double mean = (total - best) / static_cast<double>(cells - 1);
-    ev.peak_ratio = mean > 0.0 ? best / mean : 0.0;
-    ev.found = ev.peak_ratio >= cfg.threshold;
-    const double len = static_cast<double>(spec.code.size());
-    ev.code_phase_chips = static_cast<double>((g.nfft - best_idx) % g.nfft) * len /
-                          static_cast<double>(g.nfft);
-    ev.doppler_hz = g.dopplers[best_bin];
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        auto& ev = events[i];
+        const auto& s = st[i];
+        const double mean = (s.total - s.best) / static_cast<double>(s.cells - 1);
+        ev.peak_ratio = mean > 0.0 ? s.best / mean : 0.0;
+        ev.found = ev.peak_ratio >= cfg.threshold;
+        const double len = static_cast<double>(specs[i]->code.size());
+        ev.code_phase_chips = static_cast<double>((g.nfft - s.best_idx) % g.nfft) * len /
+                              static_cast<double>(g.nfft);
+        ev.doppler_hz = g.dopplers[s.best_bin];
 
-    // Refine the Doppler from the prompt's phase advance period to period,
-    // squared against sign flips: unambiguous to a quarter of 1/T, which a
-    // half-bin error is inside.
-    if (m >= 2) {
-        // Prompts from the stored spectra would need an inverse transform per
-        // period; correlate in the frequency domain at the one lag instead.
-        std::vector<characterise::Complex64> prompts(m);
-        for (unsigned k = 0; k < m; ++k) {
-            const auto& x = g.spectra[best_bin][k];
-            std::complex<double> acc{};
-            // Parseval: sum_t x[t] c[t-lag] = (1/N) sum_f X[f] conj(C[f]) e^{+j2pi f lag/N}
-            const std::complex<double> w = std::polar(1.0, kTwoPi * static_cast<double>(best_idx) /
-                                                               static_cast<double>(g.nfft));
-            std::complex<double> rot{1.0, 0.0};
-            for (std::size_t j = 0; j < g.nfft; ++j) {
-                acc += x[j] * cconj[j] * rot;
-                rot *= w;
+        if (g.period_s >= kLongCodeS && m >= 3) {
+            ev.doppler_hz = refine_aligned(g, *specs[i], s.best_idx, ev.doppler_hz);
+            continue;
+        }
+        // Refine the Doppler from the prompt's phase advance period to
+        // period, squared against sign flips: unambiguous to a quarter of
+        // 1/T, which a half-bin error is inside.
+        if (m >= 2) {
+            // Correlate in the frequency domain at the one lag.
+            std::vector<characterise::Complex64> prompts(m);
+            std::vector<characterise::Complex64> x;
+            for (unsigned k = 0; k < m; ++k) {
+                bin_spectrum(g, s.best_bin, k, x);
+                std::complex<double> acc{};
+                // Parseval: sum_t x[t] c[t-lag] = (1/N) sum_f X[f] conj(C[f]) e^{+j2pi f lag/N}
+                const std::complex<double> w = std::polar(
+                    1.0, kTwoPi * static_cast<double>(s.best_idx) / static_cast<double>(g.nfft));
+                std::complex<double> rot{1.0, 0.0};
+                for (std::size_t j = 0; j < g.nfft; ++j) {
+                    acc += x[j] * s.cconj[j] * rot;
+                    rot *= w;
+                }
+                prompts[k] = acc * inv_n;
             }
-            prompts[k] = acc * inv_n;
+            std::complex<double> sum{};
+            for (unsigned k = 0; k + 1 < m; ++k) {
+                const auto d = prompts[k + 1] * std::conj(prompts[k]);
+                sum += d * d;
+            }
+            const double dphi = std::arg(sum) / 2.0;
+            ev.doppler_hz += dphi / (kTwoPi * g.period_s);
         }
-        std::complex<double> s{};
-        for (unsigned k = 0; k + 1 < m; ++k) {
-            const auto d = prompts[k + 1] * std::conj(prompts[k]);
-            s += d * d;
-        }
-        const double dphi = std::arg(s) / 2.0;
-        ev.doppler_hz += dphi / (kTwoPi * g.period_s);
     }
-    return ev;
+    return events;
 }
 
 double code_period_s(const SignalSpec& spec) {
@@ -334,8 +422,9 @@ unsigned first_chips(std::span<const std::int8_t> code, unsigned count) {
 AcquisitionEvent acquire(std::span<const Complex32> block, dsp::SampleRate sample_rate,
                          const SignalSpec& spec, const AcquisitionConfig& config) {
     SearchGrid g;
-    build_spectra(block, sample_rate, code_period_s(spec), spec.offset_hz, config, g);
-    return search(g, spec, config);
+    build_grid(block, sample_rate, code_period_s(spec), spec.offset_hz, config, g);
+    const SignalSpec* one = &spec;
+    return search(g, std::span<const SignalSpec* const>(&one, 1), config).front();
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +440,7 @@ TrackingChannel::TrackingChannel(const SignalSpec& spec, const FrontEndConfig& c
       next_(start_sample),
       period_start_(start_sample),
       code_phase_(code_phase_chips),
+      start_phase_(code_phase_chips),
       carrier_hz_(doppler_hz),
       nco_hz_(doppler_hz) {
     code_rate_ = spec_.chip_rate_hz * (1.0 + carrier_hz_ / spec_.carrier_hz);
@@ -394,6 +484,9 @@ void TrackingChannel::process(std::span<const Complex32> samples, SampleIndex fi
         prompt_ += z * static_cast<double>(code[idx(cp)]);
         early_ += z * static_cast<double>(code[idx(cp + d)]);
         late_ += z * static_cast<double>(code[idx(cp - d)]);
+        if (!spec_.aux_code.empty()) {
+            aux_ += z * static_cast<double>(spec_.aux_code[idx(cp)]);
+        }
         cp += step;
         ++next_;
         if (cp >= code_len_) {
@@ -409,6 +502,7 @@ void TrackingChannel::process(std::span<const Complex32> samples, SampleIndex fi
             lo = std::polar(1.0, -kTwoPi * carrier_phase_);
             lo_step_ = std::polar(1.0, -kTwoPi * (spec_.offset_hz + nco_hz_) / fs_);
             period_start_ = next_;
+            start_phase_ = cp;
         }
     }
     code_phase_ = cp;
@@ -490,6 +584,8 @@ void TrackingChannel::dump(std::vector<Prompt>& out) {
     pr.sample = period_start_;
     pr.period = periods_;
     pr.prompt = p;
+    pr.aux = aux_;
+    pr.code_phase_chips = start_phase_;
     pr.doppler_hz = carrier_hz_;
     pr.cn0_dbhz = cn0_;
     pr.phase_locked = lock_metric_ > 0.6 && elapsed >= cfg_.fll_only_periods;
@@ -497,7 +593,7 @@ void TrackingChannel::dump(std::vector<Prompt>& out) {
 
     last_prompt_ = p;
     have_last_ = true;
-    early_ = prompt_ = late_ = {};
+    early_ = prompt_ = late_ = aux_ = {};
     ++periods_;
 }
 
@@ -585,18 +681,25 @@ void FrontEnd::run_block(FrontEndOutput& out) {
     if (todo.empty()) {
         return;
     }
-    // Signals sharing a centre share the transformed block.
+    // Signals sharing a centre share the transformed block, one Doppler
+    // bin at a time.
     std::vector<std::pair<AcquisitionEvent, const SignalSpec*>> found;
-    std::map<double, SearchGrid> grids;
-    const double period = code_period_s(signals_.front());
+    std::map<double, std::vector<const SignalSpec*>> by_offset;
     for (const SignalSpec* s : todo) {
-        auto it = grids.find(s->offset_hz);
-        if (it == grids.end()) {
-            SearchGrid g;
-            build_spectra(block_, config_.sample_rate, period, s->offset_hz, config_.acquisition, g);
-            it = grids.emplace(s->offset_hz, std::move(g)).first;
+        by_offset[s->offset_hz].push_back(s);
+    }
+    const double period = code_period_s(signals_.front());
+    std::map<const SignalSpec*, AcquisitionEvent> results;
+    for (const auto& [offset, group] : by_offset) {
+        SearchGrid g;
+        build_grid(block_, config_.sample_rate, period, offset, config_.acquisition, g);
+        const auto evs = search(g, group, config_.acquisition);
+        for (std::size_t i = 0; i < group.size(); ++i) {
+            results[group[i]] = evs[i];
         }
-        AcquisitionEvent ev = search(it->second, *s, config_.acquisition);
+    }
+    for (const SignalSpec* s : todo) {
+        AcquisitionEvent ev = results[s];
         ev.block_start = block_start_;
         out.acquisitions.push_back(ev);
         if (ev.found) {
