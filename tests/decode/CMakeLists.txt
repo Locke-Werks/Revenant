@@ -136,6 +136,7 @@ add_executable(revenant_decode_tests
     test_mil110.cpp
     test_ais.cpp
     test_vdl4.cpp
+    test_vdes.cpp
     test_asterix_cat021.cpp
     test_aprs.cpp
     test_atv.cpp
