@@ -48,4 +48,9 @@ struct SlowModConfig {
 [[nodiscard]] Status jt4_add(const SlowModConfig& config, std::string_view message, int submode,
                              std::span<float> audio);
 
+// JT65 submode 0 to 2 (A to C), optionally in the "OOO" form:
+// core/decode/jt65.h's channel tones.
+[[nodiscard]] Status jt65_add(const SlowModConfig& config, std::string_view message, int submode, bool ooo,
+                              std::span<float> audio);
+
 }  // namespace revenant::siggen

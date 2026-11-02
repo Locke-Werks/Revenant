@@ -4,6 +4,7 @@
 #include <numbers>
 
 #include "core/decode/jt4.h"
+#include "core/decode/jt65.h"
 #include "core/decode/jt9.h"
 #include "core/decode/wspr.h"
 
@@ -46,6 +47,14 @@ Status jt4_add(const SlowModConfig& config, std::string_view message, int submod
     if (!bits) return std::unexpected(bits.error());
     const auto tones = decode::jt4_channel_tones(*bits);
     return slow_add(config, decode::jt4_protocol(submode), tones, audio);
+}
+
+Status jt65_add(const SlowModConfig& config, std::string_view message, int submode, bool ooo,
+                std::span<float> audio) {
+    auto bits = decode::wsjt72_pack(message);
+    if (!bits) return std::unexpected(bits.error());
+    const auto tones = decode::jt65_channel_tones(*bits, ooo);
+    return slow_add(config, decode::jt65_protocol(submode, ooo), tones, audio);
 }
 
 }  // namespace revenant::siggen
