@@ -120,6 +120,7 @@ add_library(revenant_core STATIC
     decode/fsk.cpp
     decode/fx25.cpp
     decode/il2p.cpp
+    decode/lpc10.cpp
     decode/imbe.cpp
     decode/navtex.cpp
     decode/ofdm.cpp

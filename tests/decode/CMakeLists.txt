@@ -146,6 +146,7 @@ add_executable(revenant_decode_tests
     test_dstar.cpp
     test_dstar_blocking.cpp
     test_imbe.cpp
+    test_lpc10.cpp
     test_navtex.cpp
     test_ofdm.cpp
     test_ldpc.cpp
