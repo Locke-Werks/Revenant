@@ -188,6 +188,7 @@ add_executable(revenant_decode_tests
     test_viterbi_stream.cpp
     test_ft8.cpp
     test_ft4.cpp
+    test_ccsds.cpp
 )
 
 target_link_libraries(revenant_decode_tests PRIVATE
