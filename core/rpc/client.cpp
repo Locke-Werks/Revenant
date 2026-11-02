@@ -1564,6 +1564,9 @@ public:
                                                           DecodedEndedCallback on_ended,
                                                           DecodedImageCallback on_image) override;
     void unsubscribe_decoded(std::uint64_t vrx, std::string_view decoder) override;
+    [[nodiscard]] Expected<WidebandSubscription> subscribe_wideband_decoded(
+        std::string_view decoder, std::int64_t offset_hz, DecodedCallback on_message,
+        DecodedEndedCallback on_ended, DecodedImageCallback on_image) override;
     [[nodiscard]] Expected<DecodedStats> decoded_stats(std::uint64_t vrx,
                                                        std::string_view decoder) override;
 
@@ -1611,6 +1614,9 @@ private:
     // Read on the loop thread during the login handshake and never written
     // again after start() hands it over.
     Token token_{};
+
+    // subscribe_wideband_decoded's local keys. Any thread.
+    std::atomic<std::uint64_t> next_wideband_key_{0};
 
     // Loop thread only.
     [[nodiscard]] kj::Promise<void> end_subscription(LoopState& state);
@@ -3264,6 +3270,45 @@ Expected<std::string> ClientImpl::subscribe_decoded(std::uint64_t vrx, std::stri
                     return kj::Promise<std::string>(kj::mv(failure));
                 });
         });
+    });
+}
+
+Expected<Client::WidebandSubscription> ClientImpl::subscribe_wideband_decoded(
+    std::string_view decoder, std::int64_t offset_hz, DecodedCallback on_message,
+    DecodedEndedCallback on_ended, DecodedImageCallback on_image) {
+    if (!on_message) {
+        return fail("subscribe_wideband_decoded: the message callback is empty. "
+                    "unsubscribe_decoded is how a subscription ends");
+    }
+    // A key of this client's own, from a range no receiver id reaches, so the
+    // subscription sits in the same tables as a receiver's and the same
+    // unsubscribe and stats calls find it.
+    const std::uint64_t local = 0xF000'0000ULL + next_wideband_key_.fetch_add(1);
+    DecodedKey key{local, std::string(decoder)};
+    return on_loop("subscribe_wideband_decoded", [this, &key, offset_hz, &on_message,
+                                                  &on_ended, &on_image](LoopState& state) {
+        decoded_callbacks_[key] = std::move(on_message);
+        decoded_ended_[key] = std::move(on_ended);
+        if (on_image) {
+            decoded_images_[key] = std::move(on_image);
+        }
+        auto request = state.session.subscribeWidebandDecodedRequest();
+        request.setDecoder(key.second);
+        request.setOffsetHz(offset_hz);
+        request.setReceiver(
+            schema::DecodedReceiver::Client(kj::heap<DecodedReceiverImpl>(*this, key)));
+        return request.send()
+            .then([&state, key](auto&& response) -> WidebandSubscription {
+                state.decodeds[key] =
+                    kj::heap<schema::DecodedSubscription::Client>(response.getSubscription());
+                return WidebandSubscription{key.first, response.getRateGranted(),
+                                            response.getTap()};
+            })
+            .catch_([this, key](kj::Exception&& failure)
+                        -> kj::Promise<WidebandSubscription> {
+                forget_decoded(key);
+                return kj::Promise<WidebandSubscription>(kj::mv(failure));
+            });
     });
 }
 

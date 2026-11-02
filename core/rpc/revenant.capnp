@@ -4023,6 +4023,27 @@ interface Session {
     # seek to the start produces. Refused with no source open and on a
     # source with no end, which is everything but a file.
     setSourceLoop @48 (on :Bool) -> ();
+
+    # A decoder on the source's own stream rather than on a receiver, for a
+    # signal wider than any receiver channel: DAB, GNSS, HRPT, DVB-S, BLE.
+    # core/engine/wideband_tap.h has the path. The tap mixes offsetHz (from
+    # the source's tuned centre) to DC and decimates by the largest whole
+    # number that keeps the rate at or above what the decoder needs;
+    # rateGranted is the rate it runs at.
+    #
+    # Only a decoder that declares a wideband rate is accepted; every other
+    # one is refused, naming subscribeDecoded. Messages and images arrive on
+    # the DecodedReceiver exactly as subscribeDecoded delivers them, with
+    # DecodedMessage::vrx carrying a wideband tap number at or above
+    # 0xF0000000 in place of a receiver id.
+    #
+    # Refused before a source is open. Closing or replacing the source ends
+    # the tap; the subscription then delivers nothing until it is cancelled
+    # and made again on the new source.
+    subscribeWidebandDecoded @49 (decoder :Text, offsetHz :Int64,
+                                  receiver :DecodedReceiver)
+        -> (subscription :DecodedSubscription, rateGranted :UInt64,
+            tap :UInt64);
 }
 
 struct TimeShiftLimits {

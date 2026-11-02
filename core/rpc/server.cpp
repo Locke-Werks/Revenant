@@ -485,6 +485,13 @@ void release_engine(const engine::Engine& engine) {
 // same talkgroup, short enough that two calls a minute apart are two hits.
 constexpr double kDecodeAnnotationGapSeconds = 10.0;
 
+// Where wideband routes number from. A route on a wideband tap has no
+// receiver, but every DecodedMessage and image event carries a vrx and the
+// decode route map is keyed on one, so it takes a number of its own from a
+// range no receiver reaches: receiver ids count up from one and the engine
+// would have to make four billion of them first.
+constexpr std::uint32_t kWidebandRouteBase = 0xF000'0000U;
+
 // A receiver's granted passband in absolute hertz, place_tap's arithmetic.
 [[nodiscard]] std::pair<double, double> decoded_passband(const engine::EngineInfo& info,
                                                          const engine::VrxStatus& status) {
@@ -1294,6 +1301,10 @@ struct DecodeRoute {
     engine::AudioSinkId sink = 0;
     bool fault_reported = false;
 
+    // Nonzero for a route fed by a wideband tap instead of a receiver's
+    // audio fan-out; end_decoded detaches the tap rather than the sink.
+    engine::WidebandTapId wideband_tap = 0;
+
     // The decode lane this decoder runs on. Loop thread only.
     std::shared_ptr<DecodeLane> lane;
 
@@ -1830,6 +1841,14 @@ public:
     // fences every decoder on a receiver, for a retune.
     [[nodiscard]] Status add_decoded(std::shared_ptr<DecodedNode> node,
                                      const engine::VrxStatus& status, const DecoderSpec& spec);
+    // A decoder on a wideband tap. The node's vrx is the route's own number
+    // at or above kWidebandRouteBase, never a receiver. Returns the rate the
+    // tap runs at.
+    [[nodiscard]] Expected<dsp::SampleRate> add_wideband_decoded(
+        std::shared_ptr<DecodedNode> node, const DecoderSpec& spec, dsp::Hertz offset);
+    [[nodiscard]] engine::VrxId next_wideband_route() {
+        return engine::VrxId{kWidebandRouteBase + next_wideband_route_++};
+    }
     void end_decoded(const std::shared_ptr<DecodedNode>& node);
     void end_decoded_for_vrx(engine::VrxId vrx, kj::StringPtr reason);
     void reset_decoded_for_vrx(engine::VrxId vrx, const engine::VrxStatus& status);
@@ -2390,6 +2409,7 @@ private:
     // that route's own lock, as rds_routes_ are.
     std::map<std::pair<std::uint32_t, std::string>, std::shared_ptr<DecodeRoute>>
         decode_routes_;
+    std::uint32_t next_wideband_route_ = 0;
 
     // Speech to text. The transcriber is made in start() when the options
     // carry a way to prepare a recogniser, and destroyed in stop() after
@@ -2775,6 +2795,13 @@ private:
         }
     }
 
+    if (spec->wideband_rate != 0) {
+        return fail(std::format(
+            "the {} decoder reads the source's own stream, not a receiver: its signal is "
+            "wider than any receiver channel. Attach it with subscribeWidebandDecoded, "
+            "giving its offset from the source's centre",
+            spec->name));
+    }
     return spec;
 }
 
@@ -3751,6 +3778,43 @@ public:
         // same trap in kj::StringPtr.
         const std::string resolved(spec->name);
         results.setDecoderResolved(resolved.c_str());
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> subscribeWidebandDecoded(SubscribeWidebandDecodedContext context) override {
+        auto request = context.getParams();
+        if (!request.hasReceiver()) {
+            return to_exception(Error{"subscribeWidebandDecoded needs a receiver capability, and "
+                                      "this request carried a null pointer in its place"});
+        }
+        const capnp::Text::Reader asked_text = request.getDecoder();
+        const std::string_view asked(asked_text.begin(), asked_text.size());
+        const DecoderSpec* spec = find_decoder(asked);
+        if (spec == nullptr) {
+            return to_exception(Error{std::format(
+                "there is no decoder called \"{}\"; this engine has {}", asked,
+                decoder_names())});
+        }
+        if (spec->wideband_rate == 0) {
+            return to_exception(Error{std::format(
+                "the {} decoder reads a receiver, not the source's own stream; add a receiver "
+                "on the signal and attach it with subscribeDecoded",
+                spec->name)});
+        }
+
+        const engine::VrxId route = owner_.next_wideband_route();
+        auto node = std::make_shared<DecodedNode>(request.getReceiver(), route, spec->name);
+        auto rate = owner_.add_wideband_decoded(node, *spec, request.getOffsetHz());
+        if (!rate) {
+            return to_exception(rate.error());
+        }
+
+        schema::DecodedSubscription::Client handle =
+            kj::heap<DecodedSubscriptionImpl>(owner_, std::move(node));
+        auto results = context.getResults();
+        results.setSubscription(kj::mv(handle));
+        results.setRateGranted(static_cast<std::uint64_t>(*rate));
+        results.setTap(route.value);
         return kj::READY_NOW;
     }
 
@@ -6565,6 +6629,83 @@ Status ServerImpl::add_decoded(std::shared_ptr<DecodedNode> node,
     return {};
 }
 
+Expected<dsp::SampleRate> ServerImpl::add_wideband_decoded(std::shared_ptr<DecodedNode> node,
+                                                          const DecoderSpec& spec,
+                                                          dsp::Hertz offset) {
+    if (spec.wideband_rate <= 0) {
+        return fail(std::format("the {} decoder reads a receiver, not a wideband tap; attach "
+                                "it with subscribeDecoded",
+                                spec.name));
+    }
+    const engine::EngineInfo info = engine_.info();
+    if (info.source_rate <= 0) {
+        return fail("subscribeWidebandDecoded needs an open source: the tap is built for the "
+                    "source's rate and sample format");
+    }
+    if (info.source_rate < spec.wideband_rate) {
+        return fail(std::format(
+            "the {} decoder needs at least {} S/s and the open source delivers {} S/s; open "
+            "the source at a higher rate",
+            spec.name, spec.wideband_rate, info.source_rate));
+    }
+    // The largest whole decimation that keeps the decoder at or above its
+    // rate. The tap's integer decimator needs an exact divisor of the source
+    // rate, so walk down from there to one that divides.
+    std::int64_t factor = info.source_rate / spec.wideband_rate;
+    while (factor > 1 && info.source_rate % factor != 0) {
+        --factor;
+    }
+    const dsp::SampleRate rate = info.source_rate / factor;
+
+    const std::scoped_lock held(sink_lock_);
+    if (sink_closed_) {
+        return fail("this server is stopping and will install no further sinks");
+    }
+
+    auto route = std::make_shared<DecodeRoute>(node->vrx, spec, engine::Demod::Raw);
+    route->owner = this;
+    route->lane = pick_lane();
+
+    // The route's own LaneWork, as add_decoded's, so the decode, the fault
+    // path and the queues are exactly the receiver path's.
+    auto work = std::make_shared<const LaneWork>(
+        [route, load = load_](const engine::AudioChunk& chunk) {
+            const engine::LoadTimer timed(load->decode_ns);
+            load->decode_chunks.fetch_add(1, std::memory_order_relaxed);
+            const std::scoped_lock owned(route->lock);
+            if (route->owner != nullptr) {
+                route->owner->on_decoded_chunk(*route, chunk);
+            }
+        });
+
+    // The tap's thread posts to the lane, which copies, so the chunk's span
+    // need live no longer than this call. A wideband stream never retunes
+    // under the route, so the epoch fence stays at zero.
+    engine::WidebandTapConfig config;
+    config.offset = offset;
+    config.output_rate = rate;
+    auto tap = engine_.attach_wideband_tap(
+        config, [lane = route->lane, work, vrx = node->vrx,
+                 eng = &engine_](const engine::WidebandChunk& chunk) -> Status {
+            engine::AudioChunk audio;
+            audio.vrx = vrx;
+            audio.start = chunk.start;
+            audio.rate = chunk.rate;
+            audio.samples = chunk.iq;
+            audio.channels = 2;
+            static_cast<void>(lane->post(work, audio, runs_unthrottled(*eng)));
+            return {};
+        });
+    if (!tap) {
+        return std::unexpected(tap.error());
+    }
+    route->wideband_tap = *tap;
+    route->nodes.push_back(std::move(node));
+    decode_routes_.emplace(std::make_pair(route->vrx.value, std::string(spec.name)),
+                           std::move(route));
+    return rate;
+}
+
 void ServerImpl::end_decoded(const std::shared_ptr<DecodedNode>& node) {
     node->cancelled = true;
 
@@ -6594,7 +6735,11 @@ void ServerImpl::end_decoded(const std::shared_ptr<DecodedNode>& node) {
     // Unconditionally and without sink_lock_, for the reason end_rds_for_vrx
     // gives at length: a removal is always allowed, and skipping it when
     // stop() has set its flag is the window three sinks were once left in.
-    static_cast<void>(engine_.detach_audio_sink(route->vrx, route->sink));
+    if (route->wideband_tap != 0) {
+        static_cast<void>(engine_.detach_wideband_tap(route->wideband_tap));
+    } else {
+        static_cast<void>(engine_.detach_audio_sink(route->vrx, route->sink));
+    }
 
     // Taken last, which waits for a dispatch already inside the decoder; the
     // callable keeps the route alive and finds owner null afterwards.

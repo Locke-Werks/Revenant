@@ -322,6 +322,15 @@ struct DecoderSpec {
     // description already says in words". The descriptions still say it, for a
     // person reading the list.
     std::span<const std::string_view> modes;
+
+    // Nonzero for a decoder that reads the source's own stream through a
+    // wideband tap (core/engine/wideband_tap.h) instead of a receiver: the
+    // lowest complex rate it works at. subscribeWidebandDecoded attaches only
+    // these, and subscribeDecoded refuses them, because no receiver channel
+    // is wide enough. The tap runs at the source rate divided by the largest
+    // whole number that keeps it at or above this, so a decoder here must
+    // accept any rate from this one up to the source rate.
+    dsp::SampleRate wideband_rate = 0;
 };
 
 // Whether `spec` reads the output of a receiver in `mode`: listed, or nothing

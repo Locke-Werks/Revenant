@@ -627,6 +627,21 @@ public:
         std::uint64_t vrx, std::string_view decoder, DecodedCallback on_message,
         DecodedEndedCallback on_ended, DecodedImageCallback on_image = {}) = 0;
     virtual void unsubscribe_decoded(std::uint64_t vrx, std::string_view decoder) = 0;
+
+    // A decoder on the source's own stream (subscribeWidebandDecoded in the
+    // schema), for a signal wider than any receiver. The callbacks are
+    // subscribe_decoded's, under its rules. The answer's key is what
+    // unsubscribe_decoded and decoded_stats take in place of a receiver id,
+    // with the same decoder name; it is this client's own number and is not
+    // the tap number the engine reports, which is what messages carry as vrx.
+    struct WidebandSubscription {
+        std::uint64_t key = 0;
+        std::uint64_t rate = 0;
+        std::uint64_t tap = 0;
+    };
+    [[nodiscard]] virtual Expected<WidebandSubscription> subscribe_wideband_decoded(
+        std::string_view decoder, std::int64_t offset_hz, DecodedCallback on_message,
+        DecodedEndedCallback on_ended, DecodedImageCallback on_image = {}) = 0;
     [[nodiscard]] virtual Expected<DecodedStats> decoded_stats(std::uint64_t vrx,
                                                                std::string_view decoder) = 0;
 
