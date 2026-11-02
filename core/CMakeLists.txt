@@ -104,6 +104,7 @@ add_library(revenant_core STATIC
     characterise/tones.cpp
     characterise/transform.cpp
     decode/ais.cpp
+    decode/ale_2g.cpp
     decode/aprs.cpp
     decode/ax25.cpp
     decode/bch.cpp
@@ -175,6 +176,7 @@ add_library(revenant_core STATIC
     dsp/spectrum_reference.cpp
     dsp/vrx_reference.cpp
     dsp/synth/ais_mod.cpp
+    dsp/synth/ale_2g_mod.cpp
     dsp/synth/channel.cpp
     dsp/synth/cw_mod.cpp
     dsp/synth/dmr_mod.cpp
