@@ -201,6 +201,7 @@ add_executable(revenant_decode_tests
     test_ft4.cpp
     test_ccsds.cpp
     test_funcube.cpp
+    test_cospas_sarsat.cpp
 )
 
 target_link_libraries(revenant_decode_tests PRIVATE
