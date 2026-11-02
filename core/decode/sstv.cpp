@@ -789,6 +789,8 @@ bool SstvDecoder::fax_header(double at) {
 void SstvDecoder::open_on(const ImageSink& sink, const SstvMode& mode) {
     ++image_id_;
     rows_sent_ = 0;
+    next_row_ = 0;
+    held_.clear();
     if (sink.on_open) {
         sink.on_open(ImageOpen{image_id_, mode.width,
                                mode.colour == SstvColour::Gray ? ImageRow::Gray8 : ImageRow::Rgb888,
@@ -796,14 +798,27 @@ void SstvDecoder::open_on(const ImageSink& sink, const SstvMode& mode) {
     }
 }
 
+// The sink takes rows in order, so an interlaced mode's rows are held until
+// every row above them has arrived.
 void SstvDecoder::row_on(const ImageSink& sink, std::uint32_t row,
                          std::span<const std::uint8_t> bytes) {
-    ++rows_sent_;
-    if (sink.on_row) {
-        const SstvMode& mode = *image_->mode;
-        sink.on_row(ImageRow{image_id_, row, mode.width,
-                             mode.colour == SstvColour::Gray ? ImageRow::Gray8 : ImageRow::Rgb888,
-                             std::vector<std::uint8_t>(bytes.begin(), bytes.end())});
+    held_[row].assign(bytes.begin(), bytes.end());
+    release(sink, false);
+}
+
+void SstvDecoder::release(const ImageSink& sink, bool all) {
+    const SstvMode& mode = *image_->mode;
+    while (!held_.empty() && (all || held_.begin()->first == next_row_)) {
+        auto first = held_.begin();
+        ++rows_sent_;
+        next_row_ = first->first + 1;
+        if (sink.on_row) {
+            sink.on_row(ImageRow{image_id_, first->first, mode.width,
+                                 mode.colour == SstvColour::Gray ? ImageRow::Gray8
+                                                                 : ImageRow::Rgb888,
+                                 std::move(first->second)});
+        }
+        held_.erase(first);
     }
 }
 
@@ -1003,6 +1018,8 @@ void SstvDecoder::emit_period(std::uint32_t period, const ImageSink& sink) {
 }
 
 void SstvDecoder::finish(const ImageSink& sink, bool complete) {
+    // Rows held behind a missing one still go out, in order.
+    release(sink, true);
     if (sink.on_close) {
         sink.on_close(ImageClose{image_id_, rows_sent_, complete});
     }

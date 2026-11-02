@@ -121,6 +121,7 @@
 #pragma once
 
 #include <complex>
+#include <map>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -303,6 +304,7 @@ private:
     void emit_period(std::uint32_t period, const ImageSink& sink);
     void open_on(const ImageSink& sink, const SstvMode& mode);
     void row_on(const ImageSink& sink, std::uint32_t row, std::span<const std::uint8_t> bytes);
+    void release(const ImageSink& sink, bool all);
     void refit();
     void finish(const ImageSink& sink, bool complete);
     void trim(double keep_from);
@@ -345,6 +347,8 @@ private:
     std::vector<std::uint8_t> row_;
     std::uint32_t image_id_ = 0;
     std::uint32_t rows_sent_ = 0;
+    std::uint32_t next_row_ = 0;
+    std::map<std::uint32_t, std::vector<std::uint8_t>> held_;   // rows waiting on one above
     SstvStats stats_;
 };
 

@@ -398,6 +398,26 @@ TEST_CASE("AVT 90 against noise, mistuning and a clock error, measured",
     }
 }
 
+TEST_CASE("interlaced modes hand the sink their rows in order", "[decode][sstv][handbook]") {
+    constexpr dsp::SampleRate kRate = 12'000;
+    for (const char* name : {"MSCAN TV-1", "AVT 24 QRM"}) {
+        const decode::SstvMode& mode = *decode::sstv_mode_by_name(name);
+        const auto audio = render(mode, kRate);
+        auto decoder = decode::SstvDecoder::create(decode::SstvConfig{kRate});
+        REQUIRE(decoder.has_value());
+        std::vector<std::uint32_t> order;
+        decode::ImageSink sink;
+        sink.on_row = [&](const decode::ImageRow& r) { order.push_back(r.row); };
+        // Cut short in the last field, so held rows go out at the close.
+        decoder->process(std::span<const float>(audio).first(audio.size() * 9 / 10), sink);
+        decoder->flush(sink);
+        INFO(name);
+        CHECK(std::ranges::is_sorted(order));
+        CHECK(std::ranges::adjacent_find(order) == order.end());
+        CHECK(order.size() > mode.height / 2);
+    }
+}
+
 TEST_CASE("MP115 and AVT 24 rows do not depend on how the audio is cut",
           "[decode][sstv][handbook]") {
     constexpr dsp::SampleRate kRate = 12'000;
