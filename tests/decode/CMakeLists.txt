@@ -150,6 +150,7 @@ add_executable(revenant_decode_tests
     test_dmr.cpp
     test_dmr_blocking.cpp
     test_dpmr.cpp
+    test_dect.cpp
     test_dsc.cpp
     test_dsc_hf.cpp
     test_dstar.cpp
