@@ -117,6 +117,8 @@
 #include "core/decode/psk31.h"
 #include "core/decode/rtty.h"
 #include "core/decode/sitor_b.h"
+#include "core/decode/sstv.h"
+#include "core/rpc/image_bridge.h"
 #include "core/decode/tetra.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
@@ -3916,6 +3918,63 @@ private:
     std::uint64_t lsf_crc_failures_ = 0;
 };
 
+// Reads a usb, lsb or nfm receiver's audio, core/decode/sstv.h: every image
+// a VIS code or the FAX480 start tone opens, out through the image sink, one
+// row at a time as the sync after it is found. No messages. Analog SSTV is
+// sent on both sidebands on HF and on FM from the ISS and on VHF, and the
+// demodulated audio is the same either way up, so all three modes read it.
+//
+// An image is stamped with the chunk in which its VIS code completed, which
+// is within one chunk of where the picture starts.
+class SstvChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "sstv";
+    static constexpr std::string_view kModes[] = {"usb", "lsb", "nfm"};
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        auto built = decode::SstvDecoder::create(decode::SstvConfig{build.rate});
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the sstv decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new SstvChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>&) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        stamp_ = chunk.start;
+        decoder_.process(chunk.samples, sink_);
+        stamp_ = chunk.start + chunk.frames();
+        return {};
+    }
+
+    // Rows the stream still holds go out and the image closes incomplete.
+    void flush(std::vector<DecodedMessage>&) override { decoder_.flush(sink_); }
+
+    void reset() override { decoder_.reset(sink_); }
+
+private:
+    SstvChunkDecoder(dsp::SampleRate rate, decode::SstvDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)),
+          sink_(make_image_bridge(
+              [this](std::uint32_t width, ImageColour colour, double line_rate_hz,
+                     std::string label) {
+                  return open_image(stamp_, static_cast<std::uint32_t>(rate_), width, colour,
+                                    line_rate_hz, std::move(label));
+              },
+              [this](std::uint64_t image, std::uint32_t row, std::span<const std::uint8_t> px) {
+                  image_row(image, row, px);
+              },
+              [this](std::uint64_t image, bool complete) { close_image(image, complete); })) {}
+
+    dsp::SampleRate rate_;
+    decode::SstvDecoder decoder_;
+    decode::ImageSink sink_;
+    std::uint64_t stamp_ = 0;
+};
+
 // ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
@@ -4025,6 +4084,12 @@ private:
          "identities, category, nature of distress, position and working channel. Reads an nfm "
          "receiver's audio",
          &DscChunkDecoder::make, kFmModes},
+        {SstvChunkDecoder::kName, DecoderInput::RealAudio,
+         "Analog SSTV and FAX480, N7CXI's Dayton paper: Martin, Scottie, Robot 36 and 72, "
+         "Wraase SC2-180, Pasokon and PD images by their VIS code, FAX480 by its start tone, "
+         "as images a row at a time with slant corrected. Reads a usb, lsb or nfm receiver's "
+         "audio",
+         &SstvChunkDecoder::make, SstvChunkDecoder::kModes},
     };
     return kRegistry;
 }
