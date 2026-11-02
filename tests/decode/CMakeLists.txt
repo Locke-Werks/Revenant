@@ -209,6 +209,7 @@ add_executable(revenant_decode_tests
     test_mfsk16.cpp
     test_dominoex.cpp
     test_fsq.cpp
+    test_feld_hell.cpp
 )
 
 target_link_libraries(revenant_decode_tests PRIVATE
