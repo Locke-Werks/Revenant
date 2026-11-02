@@ -206,6 +206,10 @@ add_executable(revenant_decode_tests
     test_ccsds.cpp
     test_funcube.cpp
     test_cospas_sarsat.cpp
+    test_mfsk16.cpp
+    test_dominoex.cpp
+    test_fsq.cpp
+    test_feld_hell.cpp
 )
 
 target_link_libraries(revenant_decode_tests PRIVATE
@@ -233,3 +237,7 @@ catch_discover_tests(revenant_decode_tests
         LABELS "decode"
         TIMEOUT 300
 )
+target_sources(revenant_decode_tests PRIVATE test_lrpt.cpp)
+target_sources(revenant_decode_tests PRIVATE test_ahrpt.cpp)
+target_sources(revenant_decode_tests PRIVATE test_gk2a_lrit.cpp)
+target_sources(revenant_decode_tests PRIVATE test_goes_hrit.cpp)

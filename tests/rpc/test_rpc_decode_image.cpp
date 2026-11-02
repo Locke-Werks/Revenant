@@ -1,8 +1,12 @@
 // Decoded images, from a decoder adapter through the engine and out over a
 // socket.
 //
-// No image decoder ships yet, so the path is exercised with "test_raster", an
-// adapter registered only in this binary through register_test_decoder. It
+// The path is exercised with "test_raster", an adapter registered only in
+// this binary through register_test_decoder, because a known gradient checks
+// every byte where a real decoder's picture cannot. SSTV is the shipped image
+// decoder and tests/rpc/test_rpc_decode_sstv.cpp crosses the wire with it.
+// WHAT THIS PARAGRAPH USED TO SAY, until SSTV landed on 2026-11-02: "No image
+// decoder ships yet, so the path is exercised with "test_raster"". It
 // reads an nfm receiver's audio and ignores it: on the first chunk it opens a
 // kWidth-wide gray8 image, hands over kRowsPerChunk rows of a known gradient
 // per chunk after that, and closes the image complete after kHeight rows. A

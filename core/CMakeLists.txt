@@ -142,6 +142,10 @@ add_library(revenant_core STATIC
     decode/ft8.cpp
     decode/ft4.cpp
     decode/dect.cpp
+    decode/mfsk16.cpp
+    decode/dominoex.cpp
+    decode/fsq.cpp
+    decode/feld_hell.cpp
     decode/dv_phy.cpp
     decode/enocean.cpp
     decode/fs1016.cpp
@@ -249,6 +253,10 @@ add_library(revenant_core STATIC
     dsp/synth/hrpt_mod.cpp
     dsp/synth/zwave_mod.cpp
     dsp/synth/mfsk_mod.cpp
+    dsp/synth/mfsk16_mod.cpp
+    dsp/synth/dominoex_mod.cpp
+    dsp/synth/fsq_mod.cpp
+    dsp/synth/feld_hell_mod.cpp
     dsp/synth/modulators.cpp
     dsp/synth/ofdm_mod.cpp
     dsp/synth/opulent_voice_mod.cpp
@@ -389,3 +397,7 @@ target_sources(revenant_core PRIVATE
     capture/index.cpp
     capture/search.cpp
 )
+target_sources(revenant_core PRIVATE decode/ccsds_downlink.cpp dsp/synth/ccsds_downlink_mod.cpp decode/lrpt.cpp dsp/synth/lrpt_mod.cpp)
+target_sources(revenant_core PRIVATE decode/ahrpt.cpp dsp/synth/ahrpt_mod.cpp)
+target_sources(revenant_core PRIVATE decode/xrit.cpp dsp/synth/xrit_mod.cpp decode/gk2a_lrit.cpp dsp/synth/gk2a_lrit_mod.cpp)
+target_sources(revenant_core PRIVATE decode/goes_hrit.cpp dsp/synth/goes_hrit_mod.cpp)
