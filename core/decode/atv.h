@@ -74,32 +74,11 @@
 #include <optional>
 #include <vector>
 
+#include "core/decode/image_sink.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
 
 namespace revenant::decode {
-
-// The decoder-local image interface. The RPC image path adapts to this at
-// merge.
-struct ImageRow {
-    std::uint32_t image_id = 0;
-    std::uint32_t row = 0;
-    std::uint32_t width = 0;
-    enum Model { Gray8, Rgb888 } model = Gray8;
-    std::vector<std::uint8_t> bytes;
-};
-
-struct ImageOpen {
-    std::uint32_t image_id = 0;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-    ImageRow::Model model = ImageRow::Gray8;
-};
-
-struct ImageClose {
-    std::uint32_t image_id = 0;
-    std::uint32_t rows = 0;  // rows delivered; height when the frame completed
-};
 
 enum class AtvStandard : std::uint8_t {
     M525,   // system M, 525 lines, NTSC timing

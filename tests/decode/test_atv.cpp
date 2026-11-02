@@ -59,10 +59,14 @@ Decoded run(const decode::AtvConfig& config, std::span<const float> video, std::
     Decoded d;
     decode::AtvCallbacks cb;
     cb.on_open = [&](const decode::ImageOpen& o) {
-        d.images[o.image_id].assign(o.height, std::vector<std::uint8_t>(o.width, 0));
+        d.images[o.image_id].clear();
     };
     cb.on_row = [&](const decode::ImageRow& r) {
-        d.images[r.image_id].at(r.row) = r.bytes;
+        auto& img = d.images[r.image_id];
+        if (img.size() <= r.row) {
+            img.resize(r.row + 1, std::vector<std::uint8_t>(r.width, 0));
+        }
+        img[r.row] = r.bytes;
         d.rows.push_back(r);
     };
     cb.on_close = [&](const decode::ImageClose& c) { d.closed[c.image_id] = c.rows; };

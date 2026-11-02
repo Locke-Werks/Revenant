@@ -118,7 +118,9 @@ void AtvReceiver::close_image() {
     }
     image_open_ = false;
     if (callbacks_.on_close) {
-        callbacks_.on_close(ImageClose{image_id_, rows_written_});
+        callbacks_.on_close(ImageClose{.image_id = image_id_,
+                                        .rows = rows_written_,
+                                        .complete = rows_written_ == 2 * timing_.rows_per_field});
     }
 }
 
@@ -238,8 +240,14 @@ void AtvReceiver::on_pulse(double start, double end) {
             image_open_ = true;
             rows_written_ = 0;
             if (callbacks_.on_open) {
-                callbacks_.on_open(ImageOpen{image_id_, config_.width, 2 * timing_.rows_per_field,
-                                             ImageRow::Gray8});
+                // Frames are 2 * rows_per_field rows tall; the shared open carries
+                // no height, so a consumer counts rows or reads the standard.
+                callbacks_.on_open(ImageOpen{
+                    .image_id = image_id_,
+                    .width = config_.width,
+                    .model = ImageRow::Gray8,
+                    .label = config_.standard == AtvStandard::M525 ? "atv-525" : "atv-625",
+                    .line_rate_hz = 1e6 / timing_.line_us});
             }
         }
         field_ = Field{start, second, 0, 0.0};
