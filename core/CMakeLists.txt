@@ -166,6 +166,7 @@ add_library(revenant_core STATIC
     decode/il2p.cpp
     decode/lpc10.cpp
     decode/imbe.cpp
+    decode/jpeg_baseline.cpp
     decode/navtex.cpp
     decode/ofdm.cpp
     decode/ldpc.cpp
