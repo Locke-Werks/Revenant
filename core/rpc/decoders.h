@@ -2449,7 +2449,8 @@ private:
 // kind is "position_report" for Messages 1 to 3, "base_station" for 4,
 // "utc_response" for 11, "static_voyage" for 5, "class_b_position" for 18,
 // "class_b_extended" for 19, "aid_to_navigation" for 21, "static_data" for
-// 24, and "other" for any other message, or one shorter than its table,
+// 24, "safety_broadcast" for 14, "long_range_position" for 27, and "other"
+// for any other message, or one shorter than its table,
 // which carries the first three fields and its octets and nothing parsed.
 //
 // Every message, ITU-R M.1371-5 Annex 8 and Annex 2 clause 3.3.7:
@@ -2458,6 +2459,8 @@ private:
 //   mmsi                 int
 //   octets               bytes  the data portion as received, FCS removed
 //   began_sample         int    receiver-stream index of the first data bit
+//   locating_device      text   sart, mob or epirb, from the MMSI's 970, 972
+//                               or 974 (M.1371-6 Annex 8 A8-6); else absent
 // Where the message's table has them, and only when not "not available":
 //   latitude, longitude  real   degrees, north and east positive
 //   position_accuracy    flag
@@ -2492,6 +2495,8 @@ private:
 //   part_number          int    Message 24
 //   vendor               text   Message 24B, Table 79A's manufacturer
 //   unit_model, unit_serial  int
+//   safety_text          text   Message 14, padding removed
+//   position_latency     flag   Message 27, true for more than 5 s
 class AisChunkDecoder final : public ChunkDecoder {
 public:
     static constexpr std::string_view kName = "ais";
@@ -2544,8 +2549,19 @@ private:
             case 19: return "class_b_extended";
             case 21: return "aid_to_navigation";
             case 24: return "static_data";
+            case 14: return "safety_broadcast";
+            case 27: return "long_range_position";
             default: return "other";
         }
+    }
+
+    [[nodiscard]] static std::string_view locating_name(decode::AisLocatingDevice device) {
+        switch (device) {
+            case decode::AisLocatingDevice::Sart: return "sart";
+            case decode::AisLocatingDevice::Mob: return "mob";
+            case decode::AisLocatingDevice::Epirb: return "epirb";
+        }
+        return "unknown";
     }
 
     // Table 48's navigational status, shortened.
@@ -2578,8 +2594,15 @@ private:
         message.fields.push_back(bytes_field("octets", m.octets));
         message.fields.push_back(
             integer_field("began_sample", static_cast<std::int64_t>(base_.at(m.first_sample))));
+        if (m.locating_device) {
+            message.fields.push_back(
+                text_field("locating_device", std::string(locating_name(*m.locating_device))));
+        }
 
         std::string line = std::format("MMSI {} message {}", m.mmsi, m.message_id);
+        if (m.locating_device) {
+            line += std::format(" ({})", locating_name(*m.locating_device));
+        }
         if (kind == "other") {
             message.text = line + std::format(", {} octets not parsed", m.octets.size());
             return message;
@@ -2719,6 +2742,13 @@ private:
         }
         if (m.unit_serial) {
             message.fields.push_back(integer_field("unit_serial", *m.unit_serial));
+        }
+        if (m.safety_text) {
+            message.fields.push_back(text_field("safety_text", *m.safety_text));
+            line += std::format(": {}", *m.safety_text);
+        }
+        if (m.position_latency) {
+            message.fields.push_back(flag_field("position_latency", *m.position_latency));
         }
         message.text = std::move(line);
         return message;
