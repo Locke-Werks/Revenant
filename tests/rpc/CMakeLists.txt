@@ -41,6 +41,7 @@ if(TARGET revenant_rpc_server)
         test_rpc_decode_image.cpp
         test_rpc_decode_wideband.cpp
         test_rpc_decode_sstv.cpp
+        test_rpc_decode_wefax.cpp
         test_rpc_detect.cpp
         test_rpc_lifetime.cpp
         test_rpc_vrx_events.cpp

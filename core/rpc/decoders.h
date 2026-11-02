@@ -157,6 +157,7 @@
 #include "core/decode/rtty.h"
 #include "core/decode/sitor_b.h"
 #include "core/decode/sstv.h"
+#include "core/decode/wefax.h"
 #include "core/rpc/image_bridge.h"
 #include "core/decode/tetra.h"
 #include "core/dsp/types.h"
@@ -5497,8 +5498,7 @@ private:
     std::vector<decode::CsBurst> bursts_;
 };
 
-// ===========================================================================
-// Wideband decoders. Each reads the source's own stream through
+// ====================================================================// Wideband decoders. Each reads the source's own stream through
 // subscribeWidebandDecoded, whose offset mixes the signal to DC, at any rate
 // from its DecoderSpec::wideband_rate up to the source rate unless its
 // comment says otherwise.
@@ -7517,6 +7517,61 @@ private:
     std::optional<Library> decoder_;
     std::vector<dsp::Complex32> iq_;
     std::vector<DecodedMessage> pending_;
+=======
+// Reads a usb receiver's audio, core/decode/wefax.h: every chart a start tone
+// and phasing open, out through the image sink a row at a time, closed by the
+// stop signal. HF radiofax is sent for upper sideband reception 1.9 kHz below
+// the assigned frequency, so usb is the one mode. Polarity is WMO's, white at
+// 2300 Hz.
+//
+// A chart is stamped with the chunk in which its first row completed.
+class WefaxChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "wefax";
+    static constexpr std::string_view kModes[] = {"usb"};
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        auto built = decode::WefaxDecoder::create(decode::WefaxConfig{build.rate});
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the wefax decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new WefaxChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>&) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        stamp_ = chunk.start;
+        decoder_.process(chunk.samples, sink_);
+        stamp_ = chunk.start + chunk.frames();
+        return {};
+    }
+
+    // A chart still open closes incomplete.
+    void flush(std::vector<DecodedMessage>&) override { decoder_.flush(sink_); }
+
+    void reset() override { decoder_.reset(sink_); }
+
+private:
+    WefaxChunkDecoder(dsp::SampleRate rate, decode::WefaxDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)),
+          sink_(make_image_bridge(
+              [this](std::uint32_t width, ImageColour colour, double line_rate_hz,
+                     std::string label) {
+                  return open_image(stamp_, static_cast<std::uint32_t>(rate_), width, colour,
+                                    line_rate_hz, std::move(label));
+              },
+              [this](std::uint64_t image, std::uint32_t row, std::span<const std::uint8_t> px) {
+                  image_row(image, row, px);
+              },
+              [this](std::uint64_t image, bool complete) { close_image(image, complete); })) {}
+
+    dsp::SampleRate rate_;
+    decode::WefaxDecoder decoder_;
+    decode::ImageSink sink_;
+    std::uint64_t stamp_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -7859,6 +7914,12 @@ private:
          "uncompressed images through the image sink. Reads a wideband tap at 2400000 S/s or "
          "more",
          &XritChunkDecoder<true>::make, {}, 2'400'000},
+        {WefaxChunkDecoder::kName, DecoderInput::RealAudio,
+         "HF radiofax, WMO-No. 386 Part III section 5: charts at 60, 90, 120 or 240 lines per "
+         "minute and IOC 576 or 288, opened by the 300 or 675 Hz start signal and phasing, "
+         "closed by the 450 Hz stop, as grey images a row at a time with the sample clock "
+         "fitted from phasing. Reads a usb receiver's audio",
+         &WefaxChunkDecoder::make, WefaxChunkDecoder::kModes},
     };
     return kRegistry;
 }

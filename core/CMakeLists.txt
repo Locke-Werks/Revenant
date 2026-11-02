@@ -190,6 +190,7 @@ add_library(revenant_core STATIC
     decode/sitor_a.cpp
     decode/sitor_b.cpp
     decode/sstv.cpp
+    decode/wefax.cpp
     decode/tetra.cpp
     decode/tone_frontend.cpp
     decode/varicode.cpp
@@ -274,6 +275,7 @@ add_library(revenant_core STATIC
     dsp/synth/ft8_mod.cpp
     dsp/synth/rds_mod.cpp
     dsp/synth/sstv_mod.cpp
+    dsp/synth/wefax_mod.cpp
     dsp/synth/sitor_a_mod.cpp
     dsp/synth/wfm_mod.cpp
     dsp/synth/wideband.cpp

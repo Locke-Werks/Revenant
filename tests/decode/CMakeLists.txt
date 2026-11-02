@@ -199,6 +199,7 @@ add_executable(revenant_decode_tests
     test_sitor_a.cpp
     test_sitor_b.cpp
     test_sstv.cpp
+    test_wefax.cpp
     test_tetra.cpp
     test_tetra_blocking.cpp
     test_vocoder_plugin.cpp
