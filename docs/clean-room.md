@@ -81,6 +81,17 @@ neither, and it is the one thing this document has always been about.
 | Library | Licence | Used for | Why the clean-room path was rejected |
 | --- | --- | --- | --- |
 | `osmocom/rtl-sdr` (librtlsdr) at `797f814`, with four patches, built from `vcpkg-overlays/rtlsdr/` | GPL-2.0-or-later | RTL2832U device access for the RTL-SDR v3 backend: vendor control transfers, tuner programming, and the raw IQ mode | No published specification for the IQ mode exists. `docs/rtlsdr-provenance.md`, finding 2 |
+| `drowe67/codec2` (libcodec2) at the 1.2.0 tag, pinned by SHA512, vocoder files only, built from `vcpkg-overlays/codec2/` with `msvc-no-vla.diff` | LGPL-2.1, no "or later", read from the notice at the head of `src/codec2.h`. Section 3 lets a recipient take it under GPL-2.0-or-later, which combines with this project's GPL-3.0-or-later | Codec 2 speech for M17 voice at 3200 and 1600 bit/s, through `core/decode/codec2_voice.h` | No specification exists. The quantiser codebooks are trained data and the algorithm description covers method only; `docs/modes.md`, "Digital voice, collected" |
+
+**libcodec2, since 2026-11-02.** The overlay's own `CMakeLists.txt` replaces
+upstream's and compiles the vocoder and nothing else: none of the FreeDV
+modems, so linking it decides nothing about FreeDV. MSVC has no variable
+length arrays, so `msvc-no-vla.diff` replaces them with heap or fixed buffers;
+that patch is libcodec2's expression, modified, and stays under its licence,
+in the same position as the librtlsdr patch below. Revenant uses only the
+public `codec2.h` interface and queries frame sizes at run time; no libcodec2
+source was read for the wrapper. A release owes the licence notice beside
+librtlsdr's.
 
 The short form of that finding, so this table can be read without opening the
 other document. The Realtek RTL2832U datasheet, Rev 1.4, specifies the transport
@@ -872,10 +883,11 @@ on the relink question:
 Every exposure gets recorded here, with what was seen, when, and what was done
 about it. The log stays useful after the licence change, for the same reason it
 was useful before: it is the record of what the people writing this project
-actually read. Eight entries, all self-reported by the person who did it,
+actually read. Nine entries, all self-reported by the person who did it,
 which is the behaviour the practice needs to keep producing. WHAT THAT
 SENTENCE USED TO SAY: "Seven entries, all self-reported by the person who did
-it"; the AIS and DSC entry below is the eighth.
+it"; the AIS and DSC entry below is the eighth, and "Eight entries", until the
+batch of 2026-11-02 made a ninth.
 
 **2026-09-18, polyphase channelizer design.** While verifying the licences of
 candidate reference implementations, the first 1200 bytes of GNU Radio's
@@ -1072,6 +1084,97 @@ slicing phases and the sync correlation of 0.7 in `core/decode/ais.h`, the
 one-bit boxcar that replaced a reading of clause 2.3.1.3 as a filter to
 build, and the three characters lost in a row after which
 `core/decode/dsc.cpp` gives a call up.
+
+**2026-11-02, decoders merged that day.** One entry for the batch, a line per
+decoder: what was read, with the edition, and what was not. Every document
+below was fetched or downloaded on 2026-11-02 unless a date says otherwise,
+and each file's header names the clauses it used. For all of them, no
+implementation of the mode was read, and the header names the ones a reader
+would expect to have been. Two exposures, in the M17 line, and neither is new
+code.
+
+- Generic layers: textbooks and journal papers only. CRC, Williams (1993) and
+  Lin and Costello 5.1. BCH, Lin and Costello chapter 6 and Massey (1969).
+  OFDM, van de Beek et al. (1997), Schmidl and Cox (1997), Hoeher, Kaiser and
+  Robertson (1997). MFSK, Proakis. LDPC, Gallager (1963), Fossorier et al.
+  (1999), Chen and Fossorier (2002). Viterbi and Fano, Viterbi (1971), Fano
+  (1963), Lin and Costello chapters 12 and 13, CCSDS 131.0-B section 3 for the
+  K=7 generators, G4JNT "WSPR Coding Process" for the WSPR pair only. M-PSK,
+  Proakis 5th ed., Mengali and D'Andrea, Viterbi and Viterbi (1983), Gardner.
+- LPC-10: FED-STD-1015 (28 November 1984) as FIPS PUB 137 with Change Notice 1
+  (17 December 1996), from the scan filed as Exhibit 1022 in IPR2017-01077;
+  tables read from page images. The NSA reference C code and spandsp were not.
+- FS-1016: FED-STD-1016 (14 February 1991), EverySpec scan. The CELP 3.2a
+  reference code was not read.
+- CVSD: MIL-STD-188-113 (17 February 1987) section 5.2 and Appendix C,
+  EverySpec scan. spandsp and Bluetooth CVSD code were not read.
+- 2G ALE: MIL-STD-188-141D (22 December 2017) Appendix A, distribution A.
+- MIL-STD-188-110 serial tone: MIL-STD-188-110C with Change Notice 1,
+  distribution A. STANAG 4415, STANAG 4539 and 110B not held or not read.
+- dPMR: ETSI TS 102 490 V1.9.1 (2016-08) and TS 102 658 V2.6.1 (2019-01).
+- Opulent Voice: the Opulent Voice Protocol Specification 1.1 (January 2026),
+  `opulent_voice_protocol.md` at OpenResearchInstitute/interlocutor commit
+  1fa86584. That repository is GPL-2.0; only the document was opened.
+- DSC on MF and HF: ITU-R M.493-16 (12/2023) Annex 1.
+- SITOR-A: ITU-R M.625-4 (03/2012), with M.476-5 Annex 1.
+- G3RUH: Miller, "9600 Baud Packet Radio Modem Design", RSGB Data Symposium,
+  July 1988, AMSAT's republication; AX.25 v2.2.
+- DVB-S: ETSI EN 300 421 V1.1.2 (1997-08); ITU-T H.222.0 (05/2006); ETSI EN
+  300 468 V1.17.1 (2022-10), not its Annex A.
+- FT8 and FT4: Franke, Somerville and Taylor, "The FT4 and FT8 Communication
+  Protocols", QEX July/August 2020, and `ft4_ft8_protocols.tgz`, below.
+- M17 voice: M17 Protocol Specification Part I 2.0.4 again. Exposures: the
+  last line of the Appendix A.5 decoder listing, and part of the MATLAB snippet
+  under the Appendix D matrix, both GPL-2.0-or-later listings, were seen while
+  reading the prose round them. Nothing written uses either: base-40 decoding
+  follows the prose and the AB1CD example, and the interleaver is regenerated
+  from its equation. Appendix G was already recorded above and nothing
+  implements it. libcodec2 is linked, not read; its row is in the table above.
+- AIS 14 and 27, locating devices: ITU-R M.1371-6 (02/2026), Annexes 1, 3, 7
+  and 8.
+- VDL Mode 4: ETSI EN 301 842-1 V1.4.1 (2015-04). The ICAO VDL4 SARPs and
+  technical manual and EN 301 842-2 were not held.
+- ASTERIX Category 021: EUROCONTROL-SPEC-0149-12 Edition 2.7 (2 July 2025) and
+  SPEC-0149 Part 1 Edition 3.1 (23 November 2021).
+- Winlink B2F: "Open B2F" (February 2018, File: amendment of 27 May 2020) at
+  winlink.org/B2F, and F6FBB's forwarding protocol page. No Winlink, pat,
+  wl2k-go, FBB or LZHUF source.
+- NOAA APT and HRPT: NOAA KLM User's Guide, April 2014 revision, sections 4.2
+  and 4.1. A US Government work.
+- CCSDS: 131.0-B-5 (September 2023), 132.0-B-3 (October 2021), 732.0-B-4
+  (October 2021) and 133.0-B-2 (June 2020), from public.ccsds.org.
+- BLE: Bluetooth Core Specification 6.1 (29 April 2025).
+- Z-Wave: ITU-T G.9959 (01/2015).
+- EnOcean: EnOcean Radio Protocol 1 V1.2 (9 November 2020). ISO/IEC
+  14543-3-10 not held.
+- DECT: ETSI EN 300 175-2 and EN 300 175-3, V2.9.1 (2022-03).
+- ERMES: ETS 300 133-4 and ETS 300 133-2 Annex B (July 1992).
+- DRM30: ETSI ES 201 980 V4.2.1 (2021-01). Dream and gr-drm not read.
+- DAB: ETSI EN 300 401 V2.1.1 (2017-01), EN 301 234 V2.1.1 (2006-05), TS 101
+  499 V3.1.1 (2015-01). ISO/IEC 11172-3 not held.
+- ATV: ITU-R BT.470-6 (1998). BT.1700 did not download.
+- SSTV and FAX480: N7CXI, "Proposal for SSTV Mode Specifications", Dayton, 20
+  May 2000, DARC's copy. Bruchanov's handbook not read.
+- VDES ASM-TER: ITU-R M.2092-2 (02/2026), from the ITU's publication service.
+- FUNcube: "FUNcube-1 Downlink Data" Issue 1.0, as flown (05/03/2015), AMSAT-UK,
+  and Karn, "A Proposal for a Coded AO-40 Telemetry Format" v1.2 (7 January
+  2002). The reference encoder that proposal links was not opened.
+- Cospas-Sarsat: C/S T.001 Issue 4 Revision 7 (March 2021), from a copy at
+  sar.mot.go.th identified by its cover and revision table. Revision 13 exists
+  and was not read.
+- GNSS: IS-GPS-200N (1 August 2022), IS-QZSS-PNT-006, the GLONASS ICD Edition
+  5.1 (2008) and BDS-SIS-ICD-B1I-3.0 (February 2019). No implementation source
+  read.
+
+**FT8 and FT4 generator matrices: the public-domain basis.** `ft4_ft8_protocols.tgz`
+is no longer served at the princeton.edu or ARRL QEX paths; it was read from
+the Wayback Machine's capture of 2020-01-07. The archive itself carries no
+grant. The grant is section 9 of the QEX July/August 2020 paper, which places
+the archive, its reference [14], in the public domain. On that basis
+`generator.dat` and `parity.dat` were transcribed unchanged by script into
+`core/decode/ft_ldpc.cpp`, and the message-packing routines were read. No
+WSJT-X source was opened. FST4, FST4W, MSK144 and Q65 have no such archive
+and are not covered by this.
 
 **What the log is for now.** Under the old rule an exposure was a contamination
 to be contained. Under the current one it still gets written down, because the
