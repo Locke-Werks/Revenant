@@ -114,6 +114,8 @@ add_library(revenant_core STATIC
     decode/dmr_codes.cpp
     decode/dstar.cpp
     decode/dv_codes.cpp
+    decode/fano.cpp
+    decode/viterbi_stream.cpp
     decode/dv_phy.cpp
     decode/fsk.cpp
     decode/fx25.cpp

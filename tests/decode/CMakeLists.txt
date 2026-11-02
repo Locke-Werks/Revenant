@@ -167,6 +167,8 @@ add_executable(revenant_decode_tests
     test_tetra.cpp
     test_tetra_blocking.cpp
     test_vocoder_plugin.cpp
+    test_fano.cpp
+    test_viterbi_stream.cpp
 )
 
 target_link_libraries(revenant_decode_tests PRIVATE
