@@ -180,6 +180,7 @@ add_executable(revenant_decode_tests
     test_vocoder_plugin.cpp
     test_fano.cpp
     test_viterbi_stream.cpp
+    test_ft8.cpp
 )
 
 target_link_libraries(revenant_decode_tests PRIVATE

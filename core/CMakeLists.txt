@@ -121,6 +121,10 @@ add_library(revenant_core STATIC
     decode/fano.cpp
     decode/viterbi_stream.cpp
     decode/dvbs.cpp
+    decode/wsjt_dsp.cpp
+    decode/wsjt77.cpp
+    decode/ft_ldpc.cpp
+    decode/ft8.cpp
     decode/dv_phy.cpp
     decode/fs1016.cpp
     decode/fsk.cpp
@@ -200,6 +204,7 @@ add_library(revenant_core STATIC
     dsp/synth/psk31_mod.cpp
     dsp/synth/psk_mod.cpp
     dsp/synth/dvbs_mod.cpp
+    dsp/synth/ft8_mod.cpp
     dsp/synth/rds_mod.cpp
     dsp/synth/sitor_a_mod.cpp
     dsp/synth/wfm_mod.cpp
