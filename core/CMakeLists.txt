@@ -142,6 +142,7 @@ add_library(revenant_core STATIC
     decode/ft8.cpp
     decode/ft4.cpp
     decode/dect.cpp
+    decode/mfsk16.cpp
     decode/dv_phy.cpp
     decode/enocean.cpp
     decode/fs1016.cpp
@@ -249,6 +250,7 @@ add_library(revenant_core STATIC
     dsp/synth/hrpt_mod.cpp
     dsp/synth/zwave_mod.cpp
     dsp/synth/mfsk_mod.cpp
+    dsp/synth/mfsk16_mod.cpp
     dsp/synth/modulators.cpp
     dsp/synth/ofdm_mod.cpp
     dsp/synth/opulent_voice_mod.cpp
