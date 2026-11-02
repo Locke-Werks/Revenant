@@ -1,4 +1,4 @@
-// Binary BCH codes over GF(2^m), m from 3 to 10: systematic encoder and
+// Binary BCH codes over GF(2^m), m from 3 to 16: systematic encoder and
 // hard-decision decoder, full length or shortened.
 //
 // THE CODE
@@ -47,7 +47,7 @@
 namespace revenant::decode {
 
 struct BchParams {
-    // 3 to 10.
+    // 3 to 16. DVB-S2 normal frames need 16.
     unsigned m = 0;
     // The field's primitive polynomial with its x^m term.
     unsigned field_polynomial = 0;
@@ -61,7 +61,7 @@ struct BchParams {
 
 class BchCodec {
 public:
-    // Fails for m outside 3 to 10, a field polynomial that is not primitive
+    // Fails for m outside 3 to 16, a field polynomial that is not primitive
     // of degree m, a design distance below 3 or leaving no information bits,
     // or an explicit generator that does not divide x^n - 1 or has no root
     // run that corrects at least one error.

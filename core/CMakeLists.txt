@@ -412,3 +412,4 @@ target_sources(revenant_core PRIVATE decode/ccsds_downlink.cpp dsp/synth/ccsds_d
 target_sources(revenant_core PRIVATE decode/ahrpt.cpp dsp/synth/ahrpt_mod.cpp)
 target_sources(revenant_core PRIVATE decode/xrit.cpp dsp/synth/xrit_mod.cpp decode/gk2a_lrit.cpp dsp/synth/gk2a_lrit_mod.cpp)
 target_sources(revenant_core PRIVATE decode/goes_hrit.cpp dsp/synth/goes_hrit_mod.cpp)
+target_sources(revenant_core PRIVATE decode/dvbs2.cpp decode/dvbs2_tables.cpp decode/grb.cpp dsp/synth/grb_mod.cpp)

@@ -14,8 +14,8 @@ unsigned BchCodec::mul(unsigned a, unsigned b) const {
 
 Expected<BchCodec> BchCodec::create(const BchParams& params) {
     const unsigned m = params.m;
-    if (m < 3 || m > 10) {
-        return fail("a BCH code here is over GF(2^m) with m from 3 to 10");
+    if (m < 3 || m > 16) {
+        return fail("a BCH code here is over GF(2^m) with m from 3 to 16");
     }
     if ((params.field_polynomial >> m) != 1U) {
         return fail("a GF(2^m) field polynomial has degree m");
