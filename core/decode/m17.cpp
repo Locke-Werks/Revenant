@@ -569,6 +569,7 @@ void M17::reset() {
     level_offset_ = 0.0;
     chunk_mask_ = 0;
     last_symbols_.clear();
+    voice_active_ = false;
 }
 
 Status M17::process(ConstComplexSpan samples, std::vector<M17Frame>& out) {
@@ -843,6 +844,7 @@ void M17::search(std::vector<M17Frame>& out) {
                 frame.inverted = inverted_;
                 const std::vector<float> soft = soft_payload(p, inverted_, kM17SyncLsf);
                 mode_ = Mode::Unknown;
+                voice_active_ = false;
                 if (auto bytes = m17_decode_lsf(soft); bytes) {
                     frame.lsf = m17_parse_lsf(*bytes);
                     have_lsf_ = frame.lsf->crc_valid;
@@ -850,6 +852,7 @@ void M17::search(std::vector<M17Frame>& out) {
                         // Table 3.3, TYPE bit 0: which mode the frames after
                         // this one are in.
                         mode_ = frame.lsf->type.stream ? Mode::Stream : Mode::Packet;
+                        select_voice(*frame.lsf);
                     }
                 }
                 chunk_mask_ = 0;
@@ -862,6 +865,7 @@ void M17::search(std::vector<M17Frame>& out) {
             if (bert_found) {
                 inverted_ = bert < 0.0;
                 have_lsf_ = false;
+                voice_active_ = false;
                 chunk_mask_ = 0;
                 mode_ = Mode::Bert;
                 in_transmission_ = true;
@@ -897,6 +901,7 @@ void M17::search(std::vector<M17Frame>& out) {
                     inverted_ = stream < 0.0;
                     calibrated_ = false;
                     have_lsf_ = false;
+                    voice_active_ = false;
                     chunk_mask_ = 0;
                     mode_ = Mode::Stream;
                     in_transmission_ = true;
@@ -936,9 +941,54 @@ void M17::decode_stream(std::size_t offset, M17Frame& frame) {
             frame.lsf = lsf;
             frame.lsf_from_lich = true;
             have_lsf_ = true;
+            select_voice(lsf);
         }
     }
+    if (voice_active_) {
+        render_voice(*decoded, frame.voice);
+    }
     frame.stream = *decoded;
+}
+
+void M17::select_voice(const M17Lsf& lsf) {
+    voice_active_ = false;
+    // Table 3.4: data type 10 is voice, 11 voice and data; Table 3.7 puts
+    // voice at 3200 bit/s and Table 2.11 the voice and data case at 1600.
+    // Table 3.5: anything but encryption type 00 is scrambled or encrypted,
+    // which this decoder does not undo, so it renders nothing.
+    if (!lsf.type.stream || lsf.type.encryption_type != 0) {
+        return;
+    }
+    Codec2Mode rate{};
+    if (lsf.type.data_type == 0b10U) {
+        rate = Codec2Mode::Mode3200;
+    } else if (lsf.type.data_type == 0b11U) {
+        rate = Codec2Mode::Mode1600;
+    } else {
+        return;
+    }
+    if (!voice_ || voice_->mode() != rate) {
+        auto created = Codec2Voice::create(rate);
+        if (!created) {
+            voice_.reset();
+            return;
+        }
+        voice_.emplace(std::move(*created));
+    }
+    voice_active_ = true;
+}
+
+void M17::render_voice(const M17StreamFrame& stream, std::vector<float>& out) {
+    // Table 2.11: at 3200 the 128 stream bits are encoded speech, which is
+    // as many whole Codec 2 frames as fit; at 1600 the first 64 bits are
+    // speech and the last 64 arbitrary data.
+    std::span<const std::uint8_t> speech(stream.payload);
+    if (voice_->mode() == Codec2Mode::Mode1600) {
+        speech = speech.first(kM17StreamPayloadBytes / 2);
+    }
+    if (!voice_->decode_all(speech, out)) {
+        out.clear();
+    }
 }
 
 }  // namespace revenant::decode
