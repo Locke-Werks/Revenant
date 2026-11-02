@@ -647,6 +647,7 @@ void print_usage()
         "                      (at 57600 S/s or more) read an\n"
         "                      nfm one. Wideband decoders (hrpt, dab, atv_fm, atv_am,\n"
         "                      ble37 to ble39, zwave_r1 to r3, enocean, dect, gnss,\n"
+        "                      gps_l1c, gps_l2c, gps_l5,\n"
         "                      lrpt, ahrpt, gk2a_lrit, goes_hrit) read no receiver\n"
         "                      and are attached over RPC only. auto attaches the\n"
         "                      decoder named after each\n"
