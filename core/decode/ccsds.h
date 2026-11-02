@@ -130,6 +130,9 @@ struct CcsdsRsConfig {
     // Q of 4.3.7.3: virtual fill symbols over the whole codeblock, a multiple
     // of `interleave` and less than k * interleave.
     std::size_t virtual_fill = 0;
+    // 4.3.9.1 requires the dual basis. False keeps the same code in the
+    // conventional representation, which AO-40-derived amateur formats use.
+    bool dual_basis = true;
 };
 
 struct CcsdsRsResult {

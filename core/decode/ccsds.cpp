@@ -107,6 +107,8 @@ unsigned gamma_polynomial() {
 struct CodecMap {
     std::array<std::uint8_t, 256> dual_to_codec{};
     std::array<std::uint8_t, 256> codec_to_dual{};
+    std::array<std::uint8_t, 256> conventional_to_codec{};
+    std::array<std::uint8_t, 256> codec_to_conventional{};
 };
 
 CodecMap build_codec_map(const Rs8Codec& codec) {
@@ -126,6 +128,8 @@ CodecMap build_codec_map(const Rs8Codec& codec) {
         const std::uint8_t z = dual.to_dual[u];
         m.dual_to_codec[z] = c;
         m.codec_to_dual[c] = z;
+        m.conventional_to_codec[u] = c;
+        m.codec_to_conventional[c] = static_cast<std::uint8_t>(u);
     }
     return m;
 }
@@ -289,6 +293,8 @@ std::vector<std::uint8_t> CcsdsReedSolomon::encode(std::span<const std::uint8_t>
     const std::size_t k = 255 - 2 * config_.e;
     const std::size_t parity = 2 * config_.e;
     const auto& map = codec_map(*codec_);
+    const auto& to_codec = config_.dual_basis ? map.dual_to_codec : map.conventional_to_codec;
+    const auto& from_codec = config_.dual_basis ? map.codec_to_dual : map.codec_to_conventional;
 
     std::vector<std::uint8_t> out(codeblock_octets(), 0);
     std::copy(data.begin(), data.end(), out.begin());
@@ -296,11 +302,11 @@ std::vector<std::uint8_t> CcsdsReedSolomon::encode(std::span<const std::uint8_t>
     std::vector<std::uint8_t> check(parity);
     for (std::size_t c = 0; c < depth; ++c) {
         for (std::size_t s = 0; s < k - q; ++s) {
-            info[s] = map.dual_to_codec[data[s * depth + c]];
+            info[s] = to_codec[data[s * depth + c]];
         }
         codec_->encode(info, check);
         for (std::size_t s = 0; s < parity; ++s) {
-            out[data.size() + s * depth + c] = map.codec_to_dual[check[s]];
+            out[data.size() + s * depth + c] = from_codec[check[s]];
         }
     }
     return out;
@@ -311,17 +317,19 @@ CcsdsRsResult CcsdsReedSolomon::decode(std::span<std::uint8_t> codeblock) const 
     const std::size_t q = config_.virtual_fill / depth;
     const std::size_t len = 255 - q;
     const auto& map = codec_map(*codec_);
+    const auto& to_codec = config_.dual_basis ? map.dual_to_codec : map.conventional_to_codec;
+    const auto& from_codec = config_.dual_basis ? map.codec_to_dual : map.codec_to_conventional;
 
     CcsdsRsResult result;
     std::vector<std::uint8_t> word(len);
     for (std::size_t c = 0; c < depth; ++c) {
         for (std::size_t s = 0; s < len; ++s) {
-            word[s] = map.dual_to_codec[codeblock[s * depth + c]];
+            word[s] = to_codec[codeblock[s * depth + c]];
         }
         const auto fixed = codec_->decode(word);
         if (fixed && *fixed > 0) {
             for (std::size_t s = 0; s < len; ++s) {
-                codeblock[s * depth + c] = map.codec_to_dual[word[s]];
+                codeblock[s * depth + c] = from_codec[word[s]];
             }
         }
         result.corrected.push_back(fixed);
