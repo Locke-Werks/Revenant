@@ -132,6 +132,7 @@ inline constexpr const char* kTestVocoderPluginRefuseCreate = R"($<TARGET_FILE:r
 add_executable(revenant_decode_tests
     ../support/no_modal_dialogs.cpp
     test_ale_2g.cpp
+    test_b2f.cpp
     test_ais.cpp
     test_vdl4.cpp
     test_asterix_cat021.cpp

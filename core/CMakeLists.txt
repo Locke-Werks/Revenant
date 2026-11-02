@@ -111,6 +111,7 @@ add_library(revenant_core STATIC
     decode/ale_2g.cpp
     decode/vdl4.cpp
     decode/asterix_cat021.cpp
+    decode/b2f.cpp
     decode/aprs.cpp
     decode/ax25.cpp
     decode/bch.cpp
@@ -196,6 +197,7 @@ add_library(revenant_core STATIC
     dsp/synth/ais_mod.cpp
     dsp/synth/ale_2g_mod.cpp
     dsp/synth/vdl4_mod.cpp
+    dsp/synth/b2f_encode.cpp
     dsp/synth/channel.cpp
     dsp/synth/cw_mod.cpp
     dsp/synth/dmr_mod.cpp
