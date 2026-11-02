@@ -366,7 +366,7 @@ Expected<std::vector<Complex32>> ais_render_packets(
     if (!(config.bandwidth_time > 0.0)) {
         return fail("an AIS transmitter needs a positive bandwidth-time product");
     }
-    const double bit_rate = decode::kAisBitRate * (1.0 + config.bit_rate_error);
+    const double bit_rate = config.bit_rate * (1.0 + config.bit_rate_error);
     const double samples_per_bit = static_cast<double>(config.rate) / bit_rate;
     if (samples_per_bit < 2.0) {
         return fail("an AIS transmitter needs at least two samples a bit");

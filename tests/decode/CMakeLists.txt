@@ -133,6 +133,7 @@ add_executable(revenant_decode_tests
     ../support/no_modal_dialogs.cpp
     test_ale_2g.cpp
     test_ais.cpp
+    test_vdl4.cpp
     test_aprs.cpp
     test_ax25.cpp
     test_bch.cpp

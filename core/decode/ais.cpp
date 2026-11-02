@@ -404,17 +404,17 @@ AisMessage ais_parse(std::span<const std::uint8_t> octets) {
 // ---------------------------------------------------------------------------
 
 Expected<AisDecoder> AisDecoder::create(const AisConfig& config) {
-    if (config.rate < kAisMinimumRate) {
+    if (static_cast<double>(config.rate) < 3.0 * config.bit_rate) {
         return fail(std::format("the AIS decoder needs at least {} samples a second, three to "
-                                "each of M.1371-5's 9600 bits, and was given {}",
-                                kAisMinimumRate, config.rate));
+                                "each bit, and was given {}",
+                                static_cast<SampleRate>(std::ceil(3.0 * config.bit_rate)), config.rate));
     }
     if (!(config.sync_threshold > 0.0 && config.sync_threshold < 1.0)) {
         return fail("the AIS sync threshold is a correlation and must lie in (0, 1)");
     }
     // One bit of samples, rounded, each weighted alike.
     const auto taps_count = static_cast<std::size_t>(
-        std::max(1.0, std::round(static_cast<double>(config.rate) / kAisBitRate)));
+        std::max(1.0, std::round(config.integrate_bits * static_cast<double>(config.rate) / config.bit_rate)));
     auto filter = RealFir::create(
         std::vector<float>(taps_count, 1.0F / static_cast<float>(taps_count)));
     if (!filter) {
@@ -426,7 +426,7 @@ Expected<AisDecoder> AisDecoder::create(const AisConfig& config) {
     d.filter_ = std::move(*filter);
     d.filter_delay_ = (taps_count - 1) / 2;
     d.rate_ = static_cast<std::uint64_t>(config.rate);
-    d.instant_denominator_ = static_cast<std::uint64_t>(kAisBitRate) * kAisPhases;
+    d.instant_denominator_ = static_cast<std::uint64_t>(config.bit_rate) * kAisPhases;
 
     // Clause 3.2.2.3's "010101..." then clause 3.2.2.4's 01111110, each bit
     // as clause 2.6's NRZI makes it a level: a zero changes the level.
@@ -503,7 +503,7 @@ void AisDecoder::process(ConstRealSpan audio, std::vector<AisMessage>& out) {
 
     // Forget reported frames no phase can still be finishing: every phase
     // closes the same frame within a bit of the first.
-    const double samples_per_bit = static_cast<double>(rate_) / kAisBitRate;
+    const double samples_per_bit = static_cast<double>(rate_) / config_.bit_rate;
     const auto horizon = static_cast<SampleIndex>(std::ceil(4.0 * samples_per_bit));
     const SampleIndex now = soft_count_ > delay ? soft_count_ - delay : 0;
     std::erase_if(recent_, [&](const Reported& r) { return r.last_sample + horizon < now; });
@@ -579,7 +579,7 @@ bool AisDecoder::on_bit(Attempt& a, std::uint8_t phase_index, float value, Sampl
             a.have_first = true;
         }
         // Clause 3.2.2.11's five slots and no end flag: lost.
-        return a.bits.size() <= kAisMaximumFrameBits;
+        return a.bits.size() <= config_.maximum_frame_bits;
     }
 
     const int run = a.ones;
@@ -609,7 +609,7 @@ bool AisDecoder::on_bit(Attempt& a, std::uint8_t phase_index, float value, Sampl
         a.have_first = true;
     }
     a.run_start = a.bits.size();
-    return a.bits.size() <= kAisMaximumFrameBits;
+    return a.bits.size() <= config_.maximum_frame_bits;
 }
 
 void AisDecoder::on_frame(const Attempt& a, std::uint8_t phase_index, SampleIndex last_sample,
@@ -640,7 +640,7 @@ void AisDecoder::on_frame(const Attempt& a, std::uint8_t phase_index, SampleInde
 
     // Another phase already reported this frame: the same octets closing
     // within a few bits of each other.
-    const double samples_per_bit = static_cast<double>(rate_) / kAisBitRate;
+    const double samples_per_bit = static_cast<double>(rate_) / config_.bit_rate;
     const auto near = static_cast<SampleIndex>(std::ceil(2.0 * samples_per_bit));
     for (const Reported& r : recent_) {
         const SampleIndex apart =

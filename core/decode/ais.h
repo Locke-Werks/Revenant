@@ -437,6 +437,16 @@ struct AisConfig {
     // ratio of r^2 / (1 - r^2), 0.96 at 0.7, and a burst read at 0 dB loses
     // its bits anyway.
     double sync_threshold = 0.7;
+
+    // The burst engine's two AIS-specific numbers, so another link with the
+    // same 24-bit training sequence, HDLC flag, stuffing and FCS over NRZI
+    // GFSK can use it: VDL Mode 4, core/decode/vdl4.h. The rate must be at
+    // least three samples to a bit and the bit rate a whole number.
+    double bit_rate = kAisBitRate;
+    std::size_t maximum_frame_bits = kAisMaximumFrameBits;
+    // The boxcar ahead of slicing, in bits. One for AIS; see HOW IT RECOVERS
+    // BITS.
+    double integrate_bits = 1.0;
 };
 
 struct AisStats {

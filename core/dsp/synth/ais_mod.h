@@ -68,6 +68,9 @@ struct AisModConfig {
     double bandwidth_time = decode::kAisTransmitBt;
     double deviation_hz = decode::kAisDeviationHz;
 
+    // Clause 2.4. Settable for VDL Mode 4's 19200, core/dsp/synth/vdl4_mod.h.
+    double bit_rate = decode::kAisBitRate;
+
     // Fractional error of the transmitter's bit clock; clause 2.4 allows
     // 50 ppm.
     double bit_rate_error = 0.0;
