@@ -141,6 +141,19 @@ std::vector<SstvMode> build_modes() {
     modes.push_back(pd("PD180", 96, 640, 496, 183.040));
     modes.push_back(pd("PD240", 97, 640, 496, 244.480));
     modes.push_back(pd("PD290", 94, 800, 616, 228.800));
+    // "FAX480 mode".
+    {
+        SstvMode m;
+        m.name = "FAX480";
+        m.width = 512;
+        m.height = 480;
+        m.colour = SstvColour::Gray;
+        m.period = {tone(5.12, 1200), scan(262.144, 0)};
+        m.sync_ms = 5.12;
+        m.skip_periods = 20;
+        m.fax_start = true;
+        modes.push_back(std::move(m));
+    }
     return modes;
 }
 
@@ -249,6 +262,7 @@ SstvDecoder::SstvDecoder(const SstvConfig& config) : config_(config) {
     history_.assign(count, std::complex<float>{});
     step_ = std::polar(1.0, -2.0 * std::numbers::pi * kSstvLeaderHz / rate);
     sum_.push_back(0.0);
+    dev_sum_.push_back(0.0);
     hunt_at_ = ms(kVisLeaderMs);
 }
 
@@ -276,8 +290,15 @@ void SstvDecoder::push(float x) {
     previous_ = z;
     const double hz = kSstvLeaderHz + static_cast<double>(std::arg(turn)) * work_rate_ /
                                           (2.0 * std::numbers::pi);
+    // Against the frequency half a FAX480 header cycle earlier: strongly
+    // negative through the header, near zero in noise and in a leader.
+    const auto lag = static_cast<std::size_t>(std::lround(ms(2.05)));
+    const double earlier = freq_.size() >= lag
+                               ? static_cast<double>(freq_[freq_.size() - lag])
+                               : kSstvLeaderHz;
     freq_.push_back(static_cast<float>(hz));
     sum_.push_back(sum_.back() + hz);
+    dev_sum_.push_back(dev_sum_.back() + (hz - kSstvLeaderHz) * (earlier - kSstvLeaderHz));
 }
 
 double SstvDecoder::cumulative(double at) const {
@@ -307,12 +328,14 @@ void SstvDecoder::trim(double keep_from) {
     const auto drop = std::min(static_cast<std::size_t>(rel), freq_.size());
     freq_.erase(freq_.begin(), freq_.begin() + static_cast<std::ptrdiff_t>(drop));
     sum_.erase(sum_.begin(), sum_.begin() + static_cast<std::ptrdiff_t>(drop));
+    dev_sum_.erase(dev_sum_.begin(), dev_sum_.begin() + static_cast<std::ptrdiff_t>(drop));
     base_ += drop;
 }
 
 void SstvDecoder::process(std::span<const float> samples, ImageSink& sink) {
     freq_.reserve(freq_.size() + samples.size() / decimation_ + 1);
     sum_.reserve(sum_.size() + samples.size() / decimation_ + 1);
+    dev_sum_.reserve(sum_.capacity());
     for (const float x : samples) {
         push(x);
     }
@@ -357,6 +380,26 @@ bool SstvDecoder::hunt(ImageSink& sink) {
             return false;
         }
         hunt_at_ = c + ms(1.0);
+        if (fax_header(c)) {
+            const SstvMode* fax = sstv_mode_by_name("FAX480");
+            Image image;
+            image.mode = fax;
+            image.start = c;
+            image.nominal = ms(fax->period_ms());
+            image.offset_hz = mean(c - ms(1000.0), c) - kSstvLeaderHz;
+            image.fit_start = image.start;
+            image.fit_period = image.nominal;
+            image_ = std::move(image);
+            scans_.assign(3, std::vector<std::vector<std::uint8_t>>(
+                                 1, std::vector<std::uint8_t>(fax->width, 0)));
+            ++stats_.images;
+            stats_.last_offset_hz = image_->offset_hz;
+            const double delay = static_cast<double>(taps_.size() / 2);
+            const double input = std::max(0.0, c * decimation_ - delay);
+            sink.open(static_cast<std::uint64_t>(input), fax->width, ImagePixels::Gray,
+                      fax->line_rate_hz(), fax->name);
+            return true;
+        }
         const double lead = mean(c - ms(260.0), c - ms(20.0));
         if (std::abs(lead - kSstvLeaderHz) > 150.0) {
             continue;
@@ -425,6 +468,41 @@ bool SstvDecoder::hunt(ImageSink& sink) {
                   mode->line_rate_hz(), mode->name);
         return true;
     }
+}
+
+double SstvDecoder::mean_deviation(double from, double to) const {
+    const auto index = [&](double at) {
+        const double rel = std::clamp(at - static_cast<double>(base_), 0.0,
+                                      static_cast<double>(freq_.size()));
+        return static_cast<std::size_t>(rel);
+    };
+    const std::size_t a = index(from);
+    const std::size_t b = std::max(a + 1, index(to));
+    if (b >= dev_sum_.size()) {
+        return 0.0;
+    }
+    return (dev_sum_[b] - dev_sum_[a]) / static_cast<double>(b - a);
+}
+
+// "FAX480 mode", HEADER: 2.05 ms of 2300 Hz and 2.05 ms of 1500 Hz, 1220
+// times. `at` is taken as the start of the first phasing sync when the second
+// before it is that header, centred on 1900 Hz and spread about 400 Hz either
+// side, and the 5 ms after it sits at 1200 Hz.
+bool SstvDecoder::fax_header(double at) {
+    if (at - ms(1000.0) < static_cast<double>(base_)) {
+        return false;
+    }
+    const double centre = mean(at - ms(1000.0), at);
+    if (std::abs(centre - kSstvLeaderHz) > 150.0) {
+        return false;
+    }
+    // An ideal header gives -(400 Hz)^2; the filter's edges take some off.
+    if (mean_deviation(at - ms(1000.0), at) > -60'000.0) {
+        return false;
+    }
+    const double offset = centre - kSstvLeaderHz;
+    return mean(at + ms(0.5), at + ms(4.5)) - offset < kSstvSyncHz + 150.0 &&
+           mean(at - ms(4.5), at - ms(0.5)) - offset > kSstvSyncHz + 150.0;
 }
 
 double SstvDecoder::fit(double period) const {

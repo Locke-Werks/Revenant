@@ -189,9 +189,6 @@ TEST_CASE("the mode table reproduces the paper's transmission times", "[decode][
 TEST_CASE("every mode crosses the round trip clean, VIS code included", "[decode][sstv]") {
     constexpr dsp::SampleRate kRate = 12'000;
     for (const decode::SstvMode& mode : decode::sstv_modes()) {
-        if (mode.vis < 0) {
-            continue;
-        }
         const auto audio = render(mode, kRate);
         decode::SstvStats stats;
         const Collected got = decode_audio(audio, kRate, &stats);
@@ -202,8 +199,32 @@ TEST_CASE("every mode crosses the round trip clean, VIS code included", "[decode
         CHECK(got.closes == 1);
         CHECK(got.complete);
         CHECK(got.mode == mode.name);
-        CHECK(stats.last_vis == mode.vis);
+        if (!mode.fax_start) {
+            CHECK(stats.last_vis == mode.vis);
+        }
         CHECK(score > 24.0);
+    }
+}
+
+TEST_CASE("FAX480 opens on its start tone and phasing, against noise and mistuning",
+          "[decode][sstv][fax480]") {
+    constexpr dsp::SampleRate kRate = 12'000;
+    const decode::SstvMode& mode = *decode::sstv_mode_by_name("FAX480");
+    const auto want = test_image(mode.width, mode.height);
+    const std::pair<double, double> points[] = {{30.0, 28.0}, {15.0, 18.0}, {8.0, 12.0}};
+    for (const auto& [snr, floor] : points) {
+        auto audio = render(mode, kRate, 40.0);
+        add_noise(audio, snr, kRate, 0xFA4);
+        decode::SstvStats stats;
+        const Collected got = decode_audio(audio, kRate, &stats);
+        const double score = psnr(got, mode, want);
+        WARN(std::format("FAX480 at {} dB/2500 Hz, 40 Hz high: PSNR {:.1f} dB, syncs {} found {} "
+                         "missed",
+                         snr, score, stats.syncs_found, stats.syncs_missed));
+        CHECK(got.opens == 1);
+        CHECK(got.pixels == decode::ImagePixels::Gray);
+        CHECK(got.opens <= 1);
+        CHECK(score >= floor);
     }
 }
 
@@ -222,6 +243,7 @@ TEST_CASE("Martin 1 against noise at 48 kHz, measured", "[decode][sstv]") {
         const double score = psnr(got, mode, want);
         WARN(std::format("Martin 1 at {} dB/2500 Hz: PSNR {:.1f} dB, syncs {} found {} missed",
                          snr, score, stats.syncs_found, stats.syncs_missed));
+        CHECK(got.opens <= 1);
         CHECK(score >= floor);
     }
 }

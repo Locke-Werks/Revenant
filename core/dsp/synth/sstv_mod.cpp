@@ -29,7 +29,13 @@ Expected<std::vector<float>> sstv_render(const SstvModConfig& config, const deco
     }
 
     std::vector<Piece> pieces;
-    if (config.vis) {
+    if (mode.fax_start) {
+        // "FAX480 mode", HEADER.
+        for (int k = 0; k < 1220; ++k) {
+            pieces.push_back({2.05, 2300.0, {}});
+            pieces.push_back({2.05, 1500.0, {}});
+        }
+    } else if (config.vis) {
         // "VIS Code and Robot calibration header".
         pieces.push_back({decode::kVisLeaderMs, 1900.0, {}});
         pieces.push_back({decode::kVisBreakMs, 1200.0, {}});

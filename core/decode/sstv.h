@@ -56,6 +56,12 @@
 //
 // WHERE THIS STOPS
 //
+// FAX480 is the paper's "FAX480 mode" section: the 5 s header of 2.05 ms
+// 2300 Hz and 1500 Hz tones, twenty phasing lines of 5.12 ms sync and white,
+// then 480 lines of 5.12 ms sync and a 262.144 ms scan of 512 pixels. The
+// header is recognised by its mean of 1900 Hz and by the frequency half a
+// tone cycle apart being on opposite sides of it for a second at a time.
+//
 // Modes outside the Dayton paper, the 16-bit VIS extension among them, are
 // not here. They are in Bruchanov's handbook, which has not been read for
 // this file.
@@ -127,6 +133,9 @@ struct SstvMode {
 
     // Periods sent before the first row of the image, FAX480's phasing.
     int skip_periods = 0;
+
+    // Opened by the fax start tone and phasing rather than a VIS code.
+    bool fax_start = false;
 
     [[nodiscard]] double period_ms() const;
     [[nodiscard]] double lead_ms() const;
@@ -219,6 +228,8 @@ private:
 
     [[nodiscard]] double end() const { return static_cast<double>(base_ + freq_.size()); }
     [[nodiscard]] double cumulative(double at) const;
+    [[nodiscard]] double mean_deviation(double from, double to) const;
+    bool fax_header(double at);
     [[nodiscard]] double mean(double from, double to) const;
     [[nodiscard]] double ms(double milliseconds) const { return milliseconds * work_rate_ / 1000.0; }
     [[nodiscard]] double fit(double period) const;
@@ -241,6 +252,7 @@ private:
     std::uint64_t base_ = 0;
     std::vector<float> freq_;
     std::vector<double> sum_;     // sum_[i] = sum of freq_[0..i)
+    std::vector<double> dev_sum_; // the same for (f[n] - 1900) * (f[n - 2.05 ms] - 1900)
 
     double hunt_at_ = 0.0;
     std::optional<Image> image_;
