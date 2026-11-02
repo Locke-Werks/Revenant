@@ -742,4 +742,576 @@ void CsDecoder::process_capture(std::vector<CsBurst>& out) {
     out.push_back(std::move(burst));
 }
 
+// ===========================================================================
+// Second-generation beacons, T.018
+// ===========================================================================
+
+namespace {
+
+using cd = std::complex<double>;
+
+// T.018 Table 2.2, registers 22 down to 0 as printed, one character each.
+constexpr std::array<const char*, 4> kSgbPresets{
+    "00000000000000000000001",  // normal I
+    "00110101100000111111100",  // normal Q
+    "10100101100100111110000",  // self-test I
+    "01111001110100100101000",  // self-test Q
+};
+
+// Appendix B.1: g(X), highest power first.
+constexpr const char* kSgbGenerator = "1110001111110101110000101110111110011110010010111";
+
+const BchCodec& sgb_bch() {
+    static const BchCodec c = [] {
+        BchParams p;
+        // Appendix B.1: m1(X) = X^8 + X^4 + X^3 + X^2 + 1 defines the field.
+        p.m = 8;
+        p.field_polynomial = 0x11D;
+        for (const char* q = kSgbGenerator; *q != '\0'; ++q) {
+            p.generator.push_back(static_cast<std::uint8_t>(*q - '0'));
+        }
+        return BchCodec::create(p).value();
+    }();
+    return c;
+}
+
+// The preamble's half-chip template: the one-chip matched filter's output,
+// sampled at the end of each I chip (even k) and each Q chip (odd k), with Q
+// half a chip behind I, 2.3.3; signal level 1 - 2 * chip, Table 2.3.
+std::vector<cd> sgb_preamble_samples(const std::vector<std::uint8_t>& pi,
+                                     const std::vector<std::uint8_t>& pq) {
+    auto lv = [](std::uint8_t c) { return 1.0 - 2.0 * c; };
+    std::vector<cd> t(2 * kSgbPreambleChips - 1);
+    for (std::size_t c = 0; c < kSgbPreambleChips; ++c) {
+        const double q_prev = c > 0 ? lv(pq[c - 1]) : 0.0;
+        t[2 * c] = {lv(pi[c]), 0.5 * (q_prev + lv(pq[c]))};
+        if (2 * c + 1 < t.size()) {
+            t[2 * c + 1] = {0.5 * (lv(pi[c]) + lv(pi[c + 1])), lv(pq[c])};
+        }
+    }
+    return t;
+}
+
+std::vector<cd> sgb_differential(const std::vector<cd>& t) {
+    std::vector<cd> d(t.size() - 2);
+    for (std::size_t k = 0; k < d.size(); ++k) {
+        d[k] = t[k + 2] * std::conj(t[k]);
+    }
+    return d;
+}
+
+constexpr std::size_t kSgbFft = 32768;
+constexpr std::size_t kSgbTemplate = 2 * kSgbPreambleChips - 3;
+// Grid points a peak must hold to be taken. A template whose end overlaps
+// only the start of a burst normalises to about 1/sqrt(overlap), which can
+// cross the threshold before the true peak, so the search runs for a whole
+// template length past the first crossing and keeps the largest.
+constexpr std::int64_t kSgbConfirm = static_cast<std::int64_t>(2 * kSgbPreambleChips);
+constexpr std::size_t kSgbBits = kSgbChipsPerArm / kSgbChipsPerBit;  // 150 per arm
+constexpr std::size_t kSgbPreambleBits = kSgbPreambleChips / kSgbChipsPerBit;  // 25
+
+void ifft(std::vector<cd>& a) {
+    for (auto& v : a) {
+        v = std::conj(v);
+    }
+    fft(a);
+    const double n = static_cast<double>(a.size());
+    for (auto& v : a) {
+        v = std::conj(v) / n;
+    }
+}
+
+unsigned sgb_range(std::span<const std::uint8_t> b, std::size_t first, std::size_t last) {
+    unsigned v = 0;
+    for (std::size_t i = first; i <= last; ++i) {
+        v = (v << 1U) | b[i - 1];
+    }
+    return v;
+}
+
+std::string sgb_baudot(std::span<const std::uint8_t> b, std::size_t first, std::size_t chars,
+                       unsigned width) {
+    std::string s;
+    for (std::size_t i = 0; i < chars; ++i) {
+        const std::size_t at = first + i * width;
+        unsigned code = sgb_range(b, at, at + width - 1);
+        if (width == 5) {
+            // Table 3.1 note: the 3-letter designator drops the leading 1
+            // every letter's six-bit code has.
+            code |= 0b100000U;
+        }
+        s.push_back(cs_baudot_decode(code));
+    }
+    while (!s.empty() && s.back() == ' ') {
+        s.pop_back();
+    }
+    while (!s.empty() && s.front() == ' ') {
+        s.erase(s.begin());
+    }
+    return s;
+}
+
+}  // namespace
+
+std::vector<std::uint8_t> sgb_prn(SgbMode mode, bool q_arm) {
+    const char* preset = kSgbPresets[(mode == SgbMode::SelfTest ? 2U : 0U) + (q_arm ? 1U : 0U)];
+    // Figure 2-2: output X0; X0 xor X18 into X22 after the shift.
+    std::uint32_t reg = 0;
+    for (unsigned i = 0; i < 23; ++i) {
+        if (preset[i] == '1') {
+            reg |= 1U << (22U - i);
+        }
+    }
+    std::vector<std::uint8_t> out(kSgbChipsPerArm);
+    for (auto& chip : out) {
+        const std::uint32_t x0 = reg & 1U;
+        chip = static_cast<std::uint8_t>(x0);
+        const std::uint32_t temp = x0 ^ ((reg >> 18U) & 1U);
+        reg = (reg >> 1U) | (temp << 22U);
+    }
+    return out;
+}
+
+void sgb_fill_bch(std::span<std::uint8_t> bits) {
+    if (bits.size() < kSgbMessageBits) {
+        return;
+    }
+    (void)sgb_bch().encode(bits.first(kSgbInformationBits),
+                           bits.subspan(kSgbInformationBits, kSgbMessageBits - kSgbInformationBits));
+}
+
+const char* sgb_beacon_type_name(unsigned type) {
+    // Table 3.1, bits 138-140.
+    switch (type) {
+        case 0b000: return "ELT";
+        case 0b001: return "EPIRB";
+        case 0b010: return "PLB";
+        case 0b011: return "ELT(DT)";
+        case 0b111: return "system beacon";
+        default: return "spare";
+    }
+}
+
+Expected<SgbMessage> sgb_parse(std::span<const std::uint8_t> bits, SgbMode mode) {
+    if (bits.size() != kSgbMessageBits) {
+        return fail(std::format("Cospas-Sarsat SGB: {} bits, not 250", bits.size()));
+    }
+    SgbMessage m;
+    m.bits.assign(bits.begin(), bits.end());
+    const auto corrected = sgb_bch().decode(m.bits);
+    if (!corrected) {
+        return fail("Cospas-Sarsat SGB: BCH(250,202) refused the message");
+    }
+    m.bch_corrected = *corrected;
+    m.self_test = mode == SgbMode::SelfTest;
+    const std::span<const std::uint8_t> b(m.bits);
+
+    // Table 3.1.
+    m.tac = sgb_range(b, 1, 16);
+    m.serial = sgb_range(b, 17, 30);
+    m.country_code = sgb_range(b, 31, 40);
+    m.homing = b[40] != 0;
+    m.rls = b[41] != 0;
+    m.test_protocol = b[42] != 0;
+    // Encoded GNSS location, and the defaults of Table 3.1 and Appendix C.3.
+    // Table 3.1 gives the default with the hemisphere flag 0 and, for a
+    // beacon without location capability, 1; C.3 gives 0. Either is read as
+    // no location: only degrees and decimal parts are compared.
+    const unsigned lat_all = sgb_range(b, 45, 66);
+    const unsigned lon_all = sgb_range(b, 68, 90);
+    const bool lat_default = lat_all == ((0b1111111U << 15U) | 0b000001111100000U);
+    const bool lon_default = lon_all == ((0b11111111U << 15U) | 0b111110000011111U);
+    if (!lat_default && !lon_default) {
+        const double lat = sgb_range(b, 45, 51) + sgb_range(b, 52, 66) / 32768.0;
+        const double lon = sgb_range(b, 68, 75) + sgb_range(b, 76, 90) / 32768.0;
+        m.latitude = b[43] != 0 ? -lat : lat;
+        m.longitude = b[66] != 0 ? -lon : lon;
+    }
+    m.vessel_id_type = sgb_range(b, 91, 93);
+    switch (m.vessel_id_type) {
+        case 0b000:
+            m.identity = "no aircraft or maritime identity";
+            break;
+        case 0b001: {
+            const unsigned mmsi = sgb_range(b, 94, 123);
+            const unsigned ais = sgb_range(b, 124, 137);
+            m.identity = mmsi == 111111U ? "no MMSI" : std::format("MMSI {:09}", mmsi);
+            if (mmsi != 111111U) {
+                m.mmsi = mmsi;
+            }
+            if (ais != 10922U) {
+                m.identity += std::format(", EPIRB-AIS ...{:04}", ais);
+            }
+            break;
+        }
+        case 0b010:
+            m.identity = "call sign " + sgb_baudot(b, 94, 7, 6);
+            break;
+        case 0b011:
+            m.identity = "registration " + sgb_baudot(b, 94, 7, 6);
+            break;
+        case 0b100: {
+            const std::uint32_t address = sgb_range(b, 94, 117);
+            m.aircraft_address = address;
+            m.identity = std::format("aircraft address {:06X}", address);
+            const std::string op = sgb_baudot(b, 118, 3, 5);
+            if (sgb_range(b, 118, 132) != 0U) {
+                m.identity += ", operator " + op;
+            }
+            break;
+        }
+        case 0b101:
+            m.identity = std::format("operator {} serial {}", sgb_baudot(b, 94, 3, 5),
+                                     sgb_range(b, 109, 120));
+            break;
+        case 0b111:
+            m.identity = "system testing";
+            break;
+        default:
+            m.identity = "spare vessel ID type";
+            break;
+    }
+    m.beacon_type = sgb_range(b, 138, 140);
+    // 3.3: the rotating field identifier.
+    m.rotating_field = sgb_range(b, 155, 158);
+    m.cancellation = m.rotating_field == 15U;
+
+    // 3.6, Table 3.10: the 23 Hex ID.
+    std::vector<std::uint8_t> id;
+    auto put = [&](unsigned v, unsigned width) {
+        for (unsigned i = 0; i < width; ++i) {
+            id.push_back(static_cast<std::uint8_t>((v >> (width - 1U - i)) & 1U));
+        }
+    };
+    put(1, 1);
+    put(m.country_code, 10);
+    put(0b101, 3);
+    put(m.tac, 16);
+    put(m.serial, 14);
+    put(m.test_protocol ? 1U : 0U, 1);
+    put(m.vessel_id_type, 3);
+    id.insert(id.end(), b.begin() + 93, b.begin() + 137);
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    for (std::size_t i = 0; i < id.size(); i += 4) {
+        m.hex_id.push_back(kHex[(id[i] << 3U) | (id[i + 1] << 2U) | (id[i + 2] << 1U) | id[i + 3]]);
+    }
+    return m;
+}
+
+Expected<SgbDecoder> SgbDecoder::create(const SgbDecoderConfig& config) {
+    if (config.rate <= 0 || config.rate % 76800 != 0) {
+        return fail("Cospas-Sarsat SGB decoder needs a whole, even number of samples per chip");
+    }
+    if (!(config.threshold > 0.0 && config.threshold < 1.0)) {
+        return fail("Cospas-Sarsat SGB decoder: threshold must be between 0 and 1");
+    }
+    SgbDecoder d;
+    d.config_ = config;
+    d.sps_ = static_cast<std::size_t>(config.rate / 38400);
+    for (std::size_t mode = 0; mode < 2; ++mode) {
+        const auto m = mode == 0 ? SgbMode::Normal : SgbMode::SelfTest;
+        d.prn_i_[mode] = sgb_prn(m, false);
+        d.prn_q_[mode] = sgb_prn(m, true);
+        d.template_[mode] =
+            sgb_differential(sgb_preamble_samples(d.prn_i_[mode], d.prn_q_[mode]));
+        std::vector<cd> f(kSgbFft, cd{});
+        std::copy(d.template_[mode].begin(), d.template_[mode].end(), f.begin());
+        fft(f);
+        for (auto& v : f) {
+            v = std::conj(v);
+        }
+        d.template_fft_[mode] = std::move(f);
+    }
+    for (const cd& v : d.template_[0]) {
+        d.template_energy_ += std::norm(v);
+    }
+    d.reset();
+    return d;
+}
+
+void SgbDecoder::reset() {
+    prefix_.assign(1, cd{});
+    raw_base_ = 0;
+    total_ = 0;
+    running_ = {};
+    diff_.clear();
+    d_base_ = 0;
+    next_block_ = 0;
+    have_candidate_ = false;
+    holdoff_until_ = 0;
+    pending_.clear();
+}
+
+std::complex<double> SgbDecoder::filtered(double sample) const {
+    // The one-chip moving sum ending at a sample, linearly interpolated.
+    const auto s = static_cast<std::int64_t>(sps_);
+    auto at = [&](std::int64_t n) {
+        auto p = [&](std::int64_t k) {
+            k = std::max<std::int64_t>(k, 0);
+            const std::int64_t i = k - raw_base_;
+            if (i < 0 || i >= static_cast<std::int64_t>(prefix_.size())) {
+                return cd{};
+            }
+            return prefix_[static_cast<std::size_t>(i)];
+        };
+        return p(n + 1) - p(n + 1 - s);
+    };
+    const double fl = std::floor(sample);
+    const auto n = static_cast<std::int64_t>(fl);
+    const double frac = sample - fl;
+    return at(n) * (1.0 - frac) + at(n + 1) * frac;
+}
+
+void SgbDecoder::push(dsp::ConstComplexSpan in, std::vector<SgbBurst>& out) {
+    const auto h = static_cast<std::int64_t>(sps_ / 2);
+    for (const auto& x : in) {
+        running_ += cd(x.real(), x.imag());
+        prefix_.push_back(running_);
+        ++total_;
+        // Differential products on the half-chip grid, g at sample g * h.
+        const std::int64_t g = d_base_ + static_cast<std::int64_t>(diff_.size());
+        if ((g + 2) * h < total_) {
+            const cd y0 = filtered(static_cast<double>(g * h));
+            const cd y2 = filtered(static_cast<double>((g + 2) * h));
+            diff_.push_back(y2 * std::conj(y0));
+        }
+        if (static_cast<std::int64_t>(diff_.size()) + d_base_ >=
+            next_block_ + static_cast<std::int64_t>(kSgbFft)) {
+            correlate_block(out);
+        }
+        if (!pending_.empty()) {
+            finish_ready(out);
+        }
+    }
+    // Keep the raw input the pending bursts and the grid still need.
+    std::int64_t keep = d_base_ * h - static_cast<std::int64_t>(4 * sps_);
+    for (const Pending& p : pending_) {
+        keep = std::min(keep, p.start - static_cast<std::int64_t>(4 * sps_));
+    }
+    if (have_candidate_) {
+        keep = std::min(keep, candidate_ * h - static_cast<std::int64_t>(4 * sps_));
+    }
+    if (keep - raw_base_ > (1 << 20)) {
+        const auto drop = static_cast<std::size_t>(keep - raw_base_);
+        prefix_.erase(prefix_.begin(), prefix_.begin() + static_cast<std::ptrdiff_t>(drop));
+        raw_base_ += static_cast<std::int64_t>(drop);
+    }
+}
+
+void SgbDecoder::correlate_block(std::vector<SgbBurst>& /*out*/) {
+    const auto off = static_cast<std::size_t>(next_block_ - d_base_);
+    std::vector<cd> block(diff_.begin() + static_cast<std::ptrdiff_t>(off),
+                          diff_.begin() + static_cast<std::ptrdiff_t>(off + kSgbFft));
+    // Sliding energy of the products under the template.
+    std::vector<double> energy(kSgbFft + 1, 0.0);
+    for (std::size_t i = 0; i < kSgbFft; ++i) {
+        energy[i + 1] = energy[i] + std::norm(block[i]);
+    }
+    fft(block);
+    std::array<std::vector<cd>, 2> corr;
+    for (std::size_t mode = 0; mode < 2; ++mode) {
+        corr[mode].resize(kSgbFft);
+        for (std::size_t i = 0; i < kSgbFft; ++i) {
+            corr[mode][i] = block[i] * template_fft_[mode][i];
+        }
+        ifft(corr[mode]);
+    }
+    const auto h = static_cast<std::int64_t>(sps_ / 2);
+    const std::size_t valid = kSgbFft - kSgbTemplate + 1;
+    for (std::size_t i = 0; i < valid; ++i) {
+        const std::int64_t g = next_block_ + static_cast<std::int64_t>(i);
+        const double e = energy[i + kSgbTemplate] - energy[i];
+        double metric = 0.0;
+        SgbMode mode = SgbMode::Normal;
+        if (e > 0.0) {
+            for (std::size_t md = 0; md < 2; ++md) {
+                const double v = std::norm(corr[md][i]) / (e * template_energy_);
+                if (v > metric) {
+                    metric = v;
+                    mode = md == 0 ? SgbMode::Normal : SgbMode::SelfTest;
+                }
+            }
+            metric = std::sqrt(metric);
+        }
+        if (have_candidate_) {
+            if (metric > candidate_metric_) {
+                candidate_ = g;
+                candidate_metric_ = metric;
+                candidate_mode_ = mode;
+            } else if (g > candidate_ + kSgbConfirm) {
+                // The grid point ends the first I chip's matched filter.
+                pending_.push_back({candidate_ * h - static_cast<std::int64_t>(sps_) + 1,
+                                    candidate_mode_, candidate_metric_});
+                holdoff_until_ =
+                    candidate_ + static_cast<std::int64_t>(2 * kSgbChipsPerArm * 9 / 10);
+                have_candidate_ = false;
+            }
+        } else if (g >= holdoff_until_ && metric > config_.threshold) {
+            have_candidate_ = true;
+            candidate_ = g;
+            candidate_metric_ = metric;
+            candidate_mode_ = mode;
+        }
+    }
+    next_block_ += static_cast<std::int64_t>(valid);
+    const auto drop = static_cast<std::size_t>(next_block_ - d_base_);
+    diff_.erase(diff_.begin(), diff_.begin() + static_cast<std::ptrdiff_t>(drop));
+    d_base_ = next_block_;
+}
+
+void SgbDecoder::finish_ready(std::vector<SgbBurst>& out) {
+    const auto need = static_cast<std::int64_t>((kSgbChipsPerArm + 32) * sps_);
+    while (!pending_.empty() && pending_.front().start + need < total_) {
+        const Pending p = pending_.front();
+        pending_.erase(pending_.begin());
+        decode_burst(p.start, p.mode, p.metric, out);
+    }
+}
+
+void SgbDecoder::decode_burst(std::int64_t start, SgbMode mode, double metric,
+                              std::vector<SgbBurst>& out) {
+    const std::size_t md = mode == SgbMode::Normal ? 0 : 1;
+    const auto& pi = prn_i_[md];
+    const auto& pq = prn_q_[md];
+    const auto& tmpl = template_[md];
+    const auto s = static_cast<double>(sps_);
+    const double h = s / 2.0;
+    auto lv = [](std::uint8_t c) { return 1.0 - 2.0 * c; };
+
+    // Fine timing: the differential preamble correlation at each sample
+    // within a chip of the detection, then a parabola through the peak.
+    const auto span = static_cast<std::int64_t>(sps_);
+    std::vector<double> score(static_cast<std::size_t>(2 * span + 1));
+    std::vector<cd> y(kSgbTemplate + 2);
+    for (std::int64_t off = -span; off <= span; ++off) {
+        const double t0 = static_cast<double>(start + off) + s - 1.0;
+        for (std::size_t k = 0; k < y.size(); ++k) {
+            y[k] = filtered(t0 + static_cast<double>(k) * h);
+        }
+        cd c{};
+        for (std::size_t k = 0; k < kSgbTemplate; ++k) {
+            c += y[k + 2] * std::conj(y[k]) * std::conj(tmpl[k]);
+        }
+        score[static_cast<std::size_t>(off + span)] = std::abs(c);
+    }
+    const auto best = static_cast<std::size_t>(
+        std::max_element(score.begin(), score.end()) - score.begin());
+    double frac = 0.0;
+    if (best > 0 && best + 1 < score.size()) {
+        const double a = score[best - 1];
+        const double b = score[best];
+        const double c = score[best + 1];
+        const double den = a - 2.0 * b + c;
+        if (den < 0.0) {
+            frac = std::clamp(0.5 * (a - c) / den, -0.5, 0.5);
+        }
+    }
+    const double n0 = static_cast<double>(start) + static_cast<double>(best) -
+                      static_cast<double>(span) + frac;
+
+    // Carrier: the preamble despread chip by chip, both arms, then the peak
+    // of a zero-padded FFT, refined by a parabola on its magnitude.
+    constexpr std::size_t kCfoFft = 8192;
+    std::vector<cd> w(kCfoFft, cd{});
+    for (std::size_t c = 0; c < kSgbPreambleChips; ++c) {
+        const double t = n0 + s - 1.0 + static_cast<double>(c) * s;
+        w[c] = filtered(t) * lv(pi[c]) + filtered(t + h) * cd(0.0, -1.0) * lv(pq[c]);
+    }
+    std::vector<cd> spec = w;
+    fft(spec);
+    std::size_t peak = 0;
+    for (std::size_t i = 1; i < kCfoFft; ++i) {
+        if (std::norm(spec[i]) > std::norm(spec[peak])) {
+            peak = i;
+        }
+    }
+    double pk = static_cast<double>(peak);
+    {
+        const double a = std::abs(spec[(peak + kCfoFft - 1) % kCfoFft]);
+        const double b = std::abs(spec[peak]);
+        const double c = std::abs(spec[(peak + 1) % kCfoFft]);
+        const double den = a - 2.0 * b + c;
+        if (den < 0.0) {
+            pk += std::clamp(0.5 * (a - c) / den, -0.5, 0.5);
+        }
+    }
+    if (pk > static_cast<double>(kCfoFft) / 2.0) {
+        pk -= static_cast<double>(kCfoFft);
+    }
+    double omega = 2.0 * std::numbers::pi * pk / static_cast<double>(kCfoFft);  // rad per chip
+    cd acc{};
+    for (std::size_t c = 0; c < kSgbPreambleChips; ++c) {
+        acc += w[c] * std::polar(1.0, -omega * static_cast<double>(c));
+    }
+    double phase = std::arg(acc);
+
+    // Despreading, bit period by bit period on both arms, with a second
+    // order phase loop and an early-late timing loop. Loop gains are
+    // engineering choices for 256-chip periods at the SNR the acquisition
+    // needs.
+    constexpr double kPhaseP = 0.3;
+    constexpr double kPhaseI = 0.03;
+    constexpr double kTimeP = 0.3;
+    constexpr double kTimeI = 0.02;
+    const double initial_omega = omega;
+    double tc = s;                    // samples per chip
+    double tau = n0 + s - 1.0;        // matched filter peak of the period's first I chip
+    std::vector<std::uint8_t> bits(kSgbMessageBits, 0);
+    for (std::size_t p = 0; p < kSgbBits; ++p) {
+        cd xi{}, xq{}, ei{}, eq{}, li{}, lq{};
+        for (std::size_t j = 0; j < kSgbChipsPerBit; ++j) {
+            const std::size_t c = p * kSgbChipsPerBit + j;
+            const double ti = tau + static_cast<double>(j) * tc;
+            const double tq = ti + 0.5 * tc;
+            const cd rot_i = std::polar(1.0, -(phase + omega * static_cast<double>(j)));
+            const cd rot_q = std::polar(1.0, -(phase + omega * (static_cast<double>(j) + 0.5)));
+            const double si = lv(pi[c]);
+            const double sq = lv(pq[c]);
+            const cd ri = rot_i * si;
+            const cd rq = rot_q * cd(0.0, -1.0) * sq;
+            xi += filtered(ti) * ri;
+            xq += filtered(tq) * rq;
+            ei += filtered(ti - 0.5 * tc) * ri;
+            eq += filtered(tq - 0.5 * tc) * rq;
+            li += filtered(ti + 0.5 * tc) * ri;
+            lq += filtered(tq + 0.5 * tc) * rq;
+        }
+        double di = 1.0;
+        double dq = 1.0;
+        if (p >= kSgbPreambleBits) {
+            const std::size_t k = p - kSgbPreambleBits;
+            const bool bi = xi.real() < 0.0;
+            const bool bq = xq.real() < 0.0;
+            bits[2 * k] = bi ? 1 : 0;      // bit 2k + 1, odd, on I
+            bits[2 * k + 1] = bq ? 1 : 0;  // bit 2k + 2, even, on Q
+            di = bi ? -1.0 : 1.0;
+            dq = bq ? -1.0 : 1.0;
+        }
+        const double err = std::arg(xi * di + xq * dq);
+        const double early = std::abs(ei) + std::abs(eq);
+        const double late = std::abs(li) + std::abs(lq);
+        const double delta = (late + early) > 0.0 ? 0.5 * (late - early) / (late + early) : 0.0;
+
+        phase += omega * static_cast<double>(kSgbChipsPerBit) + kPhaseP * err;
+        omega += kPhaseI * err / static_cast<double>(kSgbChipsPerBit);
+        tau += static_cast<double>(kSgbChipsPerBit) * tc + kTimeP * delta * tc;
+        tc += kTimeI * delta * tc / static_cast<double>(kSgbChipsPerBit);
+    }
+
+    auto parsed = sgb_parse(bits, mode);
+    if (!parsed) {
+        ++failed_;
+        return;
+    }
+    SgbBurst burst;
+    burst.message = std::move(*parsed);
+    burst.sample_position = static_cast<std::uint64_t>(std::max(0.0, std::round(n0)));
+    burst.frequency_offset_hz = initial_omega * kSgbChipRate / (2.0 * std::numbers::pi);
+    // The mean over the burst: chips tracked over the samples they took.
+    burst.chip_rate = static_cast<double>(config_.rate) * static_cast<double>(kSgbChipsPerArm) /
+                      (tau - (n0 + s - 1.0));
+    burst.sync_metric = metric;
+    out.push_back(std::move(burst));
+}
+
 }  // namespace revenant::decode

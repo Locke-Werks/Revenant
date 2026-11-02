@@ -232,3 +232,227 @@ TEST_CASE("Cospas-Sarsat bursts decode through Doppler, drift, bit rate error an
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Second generation, C/S T.018 Issue 1 Rev. 7
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string chips_hex(const std::vector<std::uint8_t>& chips) {
+    std::string s;
+    for (std::size_t i = 0; i < 64; i += 4) {
+        const unsigned v = (chips[i] << 3U) | (chips[i + 1] << 2U) | (chips[i + 2] << 1U) | chips[i + 3];
+        s.push_back("0123456789ABCDEF"[v]);
+    }
+    return s;
+}
+
+std::vector<SgbBurst> run_sgb(const std::vector<dsp::Complex32>& x, dsp::SampleRate rate,
+                              std::size_t chunk) {
+    SgbDecoderConfig cfg;
+    cfg.rate = rate;
+    auto dec = SgbDecoder::create(cfg).value();
+    std::vector<SgbBurst> out;
+    for (std::size_t i = 0; i < x.size(); i += chunk) {
+        dec.push(std::span(x).subspan(i, std::min(chunk, x.size() - i)), out);
+    }
+    return out;
+}
+
+// Noise for a carrier to noise density ratio, the signal at unit power.
+void add_cn0(std::vector<dsp::Complex32>& x, double cn0_db, dsp::SampleRate rate,
+             std::uint64_t seed) {
+    const double n0 = 1.0 / std::pow(10.0, cn0_db / 10.0);
+    REQUIRE(siggen::add_awgn_at_power(x, n0 * static_cast<double>(rate), seed).has_value());
+}
+
+}  // namespace
+
+TEST_CASE("Cospas-Sarsat SGB PRN, BCH and message match T.018", "[decode][cospas][sgb]") {
+    // Table 2.2: the first 64 chips of each sequence.
+    CHECK(chips_hex(sgb_prn(SgbMode::Normal, false)) == "80000108421284A1");
+    CHECK(chips_hex(sgb_prn(SgbMode::Normal, true)) == "3F8358BAD030F231");
+    CHECK(chips_hex(sgb_prn(SgbMode::SelfTest, false)) == "0F934A4D4CF3028D");
+    CHECK(chips_hex(sgb_prn(SgbMode::SelfTest, true)) == "14973DC716CDE124");
+
+    // Appendix B.1: g(X) is the narrow-sense t = 6 generator over the field
+    // of m1(X); and the worked example's 48 check bits.
+    const auto narrow = BchCodec::create({8, 0x11D, 13, {}}).value();
+    CHECK(narrow.generator() == from_bits("1110001111110101110000101110111110011110010010111"));
+    auto bits = from_bits(
+        "0000 0000 1110 0110 0000 1000 1111 0100 1100 1001 1000 0110 0001 1001 0110 0001"
+        "1000 1000 1010 0000 0100 0111 1100 0000 0000 0000 0000 0000 0000 0000 0000 0000"
+        "0000 0000 0000 1111 1111 1111 1100 0000 0001 0000 0000 1100 0001 1010 0000 0000"
+        "1001 0110 00");
+    REQUIRE(bits.size() == 202);
+    bits.resize(250, 0);
+    sgb_fill_bch(bits);
+    CHECK(std::vector<std::uint8_t>(bits.begin() + 202, bits.end()) ==
+          from_bits("010010010010101001001111110001010111101001001001"));
+
+    // The same example's fields, Appendix B.1, and its 23 Hex ID, B.2.
+    auto damaged = bits;
+    for (const std::size_t i : {3U, 60U, 99U, 150U, 201U, 240U}) {
+        damaged[i] ^= 1U;
+    }
+    const auto m = sgb_parse(damaged).value();
+    CHECK(m.bch_corrected == 6);
+    CHECK(m.bits == bits);
+    CHECK(m.tac == 230);
+    CHECK(m.serial == 573);
+    CHECK(m.country_code == 201);
+    CHECK(m.homing);
+    CHECK(!m.rls);
+    CHECK(!m.test_protocol);
+    REQUIRE(m.latitude.has_value());
+    CHECK(std::abs(*m.latitude - 48.793153539336956) < 1.0 / 32768.0);
+    CHECK(std::abs(*m.longitude - 69.00875866413116) < 1.0 / 32768.0);
+    CHECK(m.vessel_id_type == 0);
+    CHECK(m.beacon_type == 0);
+    CHECK(m.rotating_field == 0);
+    CHECK(m.hex_id == "9934039823D000000000000");
+    // A seventh error is beyond t = 6.
+    damaged[10] ^= 1U;
+    CHECK(!sgb_parse(damaged).has_value());
+}
+
+TEST_CASE("Cospas-Sarsat SGB message builder round trip", "[decode][cospas][sgb]") {
+    siggen::SgbMessageSpec s;
+    s.tac = 12345;
+    s.serial = 9876;
+    s.country = 366;
+    s.latitude = -33.8567;
+    s.longitude = -151.2153;
+    s.vessel_id_type = 1;
+    s.vessel_id = (std::uint64_t{366123456} << 14U) | 10922U;
+    s.beacon_type = 1;
+    auto m = sgb_parse(siggen::sgb_message(s)).value();
+    CHECK(m.tac == 12345);
+    CHECK(m.serial == 9876);
+    CHECK(m.country_code == 366);
+    REQUIRE(m.latitude.has_value());
+    CHECK(std::abs(*m.latitude + 33.8567) < 1e-4);
+    CHECK(std::abs(*m.longitude + 151.2153) < 1e-4);
+    CHECK(m.mmsi == 366123456U);
+    CHECK(m.identity == "MMSI 366123456");
+    CHECK(std::string(sgb_beacon_type_name(m.beacon_type)) == "EPIRB");
+
+    // No location: the defaults read as none. Radio call sign, seven
+    // modified-Baudot characters, Table 3.2, then two spare bits.
+    s.latitude.reset();
+    s.longitude.reset();
+    s.vessel_id_type = 2;
+    s.vessel_id = 0;
+    for (const char c : std::string("WDC1234")) {
+        s.vessel_id = (s.vessel_id << 6U) | *cs_baudot_encode(c);
+    }
+    s.vessel_id <<= 2U;
+    s.rotating_field = 15;
+    m = sgb_parse(siggen::sgb_message(s)).value();
+    CHECK(!m.latitude.has_value());
+    CHECK(m.identity == "call sign WDC1234");
+    CHECK(m.cancellation);
+
+    // Aircraft 24-bit address and a three-letter designator in 5-bit codes.
+    s.vessel_id_type = 4;
+    std::uint64_t op = 0;
+    for (const char c : std::string("BAW")) {
+        op = (op << 5U) | (*cs_baudot_encode(c) & 0x1FU);
+    }
+    s.vessel_id = (std::uint64_t{0xA1B2C3} << 20U) | (op << 5U);
+    m = sgb_parse(siggen::sgb_message(s)).value();
+    CHECK(m.aircraft_address == 0xA1B2C3U);
+    CHECK(m.identity == "aircraft address A1B2C3, operator BAW");
+}
+
+TEST_CASE("Cospas-Sarsat SGB bursts through Doppler, chip rate error and noise",
+          "[decode][cospas][sgb]") {
+    constexpr dsp::SampleRate kRate = 153600;
+    siggen::SgbMessageSpec s;
+    s.tac = 230;
+    s.serial = 573;
+    s.country = 201;
+    s.latitude = 48.7931;
+    s.longitude = 69.0087;
+    const auto m1 = siggen::sgb_message(s);
+    s.serial = 574;
+    s.beacon_type = 2;
+    const auto m2 = siggen::sgb_message(s);
+
+    std::vector<dsp::Complex32> stream;
+    for (int i = 0; i < 3; ++i) {
+        siggen::SgbBurstConfig bc;
+        bc.rate = kRate;
+        // 2.3.1.2 allows 0.6 chip/s; twice that, as Doppler on the chip
+        // clock adds to it.
+        bc.chip_rate = 38400.0 + (i - 1) * 1.2;
+        bc.initial_phase = 0.7 * i;
+        bc.self_test = i == 2;
+        bc.lead_seconds = 0.3;
+        bc.tail_seconds = i == 2 ? 1.0 : 0.3;
+        auto b = siggen::sgb_render_burst(bc, i == 1 ? m2 : m1).value();
+        stream.insert(stream.end(), b.begin(), b.end());
+    }
+    // 2.3.1.1's 1.2 kHz tolerance plus LEO Doppler, moving.
+    siggen::FrequencyConfig fc;
+    fc.doppler_shift_hz = 2500;
+    fc.drift_hz_per_second = 60.0;
+    REQUIRE(siggen::apply_frequency_offset(stream, fc, kRate, 3).has_value());
+    add_cn0(stream, 50.0, kRate, 17);
+
+    const auto whole = run_sgb(stream, kRate, stream.size());
+    for (const auto& b : whole) {
+        UNSCOPED_INFO("SGB burst at " << b.sample_position << ": " << b.frequency_offset_hz
+                                      << " Hz, " << b.chip_rate << " chip/s, metric "
+                                      << b.sync_metric << ", BCH " << b.message.bch_corrected);
+        // The offset at the burst, 60 Hz/s on from 2.5 kHz.
+        const double expect = 2500.0 + 60.0 * static_cast<double>(b.sample_position) / kRate;
+        CHECK(std::abs(b.frequency_offset_hz - expect) < 30.0);
+    }
+    REQUIRE(whole.size() == 3);
+    CHECK(whole[0].message.bits == m1);
+    CHECK(whole[1].message.bits == m2);
+    CHECK(whole[2].message.bits == m1);
+    CHECK(!whole[0].message.self_test);
+    CHECK(whole[2].message.self_test);
+    CHECK(std::abs(whole[0].chip_rate - 38398.8) < 0.5);
+    CHECK(std::abs(whole[2].chip_rate - 38401.2) < 0.5);
+
+    for (const std::size_t chunk : {std::size_t{1}, std::size_t{4093}}) {
+        const auto split = run_sgb(stream, kRate, chunk);
+        REQUIRE(split.size() == whole.size());
+        for (std::size_t i = 0; i < whole.size(); ++i) {
+            CHECK(split[i].message.bits == whole[i].message.bits);
+            CHECK(split[i].sample_position == whole[i].sample_position);
+            CHECK(split[i].frequency_offset_hz == whole[i].frequency_offset_hz);
+        }
+    }
+}
+
+TEST_CASE("Cospas-Sarsat SGB sensitivity", "[decode][cospas][sgb][.measure]") {
+    constexpr dsp::SampleRate kRate = 153600;
+    siggen::SgbMessageSpec s;
+    s.tac = 1;
+    s.serial = 2;
+    s.country = 3;
+    const auto m = siggen::sgb_message(s);
+    for (const double cn0 : {30.0, 32.0, 34.0, 36.0, 38.0}) {
+        std::size_t good = 0;
+        constexpr int kBursts = 10;
+        for (int i = 0; i < kBursts; ++i) {
+            siggen::SgbBurstConfig bc;
+            bc.rate = kRate;
+            bc.initial_phase = i;
+            bc.tail_seconds = 1.0;
+            auto x = siggen::sgb_render_burst(bc, m).value();
+            siggen::FrequencyConfig fc;
+            fc.doppler_shift_hz = 1000;
+            REQUIRE(siggen::apply_frequency_offset(x, fc, kRate, 3).has_value());
+            add_cn0(x, cn0, kRate, static_cast<std::uint64_t>(i + 100));
+            const auto got = run_sgb(x, kRate, x.size());
+            good += (got.size() == 1 && got[0].message.bits == m) ? 1 : 0;
+        }
+        WARN("SGB C/N0 " << cn0 << " dB-Hz: " << good << "/" << kBursts << " bursts");
+    }
+}

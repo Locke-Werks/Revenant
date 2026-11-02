@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -51,5 +52,45 @@ struct CsBurstConfig {
 [[nodiscard]] std::vector<std::uint8_t> cs_serial_user_location(unsigned country, unsigned beacon_type,
                                                                 std::uint32_t serial, double latitude,
                                                                 double longitude);
+
+// Second generation, C/S T.018 Issue 1 Rev. 7 as core/decode/cospas_sarsat.h
+// cites it: the 1 s DSSS-OQPSK burst of 2.2.3 to 2.2.7 and 2.3.3 with
+// rectangular chips, and the main field of Table 3.1.
+
+struct SgbBurstConfig {
+    dsp::SampleRate rate = 153600;
+    double chip_rate = 38400.0;  // 2.3.1.2 allows +-0.6 chip/s
+    double amplitude = 1.0;
+    double initial_phase = 0.0;
+    double lead_seconds = 0.2;
+    double tail_seconds = 0.2;
+    bool self_test = false;  // the self-test PRN of Table 2.2
+};
+
+// One burst carrying 250 message bits, bit 1 first.
+[[nodiscard]] Expected<std::vector<dsp::Complex32>> sgb_render_burst(
+    const SgbBurstConfig& config, std::span<const std::uint8_t> bits);
+
+struct SgbMessageSpec {
+    unsigned tac = 0;
+    unsigned serial = 0;
+    unsigned country = 0;
+    bool homing = true;
+    bool rls = false;
+    bool test_protocol = false;
+    // Encoded per Table 3.1 and the rounding note under it; nothing sends
+    // the Appendix C.3 defaults.
+    std::optional<double> latitude;
+    std::optional<double> longitude;
+    unsigned vessel_id_type = 0;
+    std::uint64_t vessel_id = 0;  // bits 94-137, 44 bits
+    unsigned beacon_type = 0;
+    unsigned rotating_field = 0;
+    std::uint64_t rotating_bits = 0;  // bits 159-202, 44 bits
+};
+
+// 250 bits: the main field, the rotating field and the BCH field. Spare bits
+// 141-154 are ones, or zeros for a cancellation message (rotating field 15).
+[[nodiscard]] std::vector<std::uint8_t> sgb_message(const SgbMessageSpec& spec);
 
 }  // namespace revenant::siggen

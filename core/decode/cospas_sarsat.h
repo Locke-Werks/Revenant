@@ -57,6 +57,7 @@
 #pragma once
 
 #include <array>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -194,6 +195,190 @@ private:
     std::vector<dsp::Complex32> capture_;
     std::uint64_t capture_start_ = 0;
     std::uint64_t holdoff_until_ = 0;
+    std::size_t failed_ = 0;
+};
+
+// ===========================================================================
+// Second-generation beacons (SGB)
+// ===========================================================================
+//
+// SPECIFICATION
+//
+// C/S T.018, "Specification for Second-Generation Cospas-Sarsat 406-MHz
+// Distress Beacons", Issue 1 - Revision 7, March 2021, fetched 2026-11-02
+// from the Programme's own site,
+// https://www.cospas-sarsat.int/images/stories/SystemDocs/Current/T018-MAR-26-2021.pdf.
+// Its pages are watermarked "superseded by a later version"; the later
+// revisions were not held. Cited as "T.018" with a section, table or
+// appendix. Used:
+//
+//   - 2.2.2 to 2.2.7: a 1 s burst; 166.7 ms of preamble (6400 chips per arm,
+//     bits all zero) then 250 bits at 300 bit/s, odd bits (1, 3, ...) on I
+//     and even bits on Q, 256 chips a bit per arm, a one sent as the
+//     inverted PRN (Table 2.4), chip logic 1 at signal level -1 (Table 2.3);
+//   - 2.2.3, Figure 2-2 and Table 2.2: the PRN, the m-sequence of
+//     X^23 + X^18 + 1, truncated to 38 400 chips per arm, from the four
+//     tabulated register presets (normal and self-test, I and Q), checked
+//     against the table's first 64 chips;
+//   - 2.3.3: OQPSK, I leading Q by half a chip;
+//   - 3.1 and Table 3.1: 154 main field bits, a 48-bit rotating field, 48
+//     BCH bits; TAC, serial number, country code, homing and RLS flags, test
+//     protocol flag, the encoded GNSS location with its "no location"
+//     defaults, the vessel ID types 0 to 7 with the Table 3.2 modified
+//     Baudot code (the same code as T.001 Table A3), the beacon type;
+//   - 3.3 and 3.4: the rotating field identifier, bits 155 to 158, of which
+//     15 is the cancellation message; the other rotating fields are passed
+//     through as bits, not decoded;
+//   - 3.5 and Appendix B: BCH(250,202), shortened from BCH(255,207), t = 6,
+//     its printed generator, checked against Appendix B's worked example;
+//   - 3.6 and Table 3.10: the 23 Hex ID.
+//
+// THE RECEIVER
+//
+// T.018 specifies the transmitter; the receiver is this file's design.
+// Rectangular chips are assumed (2.3.2 allows filtered rectangular among
+// others), so the matched filter is a one-chip moving sum. A burst is found
+// by differential correlation of the matched filter's output at half-chip
+// spacing against the preamble: each sample times the conjugate of the one a
+// chip earlier, correlated with the same product of the known preamble
+// waveform for each of the two modes. A carrier offset turns every product
+// by the same angle, so it does not reduce the correlation. Timing is then
+// refined to a sample, the carrier offset read from the peak of a
+// zero-padded FFT of the despread preamble, and the burst despread bit by
+// bit with a second order phase loop (decision directed after the preamble)
+// and an early-late chip timing loop, which follows the 2.3.1.2 chip rate
+// tolerance and Doppler on the chip clock. Hard decisions go to the BCH
+// decoder.
+//
+// The differential detector loses against coherent detection at low SNR,
+// so acquisition, not decoding, sets this receiver's sensitivity:
+// tests/decode/test_cospas_sarsat.cpp measured every burst at C/N0 38 dB-Hz,
+// 8 in 10 at 36 and none at 34, with a 1 kHz offset (2026-11-02).
+//
+// CLEAN ROOM
+//
+// No second-generation beacon decoder or encoder was read.
+
+inline constexpr double kSgbChipRate = 38400.0;            // 2.2.3 f), 2.3.1.2
+inline constexpr std::size_t kSgbChipsPerArm = 38400;       // 2.2.3 e)
+inline constexpr std::size_t kSgbPreambleChips = 6400;      // 2.2.4
+inline constexpr std::size_t kSgbChipsPerBit = 256;         // 2.2.3 b)
+inline constexpr std::size_t kSgbMessageBits = 250;         // 2.2.6
+inline constexpr std::size_t kSgbInformationBits = 202;     // 3.1
+inline constexpr std::size_t kSgbMainFieldBits = 154;       // 3.1
+
+enum class SgbMode : std::uint8_t { Normal, SelfTest };
+
+// T.018 Table 2.2 and Figure 2-2: the 38 400 chips of one arm, logic 0 or 1,
+// first chip first.
+[[nodiscard]] std::vector<std::uint8_t> sgb_prn(SgbMode mode, bool q_arm);
+
+// 3.5 and Appendix B: fills bits 203 to 250 from bits 1 to 202. One bit per
+// byte; bits[0] is bit 1.
+void sgb_fill_bch(std::span<std::uint8_t> bits);
+
+struct SgbMessage {
+    std::vector<std::uint8_t> bits;  // 250, bits[0] is bit 1, as corrected
+    bool self_test = false;          // sent with the self-test PRN
+    std::size_t bch_corrected = 0;
+    // Table 3.1.
+    unsigned tac = 0;
+    unsigned serial = 0;
+    unsigned country_code = 0;
+    bool homing = false;
+    bool rls = false;
+    bool test_protocol = false;
+    // Nothing when bits 44 to 90 hold the "no location" defaults.
+    std::optional<double> latitude;   // degrees, north positive
+    std::optional<double> longitude;  // degrees, east positive
+    unsigned vessel_id_type = 0;      // bits 91-93
+    std::string identity;             // as the vessel ID type carries it
+    std::optional<std::uint32_t> mmsi;
+    std::optional<std::uint32_t> aircraft_address;
+    unsigned beacon_type = 0;  // bits 138-140
+    // 3.3: the rotating field identifier and its 48 bits.
+    unsigned rotating_field = 0;
+    bool cancellation = false;  // rotating field 15
+    std::string hex_id;         // 3.6, 23 characters
+};
+
+[[nodiscard]] const char* sgb_beacon_type_name(unsigned type);
+
+// Decodes 250 bits. Fails on another length or when the BCH decoder refuses
+// the word.
+[[nodiscard]] Expected<SgbMessage> sgb_parse(std::span<const std::uint8_t> bits,
+                                             SgbMode mode = SgbMode::Normal);
+
+struct SgbDecoderConfig {
+    // A whole, even number of samples per chip: 76 800, 153 600, 307 200 S/s.
+    dsp::SampleRate rate = 153600;
+    // Normalised differential preamble correlation, 0 to 1, above which a
+    // burst is taken to start. Noise reads about 1/sqrt(12800), 0.009; the
+    // value is a choice: for a Rayleigh-distributed noise metric it is 5.6
+    // standard deviations, and a false start costs one failed BCH decode.
+    double threshold = 0.05;
+};
+
+struct SgbBurst {
+    SgbMessage message;
+    std::uint64_t sample_position = 0;  // the first preamble chip
+    double frequency_offset_hz = 0.0;   // from the preamble
+    double chip_rate = 0.0;             // mean over the burst, as tracked
+    double sync_metric = 0.0;
+};
+
+class SgbDecoder {
+public:
+    [[nodiscard]] static Expected<SgbDecoder> create(const SgbDecoderConfig& config);
+
+    // Complex baseband with the beacon within a few kilohertz of zero.
+    // Chunks may split anywhere: the same stream gives the same bursts.
+    void push(dsp::ConstComplexSpan in, std::vector<SgbBurst>& out);
+    void reset();
+    [[nodiscard]] std::size_t bursts_failed() const { return failed_; }
+
+private:
+    SgbDecoder() = default;
+    void correlate_block(std::vector<SgbBurst>& out);
+    void finish_ready(std::vector<SgbBurst>& out);
+    void decode_burst(std::int64_t start, SgbMode mode, double metric,
+                      std::vector<SgbBurst>& out);
+    [[nodiscard]] std::complex<double> filtered(double sample) const;
+
+    SgbDecoderConfig config_;
+    std::size_t sps_ = 0;  // samples per chip
+    // Differential templates of the two modes, length kTemplate, and the
+    // FFTs of their zero-padded conjugates.
+    std::array<std::vector<std::complex<double>>, 2> template_;
+    std::array<std::vector<std::complex<double>>, 2> template_fft_;
+    std::array<std::vector<std::uint8_t>, 2> prn_i_;
+    std::array<std::vector<std::uint8_t>, 2> prn_q_;
+    double template_energy_ = 0.0;
+
+    // Raw input from raw_base_, and its running sum for the matched filter.
+    std::vector<std::complex<double>> prefix_;  // prefix_[i]: sum of raw before raw_base_ + i
+    std::int64_t raw_base_ = 0;
+    std::int64_t total_ = 0;
+    std::complex<double> running_{};
+
+    // Differential products on the half-chip grid, from grid index d_base_.
+    std::vector<std::complex<double>> diff_;
+    std::int64_t d_base_ = 0;
+    std::int64_t next_block_ = 0;  // grid index of the next correlation block
+
+    // A correlation peak waiting to be confirmed as the largest nearby.
+    bool have_candidate_ = false;
+    std::int64_t candidate_ = 0;
+    double candidate_metric_ = 0.0;
+    SgbMode candidate_mode_ = SgbMode::Normal;
+    std::int64_t holdoff_until_ = 0;  // grid index
+
+    struct Pending {
+        std::int64_t start = 0;  // sample of the first preamble chip
+        SgbMode mode = SgbMode::Normal;
+        double metric = 0.0;
+    };
+    std::vector<Pending> pending_;
     std::size_t failed_ = 0;
 };
 
