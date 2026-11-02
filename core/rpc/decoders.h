@@ -104,8 +104,16 @@
 #include <variant>
 #include <vector>
 
+#include "core/decode/ahrpt.h"
 #include "core/decode/ais.h"
 #include "core/decode/ale_2g.h"
+#include "core/decode/dominoex.h"
+#include "core/decode/feld_hell.h"
+#include "core/decode/fsq.h"
+#include "core/decode/gk2a_lrit.h"
+#include "core/decode/goes_hrit.h"
+#include "core/decode/lrpt.h"
+#include "core/decode/mfsk16.h"
 #include "core/decode/aprs.h"
 #include "core/decode/apt.h"
 #include "core/decode/atv.h"
@@ -6689,6 +6697,571 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// MFSK16, MFSK8, DominoEX and FSQ
+// ---------------------------------------------------------------------------
+//
+// Reads a usb or lsb receiver's audio, the sideband taken from the receiver:
+// the keyboard MFSK modes, each searching 300 to 2700 Hz for its tones, as
+// lines the way RTTY's are handed out. mfsk16 and mfsk8 are
+// core/decode/mfsk16.h, dominoex4 to dominoex22 core/decode/dominoex.h at
+// each of its six speeds, fsq core/decode/fsq.h at 6 baud.
+//
+//   text                 text   Latin-1 as UTF-8
+//   characters           int
+//   secondary            text   DominoEX only: the secondary characters the
+//                               line carried, which are not in text
+//   ended                text   line_end, length, idle or stream_end
+//   began_sample         int    receiver-stream index of the first character
+namespace decoders_detail {
+
+struct Mfsk16Traits {
+    static constexpr std::string_view kName = "mfsk16";
+    using Library = decode::Mfsk16Decoder;
+    using Character = decode::Mfsk16Character;
+    static auto build(const DecoderBuild& b) {
+        decode::Mfsk16Config c;
+        c.rate = b.rate;
+        c.mode = decode::Mfsk16Mode::Mfsk16;
+        c.lower_sideband = b.mode == "lsb";
+        return Library::create(c);
+    }
+    static bool secondary(const Character&) { return false; }
+};
+
+struct Mfsk8Traits : Mfsk16Traits {
+    static constexpr std::string_view kName = "mfsk8";
+    static auto build(const DecoderBuild& b) {
+        decode::Mfsk16Config c;
+        c.rate = b.rate;
+        c.mode = decode::Mfsk16Mode::Mfsk8;
+        c.lower_sideband = b.mode == "lsb";
+        return Library::create(c);
+    }
+};
+
+template <decode::DominoSpeed Speed>
+struct DominoTraits {
+    static constexpr std::string_view kName = Speed == decode::DominoSpeed::D4    ? "dominoex4"
+                                              : Speed == decode::DominoSpeed::D5  ? "dominoex5"
+                                              : Speed == decode::DominoSpeed::D8  ? "dominoex8"
+                                              : Speed == decode::DominoSpeed::D11 ? "dominoex11"
+                                              : Speed == decode::DominoSpeed::D16 ? "dominoex16"
+                                                                                  : "dominoex22";
+    using Library = decode::DominoDecoder;
+    using Character = decode::DominoCharacter;
+    static auto build(const DecoderBuild& b) {
+        decode::DominoConfig c;
+        c.rate = b.rate;
+        c.speed = Speed;
+        c.lower_sideband = b.mode == "lsb";
+        return Library::create(c);
+    }
+    static bool secondary(const Character& c) { return c.secondary; }
+};
+
+struct FsqTraits {
+    static constexpr std::string_view kName = "fsq";
+    using Library = decode::FsqDecoder;
+    using Character = decode::FsqCharacter;
+    static auto build(const DecoderBuild& b) {
+        decode::FsqConfig c;
+        c.rate = b.rate;
+        c.lower_sideband = b.mode == "lsb";
+        return Library::create(c);
+    }
+    static bool secondary(const Character&) { return false; }
+};
+
+// Three seconds without a character ends a line. An engineering choice: the
+// slowest of these, FSQ at 2 baud and DominoEX 4, send a character in under
+// a second, and a typist's pause is shorter than three.
+inline constexpr double kKeyboardIdleSeconds = 3.0;
+
+}  // namespace decoders_detail
+
+template <class Traits>
+class KeyboardChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = Traits::kName;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        auto built = Traits::build(build);
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        return std::unique_ptr<ChunkDecoder>(new KeyboardChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        end_.observe(chunk);
+        characters_.clear();
+        decoder_.process(chunk.samples, characters_);
+        take(chunk, out);
+        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
+            emit(chunk, decoders_detail::LineEnd::Idle, out);
+        }
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>& out) override {
+        characters_.clear();
+        decoder_.flush(characters_);
+        const DecoderChunk at_end = end_.at_end();
+        take(at_end, out);
+        emit(at_end, decoders_detail::LineEnd::StreamEnd, out);
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+        line_.clear();
+        secondary_.clear();
+    }
+
+private:
+    using Library = typename Traits::Library;
+
+    KeyboardChunkDecoder(dsp::SampleRate rate, Library decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] std::uint64_t idle_samples() const {
+        return static_cast<std::uint64_t>(decoders_detail::kKeyboardIdleSeconds *
+                                          static_cast<double>(rate_));
+    }
+
+    void take(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) {
+        using decoders_detail::LineEnd;
+        for (const auto& c : characters_) {
+            const std::uint64_t at = base_.at(static_cast<std::uint64_t>(c.position));
+            if (Traits::secondary(c)) {
+                decoders_detail::append_utf8(secondary_, static_cast<char32_t>(c.code));
+                continue;
+            }
+            if (c.code == '\r' || c.code == '\n') {
+                emit(chunk, LineEnd::LineEnd, out);
+                continue;
+            }
+            if (c.code < 0x20 && c.code != '\t') {
+                continue;
+            }
+            line_.add(static_cast<char32_t>(c.code), at);
+            if (line_.characters >= decoders_detail::kMaxLineCharacters) {
+                emit(chunk, LineEnd::Length, out);
+            }
+        }
+    }
+
+    void emit(const DecoderChunk& chunk, decoders_detail::LineEnd why,
+              std::vector<DecodedMessage>& out) {
+        if (!line_.visible && secondary_.empty()) {
+            line_.clear();
+            return;
+        }
+        using namespace decoders_detail;
+        DecodedMessage message = stamped(kName, "line", chunk);
+        message.fields.push_back(text_field("text", line_.text));
+        message.fields.push_back(
+            integer_field("characters", static_cast<std::int64_t>(line_.characters)));
+        if (!secondary_.empty()) {
+            message.fields.push_back(text_field("secondary", secondary_));
+        }
+        message.fields.push_back(text_field("ended", std::string(line_end_name(why))));
+        message.fields.push_back(
+            integer_field("began_sample", static_cast<std::int64_t>(line_.first_sample)));
+        message.text = line_.text;
+        out.push_back(std::move(message));
+        line_.clear();
+        secondary_.clear();
+    }
+
+    dsp::SampleRate rate_;
+    Library decoder_;
+    decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
+    std::vector<typename Traits::Character> characters_;
+    decoders_detail::TextLine line_;
+    std::string secondary_;
+};
+
+// ---------------------------------------------------------------------------
+// Feld Hell
+// ---------------------------------------------------------------------------
+//
+// Reads a usb or lsb receiver's audio with the carrier at 1000 Hz,
+// core/decode/feld_hell.h: Hellschreiber, 122.5 pixels a second, as one
+// image per transmission through the sink. Each column of the signal is one
+// row of a 14-pixel Gray8 image, the top of the column at x 0, so the image
+// reads as the text turned a quarter turn clockwise. No messages. An image
+// closes when no column has arrived for two seconds, and at flush or reset
+// incomplete.
+class FeldHellChunkDecoder final : public ImageChunkDecoder {
+public:
+    static constexpr std::string_view kName = "feld_hell";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::FeldHellConfig config;
+        config.rate = build.rate;
+        auto built = decode::FeldHellDecoder::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the feld_hell decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new FeldHellChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>&) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        columns_.clear();
+        decoder_.process(chunk.samples, columns_);
+        constexpr int kHeight = decode::kFeldHellHalfPixelsPerColumn;
+        for (const decode::FeldHellColumn& column : columns_) {
+            const std::uint64_t at = base_.at(static_cast<std::uint64_t>(column.position));
+            if (!image_) {
+                stamp_ = at;
+                image_ = open_image(stamp_, static_cast<std::uint32_t>(rate_), kHeight,
+                                    ImageColour::Gray8, decode::kFeldHellColumnRate, "Feld Hell");
+                row_ = 0;
+            }
+            std::array<std::uint8_t, kHeight> pixels{};
+            for (int i = 0; i < kHeight; ++i) {
+                const bool on = ((column.bits >> i) & 1U) != 0;
+                pixels[static_cast<std::size_t>(kHeight - 1 - i)] = on ? 255 : 0;
+            }
+            if (column.bits != 0) {
+                last_ink_ = at;
+            }
+            image_row(*image_, row_++, pixels);
+        }
+        if (image_ && chunk.start + chunk.frames() > last_ink_ + 2U * static_cast<std::uint64_t>(rate_)) {
+            close_image(*image_, true);
+            image_.reset();
+        }
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>&) override { close(); }
+
+    void reset() override {
+        close();
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    FeldHellChunkDecoder(dsp::SampleRate rate, decode::FeldHellDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    void close() {
+        if (image_) {
+            close_image(*image_, false);
+            image_.reset();
+        }
+    }
+
+    dsp::SampleRate rate_;
+    decode::FeldHellDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<decode::FeldHellColumn> columns_;
+    std::optional<std::uint64_t> image_;
+    std::uint32_t row_ = 0;
+    std::uint64_t last_ink_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Meteor LRPT and AHRPT
+// ---------------------------------------------------------------------------
+//
+// Wideband: core/decode/lrpt.h (Meteor-M LRPT, lrpt at 72 ksym/s QPSK and
+// lrpt_oqpsk at 80 ksym/s offset QPSK, 288000 S/s or more) and
+// core/decode/ahrpt.h (Meteor-M AHRPT, 6 MS/s or more). Both end at CCSDS
+// Space Packets; the instrument data is not rendered here, so nothing goes
+// through the image sink. One "status" message every five seconds while
+// frames arrive:
+//   frames, frames_failed, packets, packets_dropped, rs_corrected, relocks
+//                        int    cumulative
+//   locked               flag
+//   apids                text   lrpt: "APID:packets" of each APID seen;
+//                               ahrpt: the instruments seen
+//   frequency_offset_hz  real   lrpt only
+template <class Library, class Config, class Events>
+class CcsdsLinkChunkDecoder final : public ChunkDecoder {
+public:
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(std::string_view name,
+                                                                      dsp::SampleRate floor,
+                                                                      const DecoderBuild& build,
+                                                                      Config config) {
+        if (auto at_least = decoders_detail::wideband_at_least(name, build.rate, floor); !at_least) {
+            return std::unexpected(at_least.error());
+        }
+        config.sample_rate = static_cast<double>(build.rate);
+        std::unique_ptr<CcsdsLinkChunkDecoder> adapter(
+            new CcsdsLinkChunkDecoder(name, build.rate, config));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(name_, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail(std::format("the {} decoder could not be rebuilt after a reset", name_));
+        }
+        decoders_detail::to_complex(chunk, iq_);
+        decoder_->push(iq_);
+        const std::uint64_t end = chunk.start + chunk.frames();
+        const decode::CcsdsDownlinkStats& s = decoder_->stats();
+        if (s.frames != reported_frames_ &&
+            end >= last_report_ + 5U * static_cast<std::uint64_t>(rate_)) {
+            last_report_ = end;
+            reported_frames_ = s.frames;
+            using namespace decoders_detail;
+            DecodedMessage message = stamped(name_, "status", chunk);
+            message.fields.push_back(integer_field("frames", static_cast<std::int64_t>(s.frames)));
+            message.fields.push_back(
+                integer_field("frames_failed", static_cast<std::int64_t>(s.frames_failed)));
+            message.fields.push_back(integer_field("packets", static_cast<std::int64_t>(s.packets)));
+            message.fields.push_back(
+                integer_field("packets_dropped", static_cast<std::int64_t>(s.packets_dropped)));
+            message.fields.push_back(
+                integer_field("rs_corrected", static_cast<std::int64_t>(s.rs_corrected)));
+            message.fields.push_back(integer_field("relocks", static_cast<std::int64_t>(s.relocks)));
+            message.fields.push_back(flag_field("locked", decoder_->locked()));
+            std::string apids;
+            if constexpr (std::is_same_v<Library, decode::LrptDecoder>) {
+                for (const auto& [apid, stats] : decoder_->apids()) {
+                    apids += std::format("{}{}:{}", apids.empty() ? "" : " ", apid, stats.packets);
+                }
+                message.fields.push_back(
+                    real_field("frequency_offset_hz", decoder_->frequency_offset_hz()));
+            } else {
+                for (const std::string& name : instruments_) {
+                    apids += apids.empty() ? name : ", " + name;
+                }
+            }
+            message.fields.push_back(text_field("apids", apids));
+            message.text = std::format("{} frames, {} packets{}", s.frames, s.packets,
+                                       apids.empty() ? std::string() : "; " + apids);
+            out.push_back(std::move(message));
+        }
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>&) override {
+        if (decoder_) {
+            decoder_->finish();
+        }
+    }
+
+    void reset() override {
+        static_cast<void>(rebuild());
+        last_report_ = 0;
+        reported_frames_ = 0;
+        instruments_.clear();
+    }
+
+private:
+    CcsdsLinkChunkDecoder(std::string_view name, dsp::SampleRate rate, Config config)
+        : name_(name), rate_(rate), config_(config) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        Events events;
+        if constexpr (std::is_same_v<Library, decode::AhrptDecoder>) {
+            events.on_packet = [this](const decode::AhrptPacket& p) {
+                const std::string name(p.instrument);
+                if (!name.empty() && std::ranges::find(instruments_, name) == instruments_.end()) {
+                    instruments_.push_back(name);
+                }
+            };
+        }
+        auto built = Library::create(config_, std::move(events));
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", name_)));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    std::string_view name_;
+    dsp::SampleRate rate_;
+    Config config_;
+    std::optional<Library> decoder_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<std::string> instruments_;
+    std::uint64_t last_report_ = 0;
+    std::size_t reported_frames_ = 0;
+};
+
+using LrptLink = CcsdsLinkChunkDecoder<decode::LrptDecoder, decode::LrptConfig, decode::LrptEvents>;
+using AhrptLink =
+    CcsdsLinkChunkDecoder<decode::AhrptDecoder, decode::AhrptConfig, decode::AhrptEvents>;
+
+struct LrptChunkDecoder {
+    static constexpr std::string_view kName = "lrpt";
+    static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        return LrptLink::make(kName, 288'000, build, decode::LrptConfig{});
+    }
+};
+
+struct LrptOqpskChunkDecoder {
+    static constexpr std::string_view kName = "lrpt_oqpsk";
+    static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::LrptConfig config;
+        config.oqpsk = true;
+        config.symbol_rate = decode::kLrptSymbolRateFast;
+        return LrptLink::make(kName, 288'000, build, config);
+    }
+};
+
+struct AhrptChunkDecoder {
+    static constexpr std::string_view kName = "ahrpt";
+    static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        return AhrptLink::make(kName, 6'000'000, build, decode::AhrptConfig{});
+    }
+};
+
+// ---------------------------------------------------------------------------
+// GK-2A LRIT and GOES HRIT
+// ---------------------------------------------------------------------------
+//
+// Wideband: core/decode/gk2a_lrit.h (GK-2A LRIT at 1692.14 MHz, 512000 S/s
+// or more) and core/decode/goes_hrit.h (GOES-R HRIT at 1694.1 MHz, 2.4 MS/s
+// or more). Uncompressed image files go out through the image sink. Each
+// xRIT file is a "file" message without its bytes:
+//   name                 text   the annotation header
+//   size                 int    data field octets
+//   virtual_channel, apid, file_counter, file_type  int
+//   crc_ok, encrypted    flag
+// GOES EMWIN bulletins are "emwin" messages: filename, heading, product and
+// body (text), body also the message text. An image open at flush or reset
+// closes incomplete.
+template <bool Goes>
+class XritChunkDecoder final : public ImageChunkDecoder {
+public:
+    static constexpr std::string_view kName = Goes ? "goes_hrit" : "gk2a_lrit";
+    static constexpr dsp::SampleRate kMinimumRate = Goes ? 2'400'000 : 512'000;
+    using Library = std::conditional_t<Goes, decode::GoesHritDecoder, decode::Gk2aLritDecoder>;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        std::unique_ptr<XritChunkDecoder> adapter(new XritChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail(std::format("the {} decoder could not be rebuilt after a reset", kName));
+        }
+        decoders_detail::to_complex(chunk, iq_);
+        stamp_ = chunk.start;
+        decoder_->push(iq_);
+        for (DecodedMessage& message : pending_) {
+            message.start_sample = chunk.start;
+            message.end_sample = chunk.start + chunk.frames();
+            message.sample_rate = static_cast<std::uint32_t>(chunk.rate);
+            out.push_back(std::move(message));
+        }
+        pending_.clear();
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>& out) override {
+        close_open_images();
+        if (decoder_) {
+            decoder_->finish();
+        }
+        for (DecodedMessage& message : pending_) {
+            out.push_back(std::move(message));
+        }
+        pending_.clear();
+    }
+
+    void reset() override {
+        close_open_images();
+        pending_.clear();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    explicit XritChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        std::conditional_t<Goes, decode::GoesHritConfig, decode::Gk2aLritConfig> config;
+        config.sample_rate = static_cast<double>(rate_);
+        std::conditional_t<Goes, decode::GoesHritEvents, decode::Gk2aLritEvents> events;
+        events.image = image_sink(rate_);
+        events.on_file = [this](const decode::XritFile& f) {
+            using namespace decoders_detail;
+            DecodedMessage message;
+            message.decoder = std::string(kName);
+            message.kind = "file";
+            const std::string name = f.annotation();
+            message.fields.push_back(text_field("name", name));
+            message.fields.push_back(integer_field("size", static_cast<std::int64_t>(f.data.size())));
+            message.fields.push_back(integer_field("virtual_channel", f.virtual_channel));
+            message.fields.push_back(integer_field("apid", f.apid));
+            message.fields.push_back(integer_field("file_counter", f.file_counter));
+            message.fields.push_back(integer_field("file_type", f.file_type));
+            message.fields.push_back(flag_field("crc_ok", f.crc_ok));
+            message.fields.push_back(flag_field("encrypted", f.encrypted()));
+            message.text = std::format("{} ({} bytes)", name, f.data.size());
+            pending_.push_back(std::move(message));
+        };
+        if constexpr (Goes) {
+            events.on_emwin_text = [this](const decode::EmwinText& t) {
+                using namespace decoders_detail;
+                DecodedMessage message;
+                message.decoder = std::string(kName);
+                message.kind = "emwin";
+                message.fields.push_back(text_field("filename", t.filename));
+                message.fields.push_back(text_field("heading", t.heading));
+                message.fields.push_back(text_field("product", t.product));
+                message.fields.push_back(text_field("body", t.body));
+                message.text = t.body;
+                pending_.push_back(std::move(message));
+            };
+        }
+        auto built = Library::create(config, std::move(events));
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<Library> decoder_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<DecodedMessage> pending_;
+};
+
+// ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
 
@@ -6940,6 +7513,73 @@ private:
          "ephemeris; no position. Searching costs about 2 s of a core every 30 s. Reads a "
          "wideband tap at 4000000 S/s or more",
          &BeidouChunkDecoder::make, {}, BeidouChunkDecoder::kMinimumRate},
+        {KeyboardChunkDecoder<decoders_detail::Mfsk16Traits>::kName, DecoderInput::RealAudio,
+         "MFSK16, IZ8BLY's 16-tone MFSK at 15.625 baud with the K=7 code: lines of text, tones "
+         "found anywhere from 300 to 2700 Hz. Reads a usb or lsb receiver's audio",
+         &KeyboardChunkDecoder<decoders_detail::Mfsk16Traits>::make, kSidebandModes},
+        {KeyboardChunkDecoder<decoders_detail::Mfsk8Traits>::kName, DecoderInput::RealAudio,
+         "MFSK8, 32-tone MFSK at 7.8125 baud, as mfsk16. Reads a usb or lsb receiver's audio",
+         &KeyboardChunkDecoder<decoders_detail::Mfsk8Traits>::make, kSidebandModes},
+        {KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D4>>::kName,
+         DecoderInput::RealAudio,
+         "DominoEX 4, incremental frequency keying: lines of primary text and the secondary "
+         "text beside them. Reads a usb or lsb receiver's audio",
+         &KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D4>>::make,
+         kSidebandModes},
+        {KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D5>>::kName,
+         DecoderInput::RealAudio,
+         "DominoEX 5, as dominoex4. Reads a usb or lsb receiver's audio",
+         &KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D5>>::make,
+         kSidebandModes},
+        {KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D8>>::kName,
+         DecoderInput::RealAudio,
+         "DominoEX 8, as dominoex4. Reads a usb or lsb receiver's audio",
+         &KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D8>>::make,
+         kSidebandModes},
+        {KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D11>>::kName,
+         DecoderInput::RealAudio,
+         "DominoEX 11, as dominoex4. Reads a usb or lsb receiver's audio",
+         &KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D11>>::make,
+         kSidebandModes},
+        {KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D16>>::kName,
+         DecoderInput::RealAudio,
+         "DominoEX 16, as dominoex4. Reads a usb or lsb receiver's audio",
+         &KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D16>>::make,
+         kSidebandModes},
+        {KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D22>>::kName,
+         DecoderInput::RealAudio,
+         "DominoEX 22, as dominoex4. Reads a usb or lsb receiver's audio",
+         &KeyboardChunkDecoder<decoders_detail::DominoTraits<decode::DominoSpeed::D22>>::make,
+         kSidebandModes},
+        {KeyboardChunkDecoder<decoders_detail::FsqTraits>::kName, DecoderInput::RealAudio,
+         "FSQ, ZL1BPU and ZL2AFP's 33-tone IFK+ at 6 baud: lines of text. Reads a usb or lsb "
+         "receiver's audio",
+         &KeyboardChunkDecoder<decoders_detail::FsqTraits>::make, kSidebandModes},
+        {FeldHellChunkDecoder::kName, DecoderInput::RealAudio,
+         "Feld Hell, 122.5 pixels a second on 1000 Hz: each transmission as an image, one "
+         "column a row. Reads a usb or lsb receiver's audio",
+         &FeldHellChunkDecoder::make, kSidebandModes},
+        {LrptChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "Meteor-M LRPT, 72 ksym/s QPSK, CCSDS frames to Space Packets: link status every 5 s, "
+         "no imagery. Reads a wideband tap at 288000 S/s or more",
+         &LrptChunkDecoder::make, {}, 288'000},
+        {LrptOqpskChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "Meteor-M LRPT at 80 ksym/s offset QPSK, as lrpt. Reads a wideband tap at 288000 S/s "
+         "or more",
+         &LrptOqpskChunkDecoder::make, {}, 288'000},
+        {AhrptChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "Meteor-M AHRPT, CCSDS frames to Space Packets: link status and instruments seen "
+         "every 5 s, no imagery. Reads a wideband tap at 6000000 S/s or more",
+         &AhrptChunkDecoder::make, {}, 6'000'000},
+        {XritChunkDecoder<false>::kName, DecoderInput::ComplexBaseband,
+         "GK-2A LRIT, CGMS xRIT: each file's name and size, uncompressed images through the "
+         "image sink. Reads a wideband tap at 512000 S/s or more",
+         &XritChunkDecoder<false>::make, {}, 512'000},
+        {XritChunkDecoder<true>::kName, DecoderInput::ComplexBaseband,
+         "GOES-R HRIT, CGMS xRIT: each file's name and size, EMWIN bulletins as text, "
+         "uncompressed images through the image sink. Reads a wideband tap at 2400000 S/s or "
+         "more",
+         &XritChunkDecoder<true>::make, {}, 2'400'000},
     };
     return kRegistry;
 }

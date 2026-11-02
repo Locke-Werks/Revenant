@@ -975,7 +975,9 @@ TEST_CASE("the audio decoders are listed with the input they read", "[gpu][rpc][
     CHECK(audio == std::set<std::string>{"rtty", "ax25", "pocsag", "sitor_b", "navtex", "psk31",
                                          "psk63", "qpsk31", "cw", "ais", "dsc", "sstv",
                                          "ft8", "ft4", "ale_2g", "mil110", "dsc_hf", "sitor_a",
-                                         "g3ruh", "apt", "ermes", "vdl4"});
+                                         "g3ruh", "apt", "ermes", "vdl4", "mfsk16", "mfsk8",
+                                         "dominoex4", "dominoex5", "dominoex8", "dominoex11",
+                                         "dominoex16", "dominoex22", "fsq", "feld_hell"});
 }
 
 TEST_CASE("an audio decoder on the wrong receiver is refused naming the mode it needs",

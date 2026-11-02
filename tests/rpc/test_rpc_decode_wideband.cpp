@@ -161,7 +161,7 @@ TEST_CASE("every wideband decoder builds at the rates a tap can deliver", "[rpc]
             CHECK((*built)->consume(rpc::DecoderChunk{iq, 2, rate, 0}, out).has_value());
         }
     }
-    CHECK(wideband >= 17);
+    CHECK(wideband >= 22);
 }
 
 TEST_CASE("the raw-tap decoders take the rates they say", "[rpc][decode]") {
