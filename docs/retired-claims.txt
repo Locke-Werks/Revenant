@@ -2495,3 +2495,15 @@ retired: 2026-11-02
 commit: "Correct scope rows the free documents do not support"
 instead: arXiv:2603.12062 resolves (Jedermann et al., 2026-03-12) and gives no
     Ring Alert field layout.
+
+phrase: its Codec 2 voice is not rendered
+phrase: Codec 2 voice in the stream payload is not decoded
+retired: 2026-11-02
+commit: "Document the decoders merged on 2026-11-02"
+instead: M17 voice streams render through libcodec2 1.2.0 since 2026-11-02,
+    tests/decode/test_m17_voice.cpp.
+
+phrase: Eight entries, all self-reported by the person who did it
+retired: 2026-11-02
+commit: "Document the decoders merged on 2026-11-02"
+instead: The disclosure log in docs/clean-room.md has nine entries.

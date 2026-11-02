@@ -139,10 +139,13 @@ further. A digital voice receiver is cut into utterances by its calls.
 | P25 Phase 1 | Yes, from the IMBE voice, a call at a time, with the call's NAC, talkgroup and source on the transcript. An encrypted call is silence with the gate shut and never reaches the recogniser |
 | D-STAR, DMR | Only with a vocoder plugin loaded, since without one the voice is silence. A DMR call marked private never reaches the plugin and so is not transcribed. No call fields are attached today |
 | TETRA | No. A tetra receiver makes no audio; TETRA voice is not decoded |
-| M17 | No. M17 is decoded for its framing; its Codec 2 voice is not rendered |
+| M17 | Not checked. The decoder renders unencrypted Codec 2 voice since 2026-11-02; whether that audio reaches the recogniser has not been tested |
 | Analogue speech: am, sam, nfm, usb, lsb, dsb | Yes, by squelch where one is set and by a level detector where it is open |
 | wfm | Only on a receiver chosen in, since broadcast FM is mostly music |
 | cw, raw | Never |
+
+WHAT THE M17 ROW USED TO SAY, until 2026-11-02: "M17 is decoded for its
+framing; its Codec 2 voice is not rendered".
 
 The recogniser is told the speech is English and does not detect the
 language. A transcript is the recogniser's reading of the audio, not a decode:
@@ -1516,8 +1519,10 @@ payloads and 11 LSFs right against 592 and 11 before, and at 14 dB all 600 and
 12 before and after. At 10 dB, 482 payloads against 487: a transmission lost
 mid-stream now needs two good frames in a row to be joined again.
 
-Not done, and why. Codec 2 voice in the stream payload is not decoded; the
-digital voice table above covers it. Packet and BERT frames are recognised by
+Not done, and why. Since 2026-11-02 an unencrypted voice stream carries 40 ms
+of 8 kHz audio a frame through libcodec2; "Decoders merged on 2026-11-02"
+below has the measurement. WHAT THIS PARAGRAPH USED TO SAY: "Codec 2 voice in
+the stream payload is not decoded". Packet and BERT frames are recognised by
 their sync bursts and not decoded. BERT's PRBS9 receiver in Appendix G was read
 in the specification's embedded GPL listing, figures G.3 to G.5, before the
 licence note was noticed, so it is left to somebody who has not read it, per
@@ -1600,6 +1605,198 @@ held; the semi-automatic service's network numbers beyond keeping their
 symbols; M.493-16's ACS second telecommands, reported by number; and any
 acknowledgement, relay or alarm, which a receiver has no business sending.
 A decoded distress alert is a report and not a GMDSS watch.
+
+**Decoders merged on 2026-11-02.** Every file below opens with the documents,
+editions and clauses it was written from, and `docs/clean-room.md` logs each
+read. Figures are those the named test asserts or records; where a test prints
+a value and holds it only to a bound, the bound is what is given here, as "held
+to". Not one of these has been checked against an on-air recording unless the
+entry says so.
+
+| Mode | File | Document | What comes out |
+| --- | --- | --- | --- |
+| Wideband tap | `core/rpc/decoders.h`, `subscribeWidebandDecoded` | None; plumbing | Decoded messages from a decoder fed the source's own stream, decimated to at least the decoder's `wideband_rate` |
+| CRC | `core/decode/crc.h` | Williams, "A Painless Guide to CRC Error Detection Algorithms" (1993); Lin and Costello section 5.1 | Any CRC of width 1 to 64 over octets or bit spans |
+| Binary BCH | `core/decode/bch.h` | Lin and Costello chapter 6; Massey, IEEE Trans. IT, January 1969 | Systematic encoding and hard-decision correction over GF(2^m), m 3 to 10, full or shortened |
+| OFDM | `core/decode/ofdm.h` | van de Beek, Sandell and Borjesson 1997; Schmidl and Cox 1997 section III-B; Hoeher, Kaiser and Robertson 1997 | Equalised carriers per symbol with a per-carrier SNR estimate, for a mode decoder to demap |
+| MFSK | `core/decode/mfsk_demod.h` | Proakis, non-coherent orthogonal detection | Per-symbol tone energies and decisions for M-ary FSK and IFK |
+| LDPC | `core/decode/ldpc.h` | Gallager 1963; Fossorier, Mihaljevic and Imai 1999; Chen and Fossorier 2002 | Min-sum decoding of a caller's H, systematic encoding from a caller's G |
+| Viterbi stream and Fano | `core/decode/viterbi_stream.h`, `core/decode/fano.h` | Viterbi 1971; Lin and Costello chapters 12 and 13; Fano 1963; CCSDS 131.0-B section 3 for 171/133 | Continuous punctured or plain Viterbi output; rate 1/2 sequential decoding to K=32 |
+| M-PSK | `core/decode/psk_demod.h` | Proakis 5th ed. 9.2, 6.2.4, 6.2.5; Mengali and D'Andrea chapter 3; Viterbi and Viterbi 1983; Gardner, Phaselock Techniques chapter 4 | Symbols and max-log soft bits for BPSK, QPSK, OQPSK and 8PSK |
+| Image path | `core/decode/image_sink.h`, `core/rpc/image_bridge.h`, `ui/models/decoded_images.h` | None; plumbing | Image open, row and close events over RPC to a store the client's image pane paints |
+| LPC-10 | `core/decode/lpc10.h` | FED-STD-1015 (28 November 1984) as FIPS PUB 137 with Change Notice 1 | 180 samples of 8 kHz audio per 54-bit frame; an encoder |
+| FS-1016 CELP | `core/decode/fs1016.h` | FED-STD-1016 (14 February 1991) | 240 samples of 8 kHz audio per 144-bit frame; an encoder |
+| CVSD | `core/decode/cvsd.h` | MIL-STD-188-113 (17 February 1987) section 5.2 and Appendix C | 8 kHz audio from 16 or 32 kbit/s CVSD; an encoder |
+| 2G ALE | `core/decode/ale_2g.h` | MIL-STD-188-141D (22 December 2017) Appendix A | ALE words, calls and soundings with addresses |
+| MIL-STD-188-110 serial tone | `core/decode/mil110.h` | MIL-STD-188-110C with Change Notice 1, 5.3.2 | User bits at 75 to 4800 bit/s |
+| dPMR | `core/decode/dpmr.h` | ETSI TS 102 490 V1.9.1 (2016-08); TS 102 658 V2.6.1 (2019-01) | Header, payload and end frames, Mode 1 and Mode 2, with 24-bit IDs and raw TCH blocks |
+| Opulent Voice framing | `core/decode/opulent_voice.h` | Opulent Voice Protocol Specification 1.1 (January 2026), ORI | 134-byte frames with the parsed header and base-40 callsign, from soft bits |
+| DSC on MF and HF | `core/decode/dsc_hf.h` | ITU-R M.493-16 (12/2023) Annex 1, 1.3.1, 1.3.3, 1.4, 3.4 | The VHF decoder's calls, from SSB audio at 100 baud |
+| SITOR-A | `core/decode/sitor_a.h` | ITU-R M.625-4 (03/2012); M.476-5 Annex 1 agrees | Both ends of an ARQ link: information blocks, control signals and accepted text |
+| AX.25 over G3RUH 9600 | `core/decode/g3ruh.h` | Miller, "9600 Baud Packet Radio Modem Design", RSGB Data Symposium 1988; AX.25 v2.2 | AX.25 frames whose FCS checks, from discriminator audio |
+| DVB-S | `core/decode/dvbs.h` | ETSI EN 300 421 V1.1.2 (1997-08); ITU-T H.222.0 (05/2006); EN 300 468 V1.17.1 (2022-10) | Transport stream packets with PAT, PMT and SDT parsed |
+| FT8 | `core/decode/ft8.h`, `wsjt77.h`, `ft_ldpc.h` | Franke, Somerville and Taylor, QEX July/August 2020; `ft4_ft8_protocols.tgz` | 77-bit messages as text with frequency, DT and SNR per 15 s slot |
+| FT4 | `core/decode/ft4.h` | The same paper | The same per 7.5 s slot |
+| Codec 2 and M17 voice | `core/decode/codec2_voice.h` on libcodec2 1.2.0 | Linked, not written; M17 Part I 2.0.4 for the stream | 8 kHz speech from unencrypted M17 voice streams at 3200 and 1600 |
+| AIS 14 and 27, locating devices | `core/decode/ais.h` | ITU-R M.1371-6 (02/2026) | Message 14 safety text, Message 27 long-range position, and SART, MOB and EPIRB recognised on every message |
+| VDL Mode 4 | `core/decode/vdl4.h` | ETSI EN 301 842-1 V1.4.1 (2015-04) | Link-layer bursts as octets, unparsed |
+| ASTERIX Category 021 | `core/decode/asterix_cat021.h` | EUROCONTROL-SPEC-0149-12 Edition 2.7; SPEC-0149 Part 1 Edition 3.1 | ADS-B target report records with decoded fields |
+| Winlink B2F | `core/decode/b2f.h` | Open B2F (February 2018, amended 2020); F6FBB forwarding protocol page | Proposals, answers, blocks and parsed messages from a byte stream |
+| NOAA APT | `core/decode/apt.h` | NOAA KLM User's Guide (April 2014) section 4.2 | 2080-sample lines and telemetry wedges |
+| NOAA HRPT | `core/decode/hrpt.h` | NOAA KLM User's Guide (April 2014) section 4.1 | 10-bit minor frames and five AVHRR channel images |
+| CCSDS TM and AOS | `core/decode/ccsds.h` | CCSDS 131.0-B-5, 132.0-B-3, 732.0-B-4, 133.0-B-2 | Transfer frames and space packets, RS in dual or conventional basis |
+| BLE advertising | `core/decode/ble.h` | Bluetooth Core Specification 6.1 (2025-04-29) | Legacy advertising PDUs with addresses and AD structures |
+| Z-Wave | `core/decode/zwave.h` | ITU-T G.9959 (01/2015) | MAC frames at R1, R2 or R3 |
+| EnOcean | `core/decode/enocean.h` | EnOcean Radio Protocol 1 V1.2 (9 November 2020) | Subtelegrams with RORG, data, sender, status and repeater count |
+| DECT | `core/decode/dect.h` | ETSI EN 300 175-2 and -3 V2.9.1 (2022-03) | P32 A-fields: header, tail, R-CRC, NT and QT messages, RFPI |
+| ERMES | `core/decode/ermes.h` | ETS 300 133-4 and -2 (July 1992) | Batches, addresses and numeric, alphanumeric and transparent messages |
+| DRM30 | `core/decode/drm.h` | ETSI ES 201 980 V4.2.1 (2021-01) | FAC, SDC, MSC stream frames, text messages and packet data units |
+| DAB | `core/decode/dab.h` | ETSI EN 300 401 V2.1.1; EN 301 234 V2.1.1; TS 101 499 V3.1.1 | FIC, ensemble labels, sub-channel bytes, packet data groups, MOT objects |
+| Analogue ATV | `core/decode/atv.h` | ITU-R BT.470-6 (1998) | Luminance images, systems M and B/G |
+| SSTV and FAX480 | `core/decode/sstv.h` | N7CXI, "Proposal for SSTV Mode Specifications", Dayton, 20 May 2000 | Colour images, and Gray8 for FAX480, slant corrected |
+| VDES ASM-TER | `core/decode/vdes.h` | ITU-R M.2092-2 (02/2026) Annex 2 and Annex 3 A3-7 | ASM packets with the common message header |
+| FUNcube | `core/decode/funcube.h` | FUNcube-1 Downlink Data Issue 1.0 (05/03/2015); Karn, AO-40 coded telemetry proposal v1.2 (2002) | Telemetry frames |
+| Cospas-Sarsat 406 MHz FGB | `core/decode/cospas_sarsat.h` | C/S T.001 Issue 4 Revision 7 (March 2021) | Beacon messages with BCH checked and the 15 Hex ID |
+| GPS and QZSS L1 C/A | `core/decode/gnss_acq.h`, `gps_lnav.h` | IS-GPS-200N (1 August 2022); IS-QZSS-PNT-006 | Subframes 1 to 5: clock, ephemeris, almanac, UTC, Klobuchar; C/N0 and Doppler per satellite |
+| GLONASS L1OF | `core/decode/glonass_l1.h` | GLONASS ICD Edition 5.1 (2008) | Strings 1 to 4 |
+| BeiDou B1I | `core/decode/beidou_b1i.h` | BDS-SIS-ICD-B1I-3.0 (February 2019) | D1 subframes 1 to 3 with BCH |
+
+The generic layers come first because the modes below are built on them.
+CRC and BCH are held to catalogue check values over "123456789" and to
+correction up to t, with POCSAG's (31,21) as a cross-check
+(`tests/decode/test_crc.cpp`, `test_bch.cpp`). OFDM, on synthetic geometries
+in `tests/decode/test_ofdm.cpp`: a DRM mode B-like 1024-point case, 4.6
+carriers off, an echo 3 dB down at 1 ms, 25 dB, measured EVM -25.8 dB; a
+256-point case at 25 dB with an echo, -23.9 dB. MFSK, LDPC, the Viterbi
+stream, Fano and M-PSK each print their error rates and hold them to bounds:
+M-PSK to within the theoretical symbol error rate 1 dB worse, MFSK to the
+union bound 3 dB worse, the K=7 Viterbi stream below 1e-4 at Eb/N0 4.5 dB over
+two million bits, Fano at K=32 to 95 percent of WSPR-length blocks at 4 dB
+(the matching `tests/decode/test_*.cpp`). Not done: the OFDM receiver holds
+timing from acquisition, so a long transmission at 100 ppm drifts out of the
+prefix after about 2500 symbols of 1024; M-PSK reports its phase ambiguity and
+leaves it to a sync word. The wideband tap and the image path are plumbing and
+are held to delivery and ordering by `tests/rpc/test_rpc_decode_wideband.cpp`
+and `test_rpc_decode_image.cpp`; no figure applies.
+
+**Vocoders.** LPC-10, FS-1016 and CVSD each carry their own encoder, and the
+tests hold them to quality floors rather than bit streams, because none of the
+three documents prints a test vector: LPC-10 quantisation distortion under 2 dB
+voiced, FS-1016 segmental SNR over 2 dB, CVSD over 5 dB at 16 kbit/s and 7 dB at
+32 (`tests/decode/test_lpc10.cpp`, `test_fs1016.cpp`, `test_cvsd.cpp`). CVSD
+misses MIL-STD-188-113 table VI at the 0 percent pattern, about -29.5 dBm0
+against -24, because the standard's 16:1 ratio and that row contradict each
+other; `core/decode/cvsd.h` gives the arithmetic. Not done: FS-1016's error
+rate smoothing, LPC-10e's transmit enhancements, and any check against
+reference bit streams.
+
+**HF utility.** 2G ALE holds 18 of 20 frames at 6 dB in 3 kHz, AWGN and two
+path (`tests/decode/test_ale_2g.cpp`); the order of a tone's three bits is not
+stated in Appendix A and leftmost first is assumed, to confirm on air.
+Linking protection decodes to nothing and AQC-ALE addresses are not
+interpreted. MIL-STD-188-110C serial tone holds bit error rates under 0.01 at
+18, 9, 3 and 0 dB in 3 kHz for 4800, 2400, 1200 and 75 to 600 bit/s, 75 Hz off
+(`tests/decode/test_mil110.cpp`); fixed frequency only, no Appendix C rates
+above 4800, STANAG 4415 not held. MF/HF DSC, measured in
+`tests/decode/test_dsc_hf.cpp` over 30 calls: none lost at 6 or -3 dB in 2500
+Hz, 20 lost at -6 dB. SITOR-A, monitoring both stations, 301 characters in
+`tests/decode/test_sitor_a.cpp`: none lost down to 0 dB, 0.020 lost at -4 dB,
+0.26 at -6 dB, never acquired at -8 dB; Table 3a identification signals and
+the clause 2.5 check-sum are not interpreted.
+
+**VHF and UHF data.** dPMR holds the header and 16 of 16 CCH at 12 dB in 4 kHz
+(`tests/decode/test_dpmr.cpp`); the CRC preset and reflection are not stated
+and zero, unreflected, is assumed, to confirm on air; voice is AMBE+2 and goes
+to the vocoder socket. Opulent Voice framing holds 40 of 40 frames at 3 dB per
+coded bit (`tests/decode/test_opulent_voice.cpp`); there is no demodulator
+until ORI confirms the modulation, and the Opus payload is handed out as bytes.
+G3RUH 9600, 40 frames of 81 octets in `tests/decode/test_g3ruh.cpp`: none lost
+at 20 dB in 2500 Hz, 8 at 16 dB, 38 at 13 dB; through FM in an 8 kHz nfm
+receiver, none at 25 dB and 6 at 18 dB. 300 baud HF packet is not done, for
+want of a document. AIS Messages 14 and 27 and SART, MOB and EPIRB
+identities are held to M.1371-6's tables and to one RF round trip of each at
+25 dB in 2500 Hz (`tests/decode/test_ais.cpp`); no error rate was measured.
+VDL Mode 4, 60 bursts a point in `tests/decode/test_vdl4.cpp`: burst error
+rate 0.10 at 40 dB in 2500 Hz, 0.37 at 35, 0.95 at 30. That is about 8 dB
+short of clause 6.1.4's -98 dBm, it decodes strong local signals only, the
+HDLC framing is assumed from AIS rather than cited, and the burst fields are
+not parsed. VDES ASM-TER, 500 one-slot bursts in `tests/decode/test_vdes.cpp`:
+packet error rate 0.122 at 11 dB Es/N0, 0.022 at 12, 0.004 at 13. Link IDs 1
+to 3 decode; 5 to 7 are turbo coded and reported without payload; VDE-TER is
+not done.
+
+**Messages carried over other bearers.** ASTERIX Category 021 and Winlink B2F
+are parsers, held to hand-assembled records and the documents' printed
+examples (`tests/decode/test_asterix_cat021.cpp`, `test_b2f.cpp`); no figure
+applies. ASTERIX leaves REF and SPF raw. B2F hands LZHUF to a caller's
+decompressor, since the only description points at source, and reports the
+FBB CRC16 unchecked because its parameters are unstated.
+
+**Weak signal.** FT8, ten signals a slot in `tests/decode/test_ft8.cpp`, is
+held to 90 percent decoded at -16 dB in 2500 Hz and half decoded at -18 dB or
+lower; FT4, eight a slot in `test_ft4.cpp`, to 90 percent at -12 dB. Not done:
+ordered statistics decoding, block detection, and signals starting more than
+about 2.4 s into the slot. The generator and parity matrices come from
+`ft4_ft8_protocols.tgz`; `docs/clean-room.md` has the public-domain basis.
+
+**Voice through Codec 2.** M17 stream voice renders through libcodec2 1.2.0,
+linked as a recorded copyleft exception. `tests/decode/test_m17_voice.cpp`
+holds every frame to over 40 dB segmental SNR against libcodec2's own decode
+of the transmitted bits, clean, 300 Hz off and at 12 dB in 9 kHz; a correct
+payload measures near 50 dB. Encrypted or scrambled streams are not rendered,
+and M17 packet and BERT modes are still not decoded.
+
+**Satellites.** NOAA APT is held to a mean absolute error under 12 grey levels
+at 14 dB in 40 kHz with Doppler of 3 kHz either way (`tests/decode/test_apt.cpp`).
+NOAA HRPT to a word error rate under 0.01 at Eb/N0 12 dB and 0.1 at 9 dB
+(`test_hrpt.cpp`); TIP and AIP are not decoded. CCSDS, BPSK with K=7 and
+RS(255,223), recovers every frame at Eb/N0 6 dB with 300 Hz of drifting Doppler
+(`test_ccsds.cpp`); turbo and LDPC codes are not done. FUNcube, in
+`tests/decode/test_funcube.cpp`: 4 of 4 frames at Eb/N0 7 and 10 dB, 2 of 4 at
+5 dB, 150 Hz off and drifting 5 Hz/s; neither document states differential
+encoding and it is assumed. DVB-S holds every RS block at Eb/N0 4.5 dB, rate
+1/2, 2.5 kHz off (`tests/decode/test_dvbs.cpp`); elementary streams are
+identified by type and not decoded. Cospas-Sarsat first generation, in
+`tests/decode/test_cospas_sarsat.cpp`: T.001 Annex B1's worked message
+reproduces its BCH and the 15 Hex ID ADCD00800440401; 3 of 3 bursts at Eb/N0
+12 and 20 dB with 3 kHz of Doppler drifting 60 Hz/s, 1 of 3 at 9 dB. A decode
+is a report, not an alert service.
+
+**GNSS.** GPS and QZSS L1 C/A: all 210 PRN codes match IS-GPS-200N's printed
+first chips, acquisition finds 10 of 10 at 35 dB-Hz, 8 at 33 and 2 at 31 from a
+single 40 ms block, and the decoder costs 0.23 s of CPU per second at 2.048
+MS/s (`tests/decode/test_gnss_acq.cpp`, `test_gps_lnav.cpp`). GLONASS L1OF,
+0.30 s per second at 4.096 MS/s (`test_glonass_l1.cpp`); its relative code and
+meander conventions were read from a figure and are proven only against this
+project's own transmitter. BeiDou B1I, 0.48 s per second
+(`test_beidou_b1i.cpp`). Not done: a position fix; BeiDou D2 from the GEO
+satellites; SBAS, whose codes are free and whose message layer is only in the
+purchasable RTCA DO-229; L1C, L2C, L5 and NavIC.
+
+**Short-range and paging.** BLE advertising, 200 packets a point in
+`tests/decode/test_ble.cpp`: packet error rate 0.99, 0.905, 0.51 and 0.175 at
+Eb/N0 8, 10, 12 and 14 dB; LE 2M, LE Coded and data channels are not done.
+Z-Wave, 100 frames a point in `test_zwave.cpp`, at Eb/N0 10, 12, 14 and 16 dB:
+R1 1.00, 0.73, 0.13, 0; R2 0.55, 0.07, 0, 0; R3 0.39, 0.09, 0.01, 0.01.
+EnOcean is held to 0.1 at 18 dB in 250 kHz (`test_enocean.cpp`); SOF variant
+1 and the Equipment Profiles are not done. DECT P32 A-fields are held to 0.1
+at 18 dB in 1.152 MHz (`test_dect.cpp`); the B-field is located only, and
+voice, descrambling and encryption are out. ERMES decodes all five messages at
+14 dB in 25 kHz and through a 12 us echo 6 dB down (`test_ermes.cpp`);
+long-message joining is left to the caller.
+
+**Broadcast and image.** DRM30, mode B, keeps all but 9 stream frames at 15 dB
+in 10 kHz with 16-QAM and at 25 dB with 64-QAM and a 1 ms echo
+(`tests/decode/test_drm.cpp`); the audio, AAC or xHE-AAC, is not decoded, and
+DRM+ is not done. DAB at 10 dB over the full 2.048 MHz with multipath and 3412
+Hz off: no bad FIB, every stream frame and the MOT object recovered
+(`test_dab.cpp`); Layer II and DAB+ audio, UEP, TII and Journaline are not
+done. ATV luminance holds a mean error under 16 grey levels through FM at 16
+dB in 20 MHz (`test_atv.cpp`); colour, SECAM and sound are not done, and
+BT.1700 did not download. SSTV, every Dayton mode clean over 24 dB PSNR, and
+FAX480 at 28, 18 and 12 dB PSNR at 30, 15 and 8 dB in 2500 Hz, 40 Hz off
+(`test_sstv.cpp`); modes outside the Dayton paper and the 16-bit VIS extension
+are not done.
 
 ## What would change the list
 
