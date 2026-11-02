@@ -2,6 +2,7 @@
 // constellation of eight satellites at 35 to 45 dB-Hz through the synthetic
 // transmitter in core/dsp/synth/gps_lnav_mod.h and gnss_mod.h, decoded to
 // clock, ephemeris, almanac and UTC/ionosphere and compared field by field.
+// QZSS L1 C/A, PRNs 193 to 202, through the same path.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -276,4 +277,41 @@ TEST_CASE("GPS L1 C/A: eight satellites at 35 to 45 dB-Hz decode to LNAV data", 
         CHECK(x.dt_ls == want.dt_ls);
         CHECK(x.wn_lsf == want.wn_lsf);
     }
+}
+
+TEST_CASE("QZSS L1 C/A decodes through the same LNAV path", "[gnss][qzss]") {
+    constexpr dsp::SampleRate kRate = 2'048'000;
+    const std::array<unsigned, 4> prns = {193, 194, 195, 199};
+    std::vector<siggen::GnssSatelliteSpec> sats;
+    for (std::size_t i = 0; i < prns.size(); ++i) {
+        siggen::GnssSatelliteSpec s;
+        s.code = gps_ca_code(prns[i]);
+        s.cn0_dbhz = 38.0 + 2.0 * static_cast<double>(i);
+        s.doppler_hz = -600.0 + 400.0 * static_cast<double>(i);
+        s.code_phase_chips = 50.0 + 211.0 * static_cast<double>(i);
+        s.symbols = frame_bits(prns[i], 900);
+        sats.push_back(std::move(s));
+    }
+    auto synth = siggen::GnssSynth::create(kRate, sats, 99);
+    REQUIRE(synth);
+    GpsL1caConfig cfg;
+    cfg.sample_rate = kRate;
+    for (unsigned p = 193; p <= 202; ++p) {
+        cfg.prns.push_back(p);
+    }
+    auto dec = GpsL1caDecoder::create(cfg);
+    REQUIRE(dec);
+    GpsL1caOutput out;
+    std::vector<dsp::Complex32> chunk(kRate / 4);
+    // Through subframe 3: 3 s lead, 18 s of subframes, a little margin.
+    for (std::size_t b = 0; b < 4 * 22; ++b) {
+        synth->generate(chunk);
+        dec->feed(chunk, out);
+    }
+    std::set<unsigned> eph;
+    for (const auto& [prn, e] : out.ephemerides) {
+        CHECK(e.sqrt_a == eph_for(prn).sqrt_a);
+        eph.insert(prn);
+    }
+    CHECK(eph == std::set<unsigned>(prns.begin(), prns.end()));
 }
