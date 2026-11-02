@@ -238,3 +238,4 @@ catch_discover_tests(revenant_decode_tests
         TIMEOUT 300
 )
 target_sources(revenant_decode_tests PRIVATE test_lrpt.cpp)
+target_sources(revenant_decode_tests PRIVATE test_ahrpt.cpp)

@@ -398,3 +398,4 @@ target_sources(revenant_core PRIVATE
     capture/search.cpp
 )
 target_sources(revenant_core PRIVATE decode/ccsds_downlink.cpp dsp/synth/ccsds_downlink_mod.cpp decode/lrpt.cpp dsp/synth/lrpt_mod.cpp)
+target_sources(revenant_core PRIVATE decode/ahrpt.cpp dsp/synth/ahrpt_mod.cpp)
