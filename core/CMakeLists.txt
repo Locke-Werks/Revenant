@@ -118,6 +118,7 @@ add_library(revenant_core STATIC
     decode/fano.cpp
     decode/viterbi_stream.cpp
     decode/dv_phy.cpp
+    decode/fs1016.cpp
     decode/fsk.cpp
     decode/fx25.cpp
     decode/il2p.cpp
