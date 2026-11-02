@@ -861,6 +861,47 @@ fifteenth and sixteenth, the same day.
 | `pocsag` | Pages at 512, 1200 and 2400 bit/s at once: address, function, numeric or alphanumeric message | Audio of an `nfm` receiver |
 | `ais` | Every AIS message whose FCS checked, with Messages 1 to 5, 11, 18, 19, 21 and 24 parsed: MMSI, position, speed and course, heading, status, name, call sign, destination, dimensions | Audio of an `nfm` receiver on 161.975 or 162.025 MHz, at least 28800 S/s |
 | `dsc` | Each VHF DSC call whose error-check character agreed: format, category, both identities, telecommands, nature of distress, position and time, working channel | Audio of an `nfm` receiver on channel 70, 156.525 MHz |
+| `dsc_hf` | The same calls on MF and HF, 100 baud about 1700 Hz | Audio of a `usb` or `lsb` receiver |
+| `sstv` | Images by VIS code, through the image sink | Audio of a `usb`, `lsb` or `nfm` receiver |
+| `ft8`, `ft4` | Each decode with SNR, DT, frequency and the message's calls, grid and report; slots timed from the wall clock | Audio of a `usb` receiver at 12000 S/s or a multiple |
+| `ale_2g` | Each 2G ALE call or sounding with its addresses | Audio of a `usb` receiver |
+| `ale_3g` | Each 3G ALE PDU with its fields | Audio of a `usb` receiver |
+| `mil110`, `mil110c`, `mil_39tone` | Each MIL-STD-188-110 serial tone (A/B, C) or 39-tone transmission's data bytes, rate and interleave | Audio of a `usb` receiver |
+| `link11` | Each Link-11 transmission's address and data words | Audio of a `usb` receiver |
+| `sitor_a` | Lines of text from an ARQ link, repetitions dropped | Audio of a `usb` or `lsb` receiver |
+| `mfsk16`, `mfsk8`, `dominoex4` to `dominoex22`, `fsq` | Lines of text; DominoEX adds its secondary text | Audio of a `usb` or `lsb` receiver, tones anywhere from 300 to 2700 Hz |
+| `feld_hell` | Each transmission as an image, one column a row | Audio of a `usb` or `lsb` receiver, carrier at 1000 Hz |
+| `g3ruh` | AX.25 frames over 9600 baud G3RUH, APRS parsed | Audio of an `nfm` receiver at 48000 S/s or more |
+| `apt` | NOAA APT images and channel telemetry | Audio of an `nfm` receiver |
+| `ermes` | ERMES pages | Audio of an `nfm` receiver |
+| `vdl4` | VDL Mode 4 bursts as octets | Audio of an `nfm` receiver at 57600 S/s or more |
+| `dpmr` | Headers with called and own IDs, late entry, end frames | Complex baseband of a `p25p1` receiver, or a `raw` tap up to 192000 S/s |
+| `drm` | FAC, SDC, text messages and data units as they change; no audio | A `raw` tap at exactly 48000 S/s |
+| `vdes`, `funcube`, `cospas_sarsat` | VDES ASM bursts; FUNcube telemetry frames; 406 MHz beacon IDs and positions | A `raw` tap up to 192000 S/s; `vdes` at 38400 or more |
+
+Since 2026-11-02 `ais` also names Messages 14 (`safety_broadcast`) and 27
+(`long_range_position`) and reports `locating_device` from the MMSI.
+
+Wideband decoders read the source's stream through `subscribeWidebandDecoded`,
+whose offset puts the signal at DC, at any tap rate from the floor below up to
+the source rate:
+
+| Name | What comes out | Floor, S/s |
+| --- | --- | --- |
+| `vdes_wideband` | As `vdes` | 38400 |
+| `hrpt` | NOAA HRPT images, a frame message a second | 2661600 |
+| `dab` | Ensemble and services, MOT objects; no audio. Exactly this rate, so the source must run at a multiple of it | 2048000 |
+| `atv_fm`, `atv_am` | System M luminance frames as images | 2000000 |
+| `ble37`, `ble38`, `ble39` | BLE advertising PDUs on that channel | 2000000 |
+| `zwave_r1`, `zwave_r2`, `zwave_r3` | Z-Wave MPDUs at that data rate | 1000000 |
+| `enocean` | EnOcean telegrams | 1000000 |
+| `dect` | DECT A-field tails, RFPI and system information, repeats suppressed | 2304000 |
+| `gps_l1ca`, `qzss_l1ca` | Satellite status every 5 s, subframes, clock, ephemeris, almanac, UTC; about 2 s of a core per 30 s searching | 2048000 |
+| `glonass_l1of` | Status, strings, ephemeris | 4096000 |
+| `beidou_b1i` | Status, subframes, clock, ephemeris | 4000000 |
+| `lrpt`, `lrpt_oqpsk` | Meteor LRPT link status every 5 s; no imagery | 288000 |
+| `ahrpt` | Meteor AHRPT link status and instruments every 5 s; no imagery | 6000000 |
+| `gk2a_lrit`, `goes_hrit` | xRIT file names and sizes, uncompressed images; GOES adds EMWIN bulletins | 512000, 2400000 |
 
 The `p25p1` row's Link Control and encryption sync from every LDU, and its
 `tsbk` messages, are since 2026-10-02, and so are the `ax25` row's FX.25 and
