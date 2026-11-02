@@ -141,6 +141,8 @@
 #include "core/decode/funcube.h"
 #include "core/decode/g3ruh.h"
 #include "core/decode/glonass_l1.h"
+#include "core/decode/gps_cnav.h"
+#include "core/decode/gps_l1c.h"
 #include "core/decode/gps_lnav.h"
 #include "core/decode/hrpt.h"
 #include "core/decode/jt4.h"
@@ -5338,7 +5340,7 @@ private:
 // VDES ASM, terrestrial
 // ---------------------------------------------------------------------------
 //
-// Complex baseband at 38400 S/s or more, core/decode/vdes.h, ITU-R M.2092-1:
+// Complex baseband at 38400 S/s or more, core/decode/vdes.h, ITU-R M.2092-2:
 // the 9600 symbol/s pi/4-QPSK Application Specific Messages on channels 2027
 // and 2028. "vdes" reads a raw tap up to 192000 S/s; "vdes_wideband" the
 // source's stream through a wideband tap at 38400 S/s or more. One "burst"
@@ -6759,6 +6761,258 @@ private:
     decode::gnss::GpsL1caOutput output_;
 };
 
+// GPS L1C CNAV-2, core/decode/gps_l1c.h, IS-GPS-800: acquires and tracks
+// C/A, then hands each satellite over to L1C pilot tracking. A tap centred on
+// 1575.42 MHz at 2.048 MS/s or more; tested at 4.096 MS/s. Besides
+// "acquired" (C/A) it sends:
+//   kind "handover"      prn, ca_epochs_after (int), success (flag), ratio
+//                        (real), sample
+//   kind "status"        prn, cn0_db_hz, doppler_hz, lock, frame_sync (flag)
+//   kind "frame"         prn, toi (int), sf2_ok, sf3_ok (flag),
+//                        sf2_iterations, sf3_iterations (int); when sf2_ok wn,
+//                        itow, top, toe, ura_ed (int), l1c_health (flag); when
+//                        sf3_ok sf3_prn, sf3_page (int); began_sample
+class GpsL1cChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "gps_l1c";
+    static constexpr dsp::SampleRate kMinimumRate = 2'048'000;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        std::unique_ptr<GpsL1cChunkDecoder> adapter(new GpsL1cChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail(std::format("the {} decoder could not be rebuilt after a reset", kName));
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        output_ = {};
+        decoder_->feed(iq_, output_);
+        describe(chunk, out);
+        return {};
+    }
+
+    void reset() override {
+        base_.reset();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    explicit GpsL1cChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        decode::gnss::GpsL1cConfig config;
+        config.sample_rate = rate_;
+        config.offset_hz = 0.0;
+        config.status_periods = gnss_detail::kStatusPeriods / 10;  // 10 ms L1C periods
+        auto built = decode::gnss::GpsL1cDecoder::create(std::move(config));
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    [[nodiscard]] std::int64_t at(dsp::SampleIndex sample) const {
+        return static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(sample)));
+    }
+
+    void describe(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) const {
+        using namespace decoders_detail;
+        for (const auto& a : output_.acquisitions) {
+            gnss_detail::add_acquired(kName, "prn", static_cast<int>(a.id), a, chunk, out);
+        }
+        for (const auto& h : output_.handovers) {
+            DecodedMessage message = stamped(kName, "handover", chunk);
+            message.fields.push_back(integer_field("prn", h.prn));
+            message.fields.push_back(integer_field("ca_epochs_after", h.ca_epochs_after));
+            message.fields.push_back(flag_field("success", h.success));
+            message.fields.push_back(real_field("ratio", h.ratio));
+            message.fields.push_back(integer_field("sample", at(h.sample)));
+            message.text = std::format("PRN {} handover to L1C {}", h.prn,
+                                       h.success ? "succeeded" : "failed");
+            out.push_back(std::move(message));
+        }
+        for (const auto& s : output_.status) {
+            DecodedMessage message = stamped(kName, "status", chunk);
+            message.fields.push_back(integer_field("prn", s.prn));
+            message.fields.push_back(real_field("cn0_db_hz", s.cn0_dbhz));
+            message.fields.push_back(real_field("doppler_hz", s.doppler_hz));
+            message.fields.push_back(flag_field("lock", s.phase_locked));
+            message.fields.push_back(flag_field("frame_sync", s.frame_synced));
+            message.text = std::format("prn {}: {:.1f} dB-Hz, {:+.0f} Hz{}{}", s.prn, s.cn0_dbhz,
+                                       s.doppler_hz, s.phase_locked ? ", locked" : "",
+                                       s.frame_synced ? ", frame sync" : "");
+            out.push_back(std::move(message));
+        }
+        for (const auto& f : output_.frames) {
+            DecodedMessage message = stamped(kName, "frame", chunk);
+            message.fields.push_back(integer_field("prn", f.prn));
+            message.fields.push_back(integer_field("toi", f.toi));
+            message.fields.push_back(flag_field("sf2_ok", f.sf2_ok));
+            message.fields.push_back(flag_field("sf3_ok", f.sf3_ok));
+            message.fields.push_back(
+                integer_field("sf2_iterations", static_cast<std::int64_t>(f.sf2_iterations)));
+            message.fields.push_back(
+                integer_field("sf3_iterations", static_cast<std::int64_t>(f.sf3_iterations)));
+            if (f.sf2_ok) {
+                message.fields.push_back(integer_field("wn", f.clock.wn));
+                message.fields.push_back(integer_field("itow", f.clock.itow));
+                message.fields.push_back(integer_field("top", f.clock.top));
+                message.fields.push_back(integer_field("toe", f.clock.toe));
+                message.fields.push_back(integer_field("ura_ed", f.clock.ura_ed));
+                message.fields.push_back(flag_field("l1c_health", f.clock.l1c_health));
+            }
+            if (f.sf3_ok) {
+                message.fields.push_back(integer_field("sf3_prn", f.sf3_prn));
+                message.fields.push_back(integer_field("sf3_page", f.sf3_page));
+            }
+            message.fields.push_back(integer_field("began_sample", at(f.sample)));
+            message.text = std::format("PRN {} frame, TOI {}{}{}", f.prn, f.toi,
+                                       f.sf2_ok ? std::format(", WN {}", f.clock.wn)
+                                                : std::string(", subframe 2 failed"),
+                                       f.sf3_ok ? std::format(", page {}", f.sf3_page)
+                                                : std::string());
+            out.push_back(std::move(message));
+        }
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<decode::gnss::GpsL1cDecoder> decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    decode::gnss::GpsL1cOutput output_;
+};
+
+// GPS L2C and L5 CNAV, core/decode/gps_cnav.h, IS-GPS-200 and IS-GPS-705: a
+// tap centred on 1227.60 MHz (gps_l2c, 2.048 MS/s or more) or 1176.45 MHz
+// (gps_l5, 4.092 MS/s or more). L2C correlates CM alone, 3 dB under a CM+CL
+// receiver. The L5 main lobe is 20.46 MHz wide, so a tap of a few MS/s cuts
+// most of it off, about 9 dB of correlation loss. Besides "acquired":
+//   kind "status"        prn, cn0_db_hz, doppler_hz, lock, symbol_sync
+//   kind "message"       prn, msg_prn, type, tow (int, 6 s units), alert
+//                        (flag); type 10 adds wn, top, toe (int); bits
+//                        (bytes, 300, one bit per byte); began_sample
+template <bool L5>
+class GpsCnavChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = L5 ? "gps_l5" : "gps_l2c";
+    static constexpr dsp::SampleRate kMinimumRate = L5 ? 4'092'000 : 2'048'000;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        std::unique_ptr<GpsCnavChunkDecoder> adapter(new GpsCnavChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail(std::format("the {} decoder could not be rebuilt after a reset", kName));
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        output_ = {};
+        decoder_->feed(iq_, output_);
+        describe(chunk, out);
+        return {};
+    }
+
+    void reset() override {
+        base_.reset();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    explicit GpsCnavChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        decode::gnss::GpsCnavConfig config;
+        config.band = L5 ? decode::gnss::CnavBand::L5 : decode::gnss::CnavBand::L2C;
+        config.sample_rate = rate_;
+        config.offset_hz = 0.0;
+        config.status_periods = L5 ? gnss_detail::kStatusPeriods : gnss_detail::kStatusPeriods / 20;
+        auto built = decode::gnss::GpsCnavDecoder::create(std::move(config));
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    void describe(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) const {
+        using namespace decoders_detail;
+        for (const auto& a : output_.acquisitions) {
+            gnss_detail::add_acquired(kName, "prn", static_cast<int>(a.id), a, chunk, out);
+        }
+        for (const auto& s : output_.status) {
+            DecodedMessage message = stamped(kName, "status", chunk);
+            message.fields.push_back(integer_field("prn", s.prn));
+            message.fields.push_back(real_field("cn0_db_hz", s.cn0_dbhz));
+            message.fields.push_back(real_field("doppler_hz", s.doppler_hz));
+            message.fields.push_back(flag_field("lock", s.phase_locked));
+            message.fields.push_back(flag_field("symbol_sync", s.symbol_synced));
+            message.text = std::format("prn {}: {:.1f} dB-Hz, {:+.0f} Hz{}{}", s.prn, s.cn0_dbhz,
+                                       s.doppler_hz, s.phase_locked ? ", locked" : "",
+                                       s.symbol_synced ? ", symbol sync" : "");
+            out.push_back(std::move(message));
+        }
+        for (const auto& m : output_.messages) {
+            DecodedMessage message = stamped(kName, "message", chunk);
+            message.fields.push_back(integer_field("prn", m.prn));
+            message.fields.push_back(integer_field("msg_prn", m.msg_prn));
+            message.fields.push_back(integer_field("type", m.type));
+            message.fields.push_back(integer_field("tow", m.tow));
+            message.fields.push_back(flag_field("alert", m.alert));
+            if (m.type == 10) {
+                message.fields.push_back(integer_field("wn", m.wn));
+                message.fields.push_back(integer_field("top", m.top));
+                message.fields.push_back(integer_field("toe", m.toe));
+            }
+            message.fields.push_back(
+                bytes_field("bits", std::vector<std::uint8_t>(m.bits.begin(), m.bits.end())));
+            message.fields.push_back(integer_field(
+                "began_sample",
+                static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(m.sample)))));
+            message.text = std::format("PRN {} message type {}, TOW {} s", m.prn, m.type,
+                                       static_cast<std::uint64_t>(m.tow) * 6U);
+            out.push_back(std::move(message));
+        }
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<decode::gnss::GpsCnavDecoder> decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    decode::gnss::GpsCnavOutput output_;
+};
+
 class GlonassChunkDecoder final : public ChunkDecoder {
 public:
     static constexpr std::string_view kName = "glonass_l1of";
@@ -7515,12 +7769,12 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Meteor LRPT and AHRPT
+// Meteor LRPT and Metop AHRPT
 // ---------------------------------------------------------------------------
 //
 // Wideband: core/decode/lrpt.h (Meteor-M LRPT, lrpt at 72 ksym/s QPSK and
 // lrpt_oqpsk at 80 ksym/s offset QPSK, 288000 S/s or more) and
-// core/decode/ahrpt.h (Meteor-M AHRPT, 6 MS/s or more). Both end at CCSDS
+// core/decode/ahrpt.h (Metop AHRPT, 6 MS/s or more). Both end at CCSDS
 // Space Packets; the instrument data is not rendered here, so nothing goes
 // through the image sink. One "status" message every five seconds while
 // frames arrive:
@@ -8057,11 +8311,11 @@ private:
          "as they change; no audio. Reads a raw tap at exactly 48000 S/s",
          &DrmChunkDecoder::make, decoders_detail::kRawModes},
         {VdesChunkDecoder<false>::kName, DecoderInput::ComplexBaseband,
-         "VDES ASM, ITU-R M.2092-1, 9600 symbol/s pi/4-QPSK: each burst whose CRC checks. Reads "
+         "VDES ASM, ITU-R M.2092-2, 9600 symbol/s pi/4-QPSK: each burst whose CRC checks. Reads "
          "a raw tap from 38400 up to 192000 S/s",
          &VdesChunkDecoder<false>::make, decoders_detail::kRawModes},
         {VdesChunkDecoder<true>::kName, DecoderInput::ComplexBaseband,
-         "VDES ASM, ITU-R M.2092-1, as vdes, on the source's stream through a wideband tap at "
+         "VDES ASM, ITU-R M.2092-2, as vdes, on the source's stream through a wideband tap at "
          "38400 S/s or more",
          &VdesChunkDecoder<true>::make, {}, 38'400},
         {FuncubeChunkDecoder::kName, DecoderInput::ComplexBaseband,
@@ -8132,6 +8386,21 @@ private:
          "ephemeris, almanac and UTC; no position. Searching costs about 2 s of a core every "
          "30 s. Reads a wideband tap at 2048000 S/s or more",
          &GpsChunkDecoder<false>::make, {}, 2'048'000},
+        {GpsL1cChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "GPS L1C CNAV-2, IS-GPS-800, centred on 1575.42 MHz: C/A acquisition handed over to "
+         "L1C pilot tracking, then each frame's TOI, LDPC-decoded subframe 2 clock and subframe "
+         "3 page; no position. Reads a wideband tap at 2048000 S/s or more, tested at 4096000",
+         &GpsL1cChunkDecoder::make, {}, GpsL1cChunkDecoder::kMinimumRate},
+        {GpsCnavChunkDecoder<false>::kName, DecoderInput::ComplexBaseband,
+         "GPS L2C CNAV, IS-GPS-200, centred on 1227.60 MHz: CM tracking, then each CRC-checked "
+         "300-bit message with type, TOW and type 10's week; no position. Reads a wideband tap "
+         "at 2048000 S/s or more",
+         &GpsCnavChunkDecoder<false>::make, {}, GpsCnavChunkDecoder<false>::kMinimumRate},
+        {GpsCnavChunkDecoder<true>::kName, DecoderInput::ComplexBaseband,
+         "GPS L5 CNAV, IS-GPS-705, centred on 1176.45 MHz: I5 tracking with NH10 symbol sync, "
+         "then each CRC-checked message as gps_l2c. The 20.46 MHz main lobe is cut by a narrow "
+         "tap, about 9 dB of loss at a few MS/s. Reads a wideband tap at 4092000 S/s or more",
+         &GpsCnavChunkDecoder<true>::make, {}, GpsCnavChunkDecoder<true>::kMinimumRate},
         {GpsChunkDecoder<true>::kName, DecoderInput::ComplexBaseband,
          "QZSS L1 C/A, IS-QZSS-PNT-006, as gps_l1ca on PRNs 193 to 202. Searching costs about "
          "2 s of a core every 30 s. Reads a wideband tap at 2048000 S/s or more",
@@ -8221,7 +8490,7 @@ private:
          "or more",
          &LrptOqpskChunkDecoder::make, {}, 288'000},
         {AhrptChunkDecoder::kName, DecoderInput::ComplexBaseband,
-         "Meteor-M AHRPT, CCSDS frames to Space Packets: link status and instruments seen "
+         "Metop AHRPT, CCSDS frames to Space Packets: link status and instruments seen "
          "every 5 s, no imagery. Reads a wideband tap at 6000000 S/s or more",
          &AhrptChunkDecoder::make, {}, 6'000'000},
         {XritChunkDecoder<false>::kName, DecoderInput::ComplexBaseband,

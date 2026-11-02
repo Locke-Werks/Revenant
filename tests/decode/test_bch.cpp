@@ -202,3 +202,32 @@ TEST_CASE("BCH(63,16) reproduces the P25 NID code words", "[decode][bch]") {
         CHECK(std::equal(word.begin(), word.end(), nid.begin()));
     }
 }
+
+// GF(2^16) is the largest field the codec takes, and with dvbs not wired only
+// GRB reaches it in the tree. The field polynomial is DVB-S2's g1, EN 302
+// 307-1 Table 6a, 1 + x^2 + x^3 + x^5 + x^16, and t = 12 gives the 192 check
+// bits of its normal frames. Shortened to 2000 information bits to stay quick.
+TEST_CASE("BCH over GF(2^16) corrects up to t = 12 on a shortened word", "[decode][bch]") {
+    const auto codec = make(16, 0x1002D, 25);
+    CHECK(codec.n() == 65535U);
+    CHECK(codec.correctable() == 12U);
+    CHECK(codec.check_bits() == 192U);
+    std::mt19937 rng(16);
+    for (int trial = 0; trial < 26; ++trial) {
+        const auto clean = codeword(codec, 2000, rng);
+        std::vector<std::size_t> pos(clean.size());
+        for (std::size_t i = 0; i < pos.size(); ++i) {
+            pos[i] = i;
+        }
+        std::shuffle(pos.begin(), pos.end(), rng);
+        const auto errors = static_cast<std::size_t>(trial) % 13;
+        auto word = clean;
+        for (std::size_t e = 0; e < errors; ++e) {
+            word[pos[e]] ^= 1U;
+        }
+        const auto fixed = codec.decode(word);
+        REQUIRE(fixed.has_value());
+        CHECK(*fixed == errors);
+        CHECK(word == clean);
+    }
+}

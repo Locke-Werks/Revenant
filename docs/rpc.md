@@ -863,6 +863,7 @@ fifteenth and sixteenth, the same day.
 | `dsc` | Each VHF DSC call whose error-check character agreed: format, category, both identities, telecommands, nature of distress, position and time, working channel | Audio of an `nfm` receiver on channel 70, 156.525 MHz |
 | `dsc_hf` | The same calls on MF and HF, 100 baud about 1700 Hz | Audio of a `usb` or `lsb` receiver |
 | `sstv` | Images by VIS code, through the image sink | Audio of a `usb`, `lsb` or `nfm` receiver |
+| `wefax` | HF radiofax charts at 60, 90, 120 or 240 lines per minute, IOC 576 or 288, as grey images through the image sink, opened by the start signal and closed by the stop | Audio of a `usb` receiver |
 | `ft8`, `ft4` | Each decode with SNR, DT, frequency and the message's calls, grid and report; slots timed from the wall clock | Audio of a `usb` receiver at 12000 S/s or a multiple |
 | `wspr`, `jt9a`, `jt4a` to `jt4g`, `jt65a` to `jt65c` | Each decode with SNR, DT, drift, frequency and the message; WSPR adds call, grid and power, JT65 its erasure trials. 120 s slots for WSPR, 60 s for the rest, timed from the wall clock | Audio of a `usb` receiver at 12000 S/s or a multiple |
 | `ale_2g` | Each 2G ALE call or sounding with its addresses | Audio of a `usb` receiver |
@@ -899,10 +900,13 @@ the source rate:
 | `enocean` | EnOcean telegrams | 1000000 |
 | `dect` | DECT A-field tails, RFPI and system information, repeats suppressed | 2304000 |
 | `gps_l1ca`, `qzss_l1ca` | Satellite status every 5 s, subframes, clock, ephemeris, almanac, UTC; about 2 s of a core per 30 s searching | 2048000 |
+| `gps_l1c` | L1C handovers from C/A, status, frames with subframe 2 clock and subframe 3 page; centred on 1575.42 MHz | 2048000 |
+| `gps_l2c` | CNAV messages with type, TOW and week; centred on 1227.60 MHz | 2048000 |
+| `gps_l5` | As `gps_l2c`, centred on 1176.45 MHz; about 9 dB lost to a tap narrower than the 20.46 MHz main lobe | 4092000 |
 | `glonass_l1of` | Status, strings, ephemeris | 4096000 |
 | `beidou_b1i` | Status, subframes, clock, ephemeris | 4000000 |
 | `lrpt`, `lrpt_oqpsk` | Meteor LRPT link status every 5 s; no imagery | 288000 |
-| `ahrpt` | Meteor AHRPT link status and instruments every 5 s; no imagery | 6000000 |
+| `ahrpt` | Metop AHRPT link status and instruments every 5 s; no imagery | 6000000 |
 | `gk2a_lrit`, `goes_hrit` | xRIT file names and sizes, uncompressed images; GOES adds EMWIN bulletins | 512000, 2400000 |
 
 The `p25p1` row's Link Control and encryption sync from every LDU, and its
