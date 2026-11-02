@@ -977,7 +977,8 @@ TEST_CASE("the audio decoders are listed with the input they read", "[gpu][rpc][
                                          "ft8", "ft4", "ale_2g", "mil110", "dsc_hf", "sitor_a",
                                          "g3ruh", "apt", "ermes", "vdl4", "mfsk16", "mfsk8",
                                          "dominoex4", "dominoex5", "dominoex8", "dominoex11",
-                                         "dominoex16", "dominoex22", "fsq", "feld_hell"});
+                                         "dominoex16", "dominoex22", "fsq", "feld_hell",
+                                         "mil110c", "mil_39tone", "ale_3g", "link11"});
 }
 
 TEST_CASE("an audio decoder on the wrong receiver is refused naming the mode it needs",

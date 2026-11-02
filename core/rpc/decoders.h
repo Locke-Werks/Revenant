@@ -113,7 +113,11 @@
 #include "core/decode/gk2a_lrit.h"
 #include "core/decode/goes_hrit.h"
 #include "core/decode/lrpt.h"
+#include "core/decode/ale_3g.h"
+#include "core/decode/link11.h"
 #include "core/decode/mfsk16.h"
+#include "core/decode/mil110c.h"
+#include "core/decode/mil_39tone.h"
 #include "core/decode/aprs.h"
 #include "core/decode/apt.h"
 #include "core/decode/atv.h"
@@ -6977,6 +6981,260 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// MIL-STD-188-110 Appendix C, the 39-tone modem, 3G ALE and Link-11
+// ---------------------------------------------------------------------------
+//
+// Read a usb receiver's audio. One message per transmission or burst, when
+// it ends or at flush; each carries began_sample (int, receiver-stream
+// index of its start) and offset_hz (real, carrier offset found).
+//
+// mil110c, core/decode/mil110c.h, 3200 to 12800 bit/s on 1800 Hz: kind
+//   "message": bit_rate (int), interleave (text, ultra_short to very_long),
+//   eom (flag), mse, snr_db, clock_ppm (real), bits (int), data (bytes)
+// mil_39tone, core/decode/mil_39tone.h, Appendix B: kind "transmission":
+//   bit_rate, degree, elements, superblocks, codewords, corrected, failed
+//   (int), diversity (text, time_frequency or frequency), extended_preamble
+//   (flag), framing_match (real), data (bytes)
+// ale_3g, core/decode/ale_3g.h, MIL-STD-188-141 Appendix C: kind the PDU
+//   type (call, handshake, notification, time_offset, group_time, broadcast,
+//   scanning_call, tm_request, tm_confirm, tm_terminate, reserved, tm_reserved,
+//   other_bw1): waveform (text, bw0 or bw1), crc_ok (flag), metric (real),
+//   payload (int), and each PDU field the type carries (called_member,
+//   call_type, caller_member, caller_group, link_id, command, argument,
+//   caller_status, time_quality, offset, server_group, dwell, slot,
+//   countdown, channel, called_address, protocol, priority, dest_address,
+//   source_address; int)
+// link11, core/decode/link11.h, MIL-STD-188-203-1A: kind "transmission":
+//   address, preamble_frames, words, corrected, failed (int), frame_rate
+//   (text, fast or slow), started, picket_stop, control_stop,
+//   continuous_phase (flag), data (bytes, each data word's 24 bits as three
+//   octets, most significant first)
+namespace decoders_detail {
+
+struct Mil110cTraits {
+    static constexpr std::string_view kName = "mil110c";
+    using Library = decode::Mil110cDecoder;
+    using Item = decode::Mil110cMessage;
+    static auto build(const DecoderBuild& b) {
+        decode::Mil110cConfig c;
+        c.rate = b.rate;
+        return Library::create(c);
+    }
+    static std::string describe(const Item& m, DecodedMessage& message) {
+        static constexpr int kRates[] = {3200, 4800, 6400, 8000, 9600, 12800};
+        static constexpr const char* kInterleave[] = {"ultra_short", "very_short", "short",
+                                                      "medium",      "long",       "very_long"};
+        const int rate = kRates[static_cast<std::size_t>(m.mode.rate)];
+        const char* interleave = kInterleave[static_cast<std::size_t>(m.mode.interleave)];
+        message.kind = "message";
+        message.fields.push_back(integer_field("bit_rate", rate));
+        message.fields.push_back(text_field("interleave", interleave));
+        message.fields.push_back(flag_field("eom", m.eom));
+        message.fields.push_back(real_field("mse", m.mse));
+        message.fields.push_back(real_field("snr_db", m.snr_db));
+        message.fields.push_back(real_field("clock_ppm", m.clock_ppm));
+        message.fields.push_back(integer_field("bits", static_cast<std::int64_t>(m.bits.size())));
+        message.fields.push_back(bytes_field("data", m.bytes));
+        return std::format("{} bit/s, {} interleave, {} bytes{}", rate, interleave,
+                           m.bytes.size(), m.eom ? "" : ", no EOM");
+    }
+};
+
+struct Tone39Traits {
+    static constexpr std::string_view kName = "mil_39tone";
+    using Library = decode::Tone39Decoder;
+    using Item = decode::Tone39Transmission;
+    static auto build(const DecoderBuild& b) {
+        decode::Tone39Config c;
+        c.rate = b.rate;
+        return Library::create(c);
+    }
+    static std::string describe(const Item& t, DecodedMessage& message) {
+        message.kind = "transmission";
+        message.fields.push_back(integer_field("bit_rate", t.mode.rate));
+        message.fields.push_back(integer_field("degree", t.mode.degree));
+        message.fields.push_back(text_field(
+            "diversity", t.mode.diversity == decode::Tone39Diversity::TimeFrequency
+                             ? "time_frequency"
+                             : "frequency"));
+        message.fields.push_back(flag_field("extended_preamble", t.extended_preamble));
+        message.fields.push_back(integer_field("elements", t.elements));
+        message.fields.push_back(real_field("framing_match", t.framing_match));
+        message.fields.push_back(integer_field("superblocks", t.superblocks));
+        message.fields.push_back(integer_field("codewords", t.codewords));
+        message.fields.push_back(integer_field("corrected", t.corrected));
+        message.fields.push_back(integer_field("failed", t.failed));
+        message.fields.push_back(bytes_field("data", t.data));
+        return std::format("{} bit/s, {} bytes, {} codewords failed", t.mode.rate, t.data.size(),
+                           t.failed);
+    }
+};
+
+struct Ale3gTraits {
+    static constexpr std::string_view kName = "ale_3g";
+    using Library = decode::Ale3gDecoder;
+    using Item = decode::Ale3gBurst;
+    static auto build(const DecoderBuild& b) {
+        decode::Ale3gConfig c;
+        c.rate = b.rate;
+        return Library::create(c);
+    }
+    static const char* type_name(decode::Ale3gPduType type) {
+        switch (type) {
+            case decode::Ale3gPduType::Call: return "call";
+            case decode::Ale3gPduType::Handshake: return "handshake";
+            case decode::Ale3gPduType::Notification: return "notification";
+            case decode::Ale3gPduType::TimeOffset: return "time_offset";
+            case decode::Ale3gPduType::GroupTime: return "group_time";
+            case decode::Ale3gPduType::Broadcast: return "broadcast";
+            case decode::Ale3gPduType::ScanningCall: return "scanning_call";
+            case decode::Ale3gPduType::Reserved: return "reserved";
+            case decode::Ale3gPduType::TmRequest: return "tm_request";
+            case decode::Ale3gPduType::TmConfirm: return "tm_confirm";
+            case decode::Ale3gPduType::TmTerminate: return "tm_terminate";
+            case decode::Ale3gPduType::TmReserved: return "tm_reserved";
+            case decode::Ale3gPduType::OtherBw1: return "other_bw1";
+        }
+        return "unknown";
+    }
+    static std::string describe(const Item& b, DecodedMessage& message) {
+        const decode::Ale3gPdu& p = b.pdu;
+        message.kind = type_name(p.type);
+        message.fields.push_back(
+            text_field("waveform", b.waveform == decode::Ale3gWaveform::Bw0 ? "bw0" : "bw1"));
+        message.fields.push_back(flag_field("crc_ok", p.crc_ok));
+        message.fields.push_back(real_field("metric", b.metric));
+        message.fields.push_back(integer_field("payload", static_cast<std::int64_t>(b.payload)));
+        const std::pair<const char*, int> fields[] = {
+            {"called_member", p.called_member}, {"call_type", p.call_type},
+            {"caller_member", p.caller_member}, {"caller_group", p.caller_group},
+            {"link_id", p.link_id},             {"command", p.command},
+            {"argument", p.argument},           {"caller_status", p.caller_status},
+            {"time_quality", p.time_quality},   {"offset", p.offset},
+            {"server_group", p.server_group},   {"dwell", p.dwell},
+            {"slot", p.slot},                   {"countdown", p.countdown},
+            {"channel", p.channel},             {"called_address", p.called_address},
+            {"protocol", p.protocol},           {"priority", p.priority},
+            {"dest_address", p.dest_address},   {"source_address", p.source_address},
+        };
+        for (const auto& [key, value] : fields) {
+            if (value >= 0 || (std::string_view(key) == "offset" &&
+                               p.type == decode::Ale3gPduType::TimeOffset)) {
+                message.fields.push_back(integer_field(key, value));
+            }
+        }
+        return std::format("{} {}{}", message.kind,
+                           b.waveform == decode::Ale3gWaveform::Bw0 ? "BW0" : "BW1",
+                           p.crc_ok ? "" : ", CRC failed");
+    }
+};
+
+struct Link11Traits {
+    static constexpr std::string_view kName = "link11";
+    using Library = decode::Link11Decoder;
+    using Item = decode::Link11Transmission;
+    static auto build(const DecoderBuild& b) {
+        decode::Link11Config c;
+        c.rate = b.rate;
+        return Library::create(c);
+    }
+    static std::string describe(const Item& t, DecodedMessage& message) {
+        message.kind = "transmission";
+        std::vector<std::uint8_t> data;
+        for (const decode::Link11Frame& f : t.frames) {
+            if (f.kind == decode::Link11Frame::Kind::Data) {
+                data.push_back(static_cast<std::uint8_t>(f.word.data >> 16U));
+                data.push_back(static_cast<std::uint8_t>(f.word.data >> 8U));
+                data.push_back(static_cast<std::uint8_t>(f.word.data));
+            }
+        }
+        message.fields.push_back(integer_field("address", t.address));
+        message.fields.push_back(integer_field("preamble_frames", t.preamble_frames));
+        message.fields.push_back(integer_field("words", t.words));
+        message.fields.push_back(integer_field("corrected", t.corrected));
+        message.fields.push_back(integer_field("failed", t.failed));
+        message.fields.push_back(
+            text_field("frame_rate", t.frame_rate == decode::Link11Rate::Fast ? "fast" : "slow"));
+        message.fields.push_back(flag_field("started", t.started));
+        message.fields.push_back(flag_field("picket_stop", t.picket_stop));
+        message.fields.push_back(flag_field("control_stop", t.control_stop));
+        message.fields.push_back(flag_field("continuous_phase", t.continuous_phase));
+        message.fields.push_back(bytes_field("data", std::move(data)));
+        return std::format("address {}, {} words, {} failed", t.address, t.words, t.failed);
+    }
+};
+
+}  // namespace decoders_detail
+
+template <class Traits>
+class TransmissionChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = Traits::kName;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        auto built = Traits::build(build);
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        return std::unique_ptr<ChunkDecoder>(
+            new TransmissionChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        end_.observe(chunk);
+        items_.clear();
+        decoder_.process(chunk.samples, items_);
+        for (const auto& item : items_) {
+            out.push_back(describe(item, chunk));
+        }
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>& out) override {
+        items_.clear();
+        decoder_.flush(items_);
+        for (const auto& item : items_) {
+            out.push_back(describe(item, end_.at_end()));
+        }
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    using Library = typename Traits::Library;
+
+    TransmissionChunkDecoder(dsp::SampleRate rate, Library decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] DecodedMessage describe(const typename Traits::Item& item,
+                                          const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        DecodedMessage message = stamped(kName, "", chunk);
+        message.text = Traits::describe(item, message);
+        message.fields.push_back(real_field("offset_hz", item.offset_hz));
+        message.fields.push_back(integer_field(
+            "began_sample",
+            static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(item.position)))));
+        return message;
+    }
+
+    dsp::SampleRate rate_;
+    Library decoder_;
+    decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
+    std::vector<typename Traits::Item> items_;
+};
+
+// ---------------------------------------------------------------------------
 // Meteor LRPT and AHRPT
 // ---------------------------------------------------------------------------
 //
@@ -7559,6 +7817,26 @@ private:
          "Feld Hell, 122.5 pixels a second on 1000 Hz: each transmission as an image, one "
          "column a row. Reads a usb or lsb receiver's audio",
          &FeldHellChunkDecoder::make, kSidebandModes},
+        {TransmissionChunkDecoder<decoders_detail::Mil110cTraits>::kName, DecoderInput::RealAudio,
+         "MIL-STD-188-110 Appendix C, 3200 to 12800 bit/s on 1800 Hz, rate and interleave from "
+         "the preamble: each transmission's data bytes. Reads a usb receiver's audio",
+         &TransmissionChunkDecoder<decoders_detail::Mil110cTraits>::make,
+         decoders_detail::kUsbModes},
+        {TransmissionChunkDecoder<decoders_detail::Tone39Traits>::kName, DecoderInput::RealAudio,
+         "MIL-STD-188-110 Appendix B 39-tone parallel modem, 75 to 2400 bit/s: each "
+         "transmission's data bytes when it ends. Reads a usb receiver's audio",
+         &TransmissionChunkDecoder<decoders_detail::Tone39Traits>::make,
+         decoders_detail::kUsbModes},
+        {TransmissionChunkDecoder<decoders_detail::Ale3gTraits>::kName, DecoderInput::RealAudio,
+         "3G ALE, MIL-STD-188-141 Appendix C BW0 and BW1 bursts: each PDU with its fields. Reads "
+         "a usb receiver's audio",
+         &TransmissionChunkDecoder<decoders_detail::Ale3gTraits>::make,
+         decoders_detail::kUsbModes},
+        {TransmissionChunkDecoder<decoders_detail::Link11Traits>::kName, DecoderInput::RealAudio,
+         "Link-11 CLEW, MIL-STD-188-203-1A, parallel-tone DQPSK: each transmission's address and data "
+         "words when it ends. Reads a usb receiver's audio",
+         &TransmissionChunkDecoder<decoders_detail::Link11Traits>::make,
+         decoders_detail::kUsbModes},
         {LrptChunkDecoder::kName, DecoderInput::ComplexBaseband,
          "Meteor-M LRPT, 72 ksym/s QPSK, CCSDS frames to Space Packets: link status every 5 s, "
          "no imagery. Reads a wideband tap at 288000 S/s or more",
