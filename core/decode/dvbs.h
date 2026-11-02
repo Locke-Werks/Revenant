@@ -6,7 +6,7 @@
 // ETSI EN 300 421 V1.1.2 (1997-08), "Digital Video Broadcasting (DVB);
 // Framing structure, channel coding and modulation for 11/12 GHz satellite
 // services", free from etsi.org. Cited below as "EN 300 421" with a clause,
-// table or figure. ETSI keeps copyright in the text, so clause numbers are
+// table or figure. ETSI keeps the rights in the text, so clause numbers are
 // cited and no table is reproduced.
 //
 // The transport stream layer is ITU-T Rec. H.222.0 (05/2006) | ISO/IEC

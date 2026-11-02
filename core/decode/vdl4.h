@@ -8,7 +8,7 @@
 // of measurement for ground-based equipment; Part 1: Physical layer", read
 // 2026-11-02 from
 // https://www.etsi.org/deliver/etsi_en/301800_301899/30184201/01.04.01_60/en_30184201v010401p.pdf.
-// ETSI retains copyright; the clauses are cited and only the constants they
+// ETSI retains the rights in its text; the clauses are cited and only the constants they
 // state are written here. Clauses used: 3.1, the definitions of "data rate"
 // (19 200 bit/s), "VDL Mode 4 burst" (source address, burst ID, information,
 // slot reservation and FCS, bracketed by opening and closing flags and

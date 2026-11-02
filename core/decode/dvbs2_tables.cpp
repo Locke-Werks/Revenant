@@ -2,7 +2,7 @@
 // annex B, for the two normal-frame codes the GOES-R Rebroadcast uses:
 // table B.6 (rate 2/3) and table B.11 (rate 9/10).
 //
-// ETSI holds copyright in the standard's text. These are the clause-cited
+// ETSI holds the rights in the standard's text. These are the clause-cited
 // constants a receiver needs to interoperate with the code, transcribed row
 // for row in the order the tables print them (each table read down its left
 // column and then down the next), and nothing else of the document is

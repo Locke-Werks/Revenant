@@ -6,7 +6,7 @@
 // ETSI ES 201 980 V4.2.1 (2021-01), "Digital Radio Mondiale (DRM); System
 // Specification", from www.etsi.org/deliver/etsi_es/201900_201999/201980/
 // 04.02.01_60/, read 2026-11-02. Cited as "ES" with a clause or table. ETSI
-// retains copyright; this file carries the clause-cited constants a receiver
+// retains the rights in its text; this file carries the clause-cited constants a receiver
 // needs and no more of the document's tables than that. Where a table is
 // derivable from a rule the document also states (the cell counts of tables
 // 21, 25 and 41 to 44, the bit counts of Annex J), the rule is implemented and

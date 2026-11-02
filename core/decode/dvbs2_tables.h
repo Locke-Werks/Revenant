@@ -1,5 +1,5 @@
 // ETSI EN 302 307-1 annex B tables used by core/decode/dvbs2.h. See
-// dvbs2_tables.cpp for the provenance and the copyright note.
+// dvbs2_tables.cpp for the provenance and the rights note.
 //
 // Each table is flattened: a row is its entry count followed by that many
 // parity bit accumulator addresses, one row per group of 360 information bits.

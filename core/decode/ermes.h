@@ -8,7 +8,7 @@
 // www.etsi.org/deliver/etsi_i_ets/300100_300199/30013304/01_60/, read
 // 2026-11-02. Cited below as "133-4" with a clause. The character sets of
 // Annex B come from ETS 300 133-2, July 1992, "Part 2: Service aspects", same
-// site, read the same day, cited as "133-2". ETSI retains copyright in both;
+// site, read the same day, cited as "133-2". ETSI retains the rights in both;
 // the constants here are the clause-cited facts the decoder needs, not
 // reproductions of the documents' tables.
 //

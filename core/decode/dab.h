@@ -7,7 +7,7 @@
 //
 // ETSI EN 300 401 V2.1.1 (2017-01), "Radio Broadcasting Systems; Digital
 // Audio Broadcasting (DAB) to mobile, portable and fixed receivers", free
-// from etsi.org and copyright ETSI. Cited below as "EN 300 401" with a
+// from etsi.org and owned by ETSI. Cited below as "EN 300 401" with a
 // clause, table or figure. Every constant in dab.cpp carries the clause it
 // came from; nothing was taken from anywhere else.
 //
