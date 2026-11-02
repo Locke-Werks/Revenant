@@ -91,6 +91,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
@@ -104,13 +105,39 @@
 #include <vector>
 
 #include "core/decode/ais.h"
+#include "core/decode/ale_2g.h"
 #include "core/decode/aprs.h"
+#include "core/decode/apt.h"
+#include "core/decode/atv.h"
 #include "core/decode/ax25.h"
+#include "core/decode/beidou_b1i.h"
+#include "core/decode/ble.h"
+#include "core/decode/cospas_sarsat.h"
 #include "core/decode/cw.h"
+#include "core/decode/dab.h"
+#include "core/decode/dect.h"
 #include "core/decode/dmr.h"
+#include "core/decode/dpmr.h"
+#include "core/decode/drm.h"
 #include "core/decode/dsc.h"
+#include "core/decode/dsc_hf.h"
 #include "core/decode/dstar.h"
+#include "core/decode/enocean.h"
+#include "core/decode/ermes.h"
+#include "core/decode/ft4.h"
+#include "core/decode/ft8.h"
+#include "core/decode/funcube.h"
+#include "core/decode/g3ruh.h"
+#include "core/decode/glonass_l1.h"
+#include "core/decode/gps_lnav.h"
+#include "core/decode/hrpt.h"
 #include "core/decode/m17.h"
+#include "core/decode/mil110.h"
+#include "core/decode/psk_demod.h"
+#include "core/decode/sitor_a.h"
+#include "core/decode/vdes.h"
+#include "core/decode/vdl4.h"
+#include "core/decode/zwave.h"
 #include "core/decode/navtex.h"
 #include "core/decode/p25p1.h"
 #include "core/decode/pocsag.h"
@@ -2029,18 +2056,40 @@ private:
 // A status adds status (text), timestamp and maidenhead (text) when sent. A
 // message adds addressee (text), message (text) and message_id (text) when
 // sent.
-class Ax25ChunkDecoder final : public ChunkDecoder {
+//
+// G3RUH is the same adapter over core/decode/g3ruh.h: 9600 baud scrambled
+// FSK, the same AX.25 frames, named "g3ruh". It reads an nfm receiver's
+// audio at no less than 48000 S/s, five samples a bit.
+template <bool G3ruh>
+class Ax25ChunkDecoderT final : public ChunkDecoder {
 public:
-    static constexpr std::string_view kName = "ax25";
+    static constexpr std::string_view kName = G3ruh ? "g3ruh" : "ax25";
+    using Library = std::conditional_t<G3ruh, decode::G3ruhDecoder, decode::Ax25Decoder>;
 
     [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
-        decode::Ax25Config config;
-        config.rate = build.rate;
-        auto built = decode::Ax25Decoder::create(config);
-        if (!built) {
-            return std::unexpected(with_context(built.error(), "building the ax25 decoder"));
+        auto built = [&] {
+            if constexpr (G3ruh) {
+                decode::G3ruhConfig config;
+                config.rate = build.rate;
+                return decode::G3ruhDecoder::create(config);
+            } else {
+                decode::Ax25Config config;
+                config.rate = build.rate;
+                return decode::Ax25Decoder::create(config);
+            }
+        }();
+        if constexpr (G3ruh) {
+            if (build.rate < 48'000) {
+                return fail(std::format("the g3ruh decoder needs audio at 48000 S/s or more, "
+                                        "five samples a bit, and this receiver delivers {}",
+                                        build.rate));
+            }
         }
-        return std::unique_ptr<ChunkDecoder>(new Ax25ChunkDecoder(build.rate, std::move(*built)));
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        return std::unique_ptr<ChunkDecoder>(new Ax25ChunkDecoderT(build.rate, std::move(*built)));
     }
 
     [[nodiscard]] Status consume(const DecoderChunk& chunk,
@@ -2063,7 +2112,7 @@ public:
     }
 
 private:
-    Ax25ChunkDecoder(dsp::SampleRate rate, decode::Ax25Decoder decoder)
+    Ax25ChunkDecoderT(dsp::SampleRate rate, Library decoder)
         : rate_(rate), decoder_(std::move(decoder)) {}
 
     [[nodiscard]] static std::string path_text(const decode::Ax25Frame& frame) {
@@ -2264,10 +2313,13 @@ private:
     }
 
     dsp::SampleRate rate_;
-    decode::Ax25Decoder decoder_;
+    Library decoder_;
     decoders_detail::StreamBase base_;
     std::vector<decode::Ax25Frame> frames_;
 };
+
+using Ax25ChunkDecoder = Ax25ChunkDecoderT<false>;
+using G3ruhChunkDecoder = Ax25ChunkDecoderT<true>;
 
 // ---------------------------------------------------------------------------
 // POCSAG
@@ -2803,18 +2855,30 @@ private:
 //   frequency_hz         int    an MF or HF frequency, Table A1-5
 //   message_symbols      bytes  Message 2 and 3 as sent, for what is not
 //                               a channel or a frequency
-class DscChunkDecoder final : public ChunkDecoder {
+//
+// dsc_hf is the same adapter on MF and HF, core/decode/dsc_hf.h: 100 baud
+// at 170 Hz shift about 1700 Hz in a usb or lsb receiver's audio, the
+// sideband taken from the receiver. Its fields are the same.
+template <bool Hf>
+class DscChunkDecoderT final : public ChunkDecoder {
 public:
-    static constexpr std::string_view kName = "dsc";
+    static constexpr std::string_view kName = Hf ? "dsc_hf" : "dsc";
 
     [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
         decode::DscConfig config;
-        config.rate = build.rate;
+        if constexpr (Hf) {
+            config = decode::dsc_hf_config(build.rate, build.mode == "lsb"
+                                                           ? decode::DscHfSideband::Lsb
+                                                           : decode::DscHfSideband::Usb);
+        } else {
+            config.rate = build.rate;
+        }
         auto built = decode::DscDecoder::create(config);
         if (!built) {
-            return std::unexpected(with_context(built.error(), "building the dsc decoder"));
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
         }
-        return std::unique_ptr<ChunkDecoder>(new DscChunkDecoder(build.rate, std::move(*built)));
+        return std::unique_ptr<ChunkDecoder>(new DscChunkDecoderT(build.rate, std::move(*built)));
     }
 
     [[nodiscard]] Status consume(const DecoderChunk& chunk,
@@ -2837,7 +2901,7 @@ public:
     }
 
 private:
-    DscChunkDecoder(dsp::SampleRate rate, decode::DscDecoder decoder)
+    DscChunkDecoderT(dsp::SampleRate rate, decode::DscDecoder decoder)
         : rate_(rate), decoder_(std::move(decoder)) {}
 
     [[nodiscard]] static std::string_view kind_of(const decode::DscCall& c) {
@@ -2995,6 +3059,9 @@ private:
     decoders_detail::StreamBase base_;
     std::vector<decode::DscCall> calls_;
 };
+
+using DscChunkDecoder = DscChunkDecoderT<false>;
+using DscHfChunkDecoder = DscChunkDecoderT<true>;
 
 // ---------------------------------------------------------------------------
 // SITOR-B
@@ -4014,6 +4081,2613 @@ private:
     std::uint64_t stamp_ = 0;
 };
 
+namespace decoders_detail {
+
+// The modes the decoders added on 2026-11-02 read. FT8, FT4, 2G ALE and
+// MIL-STD-188-110 are sent on the upper sideband by convention and the
+// libraries take the tones the right way up, so an lsb receiver would hand
+// them a mirrored spectrum. SITOR-A and HF DSC take the sideband from the
+// receiver and read either.
+inline constexpr std::string_view kUsbModes[] = {"usb"};
+inline constexpr std::string_view kRawModes[] = {"raw"};
+
+// A raw tap for a decoder that has no fine stage of its own to point at.
+[[nodiscard]] inline Status raw_tap_capped(std::string_view decoder, std::string_view mode,
+                                           dsp::SampleRate rate) {
+    if (mode != "raw" || rate <= kRawTapRateCap) {
+        return {};
+    }
+    return fail(std::format(
+        "the {} decoder reads a raw tap at no more than {} S/s, and this one runs at {}, the "
+        "grid's channel rate. Its filters grow with the rate and run on a decode thread shared "
+        "with other receivers' decoders, so a tap this fast would leave them all behind",
+        decoder, kRawTapRateCap, rate));
+}
+
+// A wideband decoder's floor, in words, for make(). The server never builds
+// one below wideband_rate; this is for the CLI and for tests.
+[[nodiscard]] inline Status wideband_at_least(std::string_view decoder, dsp::SampleRate rate,
+                                              dsp::SampleRate floor) {
+    if (rate >= floor) {
+        return {};
+    }
+    return fail(std::format("the {} decoder reads a wideband tap at {} S/s or more, and was "
+                            "asked to run at {}",
+                            decoder, floor, rate));
+}
+
+[[nodiscard]] inline std::string hex_bytes(std::span<const std::uint8_t> bytes,
+                                           bool reversed = false, char separator = ':') {
+    std::string out;
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        if (i > 0 && separator != 0) {
+            out += separator;
+        }
+        out += std::format("{:02X}", bytes[reversed ? bytes.size() - 1 - i : i]);
+    }
+    return out;
+}
+
+}  // namespace decoders_detail
+
+// What the picture decoders share: the sink a core/decode library emits
+// through, with every image it opened remembered so that flush and reset can
+// close what is still open as incomplete, which ChunkDecoder asks of them.
+class ImageChunkDecoder : public ChunkDecoder {
+protected:
+    [[nodiscard]] decode::ImageSink image_sink(dsp::SampleRate rate) {
+        return make_image_bridge(
+            [this, rate](std::uint32_t width, ImageColour colour, double line_rate_hz,
+                         std::string label) {
+                const std::uint64_t id = open_image(stamp_, static_cast<std::uint32_t>(rate),
+                                                    width, colour, line_rate_hz,
+                                                    std::move(label));
+                open_.push_back(id);
+                return id;
+            },
+            [this](std::uint64_t image, std::uint32_t row, std::span<const std::uint8_t> px) {
+                image_row(image, row, px);
+            },
+            [this](std::uint64_t image, bool complete) {
+                close_image(image, complete);
+                std::erase(open_, image);
+            });
+    }
+
+    void close_open_images() {
+        for (const std::uint64_t id : open_) {
+            close_image(id, false);
+        }
+        open_.clear();
+    }
+
+    // The receiver-stream sample an image opened now would be stamped with.
+    std::uint64_t stamp_ = 0;
+
+private:
+    std::vector<std::uint64_t> open_;
+};
+
+// ---------------------------------------------------------------------------
+// FT8 and FT4
+// ---------------------------------------------------------------------------
+//
+// Reads a usb receiver's audio at 12000 S/s or a whole multiple,
+// core/decode/ft8.h and ft4.h. One message per decode when its slot ends.
+// The slot clock is the wall clock at the first chunk after a build or a
+// reset, counted forward by sample index, which is ft8.h's live default: a
+// receiver whose audio runs more than a second or so behind real time
+// shifts every DT by that much.
+//
+// Every message:
+//   text                 text   the message as WSJT-X prints it
+//   i3, n3               int    message type, 77-bit payload
+//   frequency_hz         real   tone 0 in the audio
+//   dt_seconds           real   start against the nominal 0.5 s
+//   snr_db               real   in 2500 Hz
+//   slot_utc             real   Unix seconds of the slot's start
+//   slot_sample          int    receiver-stream index of the slot's start
+//   pass, ldpc_iterations  int
+// When the message has them:
+//   call_to, call_de, call_third, grid, report, exchange, free_text,
+//   telemetry            text
+//   roger                flag
+template <bool Ft4>
+class FtChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = Ft4 ? "ft4" : "ft8";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (build.rate <= 0 || build.rate % decode::kWsjtRate != 0) {
+            return fail(std::format("the {} decoder reads audio at 12000 S/s or a whole "
+                                    "multiple of it, and this receiver delivers {}",
+                                    kName, build.rate));
+        }
+        std::unique_ptr<FtChunkDecoder> adapter(new FtChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail(std::format("the {} decoder could not be rebuilt after a reset", kName));
+        }
+        base_.observe(chunk);
+        decodes_.clear();
+        if (auto processed = decoder_->process(chunk.samples, decodes_); !processed) {
+            return processed;
+        }
+        for (const decode::FtDecode& d : decodes_) {
+            out.push_back(describe(d, chunk));
+        }
+        return {};
+    }
+
+    // A new slot clock as well, read from the wall clock at the next chunk.
+    void reset() override {
+        base_.reset();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    explicit FtChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        decode::FtConfig config = Ft4 ? decode::ft4_config() : decode::FtConfig{};
+        config.rate = rate_;
+        config.utc_of_sample = decode::wsjt_wall_clock();
+        auto built = decode::FtDecoder::create(std::move(config));
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    [[nodiscard]] DecodedMessage describe(const decode::FtDecode& d,
+                                          const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        const decode::WsjtMessage& m = d.message;
+        DecodedMessage message = stamped(kName, "message", chunk);
+        message.fields.push_back(text_field("text", m.text));
+        message.fields.push_back(integer_field("i3", m.i3));
+        message.fields.push_back(integer_field("n3", m.n3));
+        message.fields.push_back(real_field("frequency_hz", d.frequency_hz));
+        message.fields.push_back(real_field("dt_seconds", d.dt_seconds));
+        message.fields.push_back(real_field("snr_db", d.snr_db));
+        message.fields.push_back(real_field("slot_utc", d.slot_utc));
+        message.fields.push_back(integer_field(
+            "slot_sample", static_cast<std::int64_t>(base_.at(
+                               static_cast<std::uint64_t>(d.slot_start_sample)))));
+        message.fields.push_back(integer_field("pass", d.pass));
+        message.fields.push_back(
+            integer_field("ldpc_iterations", static_cast<std::int64_t>(d.ldpc_iterations)));
+        const std::pair<const char*, const std::string*> texts[] = {
+            {"call_to", &m.call_to},     {"call_de", &m.call_de},
+            {"call_third", &m.call_third}, {"grid", &m.grid},
+            {"report", &m.report},       {"exchange", &m.exchange},
+            {"free_text", &m.free_text}, {"telemetry", &m.telemetry},
+        };
+        for (const auto& [key, value] : texts) {
+            if (!value->empty()) {
+                message.fields.push_back(text_field(key, *value));
+            }
+        }
+        if (m.roger) {
+            message.fields.push_back(flag_field("roger", true));
+        }
+        message.text = std::format("{:+.0f} dB {:+.1f} s {:.0f} Hz {}", d.snr_db, d.dt_seconds,
+                                   d.frequency_hz, m.text);
+        return message;
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<decode::FtDecoder> decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<decode::FtDecode> decodes_;
+};
+
+// ---------------------------------------------------------------------------
+// 2G ALE
+// ---------------------------------------------------------------------------
+//
+// Reads a usb receiver's audio, core/decode/ale_2g.h, MIL-STD-188-141 2G ALE:
+// eight tones at 125 baud. One message per call or sounding when its
+// conclusion arrives; flush hands over one still open as "unterminated".
+// kind is "call", "sound" or "unterminated".
+//
+//   to                   text   TO addresses, and THRU in a group call, comma
+//                               separated
+//   from                 text   the TIS or TWAS address
+//   accepting            flag   TIS rather than TWAS
+//   commands             int    CMD words
+//   words, corrected     int    words in the frame, bit errors Golay fixed
+//   began_sample         int    receiver-stream index of the first word
+class AleChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "ale_2g";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::Ale2gConfig config;
+        config.rate = build.rate;
+        auto built = decode::Ale2gDecoder::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the ale_2g decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new AleChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        end_.observe(chunk);
+        words_.clear();
+        frames_.clear();
+        decoder_.process(chunk.samples, words_, frames_);
+        for (const decode::AleFrame& f : frames_) {
+            out.push_back(describe(f, chunk));
+        }
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>& out) override {
+        frames_.clear();
+        decoder_.flush(frames_);
+        for (const decode::AleFrame& f : frames_) {
+            out.push_back(describe(f, end_.at_end()));
+        }
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    AleChunkDecoder(dsp::SampleRate rate, decode::Ale2gDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] DecodedMessage describe(const decode::AleFrame& f,
+                                          const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        const char* kind = f.kind == decode::AleFrame::Kind::Call    ? "call"
+                           : f.kind == decode::AleFrame::Kind::Sound ? "sound"
+                                                                     : "unterminated";
+        std::string to;
+        for (const std::string& address : f.to) {
+            to += to.empty() ? address : "," + address;
+        }
+        int corrected = 0;
+        for (const decode::AleWord& w : f.words) {
+            corrected += w.corrected;
+        }
+        DecodedMessage message = stamped(kName, kind, chunk);
+        message.fields.push_back(text_field("to", to));
+        message.fields.push_back(text_field("from", f.from));
+        message.fields.push_back(flag_field("accepting", f.accepting));
+        message.fields.push_back(
+            integer_field("commands", static_cast<std::int64_t>(f.commands.size())));
+        message.fields.push_back(integer_field("words", static_cast<std::int64_t>(f.words.size())));
+        message.fields.push_back(integer_field("corrected", corrected));
+        message.fields.push_back(integer_field(
+            "began_sample",
+            static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(f.position)))));
+        message.text = to.empty() ? std::format("{} {}", kind, f.from)
+                                  : std::format("{} {} > {}", kind, f.from, to);
+        return message;
+    }
+
+    dsp::SampleRate rate_;
+    decode::Ale2gDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
+    std::vector<decode::AleWord> words_;
+    std::vector<decode::AleFrame> frames_;
+};
+
+// ---------------------------------------------------------------------------
+// MIL-STD-188-110 serial tone
+// ---------------------------------------------------------------------------
+//
+// Reads a usb receiver's audio, core/decode/mil110.h: the 1800 Hz 8-PSK
+// serial tone modem at 75 to 4800 bit/s, the rate and interleave read from
+// the preamble. One message per transmission, at its EOM or at flush.
+//
+//   bit_rate             int    75 to 4800
+//   interleave           text   zero, short or long
+//   eom                  flag   ended on the EOM sequence
+//   mse                  real   equaliser mean square error
+//   bits                 int    data bits recovered
+//   data                 bytes  first bit least significant
+//   began_sample         int    receiver-stream index of the preamble
+class Mil110ChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "mil110";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::Mil110Config config;
+        config.rate = build.rate;
+        auto built = decode::Mil110Decoder::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the mil110 decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new Mil110ChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        end_.observe(chunk);
+        messages_.clear();
+        decoder_.process(chunk.samples, messages_);
+        for (const decode::Mil110Message& m : messages_) {
+            out.push_back(describe(m, chunk));
+        }
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>& out) override {
+        messages_.clear();
+        decoder_.flush(messages_);
+        for (const decode::Mil110Message& m : messages_) {
+            out.push_back(describe(m, end_.at_end()));
+        }
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    Mil110ChunkDecoder(dsp::SampleRate rate, decode::Mil110Decoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] DecodedMessage describe(const decode::Mil110Message& m,
+                                          const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        const char* interleave = m.mode.interleave == decode::Mil110Interleave::Zero    ? "zero"
+                                 : m.mode.interleave == decode::Mil110Interleave::Short ? "short"
+                                                                                        : "long";
+        const int bit_rate = decode::mil110_bit_rate(m.mode.rate);
+        DecodedMessage message = stamped(kName, "message", chunk);
+        message.fields.push_back(integer_field("bit_rate", bit_rate));
+        message.fields.push_back(text_field("interleave", interleave));
+        message.fields.push_back(flag_field("eom", m.eom));
+        message.fields.push_back(real_field("mse", m.mse));
+        message.fields.push_back(integer_field("bits", static_cast<std::int64_t>(m.bits.size())));
+        message.fields.push_back(bytes_field("data", m.bytes));
+        message.fields.push_back(integer_field(
+            "began_sample",
+            static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(m.position)))));
+        message.text = std::format("{} bit/s, {} interleave, {} bytes{}", bit_rate, interleave,
+                                   m.bytes.size(), m.eom ? "" : ", no EOM");
+        return message;
+    }
+
+    dsp::SampleRate rate_;
+    decode::Mil110Decoder decoder_;
+    decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
+    std::vector<decode::Mil110Message> messages_;
+};
+
+// ---------------------------------------------------------------------------
+// SITOR-A
+// ---------------------------------------------------------------------------
+//
+// Reads a usb or lsb receiver's audio, core/decode/sitor_a.h: a monitor of an
+// ARQ link, ITU-R M.476-5, printing each block once, repetitions dropped.
+// Lines as RTTY and SITOR-B hand them out.
+//
+//   text, characters, lost, ended, began_sample, upper_sideband  as sitor_b
+//   acquisitions, blocks, mutilated_blocks, losses  int  cumulative
+class SitorAChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "sitor_a";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::SitorAConfig config;
+        config.rate = build.rate;
+        config.upper_sideband = build.mode != "lsb";
+        auto built = decode::SitorAMonitor::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the sitor_a decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new SitorAChunkDecoder(config, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, config_.rate); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        end_.observe(chunk);
+        output_.blocks.clear();
+        output_.characters.clear();
+        monitor_.process(chunk.samples, output_);
+        take(chunk, out);
+        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
+            emit(chunk, decoders_detail::LineEnd::Idle, out);
+        }
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>& out) override {
+        emit(end_.at_end(), decoders_detail::LineEnd::StreamEnd, out);
+    }
+
+    void reset() override {
+        monitor_.reset();
+        base_.reset();
+        line_.clear();
+        lost_ = 0;
+    }
+
+private:
+    SitorAChunkDecoder(const decode::SitorAConfig& config, decode::SitorAMonitor monitor)
+        : config_(config), monitor_(std::move(monitor)) {}
+
+    // Ten characters at three a 450 ms cycle.
+    [[nodiscard]] std::uint64_t idle_samples() const {
+        return static_cast<std::uint64_t>(decoders_detail::kIdleCharacters / 3.0 *
+                                          static_cast<double>(decode::kSitorACycleUnits) *
+                                          static_cast<double>(config_.rate) / decode::kSitorBaud);
+    }
+
+    void take(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) {
+        using decoders_detail::LineEnd;
+        for (const decode::SitorCharacter& c : output_.characters) {
+            const std::uint64_t at = base_.at(static_cast<std::uint64_t>(c.position));
+            if (line_.characters > 0 && at > line_.last_sample + idle_samples()) {
+                emit(chunk, LineEnd::Idle, out);
+            }
+            if (!c.mutilated && (c.glyph == U'\r' || c.glyph == U'\n')) {
+                emit(chunk, LineEnd::LineEnd, out);
+                continue;
+            }
+            if (!c.mutilated && c.glyph == 0) {
+                continue;
+            }
+            line_.add(c.mutilated ? config_.error_glyph : c.glyph, at);
+            lost_ += c.mutilated ? 1U : 0U;
+            if (line_.characters >= decoders_detail::kMaxLineCharacters) {
+                emit(chunk, LineEnd::Length, out);
+            }
+        }
+    }
+
+    void emit(const DecoderChunk& chunk, decoders_detail::LineEnd why,
+              std::vector<DecodedMessage>& out) {
+        if (!line_.visible) {
+            line_.clear();
+            lost_ = 0;
+            return;
+        }
+        using namespace decoders_detail;
+        const decode::SitorAStats& stats = monitor_.stats();
+        DecodedMessage message = stamped(kName, "line", chunk);
+        message.fields.push_back(text_field("text", line_.text));
+        message.fields.push_back(
+            integer_field("characters", static_cast<std::int64_t>(line_.characters)));
+        message.fields.push_back(integer_field("lost", static_cast<std::int64_t>(lost_)));
+        message.fields.push_back(text_field("ended", std::string(line_end_name(why))));
+        message.fields.push_back(
+            integer_field("began_sample", static_cast<std::int64_t>(line_.first_sample)));
+        message.fields.push_back(flag_field("upper_sideband", config_.upper_sideband));
+        message.fields.push_back(
+            integer_field("acquisitions", static_cast<std::int64_t>(stats.acquisitions)));
+        message.fields.push_back(integer_field("blocks", static_cast<std::int64_t>(stats.blocks)));
+        message.fields.push_back(integer_field("mutilated_blocks",
+                                               static_cast<std::int64_t>(stats.mutilated_blocks)));
+        message.fields.push_back(integer_field("losses", static_cast<std::int64_t>(stats.losses)));
+        message.text = line_.text;
+        out.push_back(std::move(message));
+        line_.clear();
+        lost_ = 0;
+    }
+
+    decode::SitorAConfig config_;
+    decode::SitorAMonitor monitor_;
+    decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
+    decode::SitorAOutput output_;
+    decoders_detail::TextLine line_;
+    std::size_t lost_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// NOAA APT
+// ---------------------------------------------------------------------------
+//
+// Reads an nfm receiver's audio, core/decode/apt.h: the 2400 Hz AM subcarrier
+// of a NOAA POES weather satellite, out through the image sink as 2080-pixel
+// grey lines, both channels side by side with sync and telemetry. One
+// "telemetry" message per frame's wedges:
+//   channel_a, channel_b text   the sensor channel each wedge 16 names
+//   first_line           int    image line of wedge 1
+// An image open at flush or reset is closed incomplete.
+class AptChunkDecoder final : public ImageChunkDecoder {
+public:
+    static constexpr std::string_view kName = "apt";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        std::unique_ptr<AptChunkDecoder> adapter(new AptChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail("the apt decoder could not be rebuilt after a reset");
+        }
+        stamp_ = chunk.start;
+        decoder_->push(chunk.samples);
+        stamp_ = chunk.start + chunk.frames();
+        for (const decode::AptTelemetry& t : telemetry_) {
+            using namespace decoders_detail;
+            DecodedMessage message = stamped(kName, "telemetry", chunk);
+            message.fields.push_back(text_field("channel_a", t.channel[0]));
+            message.fields.push_back(text_field("channel_b", t.channel[1]));
+            message.fields.push_back(
+                integer_field("first_line", static_cast<std::int64_t>(t.first_line)));
+            message.text = std::format("channels {} and {}", t.channel[0], t.channel[1]);
+            out.push_back(std::move(message));
+        }
+        telemetry_.clear();
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>&) override {
+        close_open_images();
+        if (decoder_) {
+            decoder_->finish();
+        }
+    }
+
+    void reset() override {
+        close_open_images();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    explicit AptChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        decode::AptConfig config;
+        config.sample_rate = static_cast<double>(rate_);
+        decode::AptEvents events;
+        events.image = image_sink(rate_);
+        events.on_telemetry = [this](const decode::AptTelemetry& t) { telemetry_.push_back(t); };
+        auto built = decode::AptDecoder::create(config, std::move(events));
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the apt decoder"));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<decode::AptDecoder> decoder_;
+    std::vector<decode::AptTelemetry> telemetry_;
+};
+
+// ---------------------------------------------------------------------------
+// ERMES
+// ---------------------------------------------------------------------------
+//
+// Reads an nfm receiver's audio, core/decode/ermes.h, ETSI ETS 300 133: the
+// 6250 bit/s four-level FSK paging system. One "page" per message.
+//
+//   address              int    22-bit local address
+//   initial_address      int    its top 18 bits
+//   message_number       int
+//   category             text   tone, numeric, alphanumeric or transparent
+//   urgent               flag
+//   alert                int
+//   external             flag
+//   text                 text   numeric or alphanumeric content
+//   data                 bytes  transparent data, one bit per byte
+//   continued, truncated flag
+//   uncorrectable        int    codewords the BCH code could not fix
+//   country, operator, paging_area, batch  int  the batch's system information
+//   began_sample         int    receiver-stream index of the batch preamble
+class ErmesChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "ermes";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::ErmesConfig config;
+        config.rate = build.rate;
+        auto built = decode::ErmesDecoder::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the ermes decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new ErmesChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        end_.observe(chunk);
+        output_ = {};
+        decoder_.process_audio(chunk.samples, output_);
+        for (const decode::ErmesMessage& m : output_.messages) {
+            out.push_back(describe(m, chunk));
+        }
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>& out) override {
+        output_ = {};
+        decoder_.flush(output_);
+        for (const decode::ErmesMessage& m : output_.messages) {
+            out.push_back(describe(m, end_.at_end()));
+        }
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    ErmesChunkDecoder(dsp::SampleRate rate, decode::ErmesDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] DecodedMessage describe(const decode::ErmesMessage& m,
+                                          const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        const char* category = m.category == decode::ErmesCategory::Tone      ? "tone"
+                               : m.category == decode::ErmesCategory::Numeric ? "numeric"
+                               : m.category == decode::ErmesCategory::Alphanumeric
+                                   ? "alphanumeric"
+                                   : "transparent";
+        DecodedMessage message = stamped(kName, "page", chunk);
+        message.fields.push_back(integer_field("address", m.local_address));
+        message.fields.push_back(integer_field("initial_address", m.initial_address));
+        message.fields.push_back(integer_field("message_number", m.message_number));
+        message.fields.push_back(text_field("category", category));
+        message.fields.push_back(flag_field("urgent", m.urgent));
+        message.fields.push_back(integer_field("alert", m.alert));
+        message.fields.push_back(flag_field("external", m.external));
+        if (!m.text.empty()) {
+            message.fields.push_back(text_field("text", m.text));
+        }
+        if (!m.data.empty()) {
+            message.fields.push_back(bytes_field("data", m.data));
+        }
+        message.fields.push_back(flag_field("continued", m.continued));
+        message.fields.push_back(flag_field("truncated", m.truncated));
+        message.fields.push_back(integer_field("uncorrectable", m.uncorrectable));
+        message.fields.push_back(integer_field("country", m.system.country));
+        message.fields.push_back(integer_field("operator", m.system.op));
+        message.fields.push_back(integer_field("paging_area", m.system.paging_area));
+        message.fields.push_back(integer_field("batch", m.system.batch));
+        message.fields.push_back(integer_field(
+            "began_sample",
+            static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(m.first_sample)))));
+        message.text = std::format("{} {}: {}", m.local_address, category, m.text);
+        return message;
+    }
+
+    dsp::SampleRate rate_;
+    decode::ErmesDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
+    decode::ErmesOutput output_;
+};
+
+// ---------------------------------------------------------------------------
+// VDL Mode 4
+// ---------------------------------------------------------------------------
+//
+// Reads an nfm receiver's audio at 57600 S/s or more, core/decode/vdl4.h:
+// 19200 bit/s GFSK bursts, HDLC-framed, as octets with nothing parsed. A
+// receiver at the default 48000 is refused; ask it for 96000.
+//
+//   octets               bytes  between the flags, FCS removed
+//   phase                int    slicing phase that recovered it
+//   began_sample, ended_sample  int
+class Vdl4ChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "vdl4";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (build.rate < decode::kVdl4MinimumRate) {
+            return fail(std::format("the vdl4 decoder reads nfm audio at {} S/s or more, three "
+                                    "samples a bit, and this receiver delivers {}; ask it for "
+                                    "96000",
+                                    decode::kVdl4MinimumRate, build.rate));
+        }
+        decode::Vdl4Config config;
+        config.rate = build.rate;
+        auto built = decode::Vdl4Decoder::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the vdl4 decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new Vdl4ChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        bursts_.clear();
+        decoder_.process(chunk.samples, bursts_);
+        using namespace decoders_detail;
+        for (const decode::Vdl4Burst& b : bursts_) {
+            DecodedMessage message = stamped(kName, "burst", chunk);
+            message.fields.push_back(bytes_field("octets", b.octets));
+            message.fields.push_back(integer_field("phase", b.phase));
+            message.fields.push_back(integer_field(
+                "began_sample",
+                static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(b.first_sample)))));
+            message.fields.push_back(integer_field(
+                "ended_sample",
+                static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(b.last_sample)))));
+            message.text = std::format("{} octets", b.octets.size());
+            out.push_back(std::move(message));
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    Vdl4ChunkDecoder(dsp::SampleRate rate, decode::Vdl4Decoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    dsp::SampleRate rate_;
+    decode::Vdl4Decoder decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<decode::Vdl4Burst> bursts_;
+};
+
+// ---------------------------------------------------------------------------
+// dPMR
+// ---------------------------------------------------------------------------
+//
+// Reads the complex baseband of a p25p1 receiver, 48000 S/s in a 12.5 kHz
+// channel that holds the 6.25 kHz signal, or a raw tap up to 192000 S/s,
+// core/decode/dpmr.h, ETSI TS 102 490. The same arrangement as M17.
+//
+// kind "header" (FS1 header): called_id, own_id, header_type, call_info,
+// mode, format, version, crc_valid. kind "late_entry", once per pair of IDs
+// the payload frames' CCH spelled out with no header seen for them:
+// called_id, own_id, voice. kind "end": end_type, status, arq, crc_valid.
+// Every message carries sync_score (real), inverted (flag) and began_sample
+// (int). Voice is not decoded: dPMR's vocoder is AMBE+2.
+class DpmrChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "dpmr";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto allowed = decoders_detail::raw_tap_allowed(kName, build.mode, build.rate);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+        decode::DpmrConfig config;
+        config.rate = build.rate;
+        auto built = decode::Dpmr::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the dpmr decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new DpmrChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        frames_.clear();
+        if (auto processed = decoder_.process(iq_, frames_); !processed) {
+            return processed;
+        }
+        for (const decode::DpmrFrame& frame : frames_) {
+            describe(frame, chunk, out);
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+        last_ids_.reset();
+    }
+
+private:
+    DpmrChunkDecoder(dsp::SampleRate rate, decode::Dpmr decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] DecodedMessage start(std::string kind, const decode::DpmrFrame& frame,
+                                       const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        DecodedMessage message = stamped(kName, std::move(kind), chunk);
+        message.fields.push_back(real_field("sync_score", frame.sync_score));
+        message.fields.push_back(flag_field("inverted", frame.inverted));
+        message.fields.push_back(integer_field(
+            "began_sample",
+            static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(frame.first_sample)))));
+        return message;
+    }
+
+    void describe(const decode::DpmrFrame& frame, const DecoderChunk& chunk,
+                  std::vector<DecodedMessage>& out) {
+        using namespace decoders_detail;
+        switch (frame.kind) {
+            case decode::DpmrFrameKind::Header:
+            case decode::DpmrFrameKind::PacketHeader: {
+                if (!frame.header) {
+                    return;
+                }
+                const decode::DpmrHeaderInfo& h = *frame.header;
+                DecodedMessage message = start("header", frame, chunk);
+                message.fields.push_back(integer_field("called_id", h.called_id));
+                message.fields.push_back(integer_field("own_id", h.own_id));
+                message.fields.push_back(integer_field("header_type", h.header_type));
+                message.fields.push_back(integer_field("call_info", h.call_info));
+                message.fields.push_back(integer_field("mode", h.mode));
+                message.fields.push_back(integer_field("format", h.format));
+                message.fields.push_back(integer_field("version", h.version));
+                message.fields.push_back(flag_field("crc_valid", h.crc_valid));
+                message.text = std::format("{} > {}{}", h.own_id, h.called_id,
+                                           h.crc_valid ? "" : " (CRC failed)");
+                if (h.crc_valid) {
+                    last_ids_ = std::pair{h.called_id, h.own_id};
+                }
+                out.push_back(std::move(message));
+                return;
+            }
+            case decode::DpmrFrameKind::Payload: {
+                if (!frame.called_id || !frame.own_id) {
+                    return;
+                }
+                const std::pair ids{*frame.called_id, *frame.own_id};
+                if (last_ids_ == ids) {
+                    return;
+                }
+                last_ids_ = ids;
+                DecodedMessage message = start("late_entry", frame, chunk);
+                message.fields.push_back(integer_field("called_id", ids.first));
+                message.fields.push_back(integer_field("own_id", ids.second));
+                message.fields.push_back(flag_field("voice", frame.voice));
+                message.text = std::format("{} > {} (late entry)", ids.second, ids.first);
+                out.push_back(std::move(message));
+                return;
+            }
+            case decode::DpmrFrameKind::End: {
+                last_ids_.reset();
+                DecodedMessage message = start("end", frame, chunk);
+                if (frame.end) {
+                    message.fields.push_back(integer_field("end_type", frame.end->end_type));
+                    message.fields.push_back(integer_field("status", frame.end->status));
+                    message.fields.push_back(integer_field("arq", frame.end->arq));
+                    message.fields.push_back(flag_field("crc_valid", frame.end->crc_valid));
+                }
+                message.text = "end of transmission";
+                out.push_back(std::move(message));
+                return;
+            }
+        }
+    }
+
+    dsp::SampleRate rate_;
+    decode::Dpmr decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::DpmrFrame> frames_;
+    std::optional<std::pair<std::uint32_t, std::uint32_t>> last_ids_;
+};
+
+// ---------------------------------------------------------------------------
+// DRM
+// ---------------------------------------------------------------------------
+//
+// Reads a raw tap at exactly 48000 S/s, core/decode/drm.h, ETSI ES 201 980:
+// Digital Radio Mondiale on HF. No audio: the AAC and xHE-AAC codecs are not
+// here. Messages go out when what they report changes, not per frame.
+//
+//   kind "fac": service_id, short_id, language, audio_ca, data, occupancy,
+//     msc_mode, sdc_mode, services (int, flags as flag), mode (text, A to D),
+//     cfo_hz (real)
+//   kind "sdc": labels (text, "id:label" joined by "; "), streams, audio,
+//     applications (int), utc (text, "MJD n HH:MM", when sent)
+//   kind "text": stream (int), text (text), each new text message
+//   kind "data_unit": stream, packet_id (int), data (bytes), each Journaline
+//     or MOT data group
+class DrmChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "drm";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (build.rate != decode::kDrmSampleRate) {
+            return fail(std::format("the drm decoder reads a raw tap at exactly {} S/s and this "
+                                    "one runs at {}; DRM's OFDM timing is fixed to that rate",
+                                    decode::kDrmSampleRate, build.rate));
+        }
+        decode::DrmConfig config;
+        config.rate = build.rate;
+        auto built = decode::DrmReceiver::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the drm decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new DrmChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        decoders_detail::to_complex(chunk, iq_);
+        output_ = {};
+        receiver_.process(iq_, output_);
+        describe(chunk, out);
+        return {};
+    }
+
+    void reset() override {
+        receiver_.reset();
+        last_fac_.clear();
+        last_sdc_.clear();
+        last_text_.clear();
+    }
+
+private:
+    DrmChunkDecoder(dsp::SampleRate rate, decode::DrmReceiver receiver)
+        : rate_(rate), receiver_(std::move(receiver)) {}
+
+    void describe(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) {
+        using namespace decoders_detail;
+        for (const decode::DrmFac& fac : output_.fac) {
+            if (!fac.crc_ok) {
+                continue;
+            }
+            const decode::DrmFacChannel& c = fac.channel;
+            const decode::DrmFacService& s = fac.service;
+            const char mode = decode::drm_mode_letter(receiver_.sync().mode);
+            const std::string key = std::format("{} {} {} {} {} {} {}", s.service_id, s.short_id,
+                                                c.occupancy, c.msc_mode, c.sdc_mode, c.services,
+                                                mode);
+            if (key == last_fac_) {
+                continue;
+            }
+            last_fac_ = key;
+            DecodedMessage message = stamped(kName, "fac", chunk);
+            message.fields.push_back(integer_field("service_id", s.service_id));
+            message.fields.push_back(integer_field("short_id", s.short_id));
+            message.fields.push_back(integer_field("language", s.language));
+            message.fields.push_back(flag_field("audio_ca", s.audio_ca));
+            message.fields.push_back(flag_field("data", s.data));
+            message.fields.push_back(integer_field("occupancy", c.occupancy));
+            message.fields.push_back(integer_field("msc_mode", c.msc_mode));
+            message.fields.push_back(integer_field("sdc_mode", c.sdc_mode));
+            message.fields.push_back(integer_field("services", c.services));
+            message.fields.push_back(text_field("mode", std::string(1, mode)));
+            message.fields.push_back(real_field("cfo_hz", receiver_.sync().cfo_hz));
+            message.text = std::format("service 0x{:06X}, mode {}, occupancy {}", s.service_id,
+                                       mode, c.occupancy);
+            out.push_back(std::move(message));
+        }
+        for (const decode::DrmSdc& sdc : output_.sdc) {
+            if (!sdc.crc_ok) {
+                continue;
+            }
+            std::string labels;
+            for (const auto& [id, label] : sdc.labels) {
+                labels += std::format("{}{}:{}", labels.empty() ? "" : "; ", id, label);
+            }
+            std::string utc;
+            if (sdc.mjd && sdc.utc_hours && sdc.utc_minutes) {
+                utc = std::format("MJD {} {:02}:{:02}", *sdc.mjd, *sdc.utc_hours,
+                                  *sdc.utc_minutes);
+            }
+            const std::string key = std::format("{}|{}|{}|{}", labels, sdc.streams.size(),
+                                                sdc.audio.size(), sdc.applications.size());
+            if (key == last_sdc_) {
+                continue;
+            }
+            last_sdc_ = key;
+            DecodedMessage message = stamped(kName, "sdc", chunk);
+            message.fields.push_back(text_field("labels", labels));
+            message.fields.push_back(
+                integer_field("streams", static_cast<std::int64_t>(sdc.streams.size())));
+            message.fields.push_back(
+                integer_field("audio", static_cast<std::int64_t>(sdc.audio.size())));
+            message.fields.push_back(
+                integer_field("applications", static_cast<std::int64_t>(sdc.applications.size())));
+            if (!utc.empty()) {
+                message.fields.push_back(text_field("utc", utc));
+            }
+            message.text = labels.empty() ? std::string("service description") : labels;
+            out.push_back(std::move(message));
+        }
+        for (const decode::DrmTextMessage& t : output_.texts) {
+            std::string& last = last_text_[t.stream];
+            if (t.text == last) {
+                continue;
+            }
+            last = t.text;
+            DecodedMessage message = stamped(kName, "text", chunk);
+            message.fields.push_back(integer_field("stream", t.stream));
+            message.fields.push_back(text_field("text", t.text));
+            message.text = t.text;
+            out.push_back(std::move(message));
+        }
+        for (const decode::DrmDataUnit& u : output_.data_units) {
+            DecodedMessage message = stamped(kName, "data_unit", chunk);
+            message.fields.push_back(integer_field("stream", u.stream));
+            message.fields.push_back(integer_field("packet_id", u.packet_id));
+            message.fields.push_back(bytes_field("data", u.bytes));
+            message.text = std::format("data unit, {} bytes", u.bytes.size());
+            out.push_back(std::move(message));
+        }
+    }
+
+    dsp::SampleRate rate_;
+    decode::DrmReceiver receiver_;
+    std::vector<dsp::Complex32> iq_;
+    decode::DrmOutput output_;
+    std::string last_fac_;
+    std::string last_sdc_;
+    std::map<std::uint8_t, std::string> last_text_;
+};
+
+// ---------------------------------------------------------------------------
+// VDES ASM, terrestrial
+// ---------------------------------------------------------------------------
+//
+// Complex baseband at 38400 S/s or more, core/decode/vdes.h, ITU-R M.2092-1:
+// the 9600 symbol/s pi/4-QPSK Application Specific Messages on channels 2027
+// and 2028. "vdes" reads a raw tap up to 192000 S/s; "vdes_wideband" the
+// source's stream through a wideband tap at 38400 S/s or more. One "burst"
+// per burst whose CRC checked:
+//   link_id              int
+//   payload              bytes
+//   message_id, repeat, session_id, source_id, data_count  int  when parsed
+//   retransmit           flag
+//   asm_identifier       int    when sent
+//   application_data     bytes  when sent
+//   cfo_hz, sinr_db      real
+//   cqi                  int
+//   began_sample         int    stream index of the sync
+template <bool Wideband>
+class VdesChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = Wideband ? "vdes_wideband" : "vdes";
+    static constexpr dsp::SampleRate kMinimumRate = 38'400;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if constexpr (!Wideband) {
+            if (auto allowed = decoders_detail::raw_tap_capped(kName, build.mode, build.rate);
+                !allowed) {
+                return std::unexpected(allowed.error());
+            }
+        }
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        decode::VdesAsmConfig config;
+        config.rate = build.rate;
+        auto built = decode::VdesAsmDecoder::create(config);
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        return std::unique_ptr<ChunkDecoder>(new VdesChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        bursts_.clear();
+        decoder_.process(iq_, bursts_);
+        using namespace decoders_detail;
+        for (const decode::VdesAsmBurst& b : bursts_) {
+            if (!b.crc_ok) {
+                continue;
+            }
+            DecodedMessage message = stamped(kName, "burst", chunk);
+            message.fields.push_back(integer_field("link_id", b.link_id));
+            message.fields.push_back(bytes_field("payload", b.payload));
+            if (b.message) {
+                const decode::VdesAsmMessage& m = *b.message;
+                message.fields.push_back(integer_field("message_id", m.message_id));
+                message.fields.push_back(integer_field("repeat", m.repeat));
+                message.fields.push_back(integer_field("session_id", m.session_id));
+                message.fields.push_back(integer_field("source_id", m.source_id));
+                message.fields.push_back(integer_field("data_count", m.data_count));
+                message.fields.push_back(flag_field("retransmit", m.retransmit));
+                if (m.asm_identifier) {
+                    message.fields.push_back(integer_field("asm_identifier", *m.asm_identifier));
+                }
+                if (m.application_data) {
+                    message.fields.push_back(bytes_field("application_data", *m.application_data));
+                }
+                message.text = std::format("source {} message {}, {} bytes", m.source_id,
+                                           m.message_id, b.payload.size());
+            } else {
+                message.text = std::format("link {}, {} bytes", b.link_id, b.payload.size());
+            }
+            message.fields.push_back(real_field("cfo_hz", b.cfo_hz));
+            message.fields.push_back(real_field("sinr_db", b.sinr_db));
+            message.fields.push_back(integer_field("cqi", b.cqi));
+            message.fields.push_back(integer_field(
+                "began_sample",
+                static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(b.sync_sample)))));
+            out.push_back(std::move(message));
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    VdesChunkDecoder(dsp::SampleRate rate, decode::VdesAsmDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    dsp::SampleRate rate_;
+    decode::VdesAsmDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::VdesAsmBurst> bursts_;
+};
+
+// ---------------------------------------------------------------------------
+// FUNcube
+// ---------------------------------------------------------------------------
+//
+// Reads a raw tap up to 192000 S/s, core/decode/funcube.h: the 1200 baud
+// differential BPSK telemetry of the FUNcube satellites, demodulated by
+// core/decode/psk_demod.h and decoded with the AO-40 FEC. One "frame" per
+// block whose Reed-Solomon decode succeeded:
+//   satellite_id, frame_type, sequence_number, reboot_count  int
+//   content              text   whole_orbit, high_resolution, fitter_message
+//                               or unknown
+//   battery_voltage, total_photo_current, total_system_current  int  raw
+//   in_eclipse, in_safe_mode  flag
+//   corrected            int    symbols Reed-Solomon corrected
+//   sync_quality, frequency_offset_hz  real
+//   octets               bytes  the 256-byte frame
+class FuncubeChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "funcube";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto allowed = decoders_detail::raw_tap_capped(kName, build.mode, build.rate);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+        decode::PskDemodConfig dc;
+        dc.rate = build.rate;
+        dc.symbol_rate = decode::kFuncubeSymbolRate;
+        dc.modulation = decode::PskModulation::Bpsk;
+        auto demod = decode::PskDemod::create(dc);
+        if (!demod) {
+            return std::unexpected(with_context(demod.error(), "building the funcube demodulator"));
+        }
+        auto built = decode::FuncubeDecoder::create();
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the funcube decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(
+            new FuncubeChunkDecoder(build.rate, std::move(*demod), std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        decoders_detail::to_complex(chunk, iq_);
+        soft_.clear();
+        for (const decode::PskSymbol& s : demod_.process(iq_)) {
+            soft_.push_back(s.soft[0]);
+        }
+        frames_.clear();
+        decoder_.push(soft_, frames_);
+        using namespace decoders_detail;
+        for (const decode::FuncubeFrame& f : frames_) {
+            const char* content = f.content == decode::FuncubeContent::WholeOrbit ? "whole_orbit"
+                                  : f.content == decode::FuncubeContent::HighResolution
+                                      ? "high_resolution"
+                                  : f.content == decode::FuncubeContent::FitterMessage
+                                      ? "fitter_message"
+                                      : "unknown";
+            const decode::FuncubeRealTime& rt = f.real_time;
+            DecodedMessage message = stamped(kName, "frame", chunk);
+            message.fields.push_back(integer_field("satellite_id", f.satellite_id));
+            message.fields.push_back(integer_field("frame_type", f.frame_type));
+            message.fields.push_back(text_field("content", content));
+            message.fields.push_back(integer_field("sequence_number", rt.sequence_number));
+            message.fields.push_back(integer_field("reboot_count", rt.reboot_count));
+            message.fields.push_back(integer_field("battery_voltage", rt.battery_voltage));
+            message.fields.push_back(integer_field("total_photo_current", rt.total_photo_current));
+            message.fields.push_back(
+                integer_field("total_system_current", rt.total_system_current));
+            message.fields.push_back(flag_field("in_eclipse", rt.in_eclipse));
+            message.fields.push_back(flag_field("in_safe_mode", rt.in_safe_mode));
+            message.fields.push_back(integer_field(
+                "corrected", static_cast<std::int64_t>(f.corrected[0] + f.corrected[1])));
+            message.fields.push_back(real_field("sync_quality", f.sync_quality));
+            message.fields.push_back(real_field("frequency_offset_hz", demod_.frequency_offset_hz()));
+            message.fields.push_back(bytes_field(
+                "octets", std::vector<std::uint8_t>(f.octets.begin(), f.octets.end())));
+            message.text = std::format("satellite {} frame {} ({}), sequence {}", f.satellite_id,
+                                       f.frame_type, content, rt.sequence_number);
+            out.push_back(std::move(message));
+        }
+        return {};
+    }
+
+    void reset() override {
+        demod_.reset();
+        decoder_.reset();
+    }
+
+private:
+    FuncubeChunkDecoder(dsp::SampleRate rate, decode::PskDemod demod,
+                        decode::FuncubeDecoder decoder)
+        : rate_(rate), demod_(std::move(demod)), decoder_(std::move(decoder)) {}
+
+    dsp::SampleRate rate_;
+    decode::PskDemod demod_;
+    decode::FuncubeDecoder decoder_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<float> soft_;
+    std::vector<decode::FuncubeFrame> frames_;
+};
+
+// ---------------------------------------------------------------------------
+// Cospas-Sarsat 406 MHz
+// ---------------------------------------------------------------------------
+//
+// Reads a raw tap up to 192000 S/s, core/decode/cospas_sarsat.h, C/S T.001:
+// first-generation 406 MHz distress beacons. One "beacon" per burst whose
+// BCH checked. Reported, nothing more: a decoded beacon is not an alert to
+// the rescue system.
+//
+//   hex_id               text   the 15-character beacon ID
+//   protocol             text   T.001's protocol name
+//   country_code         int
+//   long_message, self_test, user_protocol  flag
+//   identity             text   as the protocol encodes it
+//   mmsi, aircraft_address, homing  int  when the protocol carries them
+//   latitude, longitude  real   when encoded
+//   frequency_offset_hz, bit_rate  real
+//   bits                 bytes  one bit per byte, bit 1 first
+//   began_sample         int    stream index of the carrier's start
+class CospasChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "cospas_sarsat";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto allowed = decoders_detail::raw_tap_capped(kName, build.mode, build.rate);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+        decode::CsDecoderConfig config;
+        config.rate = build.rate;
+        auto built = decode::CsDecoder::create(config);
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), "building the cospas_sarsat decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new CospasChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        bursts_.clear();
+        decoder_.push(iq_, bursts_);
+        using namespace decoders_detail;
+        for (const decode::CsBurst& b : bursts_) {
+            const decode::CsMessage& m = b.message;
+            DecodedMessage message = stamped(kName, "beacon", chunk);
+            message.fields.push_back(text_field("hex_id", m.hex_id));
+            message.fields.push_back(text_field("protocol", decode::cs_protocol_name(m.protocol)));
+            message.fields.push_back(integer_field("country_code", m.country_code));
+            message.fields.push_back(flag_field("long_message", m.long_message));
+            message.fields.push_back(flag_field("self_test", m.self_test));
+            message.fields.push_back(flag_field("user_protocol", m.user_protocol));
+            if (!m.identity.empty()) {
+                message.fields.push_back(text_field("identity", m.identity));
+            }
+            if (m.mmsi) {
+                message.fields.push_back(integer_field("mmsi", *m.mmsi));
+            }
+            if (m.aircraft_address) {
+                message.fields.push_back(integer_field("aircraft_address", *m.aircraft_address));
+            }
+            if (m.homing) {
+                message.fields.push_back(integer_field("homing", *m.homing));
+            }
+            if (m.position) {
+                message.fields.push_back(real_field("latitude", m.position->latitude));
+                message.fields.push_back(real_field("longitude", m.position->longitude));
+            }
+            message.fields.push_back(real_field("frequency_offset_hz", b.frequency_offset_hz));
+            message.fields.push_back(real_field("bit_rate", b.bit_rate));
+            message.fields.push_back(bytes_field("bits", m.bits));
+            message.fields.push_back(integer_field(
+                "began_sample", static_cast<std::int64_t>(base_.at(b.sample_position))));
+            message.text = std::format("{} {}{}{}", m.hex_id, decode::cs_protocol_name(m.protocol),
+                                       m.self_test ? ", self test" : "",
+                                       m.position ? std::format(", {:.4f} {:.4f}",
+                                                                m.position->latitude,
+                                                                m.position->longitude)
+                                                  : std::string());
+            out.push_back(std::move(message));
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    CospasChunkDecoder(dsp::SampleRate rate, decode::CsDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    dsp::SampleRate rate_;
+    decode::CsDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::CsBurst> bursts_;
+};
+
+// ===========================================================================
+// Wideband decoders. Each reads the source's own stream through
+// subscribeWidebandDecoded, whose offset mixes the signal to DC, at any rate
+// from its DecoderSpec::wideband_rate up to the source rate unless its
+// comment says otherwise.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// NOAA HRPT
+// ---------------------------------------------------------------------------
+//
+// core/decode/hrpt.h: the 665.4 kbit/s split-phase AVHRR downlink at 1698 or
+// 1707 MHz, 2.6616 to 20 MS/s. Images through the sink, one per pass, the
+// five channels side by side. One "frame" message a second (every sixth
+// minor frame): spacecraft, minor_frame, day, msec, sync_errors (int),
+// inverted, channel_3a (flag), carrier_hz (real).
+class HrptChunkDecoder final : public ImageChunkDecoder {
+public:
+    static constexpr std::string_view kName = "hrpt";
+    static constexpr dsp::SampleRate kMinimumRate = 2'661'600;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        std::unique_ptr<HrptChunkDecoder> adapter(new HrptChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail("the hrpt decoder could not be rebuilt after a reset");
+        }
+        decoders_detail::to_complex(chunk, iq_);
+        stamp_ = chunk.start;
+        decoder_->push(iq_);
+        stamp_ = chunk.start + chunk.frames();
+        using namespace decoders_detail;
+        for (const Frame& f : frames_) {
+            DecodedMessage message = stamped(kName, "frame", chunk);
+            message.fields.push_back(integer_field("spacecraft", f.spacecraft));
+            message.fields.push_back(integer_field("minor_frame", f.minor_frame));
+            message.fields.push_back(integer_field("day", f.day));
+            message.fields.push_back(integer_field("msec", f.msec));
+            message.fields.push_back(integer_field("sync_errors", f.sync_errors));
+            message.fields.push_back(flag_field("inverted", f.inverted));
+            message.fields.push_back(flag_field("channel_3a", f.channel_3a));
+            message.fields.push_back(real_field("carrier_hz", decoder_->carrier_hz()));
+            message.text = std::format("spacecraft {} day {} {} ms", f.spacecraft, f.day, f.msec);
+            out.push_back(std::move(message));
+        }
+        frames_.clear();
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>&) override {
+        close_open_images();
+        if (decoder_) {
+            decoder_->finish();
+        }
+    }
+
+    void reset() override {
+        close_open_images();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    struct Frame {
+        unsigned spacecraft = 0, minor_frame = 0, day = 0;
+        std::uint32_t msec = 0, sync_errors = 0;
+        bool inverted = false, channel_3a = false;
+    };
+
+    explicit HrptChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        decode::HrptConfig config;
+        config.sample_rate = static_cast<double>(rate_);
+        decode::HrptEvents events;
+        events.image = image_sink(rate_);
+        events.on_frame = [this](const decode::HrptFrame& f) {
+            if (f.index % 6 == 0) {
+                frames_.push_back(Frame{f.spacecraft, f.minor_frame, f.day, f.msec,
+                                        f.sync_errors, f.inverted, f.channel_3a});
+            }
+        };
+        auto built = decode::HrptDecoder::create(config, std::move(events));
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the hrpt decoder"));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<decode::HrptDecoder> decoder_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<Frame> frames_;
+};
+
+// ---------------------------------------------------------------------------
+// DAB
+// ---------------------------------------------------------------------------
+//
+// core/decode/dab.h, ETSI EN 300 401 transmission mode I. EXACTLY 2048000
+// S/s: the receiver's OFDM timing is fixed to that rate and nothing here
+// resamples, so the source must run at a whole multiple of 2.048 MS/s
+// (2.048, 4.096, 8.192) for the tap to land on it; any other rate is refused
+// in words saying so. No audio: the codecs are not here.
+//
+//   kind "ensemble", each time the FIC's picture grows or changes: eid (int),
+//     label (text), services (int), service_list (text, "SId label" joined by
+//     "; "), subchannels (int), cfo_hz (real)
+//   kind "mot_object", each MOT object reassembled: transport_id,
+//     content_type, content_subtype, body_size (int), content_name (text),
+//     body (bytes)
+class DabChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "dab";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (build.rate != decode::kDabSampleRate) {
+            return fail(std::format("the dab decoder reads exactly {} S/s and was asked for {}. "
+                                    "Open the source at a whole multiple of 2048000 S/s so the "
+                                    "wideband tap lands on it",
+                                    decode::kDabSampleRate, build.rate));
+        }
+        std::unique_ptr<DabChunkDecoder> adapter(new DabChunkDecoder(build.rate));
+        decode::DabCallbacks callbacks;
+        DabChunkDecoder* self = adapter.get();
+        callbacks.on_mot_object = [self](const decode::MotObject& o) { self->mot_.push_back(o); };
+        auto built = decode::DabReceiver::create(decode::DabReceiverConfig{}, std::move(callbacks));
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the dab decoder"));
+        }
+        adapter->receiver_.emplace(std::move(*built));
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        decoders_detail::to_complex(chunk, iq_);
+        receiver_->push(iq_);
+        using namespace decoders_detail;
+        for (const decode::MotObject& o : mot_) {
+            DecodedMessage message = stamped(kName, "mot_object", chunk);
+            message.fields.push_back(integer_field("transport_id", o.transport_id));
+            message.fields.push_back(integer_field("content_type", o.content_type));
+            message.fields.push_back(integer_field("content_subtype", o.content_subtype));
+            message.fields.push_back(
+                integer_field("body_size", static_cast<std::int64_t>(o.body_size)));
+            message.fields.push_back(text_field("content_name", o.content_name));
+            message.fields.push_back(bytes_field("body", o.body));
+            message.text = std::format("MOT {} ({} bytes)", o.content_name, o.body.size());
+            out.push_back(std::move(message));
+        }
+        mot_.clear();
+
+        const decode::DabEnsemble& e = receiver_->ensemble();
+        std::string services;
+        for (const auto& [sid, service] : e.services) {
+            services += std::format("{}{:X} {}", services.empty() ? "" : "; ", sid,
+                                    service.label ? service.label->text : std::string());
+        }
+        const std::string label = e.label ? e.label->text : std::string();
+        const std::string key = std::format("{}|{}|{}|{}", e.eid.value_or(0), label, services,
+                                            e.subchannels.size());
+        if (key != last_ensemble_ && (e.eid || !e.services.empty())) {
+            last_ensemble_ = key;
+            DecodedMessage message = stamped(kName, "ensemble", chunk);
+            message.fields.push_back(integer_field("eid", e.eid.value_or(0)));
+            message.fields.push_back(text_field("label", label));
+            message.fields.push_back(
+                integer_field("services", static_cast<std::int64_t>(e.services.size())));
+            message.fields.push_back(text_field("service_list", services));
+            message.fields.push_back(
+                integer_field("subchannels", static_cast<std::int64_t>(e.subchannels.size())));
+            message.fields.push_back(real_field("cfo_hz", receiver_->sync().cfo_hz));
+            message.text = std::format("{} (0x{:04X}): {}", label, e.eid.value_or(0), services);
+            out.push_back(std::move(message));
+        }
+        return {};
+    }
+
+    void reset() override {
+        receiver_->reset();
+        last_ensemble_.clear();
+        mot_.clear();
+    }
+
+private:
+    explicit DabChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    dsp::SampleRate rate_;
+    std::optional<decode::DabReceiver> receiver_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::MotObject> mot_;
+    std::string last_ensemble_;
+};
+
+// ---------------------------------------------------------------------------
+// Analogue television
+// ---------------------------------------------------------------------------
+//
+// core/decode/atv.h: fast-scan television luminance, each frame an image
+// through the sink, at 2 MS/s or more. atv_fm reads frequency-modulated
+// video, as amateur television on 23 cm and above is sent; atv_am reads
+// negative AM vestigial sideband, as broadcast and 70 cm amateur television
+// are. Both assume system M, 525 lines: the standard is not a field a
+// subscription can carry, and amateur television in the Americas is M.
+// No messages.
+template <bool Fm>
+class AtvChunkDecoder final : public ImageChunkDecoder {
+public:
+    static constexpr std::string_view kName = Fm ? "atv_fm" : "atv_am";
+    static constexpr dsp::SampleRate kMinimumRate = 2'000'000;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        std::unique_ptr<AtvChunkDecoder> adapter(new AtvChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>&) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!receiver_) {
+            return fail(std::format("the {} decoder could not be rebuilt after a reset", kName));
+        }
+        decoders_detail::to_complex(chunk, iq_);
+        video_.clear();
+        if constexpr (Fm) {
+            fm_->push(iq_, video_);
+        } else {
+            decode::atv_am_envelope(iq_, video_);
+        }
+        stamp_ = chunk.start;
+        receiver_->push(video_);
+        return {};
+    }
+
+    void flush(std::vector<DecodedMessage>&) override { close_open_images(); }
+
+    void reset() override {
+        close_open_images();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    explicit AtvChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        receiver_.reset();
+        decode::AtvConfig config;
+        config.standard = decode::AtvStandard::M525;
+        config.sample_rate = rate_;
+        config.inverted = !Fm;
+        const decode::ImageSink sink = image_sink(rate_);
+        decode::AtvCallbacks callbacks;
+        callbacks.on_open = sink.on_open;
+        callbacks.on_row = sink.on_row;
+        callbacks.on_close = sink.on_close;
+        auto built = decode::AtvReceiver::create(config, std::move(callbacks));
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        receiver_.emplace(std::move(*built));
+        if constexpr (Fm) {
+            fm_.emplace(rate_);
+        }
+        return {};
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<decode::AtvReceiver> receiver_;
+    std::optional<decode::AtvFmDemodulator> fm_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<float> video_;
+};
+
+// ---------------------------------------------------------------------------
+// Bluetooth Low Energy advertising
+// ---------------------------------------------------------------------------
+//
+// core/decode/ble.h, Core Specification Vol 6 Part B: LE 1M advertising
+// packets on one advertising channel, 2 MS/s or more. ble37, ble38 and ble39
+// are the three channels at 2402, 2426 and 2480 MHz; each needs its own tap
+// centred there. One "packet" per PDU whose CRC checked:
+//   pdu_type             text   adv_ind, scan_rsp and so on, or the number
+//   adv_address, target_address, scan_address, init_address  text
+//                               "AA:BB:...", most significant octet first
+//   tx_add, rx_add, ch_sel  flag
+//   local_name           text   AD type 0x08 or 0x09, when sent
+//   ad_structures        int
+//   pdu                  bytes  as received after de-whitening
+//   frequency_offset_hz, deviation_hz  real
+//   access_address_errors  int
+//   began_sample         int
+template <unsigned Channel>
+class BleChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = Channel == 37   ? "ble37"
+                                              : Channel == 38 ? "ble38"
+                                                              : "ble39";
+    static constexpr dsp::SampleRate kMinimumRate = 2'000'000;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        decode::BleConfig config;
+        config.sample_rate = build.rate;
+        config.channel_index = Channel;
+        auto built = decode::BleDecoder::create(config);
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        return std::unique_ptr<ChunkDecoder>(new BleChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        packets_.clear();
+        if (auto pushed = decoder_.push(iq_, packets_); !pushed) {
+            return pushed;
+        }
+        for (const decode::BlePacket& p : packets_) {
+            out.push_back(describe(p, chunk));
+        }
+        return {};
+    }
+
+    void reset() override {
+        if (auto rebuilt = decode::BleDecoder::create(decoder_.config()); rebuilt) {
+            decoder_ = std::move(*rebuilt);
+        }
+        base_.reset();
+    }
+
+private:
+    BleChunkDecoder(dsp::SampleRate rate, decode::BleDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] static std::string pdu_name(std::uint8_t type) {
+        switch (type) {
+            case 0b0000: return "adv_ind";
+            case 0b0001: return "adv_direct_ind";
+            case 0b0010: return "adv_nonconn_ind";
+            case 0b0011: return "scan_req";
+            case 0b0100: return "scan_rsp";
+            case 0b0101: return "connect_ind";
+            case 0b0110: return "adv_scan_ind";
+            case 0b0111: return "adv_ext_ind";
+            case 0b1000: return "aux_connect_rsp";
+            case 0b1001: return "adv_decision_ind";
+            default: return std::format("{}", type);
+        }
+    }
+
+    [[nodiscard]] DecodedMessage describe(const decode::BlePacket& p,
+                                          const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        const std::string type = pdu_name(p.pdu_type);
+        DecodedMessage message = stamped(kName, "packet", chunk);
+        message.fields.push_back(text_field("pdu_type", type));
+        const std::pair<const char*, const std::optional<decode::BleAddress>*> addresses[] = {
+            {"adv_address", &p.adv_address},
+            {"target_address", &p.target_address},
+            {"scan_address", &p.scan_address},
+            {"init_address", &p.init_address},
+        };
+        for (const auto& [key, value] : addresses) {
+            if (*value) {
+                message.fields.push_back(text_field(key, hex_bytes(**value, true)));
+            }
+        }
+        message.fields.push_back(flag_field("tx_add", p.tx_add));
+        message.fields.push_back(flag_field("rx_add", p.rx_add));
+        message.fields.push_back(flag_field("ch_sel", p.ch_sel));
+        std::string name;
+        for (const decode::BleAdStructure& ad : p.ad) {
+            if (ad.type == 0x08 || ad.type == 0x09) {
+                name.assign(ad.data.begin(), ad.data.end());
+            }
+        }
+        if (!name.empty()) {
+            message.fields.push_back(text_field("local_name", name));
+        }
+        message.fields.push_back(
+            integer_field("ad_structures", static_cast<std::int64_t>(p.ad.size())));
+        message.fields.push_back(bytes_field("pdu", p.pdu));
+        message.fields.push_back(real_field("frequency_offset_hz", p.frequency_offset_hz));
+        message.fields.push_back(real_field("deviation_hz", p.deviation_hz));
+        message.fields.push_back(integer_field("access_address_errors", p.access_address_errors));
+        message.fields.push_back(integer_field(
+            "began_sample", static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(p.sample)))));
+        message.text = std::format("{} {}{}", type,
+                                   p.adv_address ? hex_bytes(*p.adv_address, true) : std::string(),
+                                   name.empty() ? std::string() : " \"" + name + "\"");
+        return message;
+    }
+
+    dsp::SampleRate rate_;
+    decode::BleDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::BlePacket> packets_;
+};
+
+// ---------------------------------------------------------------------------
+// Z-Wave
+// ---------------------------------------------------------------------------
+//
+// core/decode/zwave.h, ITU-T G.9959: zwave_r1 (9.6 kbit/s Manchester FSK),
+// zwave_r2 (40 kbit/s FSK) and zwave_r3 (100 kbit/s GFSK, configuration 3
+// frames), 1 MS/s or more. One "frame" per MPDU whose checksum or CRC
+// checked:
+//   home_id, source, destination, header_type, sequence  int
+//   ack_request, routed, low_power  flag
+//   multicast_nodes      bytes  node IDs, multicast only
+//   payload              bytes
+//   frequency_error_hz   real
+//   began_sample         int    stream index of the end of the SOF
+template <decode::ZWaveRate Rate>
+class ZWaveChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = Rate == decode::ZWaveRate::R1   ? "zwave_r1"
+                                              : Rate == decode::ZWaveRate::R2 ? "zwave_r2"
+                                                                              : "zwave_r3";
+    static constexpr dsp::SampleRate kMinimumRate = 1'000'000;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        decode::ZWaveConfig config;
+        config.sample_rate = build.rate;
+        config.rate = Rate;
+        config.layout = Rate == decode::ZWaveRate::R3 ? decode::ZWaveLayout::Config3
+                                                      : decode::ZWaveLayout::Config12;
+        auto built = decode::ZWave::create(config);
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        return std::unique_ptr<ChunkDecoder>(new ZWaveChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        frames_.clear();
+        if (auto processed = decoder_.process(iq_, frames_); !processed) {
+            return processed;
+        }
+        using namespace decoders_detail;
+        for (const decode::ZWaveFrame& f : frames_) {
+            const decode::ZWaveMpdu& m = f.mpdu;
+            DecodedMessage message = stamped(kName, "frame", chunk);
+            message.fields.push_back(integer_field("home_id", m.home_id));
+            message.fields.push_back(integer_field("source", m.source));
+            message.fields.push_back(integer_field("destination", m.destination));
+            message.fields.push_back(integer_field("header_type", m.frame_control.header_type));
+            message.fields.push_back(integer_field("sequence", m.frame_control.sequence));
+            message.fields.push_back(flag_field("ack_request", m.frame_control.ack_request));
+            message.fields.push_back(flag_field("routed", m.frame_control.routed));
+            message.fields.push_back(flag_field("low_power", m.frame_control.low_power));
+            if (!m.multicast_nodes.empty()) {
+                message.fields.push_back(bytes_field("multicast_nodes", m.multicast_nodes));
+            }
+            message.fields.push_back(bytes_field("payload", m.payload));
+            message.fields.push_back(real_field("frequency_error_hz", f.frequency_error_hz));
+            message.fields.push_back(integer_field(
+                "began_sample",
+                static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(f.sof_end_sample)))));
+            message.text = std::format("home {:08X} node {} > {}, {} bytes", m.home_id, m.source,
+                                       m.destination, m.payload.size());
+            out.push_back(std::move(message));
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    ZWaveChunkDecoder(dsp::SampleRate rate, decode::ZWave decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    dsp::SampleRate rate_;
+    decode::ZWave decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::ZWaveFrame> frames_;
+};
+
+// ---------------------------------------------------------------------------
+// EnOcean
+// ---------------------------------------------------------------------------
+//
+// core/decode/enocean.h, ISO/IEC 14543-3-10: 125 kbit/s ASK telegrams at
+// 868.3 or 902.875 MHz, 1 MS/s or more. One "telegram" per telegram whose
+// checksum or CRC checked:
+//   rorg, inner_rorg, sender_id, status, repeater_level  int
+//   destination_id       int    addressed telegrams only
+//   data                 bytes
+//   crc8, repeat         flag
+//   level                real
+//   began_sample         int
+class EnoceanChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "enocean";
+    static constexpr dsp::SampleRate kMinimumRate = 1'000'000;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        decode::EnoceanConfig config;
+        config.sample_rate = build.rate;
+        auto built = decode::EnoceanDecoder::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the enocean decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new EnoceanChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        telegrams_.clear();
+        decoder_.process(iq_, telegrams_);
+        using namespace decoders_detail;
+        for (const decode::EnoceanTelegram& t : telegrams_) {
+            DecodedMessage message = stamped(kName, "telegram", chunk);
+            message.fields.push_back(integer_field("rorg", t.rorg));
+            message.fields.push_back(integer_field("inner_rorg", t.inner_rorg));
+            message.fields.push_back(integer_field("sender_id", t.sender_id));
+            if (t.destination_id) {
+                message.fields.push_back(integer_field("destination_id", *t.destination_id));
+            }
+            message.fields.push_back(integer_field("status", t.status));
+            message.fields.push_back(integer_field("repeater_level", t.repeater_level));
+            message.fields.push_back(bytes_field("data", t.data));
+            message.fields.push_back(flag_field("crc8", t.crc8));
+            message.fields.push_back(flag_field("repeat", t.repeat));
+            message.fields.push_back(real_field("level", t.level));
+            message.fields.push_back(integer_field(
+                "began_sample",
+                static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(t.sample)))));
+            message.text = std::format("{:08X} RORG {:02X}, {} data bytes", t.sender_id, t.rorg,
+                                       t.data.size());
+            out.push_back(std::move(message));
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    EnoceanChunkDecoder(dsp::SampleRate rate, decode::EnoceanDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    dsp::SampleRate rate_;
+    decode::EnoceanDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::EnoceanTelegram> telegrams_;
+};
+
+// ---------------------------------------------------------------------------
+// DECT
+// ---------------------------------------------------------------------------
+//
+// core/decode/dect.h, ETSI EN 300 175-2 and -3: the A-field of every burst on
+// one 1.728 MHz carrier, 2.304 MS/s or more. A base sends a beacon every
+// 10 ms, so a burst goes out only when its A-field tail differs from the
+// last one with the same tail type and direction, or a second has passed.
+// kind "burst", R-CRC checked:
+//   direction            text   rfp or pp
+//   tail                 text   ct0, ct1, nt_connectionless, nt, qt, combined,
+//                               mt or pt
+//   rfpi                 int    the base's identity, NT tails
+//   qh                   int    QT header
+//   carrier_number, slot_number, rf_carriers, primary_scan_carrier  int
+//                               QT static system information
+//   frequency_hz, correlation  real
+//   began_sample         int
+class DectChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "dect";
+    static constexpr dsp::SampleRate kMinimumRate = 2'304'000;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        decode::DectConfig config;
+        config.sample_rate = build.rate;
+        auto built = decode::DectDecoder::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the dect decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new DectChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        bursts_.clear();
+        decoder_.process(iq_, bursts_);
+        for (const decode::DectBurst& b : bursts_) {
+            if (!b.crc_ok) {
+                continue;
+            }
+            const std::uint64_t at = base_.at(static_cast<std::uint64_t>(b.sample));
+            const auto key = std::pair{static_cast<unsigned>(b.polarity) * 8U +
+                                           static_cast<unsigned>(b.tail_id),
+                                       b.tail};
+            const auto seen = last_.find(key.first);
+            if (seen != last_.end() && seen->second.first == key.second &&
+                at < seen->second.second + static_cast<std::uint64_t>(rate_)) {
+                continue;
+            }
+            last_[key.first] = {key.second, at};
+            out.push_back(describe(b, at, chunk));
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+        last_.clear();
+    }
+
+private:
+    DectChunkDecoder(dsp::SampleRate rate, decode::DectDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] static std::string_view tail_name(decode::DectTail tail) {
+        switch (tail) {
+            case decode::DectTail::Ct0: return "ct0";
+            case decode::DectTail::Ct1: return "ct1";
+            case decode::DectTail::NtConnectionless: return "nt_connectionless";
+            case decode::DectTail::Nt: return "nt";
+            case decode::DectTail::Qt: return "qt";
+            case decode::DectTail::Combined: return "combined";
+            case decode::DectTail::Mt: return "mt";
+            case decode::DectTail::PtOrFirstPp: return "pt";
+        }
+        return "unknown";
+    }
+
+    [[nodiscard]] DecodedMessage describe(const decode::DectBurst& b, std::uint64_t at,
+                                          const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        DecodedMessage message = stamped(kName, "burst", chunk);
+        const bool rfp = b.polarity == decode::DectPolarity::Rfp;
+        message.fields.push_back(text_field("direction", rfp ? "rfp" : "pp"));
+        message.fields.push_back(text_field("tail", std::string(tail_name(b.tail_id))));
+        std::string line = std::format("{} {}", rfp ? "RFP" : "PP", tail_name(b.tail_id));
+        if (b.rfpi) {
+            message.fields.push_back(integer_field("rfpi", static_cast<std::int64_t>(*b.rfpi)));
+            line += std::format(" RFPI {:010X}", *b.rfpi);
+        }
+        if (b.qt) {
+            message.fields.push_back(integer_field("qh", b.qt->qh));
+            if (b.qt->static_info) {
+                const decode::DectStaticSystemInfo& s = *b.qt->static_info;
+                message.fields.push_back(integer_field("carrier_number", s.carrier_number));
+                message.fields.push_back(integer_field("slot_number", s.slot_number));
+                message.fields.push_back(integer_field("rf_carriers", s.rf_carriers));
+                message.fields.push_back(
+                    integer_field("primary_scan_carrier", s.primary_scan_carrier));
+                line += std::format(" carrier {} slot {}", s.carrier_number, s.slot_number);
+            }
+        }
+        message.fields.push_back(real_field("frequency_hz", b.frequency_hz));
+        message.fields.push_back(real_field("correlation", b.correlation));
+        message.fields.push_back(integer_field("began_sample", static_cast<std::int64_t>(at)));
+        message.text = std::move(line);
+        return message;
+    }
+
+    dsp::SampleRate rate_;
+    decode::DectDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::DectBurst> bursts_;
+    std::map<unsigned, std::pair<std::uint64_t, std::uint64_t>> last_;
+};
+
+// ---------------------------------------------------------------------------
+// GNSS navigation messages
+// ---------------------------------------------------------------------------
+//
+// core/decode/gnss_acq.h's acquisition and tracking front end and a message
+// decoder per system: gps_l1ca (IS-GPS-200 LNAV, 2.048 MS/s or more, PRNs 1
+// to 32), qzss_l1ca (the same message on PRNs 193 to 202), glonass_l1of
+// (ICD GLONASS L1OF strings, 4.096 MS/s or more, every frequency channel k)
+// and beidou_b1i (BDS-SIS-ICD B1I D1 and D2, 4 MS/s or more). The tap's
+// offset puts the signal at DC, so the decoder's own offset is zero. Each
+// search for a satellite not yet tracked costs about 2 s of a core every
+// 30 s; nothing is a position solution.
+//
+// Every system:
+//   kind "acquired"      prn, doppler_hz, code_phase_chips, peak_ratio
+//   kind "status"        every 5 s per tracked satellite: prn, cn0_db_hz,
+//                        doppler_hz, lock (flag, carrier phase), bit_sync
+//                        (flag), sample
+// GLONASS reports its frequency channel k as "channel" where the others say
+// "prn". Then, per system:
+//   gps, qzss "subframe": prn, subframe_id, tow_count, page_sv_id (int),
+//     alert, anti_spoof (flag), began_sample
+//   gps, qzss "clock": prn, week, ura_index, health, iodc (int), tgd_s,
+//     toc_s, af0, af1, af2 (real)
+//   gps, qzss, beidou "ephemeris": prn (int), toe_s, sqrt_a, e, m0_sc,
+//     delta_n_sc_s, omega0_sc, i0_sc, omega_sc, omega_dot_sc_s, idot_sc_s,
+//     cuc_rad, cus_rad, crc_m, crs_m, cic_rad, cis_rad (real); gps and qzss
+//     add iode (int)
+//   gps, qzss "almanac": sv_id, health (int), e, toa_s, sqrt_a, delta_i_sc,
+//     omega0_sc, omega_sc, m0_sc, omega_dot_sc_s, af0_s, af1 (real)
+//   gps, qzss "utc_iono": a0_s, a1, tot_s, alpha0..3, beta0..3 (real),
+//     wnt, wn_lsf, dn, dt_ls, dt_lsf (int)
+//   glonass "string": channel, number (int), check (text: clean, corrected,
+//     erased), began_sample
+//   glonass "ephemeris": channel, slot, tb_min, bn, en_days, nt_days,
+//     m_type (int), x_km, y_km, z_km, vx_km_s, vy_km_s, vz_km_s, ax_km_s2,
+//     ay_km_s2, az_km_s2, gamma_n, tau_n_s, delta_tau_n_s (real)
+//   beidou "subframe": prn, fra_id, sow, corrections (int), began_sample
+//   beidou "clock": prn, week, aodc, aode, urai (int), sat_h1 (flag), toc_s,
+//     tgd1_s, tgd2_s, a0, a1, a2, alpha0..3, beta0..3 (real)
+namespace gnss_detail {
+
+inline constexpr unsigned kStatusPeriods = 5000;
+
+inline void add_status(std::string_view decoder, const char* id_key, int id,
+                       const decode::gnss::SatelliteStatus& s, const decoders_detail::StreamBase& base,
+                       const DecoderChunk& chunk, std::vector<DecodedMessage>& out) {
+    using namespace decoders_detail;
+    DecodedMessage message = stamped(decoder, "status", chunk);
+    message.fields.push_back(integer_field(id_key, id));
+    message.fields.push_back(real_field("cn0_db_hz", s.cn0_dbhz));
+    message.fields.push_back(real_field("doppler_hz", s.doppler_hz));
+    message.fields.push_back(flag_field("lock", s.phase_locked));
+    message.fields.push_back(flag_field("bit_sync", s.bit_synced));
+    message.fields.push_back(integer_field(
+        "sample", static_cast<std::int64_t>(base.at(static_cast<std::uint64_t>(s.sample)))));
+    message.text = std::format("{} {}: {:.1f} dB-Hz, {:+.0f} Hz{}{}", id_key, id, s.cn0_dbhz,
+                               s.doppler_hz, s.phase_locked ? ", locked" : "",
+                               s.bit_synced ? ", bit sync" : "");
+    out.push_back(std::move(message));
+}
+
+inline void add_acquired(std::string_view decoder, const char* id_key, int id,
+                         const decode::gnss::AcquisitionEvent& a, const DecoderChunk& chunk,
+                         std::vector<DecodedMessage>& out) {
+    if (!a.found) {
+        return;
+    }
+    using namespace decoders_detail;
+    DecodedMessage message = stamped(decoder, "acquired", chunk);
+    message.fields.push_back(integer_field(id_key, id));
+    message.fields.push_back(real_field("doppler_hz", a.doppler_hz));
+    message.fields.push_back(real_field("code_phase_chips", a.code_phase_chips));
+    message.fields.push_back(real_field("peak_ratio", a.peak_ratio));
+    message.text = std::format("acquired {} {} at {:+.0f} Hz", id_key, id, a.doppler_hz);
+    out.push_back(std::move(message));
+}
+
+inline void add_reals(DecodedMessage& message,
+                      std::initializer_list<std::pair<const char*, double>> values) {
+    for (const auto& [key, value] : values) {
+        message.fields.push_back(decoders_detail::real_field(key, value));
+    }
+}
+
+inline void add_alpha_beta(DecodedMessage& message, const std::array<double, 4>& alpha,
+                           const std::array<double, 4>& beta) {
+    for (std::size_t i = 0; i < 4; ++i) {
+        message.fields.push_back(decoders_detail::real_field(std::format("alpha{}", i), alpha[i]));
+        message.fields.push_back(decoders_detail::real_field(std::format("beta{}", i), beta[i]));
+    }
+}
+
+}  // namespace gnss_detail
+
+template <bool Qzss>
+class GpsChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = Qzss ? "qzss_l1ca" : "gps_l1ca";
+    static constexpr dsp::SampleRate kMinimumRate = 2'048'000;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        std::unique_ptr<GpsChunkDecoder> adapter(new GpsChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail(std::format("the {} decoder could not be rebuilt after a reset", kName));
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        output_ = {};
+        decoder_->feed(iq_, output_);
+        describe(chunk, out);
+        return {};
+    }
+
+    void reset() override {
+        base_.reset();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    explicit GpsChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        decode::gnss::GpsL1caConfig config;
+        config.sample_rate = rate_;
+        config.offset_hz = 0.0;
+        config.status_periods = gnss_detail::kStatusPeriods;
+        if constexpr (Qzss) {
+            for (unsigned prn = 193; prn <= 202; ++prn) {
+                config.prns.push_back(prn);
+            }
+        }
+        auto built = decode::gnss::GpsL1caDecoder::create(std::move(config));
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    void describe(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) const {
+        using namespace decoders_detail;
+        using gnss_detail::add_reals;
+        for (const auto& a : output_.acquisitions) {
+            gnss_detail::add_acquired(kName, "prn", static_cast<int>(a.id), a, chunk, out);
+        }
+        for (const auto& s : output_.status) {
+            gnss_detail::add_status(kName, "prn", static_cast<int>(s.prn), s, base_, chunk, out);
+        }
+        for (const auto& sf : output_.subframes) {
+            DecodedMessage message = stamped(kName, "subframe", chunk);
+            message.fields.push_back(integer_field("prn", sf.prn));
+            message.fields.push_back(integer_field("subframe_id", sf.id));
+            message.fields.push_back(integer_field("tow_count", sf.tow_count));
+            message.fields.push_back(integer_field("page_sv_id", sf.page_sv_id));
+            message.fields.push_back(flag_field("alert", sf.alert));
+            message.fields.push_back(flag_field("anti_spoof", sf.anti_spoof));
+            message.fields.push_back(integer_field(
+                "began_sample",
+                static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(sf.sample)))));
+            message.text = std::format("PRN {} subframe {}, TOW {} s", sf.prn, sf.id,
+                                       static_cast<std::uint64_t>(sf.tow_count) * 6U);
+            out.push_back(std::move(message));
+        }
+        for (const auto& [prn, c] : output_.clocks) {
+            DecodedMessage message = stamped(kName, "clock", chunk);
+            message.fields.push_back(integer_field("prn", prn));
+            message.fields.push_back(integer_field("week", c.week));
+            message.fields.push_back(integer_field("ura_index", c.ura_index));
+            message.fields.push_back(integer_field("health", c.health));
+            message.fields.push_back(integer_field("iodc", c.iodc));
+            add_reals(message, {{"tgd_s", c.tgd_s}, {"toc_s", c.toc_s}, {"af0", c.af0},
+                                {"af1", c.af1}, {"af2", c.af2}});
+            message.text = std::format("PRN {} clock, week {}, health {}", prn, c.week, c.health);
+            out.push_back(std::move(message));
+        }
+        for (const auto& [prn, e] : output_.ephemerides) {
+            DecodedMessage message = stamped(kName, "ephemeris", chunk);
+            message.fields.push_back(integer_field("prn", prn));
+            message.fields.push_back(integer_field("iode", e.iode));
+            add_reals(message, {{"toe_s", e.toe_s}, {"sqrt_a", e.sqrt_a}, {"e", e.e},
+                                {"m0_sc", e.m0_sc}, {"delta_n_sc_s", e.delta_n_sc_s},
+                                {"omega0_sc", e.omega0_sc}, {"i0_sc", e.i0_sc},
+                                {"omega_sc", e.omega_sc}, {"omega_dot_sc_s", e.omega_dot_sc_s},
+                                {"idot_sc_s", e.idot_sc_s}, {"cuc_rad", e.cuc_rad},
+                                {"cus_rad", e.cus_rad}, {"crc_m", e.crc_m}, {"crs_m", e.crs_m},
+                                {"cic_rad", e.cic_rad}, {"cis_rad", e.cis_rad}});
+            message.text = std::format("PRN {} ephemeris, IODE {}", prn, e.iode);
+            out.push_back(std::move(message));
+        }
+        for (const auto& a : output_.almanacs) {
+            DecodedMessage message = stamped(kName, "almanac", chunk);
+            message.fields.push_back(integer_field("sv_id", a.sv_id));
+            message.fields.push_back(integer_field("health", a.health));
+            add_reals(message, {{"e", a.e}, {"toa_s", a.toa_s}, {"sqrt_a", a.sqrt_a},
+                                {"delta_i_sc", a.delta_i_sc}, {"omega0_sc", a.omega0_sc},
+                                {"omega_sc", a.omega_sc}, {"m0_sc", a.m0_sc},
+                                {"omega_dot_sc_s", a.omega_dot_sc_s}, {"af0_s", a.af0_s},
+                                {"af1", a.af1}});
+            message.text = std::format("almanac for SV {}", a.sv_id);
+            out.push_back(std::move(message));
+        }
+        for (const auto& u : output_.utc_iono) {
+            DecodedMessage message = stamped(kName, "utc_iono", chunk);
+            add_reals(message, {{"a0_s", u.a0_s}, {"a1", u.a1}, {"tot_s", u.tot_s}});
+            gnss_detail::add_alpha_beta(message, u.alpha, u.beta);
+            message.fields.push_back(integer_field("wnt", u.wnt));
+            message.fields.push_back(integer_field("wn_lsf", u.wn_lsf));
+            message.fields.push_back(integer_field("dn", u.dn));
+            message.fields.push_back(integer_field("dt_ls", u.dt_ls));
+            message.fields.push_back(integer_field("dt_lsf", u.dt_lsf));
+            message.text = std::format("UTC: leap seconds {}", u.dt_ls);
+            out.push_back(std::move(message));
+        }
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<decode::gnss::GpsL1caDecoder> decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    decode::gnss::GpsL1caOutput output_;
+};
+
+class GlonassChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "glonass_l1of";
+    static constexpr dsp::SampleRate kMinimumRate = 4'096'000;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        std::unique_ptr<GlonassChunkDecoder> adapter(new GlonassChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail("the glonass_l1of decoder could not be rebuilt after a reset");
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        output_ = {};
+        decoder_->feed(iq_, output_);
+        describe(chunk, out);
+        return {};
+    }
+
+    void reset() override {
+        base_.reset();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    explicit GlonassChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        decode::gnss::GlonassL1Config config;
+        config.sample_rate = rate_;
+        config.k0_offset_hz = 0.0;
+        config.status_periods = gnss_detail::kStatusPeriods;
+        auto built = decode::gnss::GlonassL1Decoder::create(std::move(config));
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the glonass_l1of decoder"));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    void describe(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) const {
+        using namespace decoders_detail;
+        constexpr int kBias = static_cast<int>(decode::gnss::GlonassL1Decoder::kIdBias);
+        for (const auto& a : output_.acquisitions) {
+            gnss_detail::add_acquired(kName, "channel", static_cast<int>(a.id) - kBias, a, chunk,
+                                      out);
+        }
+        for (const auto& s : output_.status) {
+            gnss_detail::add_status(kName, "channel", static_cast<int>(s.prn) - kBias, s, base_,
+                                    chunk, out);
+        }
+        for (const auto& s : output_.strings) {
+            const char* check = s.check == decode::gnss::GlonassCheck::Clean       ? "clean"
+                                : s.check == decode::gnss::GlonassCheck::Corrected ? "corrected"
+                                                                                   : "erased";
+            DecodedMessage message = stamped(kName, "string", chunk);
+            message.fields.push_back(integer_field("channel", s.channel));
+            message.fields.push_back(integer_field("number", s.number));
+            message.fields.push_back(text_field("check", check));
+            message.fields.push_back(integer_field(
+                "began_sample",
+                static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(s.sample)))));
+            message.text = std::format("k {} string {} ({})", s.channel, s.number, check);
+            out.push_back(std::move(message));
+        }
+        for (const auto& e : output_.ephemerides) {
+            DecodedMessage message = stamped(kName, "ephemeris", chunk);
+            message.fields.push_back(integer_field("channel", e.channel));
+            message.fields.push_back(integer_field("slot", e.slot));
+            message.fields.push_back(integer_field("tb_min", e.tb_min));
+            message.fields.push_back(integer_field("bn", e.bn));
+            message.fields.push_back(integer_field("en_days", e.en_days));
+            message.fields.push_back(integer_field("nt_days", e.nt_days));
+            message.fields.push_back(integer_field("m_type", e.m_type));
+            gnss_detail::add_reals(
+                message, {{"x_km", e.pos_km[0]}, {"y_km", e.pos_km[1]}, {"z_km", e.pos_km[2]},
+                          {"vx_km_s", e.vel_km_s[0]}, {"vy_km_s", e.vel_km_s[1]},
+                          {"vz_km_s", e.vel_km_s[2]}, {"ax_km_s2", e.acc_km_s2[0]},
+                          {"ay_km_s2", e.acc_km_s2[1]}, {"az_km_s2", e.acc_km_s2[2]},
+                          {"gamma_n", e.gamma_n}, {"tau_n_s", e.tau_n_s},
+                          {"delta_tau_n_s", e.delta_tau_n_s}});
+            message.text = std::format("slot {} (k {}) ephemeris, tb {} min", e.slot, e.channel,
+                                       e.tb_min);
+            out.push_back(std::move(message));
+        }
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<decode::gnss::GlonassL1Decoder> decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    decode::gnss::GlonassL1Output output_;
+};
+
+class BeidouChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "beidou_b1i";
+    static constexpr dsp::SampleRate kMinimumRate = 4'000'000;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto floor = decoders_detail::wideband_at_least(kName, build.rate, kMinimumRate);
+            !floor) {
+            return std::unexpected(floor.error());
+        }
+        std::unique_ptr<BeidouChunkDecoder> adapter(new BeidouChunkDecoder(build.rate));
+        if (auto built = adapter->rebuild(); !built) {
+            return std::unexpected(built.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(std::move(adapter));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        if (!decoder_) {
+            return fail("the beidou_b1i decoder could not be rebuilt after a reset");
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        output_ = {};
+        decoder_->feed(iq_, output_);
+        describe(chunk, out);
+        return {};
+    }
+
+    void reset() override {
+        base_.reset();
+        static_cast<void>(rebuild());
+    }
+
+private:
+    explicit BeidouChunkDecoder(dsp::SampleRate rate) : rate_(rate) {}
+
+    [[nodiscard]] Status rebuild() {
+        decoder_.reset();
+        decode::gnss::BeidouB1iConfig config;
+        config.sample_rate = rate_;
+        config.offset_hz = 0.0;
+        config.status_periods = gnss_detail::kStatusPeriods;
+        auto built = decode::gnss::BeidouB1iDecoder::create(std::move(config));
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the beidou_b1i decoder"));
+        }
+        decoder_.emplace(std::move(*built));
+        return {};
+    }
+
+    void describe(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) const {
+        using namespace decoders_detail;
+        using gnss_detail::add_reals;
+        for (const auto& a : output_.acquisitions) {
+            gnss_detail::add_acquired(kName, "prn", static_cast<int>(a.id), a, chunk, out);
+        }
+        for (const auto& s : output_.status) {
+            gnss_detail::add_status(kName, "prn", static_cast<int>(s.prn), s, base_, chunk, out);
+        }
+        for (const auto& sf : output_.subframes) {
+            DecodedMessage message = stamped(kName, "subframe", chunk);
+            message.fields.push_back(integer_field("prn", sf.prn));
+            message.fields.push_back(integer_field("fra_id", sf.fra_id));
+            message.fields.push_back(integer_field("sow", sf.sow));
+            message.fields.push_back(integer_field("corrections", sf.corrections));
+            message.fields.push_back(integer_field(
+                "began_sample",
+                static_cast<std::int64_t>(base_.at(static_cast<std::uint64_t>(sf.sample)))));
+            message.text = std::format("PRN {} subframe {}, SOW {}", sf.prn, sf.fra_id, sf.sow);
+            out.push_back(std::move(message));
+        }
+        for (const auto& [prn, c] : output_.clocks) {
+            DecodedMessage message = stamped(kName, "clock", chunk);
+            message.fields.push_back(integer_field("prn", prn));
+            message.fields.push_back(integer_field("week", c.week));
+            message.fields.push_back(integer_field("aodc", c.aodc));
+            message.fields.push_back(integer_field("aode", c.aode));
+            message.fields.push_back(integer_field("urai", c.urai));
+            message.fields.push_back(flag_field("sat_h1", c.sat_h1));
+            add_reals(message, {{"toc_s", c.toc_s}, {"tgd1_s", c.tgd1_s}, {"tgd2_s", c.tgd2_s},
+                                {"a0", c.a0}, {"a1", c.a1}, {"a2", c.a2}});
+            gnss_detail::add_alpha_beta(message, c.alpha, c.beta);
+            message.text = std::format("PRN {} clock, week {}", prn, c.week);
+            out.push_back(std::move(message));
+        }
+        for (const auto& [prn, e] : output_.ephemerides) {
+            DecodedMessage message = stamped(kName, "ephemeris", chunk);
+            message.fields.push_back(integer_field("prn", prn));
+            add_reals(message, {{"toe_s", e.toe_s}, {"sqrt_a", e.sqrt_a}, {"e", e.e},
+                                {"m0_sc", e.m0_sc}, {"delta_n_sc_s", e.delta_n_sc_s},
+                                {"omega0_sc", e.omega0_sc}, {"i0_sc", e.i0_sc},
+                                {"omega_sc", e.omega_sc}, {"omega_dot_sc_s", e.omega_dot_sc_s},
+                                {"idot_sc_s", e.idot_sc_s}, {"cuc_rad", e.cuc_rad},
+                                {"cus_rad", e.cus_rad}, {"crc_m", e.crc_m}, {"crs_m", e.crs_m},
+                                {"cic_rad", e.cic_rad}, {"cis_rad", e.cis_rad}});
+            message.text = std::format("PRN {} ephemeris", prn);
+            out.push_back(std::move(message));
+        }
+    }
+
+    dsp::SampleRate rate_;
+    std::optional<decode::gnss::BeidouB1iDecoder> decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    decode::gnss::BeidouB1iOutput output_;
+};
+
 // ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
@@ -4129,6 +6803,143 @@ private:
          "as images a row at a time with slant corrected. Reads a usb, lsb or nfm receiver's "
          "audio",
          &SstvChunkDecoder::make, SstvChunkDecoder::kModes},
+        {FtChunkDecoder<false>::kName, DecoderInput::RealAudio,
+         "FT8, the WSJT-X 77-bit protocol: 15 s slots, 8-GFSK, LDPC (174,91), each decode with "
+         "its SNR, DT and audio frequency. Slots are timed from the wall clock. Reads a usb "
+         "receiver's audio at 12000 S/s or a multiple",
+         &FtChunkDecoder<false>::make, decoders_detail::kUsbModes},
+        {FtChunkDecoder<true>::kName, DecoderInput::RealAudio,
+         "FT4, the WSJT-X 77-bit protocol: 7.5 s slots, 4-GFSK, LDPC (174,91), each decode with "
+         "its SNR, DT and audio frequency. Slots are timed from the wall clock. Reads a usb "
+         "receiver's audio at 12000 S/s or a multiple",
+         &FtChunkDecoder<true>::make, decoders_detail::kUsbModes},
+        {AleChunkDecoder::kName, DecoderInput::RealAudio,
+         "2G ALE, MIL-STD-188-141 Appendix A: 8-FSK at 125 baud, each call or sounding with its "
+         "TO and TIS or TWAS addresses. Reads a usb receiver's audio",
+         &AleChunkDecoder::make, decoders_detail::kUsbModes},
+        {Mil110ChunkDecoder::kName, DecoderInput::RealAudio,
+         "MIL-STD-188-110 serial tone, 1800 Hz 8-PSK at 75 to 4800 bit/s, rate and interleave "
+         "from the preamble: each transmission's data bytes. Reads a usb receiver's audio",
+         &Mil110ChunkDecoder::make, decoders_detail::kUsbModes},
+        {DscHfChunkDecoder::kName, DecoderInput::RealAudio,
+         "DSC on MF and HF, ITU-R M.493-15, 100 baud at 170 Hz shift about 1700 Hz: the same "
+         "calls as dsc. Reads a usb or lsb receiver's audio",
+         &DscHfChunkDecoder::make, kSidebandModes},
+        {SitorAChunkDecoder::kName, DecoderInput::RealAudio,
+         "SITOR-A monitor, ITU-R M.476-5 ARQ: lines of text from both directions of a link, "
+         "repetitions dropped. Reads a usb or lsb receiver's audio",
+         &SitorAChunkDecoder::make, kSidebandModes},
+        {G3ruhChunkDecoder::kName, DecoderInput::RealAudio,
+         "AX.25 over G3RUH 9600 baud scrambled FSK: every frame whose FCS checks, APRS parsed as "
+         "ax25 does. Reads an nfm receiver's audio at 48000 S/s or more",
+         &G3ruhChunkDecoder::make, kFmModes},
+        {AptChunkDecoder::kName, DecoderInput::RealAudio,
+         "NOAA APT, the 2400 Hz AM subcarrier of NOAA 15, 18 and 19: images a line at a time "
+         "and each frame's channel telemetry. Reads an nfm receiver's audio",
+         &AptChunkDecoder::make, kFmModes},
+        {ErmesChunkDecoder::kName, DecoderInput::RealAudio,
+         "ERMES paging, ETS 300 133, 6250 bit/s 4-FSK: pages with address, category and "
+         "numeric or alphanumeric text. Reads an nfm receiver's audio",
+         &ErmesChunkDecoder::make, kFmModes},
+        {Vdl4ChunkDecoder::kName, DecoderInput::RealAudio,
+         "VDL Mode 4, EN 301 842-1, 19200 bit/s GFSK: bursts as octets, nothing parsed. Reads "
+         "an nfm receiver's audio at 57600 S/s or more",
+         &Vdl4ChunkDecoder::make, kFmModes},
+        {DpmrChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "dPMR, ETSI TS 102 490, 4-FSK at 2400 baud: each header's called and own IDs, late "
+         "entry from the CCH, and the end frame. Reads the complex baseband of a p25p1 receiver, "
+         "48000 S/s, or a raw tap up to 192000 S/s",
+         &DpmrChunkDecoder::make, kM17Modes},
+        {DrmChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "DRM, ETSI ES 201 980: FAC and SDC service information, text messages and data units "
+         "as they change; no audio. Reads a raw tap at exactly 48000 S/s",
+         &DrmChunkDecoder::make, decoders_detail::kRawModes},
+        {VdesChunkDecoder<false>::kName, DecoderInput::ComplexBaseband,
+         "VDES ASM, ITU-R M.2092-1, 9600 symbol/s pi/4-QPSK: each burst whose CRC checks. Reads "
+         "a raw tap from 38400 up to 192000 S/s",
+         &VdesChunkDecoder<false>::make, decoders_detail::kRawModes},
+        {VdesChunkDecoder<true>::kName, DecoderInput::ComplexBaseband,
+         "VDES ASM, ITU-R M.2092-1, as vdes, on the source's stream through a wideband tap at "
+         "38400 S/s or more",
+         &VdesChunkDecoder<true>::make, {}, 38'400},
+        {FuncubeChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "FUNcube telemetry, 1200 baud differential BPSK with AO-40 FEC: each frame's "
+         "satellite, type and real-time power and status values. Reads a raw tap up to 192000 "
+         "S/s",
+         &FuncubeChunkDecoder::make, decoders_detail::kRawModes},
+        {CospasChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "Cospas-Sarsat 406 MHz first-generation beacons, C/S T.001: hex ID, protocol, "
+         "country, identity and encoded position. Reads a raw tap up to 192000 S/s",
+         &CospasChunkDecoder::make, decoders_detail::kRawModes},
+        {HrptChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "NOAA HRPT, 665.4 kbit/s split-phase AVHRR: images of all five channels and a frame "
+         "message a second. Reads a wideband tap at 2661600 S/s or more",
+         &HrptChunkDecoder::make, {}, HrptChunkDecoder::kMinimumRate},
+        {DabChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "DAB, EN 300 401 mode I: the ensemble and its services from the FIC, and MOT objects; "
+         "no audio. Reads a wideband tap at exactly 2048000 S/s, so the source must run at a "
+         "whole multiple of it",
+         &DabChunkDecoder::make, {}, decode::kDabSampleRate},
+        {AtvChunkDecoder<true>::kName, DecoderInput::ComplexBaseband,
+         "Analogue FM television, system M 525 lines: each frame's luminance as an image. Reads "
+         "a wideband tap at 2000000 S/s or more",
+         &AtvChunkDecoder<true>::make, {}, AtvChunkDecoder<true>::kMinimumRate},
+        {AtvChunkDecoder<false>::kName, DecoderInput::ComplexBaseband,
+         "Analogue negative-AM television, system M 525 lines: each frame's luminance as an "
+         "image. Reads a wideband tap at 2000000 S/s or more",
+         &AtvChunkDecoder<false>::make, {}, AtvChunkDecoder<false>::kMinimumRate},
+        {BleChunkDecoder<37>::kName, DecoderInput::ComplexBaseband,
+         "Bluetooth LE advertising on channel 37, 2402 MHz, Core Vol 6 Part B: each PDU whose "
+         "CRC checks, with its addresses and local name. Reads a wideband tap at 2000000 S/s or "
+         "more",
+         &BleChunkDecoder<37>::make, {}, BleChunkDecoder<37>::kMinimumRate},
+        {BleChunkDecoder<38>::kName, DecoderInput::ComplexBaseband,
+         "Bluetooth LE advertising on channel 38, 2426 MHz, as ble37. Reads a wideband tap at "
+         "2000000 S/s or more",
+         &BleChunkDecoder<38>::make, {}, BleChunkDecoder<38>::kMinimumRate},
+        {BleChunkDecoder<39>::kName, DecoderInput::ComplexBaseband,
+         "Bluetooth LE advertising on channel 39, 2480 MHz, as ble37. Reads a wideband tap at "
+         "2000000 S/s or more",
+         &BleChunkDecoder<39>::make, {}, BleChunkDecoder<39>::kMinimumRate},
+        {ZWaveChunkDecoder<decode::ZWaveRate::R1>::kName, DecoderInput::ComplexBaseband,
+         "Z-Wave R1, ITU-T G.9959, 9.6 kbit/s: each MPDU whose checksum checks, with home ID, "
+         "nodes and payload. Reads a wideband tap at 1000000 S/s or more",
+         &ZWaveChunkDecoder<decode::ZWaveRate::R1>::make, {}, 1'000'000},
+        {ZWaveChunkDecoder<decode::ZWaveRate::R2>::kName, DecoderInput::ComplexBaseband,
+         "Z-Wave R2, ITU-T G.9959, 40 kbit/s, as zwave_r1. Reads a wideband tap at 1000000 S/s "
+         "or more",
+         &ZWaveChunkDecoder<decode::ZWaveRate::R2>::make, {}, 1'000'000},
+        {ZWaveChunkDecoder<decode::ZWaveRate::R3>::kName, DecoderInput::ComplexBaseband,
+         "Z-Wave R3, ITU-T G.9959, 100 kbit/s, as zwave_r1 with a CRC-16. Reads a wideband tap "
+         "at 1000000 S/s or more",
+         &ZWaveChunkDecoder<decode::ZWaveRate::R3>::make, {}, 1'000'000},
+        {EnoceanChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "EnOcean, ISO/IEC 14543-3-10, 125 kbit/s ASK: each telegram with sender ID, RORG and "
+         "data. Reads a wideband tap at 1000000 S/s or more",
+         &EnoceanChunkDecoder::make, {}, EnoceanChunkDecoder::kMinimumRate},
+        {DectChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "DECT, EN 300 175: A-field tails of one carrier's bursts, RFPI and system information, "
+         "repeats suppressed for a second. Reads a wideband tap at 2304000 S/s or more",
+         &DectChunkDecoder::make, {}, DectChunkDecoder::kMinimumRate},
+        {GpsChunkDecoder<false>::kName, DecoderInput::ComplexBaseband,
+         "GPS L1 C/A LNAV, IS-GPS-200: per-satellite C/N0 and Doppler, subframes, clock, "
+         "ephemeris, almanac and UTC; no position. Searching costs about 2 s of a core every "
+         "30 s. Reads a wideband tap at 2048000 S/s or more",
+         &GpsChunkDecoder<false>::make, {}, 2'048'000},
+        {GpsChunkDecoder<true>::kName, DecoderInput::ComplexBaseband,
+         "QZSS L1 C/A, IS-QZSS-PNT-006, as gps_l1ca on PRNs 193 to 202. Searching costs about "
+         "2 s of a core every 30 s. Reads a wideband tap at 2048000 S/s or more",
+         &GpsChunkDecoder<true>::make, {}, 2'048'000},
+        {GlonassChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "GLONASS L1OF, every frequency channel: per-satellite C/N0 and Doppler, navigation "
+         "strings and immediate ephemeris; no position. Searching costs about 2 s of a core "
+         "every 30 s. Reads a wideband tap at 4096000 S/s or more",
+         &GlonassChunkDecoder::make, {}, GlonassChunkDecoder::kMinimumRate},
+        {BeidouChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "BeiDou B1I D1 and D2: per-satellite C/N0 and Doppler, subframes, clock and "
+         "ephemeris; no position. Searching costs about 2 s of a core every 30 s. Reads a "
+         "wideband tap at 4000000 S/s or more",
+         &BeidouChunkDecoder::make, {}, BeidouChunkDecoder::kMinimumRate},
     };
     return kRegistry;
 }

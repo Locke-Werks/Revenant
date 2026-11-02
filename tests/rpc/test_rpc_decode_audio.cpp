@@ -973,7 +973,9 @@ TEST_CASE("the audio decoders are listed with the input they read", "[gpu][rpc][
         }
     }
     CHECK(audio == std::set<std::string>{"rtty", "ax25", "pocsag", "sitor_b", "navtex", "psk31",
-                                         "psk63", "qpsk31", "cw", "ais", "dsc", "sstv"});
+                                         "psk63", "qpsk31", "cw", "ais", "dsc", "sstv",
+                                         "ft8", "ft4", "ale_2g", "mil110", "dsc_hf", "sitor_a",
+                                         "g3ruh", "apt", "ermes", "vdl4"});
 }
 
 TEST_CASE("an audio decoder on the wrong receiver is refused naming the mode it needs",
@@ -1969,6 +1971,37 @@ std::vector<decode::DscCall> dsc_calls() {
     return Capture{"dsc_nfm", std::move(signal), rpc::Demod::Nfm, kVhfCentre};
 }
 
+// The same calls on MF and HF: 100 baud at 1615 and 1785 Hz in the audio of
+// a usb receiver, M.493-15 clause 1.3.1, with no pre-emphasis.
+[[nodiscard]] Expected<Capture> dsc_hf_capture(double snr_2500_db) {
+    std::vector<std::vector<std::uint8_t>> bits;
+    for (const decode::DscCall& call : dsc_calls()) {
+        auto information = siggen::dsc_encode(call);
+        if (!information) {
+            return std::unexpected(information.error());
+        }
+        bits.push_back(siggen::dsc_bits(*information));
+    }
+    siggen::DscModConfig mod;
+    mod.rate = kFileRate;
+    mod.y_hz = decode::kDscHfYHz;
+    mod.b_hz = decode::kDscHfBHz;
+    mod.bit_rate = decode::kDscHfBitRate;
+    mod.preemphasis = false;
+    auto audio = siggen::dsc_render_audio(mod, bits);
+    if (!audio) {
+        return std::unexpected(audio.error());
+    }
+    auto signal = sideband(padded(*audio, kTailSeconds), true);
+    if (!signal) {
+        return std::unexpected(signal.error());
+    }
+    if (auto noisy = add_noise(*signal, snr_2500_db); !noisy) {
+        return std::unexpected(noisy.error());
+    }
+    return Capture{"dsc_hf_usb", std::move(*signal), rpc::Demod::Usb, kHfCentre};
+}
+
 }  // namespace
 
 TEST_CASE("AIS messages cross the wire from an nfm receiver", "[gpu][rpc][decode]") {
@@ -2061,4 +2094,21 @@ TEST_CASE("DSC calls cross the wire from an nfm receiver", "[gpu][rpc][decode]")
     }
     WARN(std::format("dsc at {} dB/2500 Hz: {} of 3 calls", kLowSnrDb, low.messages.size()));
     CHECK(low.messages.size() <= 3);
+}
+
+TEST_CASE("HF DSC calls cross the wire from a usb receiver", "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    auto capture = dsc_hf_capture(kHighSnrDb);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Run run = run_capture(*capture, "dsc_hf");
+    INFO(std::format("{} messages arrived:{}", run.messages.size(), arrived(run)));
+    check_common(run, "dsc_hf");
+    REQUIRE(run.messages.size() == 3);
+    CHECK(run.messages[0].kind == "distress_alert");
+    CHECK(integer_of(run.messages[0], "self_id") == 366123456);
+    CHECK(run.messages[1].kind == "individual");
+    CHECK(integer_of(run.messages[1], "address") == 211456780);
+    CHECK(run.messages[2].kind == "all_ships");
 }

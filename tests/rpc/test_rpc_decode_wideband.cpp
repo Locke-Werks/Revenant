@@ -126,6 +126,60 @@ TEST_CASE("a wideband decoder hears the source's stream over the wire",
     harness.client().unsubscribe_decoded(subscribed->key, "test_wideband");
 }
 
+// Every registered wideband decoder builds at its floor and at a faster tap,
+// refuses a slower one, and eats a chunk of each. DAB alone is held to its
+// one rate. The server picks the tap's rate; this is what make() has to
+// accept of whatever it picks.
+TEST_CASE("every wideband decoder builds at the rates a tap can deliver", "[rpc][decode][wideband]") {
+    std::size_t wideband = 0;
+    for (const rpc::DecoderSpec& spec : rpc::decoder_registry()) {
+        if (spec.wideband_rate == 0) {
+            continue;
+        }
+        ++wideband;
+        INFO(spec.name);
+        CHECK(spec.input == rpc::DecoderInput::ComplexBaseband);
+        const bool exact = spec.name == "dab";
+        const dsp::SampleRate floor = spec.wideband_rate;
+        const dsp::SampleRate faster = floor * 5 / 4;
+
+        CHECK_FALSE(spec.make(rpc::DecoderBuild{floor / 2, "raw"}).has_value());
+        CHECK(spec.make(rpc::DecoderBuild{faster, "raw"}).has_value() == !exact);
+
+        for (const dsp::SampleRate rate : {floor, faster}) {
+            auto built = spec.make(rpc::DecoderBuild{rate, "raw"});
+            if (exact && rate != floor) {
+                continue;
+            }
+            INFO(rate);
+            REQUIRE(built.has_value());
+            std::vector<float> iq(static_cast<std::size_t>(rate / 100) * 2, 0.0F);
+            std::vector<rpc::DecodedMessage> out;
+            CHECK((*built)->consume(rpc::DecoderChunk{iq, 2, rate, 0}, out).has_value());
+            (*built)->flush(out);
+            (*built)->reset();
+            CHECK((*built)->consume(rpc::DecoderChunk{iq, 2, rate, 0}, out).has_value());
+        }
+    }
+    CHECK(wideband >= 17);
+}
+
+TEST_CASE("the raw-tap decoders take the rates they say", "[rpc][decode]") {
+    const auto builds = [](std::string_view name, dsp::SampleRate rate) {
+        const rpc::DecoderSpec* spec = rpc::find_decoder(name);
+        REQUIRE(spec != nullptr);
+        return spec->make(rpc::DecoderBuild{rate, "raw"}).has_value();
+    };
+    CHECK(builds("drm", 48'000));
+    CHECK_FALSE(builds("drm", 96'000));
+    for (const std::string_view name : {"dpmr", "vdes", "funcube", "cospas_sarsat"}) {
+        INFO(name);
+        CHECK(builds(name, 48'000));
+        CHECK_FALSE(builds(name, 384'000));
+    }
+    CHECK_FALSE(builds("vdes", 24'000));
+}
+
 TEST_CASE("a wideband decoder is refused on a receiver, and a receiver decoder on a tap",
           "[gpu][rpc][decode][wideband]") {
     REVENANT_NEEDS_GPU();
