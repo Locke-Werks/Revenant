@@ -113,6 +113,7 @@ add_library(revenant_core STATIC
     decode/cw.cpp
     decode/dmr.cpp
     decode/dsc.cpp
+    decode/dsc_hf.cpp
     decode/dmr_codes.cpp
     decode/dpmr.cpp
     decode/dstar.cpp
@@ -184,6 +185,7 @@ add_library(revenant_core STATIC
     dsp/synth/dmr_mod.cpp
     dsp/synth/dpmr_mod.cpp
     dsp/synth/dsc_mod.cpp
+    dsp/synth/dsc_hf_mod.cpp
     dsp/synth/dv_mod.cpp
     dsp/synth/fsk_mod.cpp
     dsp/synth/m17_mod.cpp
