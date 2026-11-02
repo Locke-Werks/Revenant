@@ -125,6 +125,7 @@ add_library(revenant_core STATIC
     decode/wsjt77.cpp
     decode/ft_ldpc.cpp
     decode/ft8.cpp
+    decode/ft4.cpp
     decode/dv_phy.cpp
     decode/fs1016.cpp
     decode/fsk.cpp
