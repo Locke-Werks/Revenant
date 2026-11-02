@@ -121,6 +121,7 @@ add_library(revenant_core STATIC
     decode/ax25.cpp
     decode/ble.cpp
     decode/bch.cpp
+    decode/beidou_b1i.cpp
     decode/crc.cpp
     decode/dab.cpp
     decode/cvsd.cpp
@@ -149,6 +150,9 @@ add_library(revenant_core STATIC
     decode/ermes.cpp
     decode/fsk.cpp
     decode/funcube.cpp
+    decode/glonass_l1.cpp
+    decode/gnss_acq.cpp
+    decode/gps_lnav.cpp
     decode/fx25.cpp
     decode/g3ruh.cpp
     decode/il2p.cpp
@@ -221,6 +225,7 @@ add_library(revenant_core STATIC
     dsp/synth/atv_mod.cpp
     dsp/synth/vdes_mod.cpp
     dsp/synth/cospas_sarsat_mod.cpp
+    dsp/synth/beidou_mod.cpp
     dsp/synth/channel.cpp
     dsp/synth/cw_mod.cpp
     dsp/synth/dab_mod.cpp
@@ -236,6 +241,9 @@ add_library(revenant_core STATIC
     dsp/synth/fsk_mod.cpp
     dsp/synth/g3ruh_mod.cpp
     dsp/synth/funcube_mod.cpp
+    dsp/synth/glonass_mod.cpp
+    dsp/synth/gnss_mod.cpp
+    dsp/synth/gps_lnav_mod.cpp
     dsp/synth/m17_mod.cpp
     dsp/synth/apt_mod.cpp
     dsp/synth/hrpt_mod.cpp
