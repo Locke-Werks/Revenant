@@ -3876,6 +3876,24 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                     continue;
                 }
 
+                // auto takes only the decoders that will run at this
+                // receiver's rate. A decoder with a floor above it, vdl4 at
+                // 57.6 kS/s on a 48 kHz nfm receiver, would otherwise be
+                // attached, refuse its first chunk and mark a clean run as
+                // faulted. Asked for by name it is still attached, so the
+                // refusal reaches the operator who asked.
+                if (name == "auto") {
+                    auto status = eng.vrx_status(receivers[i].id);
+                    const dsp::SampleRate rate =
+                        !status ? 0
+                        : complex_tap ? status->demod_rate
+                                      : status->resolved_audio_rate;
+                    if (rate <= 0 ||
+                        !spec->make(rpc::DecoderBuild{.rate = rate, .mode = mode_name})) {
+                        continue;
+                    }
+                }
+
                 auto tap = std::make_shared<DecodeTap>();
                 tap->number = i + 1;
                 tap->spec = spec;
