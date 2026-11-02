@@ -134,6 +134,9 @@ add_executable(revenant_decode_tests
     test_ale_2g.cpp
     test_b2f.cpp
     test_mil110.cpp
+    test_ale_3g.cpp
+    test_mil_39tone.cpp
+    test_link11.cpp
     test_ais.cpp
     test_vdl4.cpp
     test_vdes.cpp

@@ -34,7 +34,7 @@
 // probes, the long interleaver giving 4.8 s), which is the public description
 // of that waveform; this file does not claim conformance to the STANAG text.
 // STANAG 4539 corresponds to the 3200 to 9600 bit/s medium data rate
-// waveform of Appendix C (5.3.1.3 c), which this file does not implement.
+// waveform of Appendix C (5.3.1.3 c), which mil110c.h implements.
 // 110C's Appendix C still calls itself "a non-mandatory part of
 // MIL-STD-188-110B" (C.1.2), so it is the 110B appendix carried forward;
 // docs/modes.md records the 4539 equivalence. Neither 110B nor STANAG 4539
@@ -91,6 +91,10 @@
 //     with a second-order decision-directed phase loop in front of the
 //     decision.
 //   - Max-log soft bits into a soft-decision Viterbi decoder.
+//   - Symbol timing tracked by a minimum-MSE timing loop with an integrator,
+//     so a sound card clock 100 ppm off (14 symbols of slip over a minute)
+//     decodes; mil110_rx.h describes it. The baseband runs at four samples a
+//     symbol so the equaliser's T/2 taps can be read between samples.
 //
 // CLEAN ROOM
 //
@@ -107,6 +111,7 @@
 #include <vector>
 
 #include "core/decode/dv_codes.h"
+#include "core/decode/mil110_rx.h"
 #include "core/decode/viterbi_stream.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
@@ -282,6 +287,9 @@ struct Mil110Message {
     double snr_db = 0.0;
     // False when the signal was lost before an EOM.
     bool eom = false;
+    // Symbol clock error the timing loop settled on, in parts per million
+    // of the nominal 2400 symbols/s as counted in receiver samples.
+    double clock_ppm = 0.0;
     std::vector<std::uint8_t> bits;   // one per byte, as received
     std::vector<std::uint8_t> bytes;  // first bit least significant
 };
@@ -309,19 +317,12 @@ private:
     enum class State : std::uint8_t { Search, Data };
 
     void run(std::vector<Mil110Message>& messages);
-    [[nodiscard]] bool available(std::int64_t index) const;
-    [[nodiscard]] C bb(std::int64_t index) const;
     [[nodiscard]] C derot(std::int64_t index) const;
     [[nodiscard]] double detect_metric(std::int64_t pos) const;
     [[nodiscard]] bool acquire(std::int64_t pos);
-
-    // One equaliser step for symbol n (counted from the acquisition point).
-    // Returns the output after the phase loop, before descrambling.
-    [[nodiscard]] C equalise(std::int64_t n, std::vector<C>& x) const;
-    // Normalised LMS toward d, for an output y made at loop phase theta.
-    void adapt(const std::vector<C>& x, C y, C d, double theta, double mu);
-    void loop(C y, C d);
-    void push_feedback(C d);
+    [[nodiscard]] C sample(std::int64_t pos, std::size_t m) const {
+        return fe_.at(pos + mil110_rx::kSps * static_cast<std::int64_t>(m));
+    }
 
     void on_data_symbol(std::vector<Mil110Message>& messages);
     void on_set_symbol(std::vector<Mil110Message>& messages);
@@ -330,19 +331,7 @@ private:
     void finish(bool eom, std::vector<Mil110Message>& messages);
 
     Mil110Config config_;
-
-    // Front end: mixer, matched filter, resampler to 4800 S/s.
-    std::vector<float> rrc_;
-    std::vector<C> fir_hist_;
-    std::size_t fir_pos_ = 0;
-    std::int64_t in_count_ = 0;
-    double ratio_ = 2.0;  // input samples per output sample
-    std::array<C, 4> interp_{};
-    std::int64_t filt_count_ = 0;
-    std::int64_t out_count_ = 0;
-
-    std::vector<C> bb_;
-    std::int64_t bb_base_ = 0;
+    mil110_rx::FrontEnd fe_;
     std::vector<C> head_ref_;  // conjugated, scrambled segment head
 
     State state_ = State::Search;
@@ -350,22 +339,16 @@ private:
     std::int64_t trigger_ = -1;
 
     // Acquisition.
-    std::int64_t origin_ = 0;  // bb index of the acquired segment start
-    double omega_ = 0.0;       // radians per bb sample
+    std::int64_t origin_ = 0;  // baseband index of the acquired segment start
+    double omega_ = 0.0;       // radians per baseband sample
     Mil110Mode mode_{};
     std::array<std::uint8_t, 2> designators_{};
     Mil110Layout layout_{};
     std::int64_t data_start_ = 0;  // symbol index from origin_
     int count0_ = 0;               // segment count at origin_
 
-    // Equaliser and phase loop.
-    std::vector<C> x_;
-    std::vector<C> ff_;
-    std::vector<C> fb_;
-    std::vector<C> past_;  // newest first
-    double theta_ = 0.0;
-    double nu_ = 0.0;
-    double sigma2_ = 0.1;
+    mil110_rx::Equaliser eq_;
+    mil110_rx::Snapshot snap_;
     std::int64_t symbol_ = 0;  // next symbol, from origin_
 
     // Data phase.
@@ -373,22 +356,18 @@ private:
     std::vector<float> block_;
     std::size_t block_fill_ = 0;
     std::vector<std::size_t> deinterleave_;  // load index -> fetch index
-    std::vector<float> soft_;
     std::vector<float> derep_;
     std::optional<StreamingViterbi> viterbi_;
-    std::vector<std::uint8_t> decoded_;
     std::uint32_t shift_ = 0;
     std::size_t shift_count_ = 0;
     double mse_sum_ = 0.0;
     std::size_t mse_n_ = 0;
     double frame_err_ = 0.0;
-    std::size_t frame_known_ = 0;
     int bad_frames_ = 0;
     std::vector<std::uint8_t> probe_;
     struct SetSymbol {
-        std::vector<C> x;
+        mil110_rx::Snapshot s;
         C y{};
-        double theta = 0.0;
     };
     std::vector<SetSymbol> set_;
     std::size_t set_index_ = 0;
