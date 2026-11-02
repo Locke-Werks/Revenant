@@ -52,6 +52,28 @@ std::vector<float> two_path(const std::vector<float>& x, dsp::SampleRate rate) {
     return y;
 }
 
+// A sound card whose clock runs ppm fast: audio rendered at 48000 S/s read
+// back at 9600 (1 + ppm) S/s, by cubic interpolation, which is close to exact
+// at five times oversampling.
+std::vector<float> sound_card(const std::vector<float>& x48k, double ppm) {
+    const double step = 5.0 / (1.0 + ppm * 1e-6);
+    std::vector<float> y;
+    y.reserve(static_cast<std::size_t>(static_cast<double>(x48k.size()) / step) + 1);
+    for (double t = 1.0; t + 2.0 < static_cast<double>(x48k.size()); t += step) {
+        const auto i = static_cast<std::size_t>(t);
+        const double mu = t - static_cast<double>(i);
+        const double a = x48k[i - 1];
+        const double b = x48k[i];
+        const double c = x48k[i + 1];
+        const double d = x48k[i + 2];
+        y.push_back(static_cast<float>(-mu * (mu - 1) * (mu - 2) / 6 * a +
+                                       (mu + 1) * (mu - 1) * (mu - 2) / 2 * b -
+                                       (mu + 1) * mu * (mu - 2) / 2 * c +
+                                       (mu + 1) * mu * (mu - 1) / 6 * d));
+    }
+    return y;
+}
+
 std::vector<std::uint8_t> random_bits(std::size_t n, std::uint32_t seed) {
     std::mt19937 rng(seed);
     std::vector<std::uint8_t> b(n);
@@ -338,6 +360,35 @@ TEST_CASE("MIL-STD-188-110C serial tone BER sweep", "[.mil110-sweep]") {
             }
             WARN("MIL-110 " << rate_name(r) << (mp ? " two-path" : " AWGN") << line);
         }
+    }
+}
+
+TEST_CASE("MIL-STD-188-110C serial tone tracks a sound card clock offset", "[mil110]") {
+    // 60 s of 2400 bit/s with the receiver's clock 100 ppm off either way:
+    // 14 symbols of slip by the end, which an untracked receiver loses
+    // within the first few seconds.
+    const Mil110Mode mode{Mil110Rate::Bps2400, Mil110Interleave::Short};
+    const auto bits = random_bits(2400 * 60, 2024);
+    siggen::Mil110ModConfig mc;
+    mc.rate = 48000;
+    mc.offset_hz = 10.0;
+    mc.lead_in_samples = 12000;
+    mc.tail_samples = 12000;
+    auto audio = siggen::mil110_render_bits(mc, mode, bits);
+    REQUIRE(audio.has_value());
+    for (const double ppm : {100.0, -100.0}) {
+        auto slow = sound_card(*audio, ppm);
+        add_noise(slow, 12.0, mc.amplitude, kRate, 17);
+        const auto msgs = run(slow, kRate, 0);
+        REQUIRE(msgs.size() == 1);
+        const double b = ber(bits, msgs[0].bits);
+        WARN("MIL-110 2400 bit/s, 60 s, sound card " << ppm << " ppm, 12 dB: BER " << b
+                                                     << ", clock read " << msgs[0].clock_ppm
+                                                     << " ppm");
+        CHECK(msgs[0].eom);
+        CHECK(b < 1e-3);
+        // A fast receiver clock makes each symbol longer in its samples.
+        CHECK(std::abs(msgs[0].clock_ppm - ppm) < 20.0);
     }
 }
 
