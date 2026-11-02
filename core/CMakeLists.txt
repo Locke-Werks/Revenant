@@ -117,6 +117,7 @@ add_library(revenant_core STATIC
     decode/mil110.cpp
     decode/atv.cpp
     decode/cospas_sarsat.cpp
+    decode/mil_39tone.cpp
     decode/aprs.cpp
     decode/ax25.cpp
     decode/ble.cpp
@@ -230,6 +231,7 @@ add_library(revenant_core STATIC
     dsp/synth/vdes_mod.cpp
     dsp/synth/cospas_sarsat_mod.cpp
     dsp/synth/beidou_mod.cpp
+    dsp/synth/mil_39tone_mod.cpp
     dsp/synth/channel.cpp
     dsp/synth/cw_mod.cpp
     dsp/synth/dab_mod.cpp
