@@ -168,6 +168,7 @@ add_library(revenant_core STATIC
     decode/ofdm.cpp
     decode/ldpc.cpp
     decode/opulent_voice.cpp
+    decode/link11.cpp
     decode/m17.cpp
     decode/apt.cpp
     decode/hrpt.cpp
@@ -252,6 +253,7 @@ add_library(revenant_core STATIC
     dsp/synth/glonass_mod.cpp
     dsp/synth/gnss_mod.cpp
     dsp/synth/gps_lnav_mod.cpp
+    dsp/synth/link11_mod.cpp
     dsp/synth/m17_mod.cpp
     dsp/synth/apt_mod.cpp
     dsp/synth/hrpt_mod.cpp
