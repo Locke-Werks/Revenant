@@ -140,6 +140,7 @@ add_library(revenant_core STATIC
     decode/rds_groups.cpp
     decode/rtty.cpp
     decode/sitor_b.cpp
+    decode/sstv.cpp
     decode/tetra.cpp
     decode/tone_frontend.cpp
     decode/varicode.cpp
@@ -188,6 +189,7 @@ add_library(revenant_core STATIC
     dsp/synth/psk31_mod.cpp
     dsp/synth/psk_mod.cpp
     dsp/synth/rds_mod.cpp
+    dsp/synth/sstv_mod.cpp
     dsp/synth/wfm_mod.cpp
     dsp/synth/wideband.cpp
     engine/audio_egress.cpp

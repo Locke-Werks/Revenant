@@ -168,6 +168,7 @@ add_executable(revenant_decode_tests
     test_rds_groups.cpp
     test_rtty.cpp
     test_sitor_b.cpp
+    test_sstv.cpp
     test_tetra.cpp
     test_tetra_blocking.cpp
     test_vocoder_plugin.cpp
