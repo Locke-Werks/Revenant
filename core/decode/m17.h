@@ -29,8 +29,10 @@
 //
 // WHERE IT STOPS
 //
-// At the 128 stream bits. Voice in them is Codec 2, which docs/modes.md
-// covers separately, and this file does not decode it. Packet Mode, 2.9, and
+// At the 128 stream bits, except for voice: an unencrypted stream whose LSF
+// TYPE says Voice or Voice+Data (Table 3.4) is rendered to 8 kHz audio by
+// core/decode/codec2_voice.h, the linked libcodec2, laid out per Table 2.11.
+// An encrypted or scrambled stream is not rendered. Packet Mode, 2.9, and
 // BERT Mode, 2.10, are recognised by their sync bursts and not decoded;
 // BERT's case is recorded in docs/modes.md, because its PRBS9 receiver was
 // read in the specification's embedded listing and so is not written here by
@@ -69,6 +71,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/decode/codec2_voice.h"
 #include "core/decode/dv_phy.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
@@ -309,6 +312,11 @@ struct M17Frame {
     bool lsf_from_lich = false;
 
     std::optional<M17StreamFrame> stream;
+
+    // 8 kHz speech from a Stream frame's payload, 40 ms of it, when the
+    // transmission's LSF is known, unencrypted and of a voice data type.
+    // Empty otherwise.
+    std::vector<float> voice;
 };
 
 struct M17Config {
@@ -368,6 +376,10 @@ class M17 {
 
     void search(std::vector<M17Frame>& out);
     void decode_stream(std::size_t offset, M17Frame& frame);
+
+    // Picks the Codec 2 rate an LSF's TYPE field calls for, or none.
+    void select_voice(const M17Lsf& lsf);
+    void render_voice(const M17StreamFrame& stream, std::vector<float>& out);
     [[nodiscard]] double score_at(std::size_t offset, std::uint16_t word) const;
 
     // The 368 soft payload bits of the frame whose burst starts at `offset`,
@@ -409,6 +421,12 @@ class M17 {
 
     std::vector<float> last_symbols_;
     std::vector<RecoveredSymbol> recovered_;
+
+    // The voice decoder for the transmission in hand, when its LSF asks for
+    // one. Kept across transmissions of the same rate, since Codec 2 carries
+    // state only for a frame or two.
+    std::optional<Codec2Voice> voice_;
+    bool voice_active_ = false;
 };
 
 }  // namespace revenant::decode

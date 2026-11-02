@@ -131,30 +131,46 @@ inline constexpr const char* kTestVocoderPluginRefuseCreate = R"($<TARGET_FILE:r
 
 add_executable(revenant_decode_tests
     ../support/no_modal_dialogs.cpp
+    test_ale_2g.cpp
+    test_b2f.cpp
     test_ais.cpp
+    test_vdl4.cpp
+    test_asterix_cat021.cpp
     test_aprs.cpp
     test_ax25.cpp
     test_bch.cpp
+    test_ble.cpp
     test_crc.cpp
     test_fx25.cpp
+    test_g3ruh.cpp
     test_il2p.cpp
     test_cvsd.cpp
     test_cw.cpp
     test_cw_band.cpp
     test_dmr.cpp
     test_dmr_blocking.cpp
+    test_dpmr.cpp
+    test_dect.cpp
     test_dsc.cpp
+    test_dsc_hf.cpp
     test_dstar.cpp
+    test_dvbs.cpp
     test_dstar_blocking.cpp
+    test_enocean.cpp
     test_fs1016.cpp
     test_imbe.cpp
     test_lpc10.cpp
     test_navtex.cpp
     test_ofdm.cpp
     test_ldpc.cpp
+    test_opulent_voice.cpp
     test_m17.cpp
+    test_apt.cpp
+    test_hrpt.cpp
     test_m17_noise.cpp
+    test_zwave.cpp
     test_mfsk_demod.cpp
+    test_m17_voice.cpp
     test_p25_trunk.cpp
     test_p25_tsbk.cpp
     test_p25p1.cpp
@@ -167,6 +183,7 @@ add_executable(revenant_decode_tests
     test_rds_bits.cpp
     test_rds_groups.cpp
     test_rtty.cpp
+    test_sitor_a.cpp
     test_sitor_b.cpp
     test_sstv.cpp
     test_tetra.cpp
@@ -174,6 +191,9 @@ add_executable(revenant_decode_tests
     test_vocoder_plugin.cpp
     test_fano.cpp
     test_viterbi_stream.cpp
+    test_ft8.cpp
+    test_ft4.cpp
+    test_ccsds.cpp
 )
 
 target_link_libraries(revenant_decode_tests PRIVATE

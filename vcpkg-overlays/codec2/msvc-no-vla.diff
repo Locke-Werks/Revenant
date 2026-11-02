@@ -1,0 +1,354 @@
+Codec 2 1.2.0 for MSVC, whose C compiler has no variable-length arrays.
+
+Each VLA in the vocoder files becomes _alloca of the same size, on the same
+line, except levinson_durbin's two-dimensional one, which becomes a fixed
+array bounded by lpc.h's LPC_MAX_ORDER, with an assert. No behaviour changes.
+Written by Revenant against libcodec2's own source, generated mechanically at
+each site MSVC rejected; it is libcodec2's expression, modified, and stays
+under libcodec2's LGPL-2.1.
+
+diff --git a/src/codec2.c b/src/codec2.c
+index 52602e3..a10cf54 100644
+--- a/src/codec2.c
++++ b/src/codec2.c
+@@ -26,6 +26,7 @@
+   along with this program; if not, see <http://www.gnu.org/licenses/>.
+ */
+ 
++#include <malloc.h>
+ #include "codec2.h"
+ 
+ #include <assert.h>
+@@ -1452,8 +1453,8 @@ void codec2_encode_700c(struct CODEC2 *c2, unsigned char *bits,
+   }
+ 
+   int K = 20;
+-  float rate_K_vec[K], mean;
+-  float rate_K_vec_no_mean[K], rate_K_vec_no_mean_[K];
++  float *rate_K_vec = (float *)_alloca(sizeof(float) * (K)); float mean;
++  float *rate_K_vec_no_mean = (float *)_alloca(sizeof(float) * (K)); float *rate_K_vec_no_mean_ = (float *)_alloca(sizeof(float) * (K));
+ 
+   newamp1_model_to_indexes(&c2->c2const, indexes, &model, rate_K_vec,
+                            c2->rate_K_sample_freqs_kHz, K, &mean,
+@@ -1469,7 +1470,7 @@ void codec2_encode_700c(struct CODEC2 *c2, unsigned char *bits,
+     fwrite(rate_K_vec_no_mean_, K, sizeof(float), c2->fmlfeat);
+     MODEL model_;
+     memcpy(&model_, &model, sizeof(model));
+-    float rate_K_vec_[K];
++    float *rate_K_vec_ = (float *)_alloca(sizeof(float) * (K));
+     for (int k = 0; k < K; k++) rate_K_vec_[k] = rate_K_vec_no_mean_[k] + mean;
+     resample_rate_L(&c2->c2const, &model_, rate_K_vec_,
+                     c2->rate_K_sample_freqs_kHz, K);
+@@ -1513,8 +1514,8 @@ void codec2_decode_700c(struct CODEC2 *c2, short speech[],
+   indexes[3] = unpack_natural_or_gray(bits, &nbit, 6, 0);
+ 
+   int M = 4;
+-  COMP HH[M][MAX_AMP + 1];
+-  float interpolated_surface_[M][NEWAMP1_K];
++  COMP (*HH)[MAX_AMP + 1] = (COMP (*)[MAX_AMP + 1])_alloca(sizeof(COMP) * (M) * (MAX_AMP + 1));
++  float (*interpolated_surface_)[NEWAMP1_K] = (float (*)[NEWAMP1_K])_alloca(sizeof(float) * (M) * (NEWAMP1_K));
+ 
+   newamp1_indexes_to_model(
+       &c2->c2const, model, (COMP *)HH, (float *)interpolated_surface_,
+@@ -1884,7 +1885,7 @@ void codec2_load_codebook(struct CODEC2 *codec2_state, int num,
+   }
+   // fprintf(stderr, "reading newamp1vq_cb[%d] k=%d m=%d\n", num,
+   // newamp1vq_cb[num].k, newamp1vq_cb[num].m);
+-  float tmp[newamp1vq_cb[num].k * newamp1vq_cb[num].m];
++  float *tmp = (float *)_alloca(sizeof(float) * (newamp1vq_cb[num].k * newamp1vq_cb[num].m));
+   int nread =
+       fread(tmp, sizeof(float), newamp1vq_cb[num].k * newamp1vq_cb[num].m, f);
+   float *p = (float *)newamp1vq_cb[num].cb;
+diff --git a/src/lpc.c b/src/lpc.c
+index 3117a1a..a71857f 100644
+--- a/src/lpc.c
++++ b/src/lpc.c
+@@ -31,6 +31,8 @@
+ #define ALPHA 1.0
+ #define BETA 0.94
+ 
++#include <assert.h>
++#include <malloc.h>
+ #include "lpc.h"
+ 
+ #include <assert.h>
+@@ -143,7 +145,7 @@ void levinson_durbin(float R[],    /* order+1 autocorrelation coeff */
+                      float lpcs[], /* order+1 LPC's */
+                      int order     /* order of the LPC analysis */
+ ) {
+-  float a[order + 1][order + 1];
++  float a[LPC_MAX_ORDER + 1][LPC_MAX_ORDER + 1]; assert(order <= LPC_MAX_ORDER);
+   float sum, e, k;
+   int i, j; /* loop variables */
+ 
+@@ -244,7 +246,7 @@ void find_aks(float Sn[], /* Nsam samples with order sample memory */
+               float *E    /* residual energy */
+ ) {
+   float Wn[LPC_MAX_N]; /* windowed frame of Nsam speech samples */
+-  float R[order + 1];  /* order+1 autocorrelation values of Sn[] */
++  float *R = (float *)_alloca(sizeof(float) * (order + 1));  /* order+1 autocorrelation values of Sn[] */
+   int i;
+ 
+   assert(Nsam < LPC_MAX_N);
+diff --git a/src/lsp.c b/src/lsp.c
+index aa7bac3..e57f080 100644
+--- a/src/lsp.c
++++ b/src/lsp.c
+@@ -28,6 +28,7 @@
+   along with this program; if not, see <http://www.gnu.org/licenses/>.
+ */
+ 
++#include <malloc.h>
+ #include "lsp.h"
+ 
+ #include <math.h>
+@@ -93,7 +94,7 @@ static float cheb_poly_eva(float *coef, float x, int order)
+ {
+   int i;
+   float *t, *u, *v, sum;
+-  float T[(order / 2) + 1];
++  float *T = (float *)_alloca(sizeof(float) * ((order / 2) + 1));
+ 
+   /* Initialise pointers */
+ 
+@@ -145,8 +146,8 @@ int lpc_to_lsp(float *a, int order, float *freq, int nb, float delta)
+   float *pt;     /* ptr used for cheb_poly_eval()
+                     whether P' or Q' 			*/
+   int roots = 0; /* number of roots found 	        */
+-  float Q[order + 1];
+-  float P[order + 1];
++  float *Q = (float *)_alloca(sizeof(float) * (order + 1));
++  float *P = (float *)_alloca(sizeof(float) * (order + 1));
+ 
+   flag = 1;
+   m = order / 2; /* order of P'(z) & Q'(z) polynimials 	*/
+@@ -262,8 +263,8 @@ void lsp_to_lpc(float *lsp, float *ak, int order)
+   int i, j;
+   float xout1, xout2, xin1, xin2;
+   float *pw, *n1, *n2, *n3, *n4 = 0;
+-  float freq[order];
+-  float Wp[(order * 4) + 2];
++  float *freq = (float *)_alloca(sizeof(float) * (order));
++  float *Wp = (float *)_alloca(sizeof(float) * ((order * 4) + 2));
+ 
+   /* convert from radians to the x=cos(w) domain */
+ 
+diff --git a/src/newamp1.c b/src/newamp1.c
+index 3ba2de0..0831be2 100644
+--- a/src/newamp1.c
++++ b/src/newamp1.c
+@@ -28,6 +28,7 @@
+ 
+ */
+ 
++#include <malloc.h>
+ #include "newamp1.h"
+ 
+ #include <assert.h>
+@@ -171,7 +172,7 @@ float rate_K_mbest_encode(int *indexes, float *x, float *xq, int ndim,
+   const float *codebook1 = newamp1vq_cb[0].cb;
+   const float *codebook2 = newamp1vq_cb[1].cb;
+   struct MBEST *mbest_stage1, *mbest_stage2;
+-  float target[ndim];
++  float *target = (float *)_alloca(sizeof(float) * (ndim));
+   int index[MBEST_STAGES];
+   float mse, tmp;
+ 
+@@ -240,7 +241,7 @@ void post_filter_newamp1(float vec[], float sample_freq_kHz[], int K,
+     and normalise.  Plenty of room for experimentation here.
+   */
+ 
+-  float pre[K];
++  float *pre = (float *)_alloca(sizeof(float) * (K));
+   float e_before = 0.0;
+   float e_after = 0.0;
+   for (k = 0; k < K; k++) {
+@@ -319,7 +320,7 @@ void interp_Wo_v(float Wo_[], int L_[], int voicing_[], float Wo1, float Wo2,
+ 
+ void resample_rate_L(C2CONST *c2const, MODEL *model, float rate_K_vec[],
+                      float rate_K_sample_freqs_kHz[], int K) {
+-  float rate_K_vec_term[K + 2], rate_K_sample_freqs_kHz_term[K + 2];
++  float *rate_K_vec_term = (float *)_alloca(sizeof(float) * (K + 2)); float *rate_K_sample_freqs_kHz_term = (float *)_alloca(sizeof(float) * (K + 2));
+   float AmdB[MAX_AMP + 1], rate_L_sample_freqs_kHz[MAX_AMP + 1];
+   int m, k;
+ 
+@@ -364,7 +365,7 @@ void determine_phase(C2CONST *c2const, COMP H[], MODEL *model, int Nfft,
+                      codec2_fft_cfg fwd_cfg, codec2_fft_cfg inv_cfg) {
+   int i, m, b;
+   int Ns = Nfft / 2 + 1;
+-  float Gdbfk[Ns], sample_freqs_kHz[Ns], phase[Ns];
++  float *Gdbfk = (float *)_alloca(sizeof(float) * (Ns)); float *sample_freqs_kHz = (float *)_alloca(sizeof(float) * (Ns)); float *phase = (float *)_alloca(sizeof(float) * (Ns));
+   float AmdB[MAX_AMP + 1], rate_L_sample_freqs_kHz[MAX_AMP + 1];
+ 
+   for (m = 1; m <= model->L; m++) {
+@@ -404,7 +405,7 @@ void determine_autoc(C2CONST *c2const, float Rk[], int order, MODEL *model,
+                      int Nfft, codec2_fft_cfg fwd_cfg, codec2_fft_cfg inv_cfg) {
+   int i, m;
+   int Ns = Nfft / 2 + 1;
+-  float Gdbfk[Ns], sample_freqs_kHz[Ns];
++  float *Gdbfk = (float *)_alloca(sizeof(float) * (Ns)); float *sample_freqs_kHz = (float *)_alloca(sizeof(float) * (Ns));
+   float AmdB[MAX_AMP + 1], rate_L_sample_freqs_kHz[MAX_AMP + 1];
+ 
+   /* interpolate in the log domain */
+@@ -422,7 +423,7 @@ void determine_autoc(C2CONST *c2const, float Rk[], int order, MODEL *model,
+   interp_para(Gdbfk, &rate_L_sample_freqs_kHz[1], &AmdB[1], model->L,
+               sample_freqs_kHz, Ns);
+ 
+-  COMP S[Nfft], R[Nfft];
++  COMP *S = (COMP *)_alloca(sizeof(COMP) * (Nfft)); COMP *R = (COMP *)_alloca(sizeof(COMP) * (Nfft));
+ 
+   /* install negative frequency components, convert to mag squared of spectrum
+    */
+@@ -599,7 +600,7 @@ void newamp1_indexes_to_model(C2CONST *c2const, MODEL model_[], COMP H[],
+                               codec2_fft_cfg fwd_cfg, codec2_fft_cfg inv_cfg,
+                               int indexes[], float user_rate_K_vec_no_mean_[],
+                               int post_filter_en) {
+-  float rate_K_vec_[K], rate_K_vec_no_mean_[K], mean_, Wo_right;
++  float *rate_K_vec_ = (float *)_alloca(sizeof(float) * (K)); float *rate_K_vec_no_mean_ = (float *)_alloca(sizeof(float) * (K)); float mean_; float Wo_right;
+   int voicing_right, k;
+   int M = 4;
+ 
+@@ -627,8 +628,8 @@ void newamp1_indexes_to_model(C2CONST *c2const, MODEL model_[], COMP H[],
+ 
+   /* interpolate 25Hz v and Wo back to 100Hz */
+ 
+-  float aWo_[M];
+-  int avoicing_[M], aL_[M], i;
++  float *aWo_ = (float *)_alloca(sizeof(float) * (M));
++  int *avoicing_ = (int *)_alloca(sizeof(int) * (M)); int *aL_ = (int *)_alloca(sizeof(int) * (M)); int i;
+ 
+   interp_Wo_v(aWo_, aL_, avoicing_, *Wo_left, Wo_right, *voicing_left,
+               voicing_right);
+diff --git a/src/nlp.c b/src/nlp.c
+index 53cf040..a6b9f82 100644
+--- a/src/nlp.c
++++ b/src/nlp.c
+@@ -25,6 +25,7 @@
+   along with this program; if not, see <http://www.gnu.org/licenses/>.
+ */
+ 
++#include <malloc.h>
+ #include "nlp.h"
+ 
+ #include "codec2_fft.h"
+@@ -252,7 +253,7 @@ float nlp(
+     m /= 2;
+     n /= 2;
+ 
+-    float Sn8k[n];
++    float *Sn8k = (float *)_alloca(sizeof(float) * (n));
+     fdmdv_16_to_8(Sn8k, &nlp->Sn16k[FDMDV_OS_TAPS_16K], n);
+ 
+     /* Square latest input samples */
+diff --git a/src/phase.c b/src/phase.c
+index dec8793..48d5cac 100644
+--- a/src/phase.c
++++ b/src/phase.c
+@@ -25,6 +25,7 @@
+   along with this program; if not,see <http://www.gnu.org/licenses/>.
+ */
+ 
++#include <malloc.h>
+ #include "phase.h"
+ 
+ #include <assert.h>
+@@ -225,7 +226,7 @@ void mag_to_phase(
+     float phase[], /* Nfft/2+1 output phase samples in radians       */
+     float Gdbfk[], /* Nfft/2+1 positive freq amplitudes samples in dB */
+     int Nfft, codec2_fft_cfg fft_fwd_cfg, codec2_fft_cfg fft_inv_cfg) {
+-  COMP Sdb[Nfft], c[Nfft], cf[Nfft], Cf[Nfft];
++  COMP *Sdb = (COMP *)_alloca(sizeof(COMP) * (Nfft)); COMP *c = (COMP *)_alloca(sizeof(COMP) * (Nfft)); COMP *cf = (COMP *)_alloca(sizeof(COMP) * (Nfft)); COMP *Cf = (COMP *)_alloca(sizeof(COMP) * (Nfft));
+   int Ns = Nfft / 2 + 1;
+   int i;
+ 
+diff --git a/src/quantise.c b/src/quantise.c
+index da1d821..1a392cb 100644
+--- a/src/quantise.c
++++ b/src/quantise.c
+@@ -24,6 +24,7 @@
+ 
+ */
+ 
++#include <malloc.h>
+ #include "quantise.h"
+ 
+ #include <assert.h>
+@@ -121,11 +122,11 @@ long quantise(const float *cb, float vec[], float w[], int k, int m, float *se)
+ 
+ void encode_lspds_scalar(int indexes[], float lsp[], int order) {
+   int i, k, m;
+-  float lsp_hz[order];
+-  float lsp__hz[order];
+-  float dlsp[order];
+-  float dlsp_[order];
+-  float wt[order];
++  float *lsp_hz = (float *)_alloca(sizeof(float) * (order));
++  float *lsp__hz = (float *)_alloca(sizeof(float) * (order));
++  float *dlsp = (float *)_alloca(sizeof(float) * (order));
++  float *dlsp_ = (float *)_alloca(sizeof(float) * (order));
++  float *wt = (float *)_alloca(sizeof(float) * (order));
+   const float *cb;
+   float se;
+ 
+@@ -162,8 +163,8 @@ void encode_lspds_scalar(int indexes[], float lsp[], int order) {
+ 
+ void decode_lspds_scalar(float lsp_[], int indexes[], int order) {
+   int i, k;
+-  float lsp__hz[order];
+-  float dlsp_[order];
++  float *lsp__hz = (float *)_alloca(sizeof(float) * (order));
++  float *dlsp_ = (float *)_alloca(sizeof(float) * (order));
+   const float *cb;
+ 
+   for (i = 0; i < order; i++) {
+@@ -230,8 +231,8 @@ int find_nearest_weighted(const float *codebook, int nb_entries, float *x,
+ 
+ void lspjmv_quantise(float *x, float *xq, int order) {
+   int i, n1, n2, n3;
+-  float err[order], err2[order], err3[order];
+-  float w[order], w2[order], w3[order];
++  float *err = (float *)_alloca(sizeof(float) * (order)); float *err2 = (float *)_alloca(sizeof(float) * (order)); float *err3 = (float *)_alloca(sizeof(float) * (order));
++  float *w = (float *)_alloca(sizeof(float) * (order)); float *w2 = (float *)_alloca(sizeof(float) * (order)); float *w3 = (float *)_alloca(sizeof(float) * (order));
+   const float *codebook1 = lsp_cbjmv[0].cb;
+   const float *codebook2 = lsp_cbjmv[1].cb;
+   const float *codebook3 = lsp_cbjmv[2].cb;
+@@ -653,8 +654,8 @@ float decode_log_Wo(C2CONST *c2const, int index, int bits) {
+ float speech_to_uq_lsps(float lsp[], float ak[], float Sn[], float w[],
+                         int m_pitch, int order) {
+   int i, roots;
+-  float Wn[m_pitch];
+-  float R[order + 1];
++  float *Wn = (float *)_alloca(sizeof(float) * (m_pitch));
++  float *R = (float *)_alloca(sizeof(float) * (order + 1));
+   float e, E;
+ 
+   e = 0.0;
+@@ -706,7 +707,7 @@ float speech_to_uq_lsps(float lsp[], float ak[], float Sn[], float w[],
+ void encode_lsps_scalar(int indexes[], float lsp[], int order) {
+   int i, k, m;
+   float wt[1];
+-  float lsp_hz[order];
++  float *lsp_hz = (float *)_alloca(sizeof(float) * (order));
+   const float *cb;
+   float se;
+ 
+@@ -739,7 +740,7 @@ void encode_lsps_scalar(int indexes[], float lsp[], int order) {
+ 
+ void decode_lsps_scalar(float lsp[], int indexes[], int order) {
+   int i, k;
+-  float lsp_hz[order];
++  float *lsp_hz = (float *)_alloca(sizeof(float) * (order));
+   const float *cb;
+ 
+   for (i = 0; i < order; i++) {
+@@ -765,8 +766,8 @@ void decode_lsps_scalar(float lsp[], int indexes[], int order) {
+ 
+ void encode_lsps_vq(int *indexes, float *x, float *xq, int order) {
+   int i, n1, n2, n3;
+-  float err[order], err2[order], err3[order];
+-  float w[order], w2[order], w3[order];
++  float *err = (float *)_alloca(sizeof(float) * (order)); float *err2 = (float *)_alloca(sizeof(float) * (order)); float *err3 = (float *)_alloca(sizeof(float) * (order));
++  float *w = (float *)_alloca(sizeof(float) * (order)); float *w2 = (float *)_alloca(sizeof(float) * (order)); float *w3 = (float *)_alloca(sizeof(float) * (order));
+   const float *codebook1 = lsp_cbjmv[0].cb;
+   const float *codebook2 = lsp_cbjmv[1].cb;
+   const float *codebook3 = lsp_cbjmv[2].cb;

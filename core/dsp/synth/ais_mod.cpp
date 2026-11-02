@@ -276,6 +276,42 @@ Expected<std::vector<std::uint8_t>> ais_encode(const decode::AisMessage& m) {
             }
             break;
         }
+        case 14: {
+            // M.1371-6 Table 61: two spare bits, then only the characters
+            // the text has, at most 968 bits of them.
+            const std::string text = m.safety_text.value_or("");
+            if (text.empty() || text.size() * 6 > 968) {
+                return fail(std::format("{} characters is not 1 to Table 61's 161", text.size()));
+            }
+            w.put(0, 2);
+            if (auto s = w.put_text(text, text.size()); !s) {
+                return std::unexpected(s.error());
+            }
+            break;
+        }
+        case 27: {
+            // M.1371-6 Table 83.
+            w.put(m.position_accuracy ? 1U : 0U, 1);
+            w.put(m.raim ? 1U : 0U, 1);
+            w.put(m.navigational_status.value_or(15), 4);
+            if (m.position) {
+                w.put_signed(
+                    std::llround(m.position->longitude * decode::kAis27PositionUnitsPerDegree), 18);
+                w.put_signed(
+                    std::llround(m.position->latitude * decode::kAis27PositionUnitsPerDegree), 17);
+            } else {
+                w.put_signed(decode::kAis27LongitudeNotAvailable, 18);
+                w.put_signed(decode::kAis27LatitudeNotAvailable, 17);
+            }
+            // Table 83: 0 to 62 knots, 62 meaning 62 or faster.
+            w.put(m.sog_tenths ? std::min<unsigned>(*m.sog_tenths / 10U, 62U)
+                               : decode::kAis27SogNotAvailable,
+                  6);
+            w.put(m.cog_tenths ? *m.cog_tenths / 10U : decode::kAis27CogNotAvailable, 9);
+            w.put(m.position_latency.value_or(true) ? 1U : 0U, 1);
+            w.put(0, 1);
+            break;
+        }
         default:
             return fail(std::format("Message {} is not one this transmitter encodes", m.message_id));
     }
@@ -330,7 +366,7 @@ Expected<std::vector<Complex32>> ais_render_packets(
     if (!(config.bandwidth_time > 0.0)) {
         return fail("an AIS transmitter needs a positive bandwidth-time product");
     }
-    const double bit_rate = decode::kAisBitRate * (1.0 + config.bit_rate_error);
+    const double bit_rate = config.bit_rate * (1.0 + config.bit_rate_error);
     const double samples_per_bit = static_cast<double>(config.rate) / bit_rate;
     if (samples_per_bit < 2.0) {
         return fail("an AIS transmitter needs at least two samples a bit");

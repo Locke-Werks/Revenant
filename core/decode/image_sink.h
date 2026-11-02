@@ -1,39 +1,50 @@
-// Where an image decoder in core/decode hands its raster, a row at a time.
+// Image output from the picture decoders: rows, plus an open and a close
+// around each image.
 //
-// The decoders here know nothing of the RPC layer. Each takes one of these
-// and calls it as the image arrives; core/rpc/decoders.h implements it on top
-// of ChunkDecoder's open_image, image_row and close_image, and a test
-// implements it on top of a vector.
-//
-// The contract is the RPC one, restated so a decoder can be written against
-// this header alone: open once, then rows of exactly width pixels (one byte
-// each for Gray, R G B for Rgb), then close once, complete or not. Rows may
-// arrive out of order and a row index may repeat with better data. A decoder
-// never opens a second image before closing the first.
+// A decoder-local interface. The engine's image RPC path adapts these three
+// callbacks; nothing here knows about it. An image is opened before its first
+// row and closed after its last, rows arrive in order from 0, and every row of
+// one image has the width and colour model given when it was opened.
 
 #pragma once
 
 #include <cstdint>
-#include <span>
-#include <string_view>
+#include <functional>
+#include <string>
+#include <vector>
 
 namespace revenant::decode {
 
-enum class ImagePixels : std::uint8_t {
-    Gray,
-    Rgb,
+struct ImageRow {
+    std::uint32_t image_id = 0;
+    std::uint32_t row = 0;
+    std::uint32_t width = 0;
+    enum Model { Gray8, Rgb888 } model = Gray8;
+    // width bytes for Gray8, 3 * width for Rgb888.
+    std::vector<std::uint8_t> bytes;
 };
 
-class ImageSink {
-public:
-    virtual ~ImageSink() = default;
+struct ImageOpen {
+    std::uint32_t image_id = 0;
+    std::uint32_t width = 0;
+    ImageRow::Model model = ImageRow::Gray8;
+    // Short human-readable name of what the image shows, e.g. "NOAA APT".
+    std::string label;
+    // Nominal rows per second, for a display that scrolls in real time.
+    double line_rate_hz = 0.0;
+};
 
-    // `start_sample` is the stream index the image began at, at the rate the
-    // decoder was built for. `line_rate_hz` is the nominal rows per second.
-    virtual void open(std::uint64_t start_sample, std::uint32_t width, ImagePixels pixels,
-                      double line_rate_hz, std::string_view mode) = 0;
-    virtual void row(std::uint32_t index, std::span<const std::uint8_t> pixels) = 0;
-    virtual void close(bool complete) = 0;
+struct ImageClose {
+    std::uint32_t image_id = 0;
+    std::uint32_t rows = 0;
+    // False when the image ended on lost signal rather than its natural end.
+    bool complete = false;
+};
+
+struct ImageSink {
+    std::function<void(const ImageOpen&)> on_open;
+    std::function<void(const ImageRow&)> on_row;
+    std::function<void(const ImageClose&)> on_close;
 };
 
 }  // namespace revenant::decode

@@ -98,12 +98,28 @@
 //
 // WHERE THIS STOPS
 //
-// At the fields of Messages 1, 2, 3, 4, 5, 18, 19, 21 and 24, and of Message
-// 11, which Table 51 lays out as Message 4. Any other message whose FCS
-// checks is reported with its message ID and its octets and nothing parsed.
-// Communication states are handed out raw. The binary messages' application
-// data, the long-range Message 27 and the satellite channels are not
-// decoded; docs/modes.md lists them.
+// At the fields of Messages 1, 2, 3, 4, 5, 14, 18, 19, 21, 24 and 27, and of
+// Message 11, which Table 51 lays out as Message 4. Any other message whose
+// FCS checks is reported with its message ID and its octets and nothing
+// parsed. Communication states are handed out raw. The binary messages'
+// application data is not decoded; docs/modes.md lists it.
+//
+// LOCATING DEVICES AND THE SATELLITE CHANNELS
+//
+// Added from M.1371-6 (02/2026) alone, read 2026-11-02 from
+// https://www.itu.int/dms_pubrec/itu-r/rec/m/R-REC-M.1371-6-202602-I!!PDF-E.pdf.
+// Annex 1 clause A1-5 names channels 75 and 76, 156.775 and 156.825 MHz, for
+// the satellite uplink, and Annex 3 clause A3-2.3.4 puts Message 27 there
+// and only there. The physical layer on them is the one above, so the
+// decoder is unchanged and only the tuning differs. Annex 7 clause A7-3.25,
+// Table 83, is Message 27. Clause A7-3.12, Table 61, is Message 14, the
+// safety related broadcast a locating device sends as "SART ACTIVE" and the
+// like, clauses A1-2.1.5.1 to A1-2.1.5.3. Annex 8 clause A8-6 gives a
+// locating device's identity as 9172T3..., so 970, 972 and 974 lead the MMSI
+// of an AIS-SART, a MOB-AIS and an EPIRB-AIS; ais_locating_device() reads
+// that. Annex 7 Table 45's navigational status 14, an active locating
+// device, is reported as sent. The burst schedule of Annex 8 is a
+// transmitter's and needs nothing here: each burst is an ordinary packet.
 //
 // CLEAN ROOM
 //
@@ -140,6 +156,11 @@ using dsp::SampleRate;
 // Table 3, PH.AIS1 and PH.AIS2: the default channels, 2087 and 2088.
 inline constexpr Hertz kAisChannel1Hz = 161'975'000;
 inline constexpr Hertz kAisChannel2Hz = 162'025'000;
+
+// M.1371-6 Annex 1 clause A1-5: channels 75 and 76, the satellite uplink,
+// which carry Message 27 only (Annex 3 clause A3-2.3.4).
+inline constexpr Hertz kAisChannel75Hz = 156'775'000;
+inline constexpr Hertz kAisChannel76Hz = 156'825'000;
 
 // Clause 2.4 and Table 3, PH.BR.
 inline constexpr double kAisBitRate = 9600.0;
@@ -188,6 +209,27 @@ inline constexpr double kAisPositionUnitsPerDegree = 600000.0;
 inline constexpr std::uint32_t kAisSogNotAvailable = 1023;
 inline constexpr std::uint32_t kAisCogNotAvailable = 3600;
 inline constexpr std::uint32_t kAisHeadingNotAvailable = 511;
+
+// M.1371-6 Annex 7 Table 83, Message 27: longitude 18 bits and latitude 17
+// in 1/10 minute, "not available" 181 and 91 degrees printed as 1A838h and
+// D548h; SOG 6 bits in knots, 63 not available; COG 9 bits in degrees, 511
+// not available.
+inline constexpr std::int32_t kAis27LongitudeNotAvailable = 0x1A838;
+inline constexpr std::int32_t kAis27LatitudeNotAvailable = 0xD548;
+inline constexpr double kAis27PositionUnitsPerDegree = 600.0;
+inline constexpr std::uint32_t kAis27SogNotAvailable = 63;
+inline constexpr std::uint32_t kAis27CogNotAvailable = 511;
+
+// M.1371-6 Annex 7 Table 45: navigational status 14, an active AIS-SART,
+// MOB-AIS or EPIRB-AIS.
+inline constexpr std::uint8_t kAisStatusLocatingDeviceActive = 14;
+
+// M.1371-6 Annex 8 clause A8-6: T3 of the identity 9172T3X4X5Y9Y10Y11Y12 is
+// 0, 2 or 4 for these three.
+enum class AisLocatingDevice : std::uint8_t { Sart, Mob, Epirb };
+
+// The device a nine-digit MMSI's leading 970, 972 or 974 names, or nothing.
+[[nodiscard]] std::optional<AisLocatingDevice> ais_locating_device(std::uint32_t mmsi);
 
 // ---------------------------------------------------------------------------
 // The receiver's own choices
@@ -338,6 +380,17 @@ struct AisMessage {
     std::optional<std::uint8_t> unit_model;
     std::optional<std::uint32_t> unit_serial;
 
+    // Message 14: Table 61's safety related text, padding removed.
+    std::optional<std::string> safety_text;
+
+    // Message 27: Table 83's position latency bit, true for "greater than 5
+    // seconds". Its SOG is whole knots and its COG whole degrees, carried in
+    // sog_tenths and cog_tenths times ten so each field keeps one unit.
+    std::optional<bool> position_latency;
+
+    // From the MMSI, on every message parsed or not. ais_locating_device().
+    std::optional<AisLocatingDevice> locating_device;
+
     // True when the message ID is one this file parses and the frame was long
     // enough for its table. False for any other message whose FCS checked,
     // which comes out with the fields above empty but for the first three.
@@ -384,6 +437,16 @@ struct AisConfig {
     // ratio of r^2 / (1 - r^2), 0.96 at 0.7, and a burst read at 0 dB loses
     // its bits anyway.
     double sync_threshold = 0.7;
+
+    // The burst engine's two AIS-specific numbers, so another link with the
+    // same 24-bit training sequence, HDLC flag, stuffing and FCS over NRZI
+    // GFSK can use it: VDL Mode 4, core/decode/vdl4.h. The rate must be at
+    // least three samples to a bit and the bit rate a whole number.
+    double bit_rate = kAisBitRate;
+    std::size_t maximum_frame_bits = kAisMaximumFrameBits;
+    // The boxcar ahead of slicing, in bits. One for AIS; see HOW IT RECOVERS
+    // BITS.
+    double integrate_bits = 1.0;
 };
 
 struct AisStats {

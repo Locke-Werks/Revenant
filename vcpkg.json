@@ -13,6 +13,7 @@
         "libusb",
         "rtlsdr",
         "hackrf",
+        "codec2",
         "capnproto",
         "whisper-cpp",
         {

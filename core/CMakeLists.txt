@@ -21,6 +21,10 @@ find_package(rtlsdr CONFIG REQUIRED)
 # registry has no port. docs/hackrf-provenance.md has the pin.
 find_package(hackrf CONFIG REQUIRED)
 
+# libcodec2 1.2.0, LGPL-2.1, the vocoder alone from vcpkg-overlays/codec2: the
+# linked exception docs/modes.md records under "Digital voice, collected".
+find_package(codec2 CONFIG REQUIRED)
+
 # characterise/ is the waveform characteriser: what a signal IS, without
 # decoding it. It reads complex baseband rather than the power spectrum,
 # because symbol rate, modulation order, tone structure and frame period are
@@ -104,31 +108,53 @@ add_library(revenant_core STATIC
     characterise/tones.cpp
     characterise/transform.cpp
     decode/ais.cpp
+    decode/ale_2g.cpp
+    decode/vdl4.cpp
+    decode/asterix_cat021.cpp
+    decode/b2f.cpp
+    decode/ccsds.cpp
     decode/aprs.cpp
     decode/ax25.cpp
+    decode/ble.cpp
     decode/bch.cpp
     decode/crc.cpp
     decode/cvsd.cpp
     decode/cw.cpp
     decode/dmr.cpp
     decode/dsc.cpp
+    decode/dsc_hf.cpp
     decode/dmr_codes.cpp
+    decode/dpmr.cpp
     decode/dstar.cpp
     decode/dv_codes.cpp
     decode/fano.cpp
     decode/viterbi_stream.cpp
+    decode/dvbs.cpp
+    decode/wsjt_dsp.cpp
+    decode/wsjt77.cpp
+    decode/ft_ldpc.cpp
+    decode/ft8.cpp
+    decode/ft4.cpp
+    decode/dect.cpp
     decode/dv_phy.cpp
+    decode/enocean.cpp
     decode/fs1016.cpp
     decode/fsk.cpp
     decode/fx25.cpp
+    decode/g3ruh.cpp
     decode/il2p.cpp
     decode/lpc10.cpp
     decode/imbe.cpp
     decode/navtex.cpp
     decode/ofdm.cpp
     decode/ldpc.cpp
+    decode/opulent_voice.cpp
     decode/m17.cpp
+    decode/apt.cpp
+    decode/hrpt.cpp
+    decode/zwave.cpp
     decode/mfsk_demod.cpp
+    decode/codec2_voice.cpp
     decode/p25_trunk.cpp
     decode/p25_tsbk.cpp
     decode/p25p1.cpp
@@ -139,6 +165,7 @@ add_library(revenant_core STATIC
     decode/reed_solomon.cpp
     decode/rds_groups.cpp
     decode/rtty.cpp
+    decode/sitor_a.cpp
     decode/sitor_b.cpp
     decode/sstv.cpp
     decode/tetra.cpp
@@ -176,20 +203,37 @@ add_library(revenant_core STATIC
     dsp/spectrum_reference.cpp
     dsp/vrx_reference.cpp
     dsp/synth/ais_mod.cpp
+    dsp/synth/ale_2g_mod.cpp
+    dsp/synth/vdl4_mod.cpp
+    dsp/synth/b2f_encode.cpp
+    dsp/synth/ccsds_mod.cpp
+    dsp/synth/ble_mod.cpp
     dsp/synth/channel.cpp
     dsp/synth/cw_mod.cpp
     dsp/synth/dmr_mod.cpp
+    dsp/synth/dpmr_mod.cpp
     dsp/synth/dsc_mod.cpp
+    dsp/synth/dsc_hf_mod.cpp
+    dsp/synth/dect_mod.cpp
     dsp/synth/dv_mod.cpp
+    dsp/synth/enocean_mod.cpp
     dsp/synth/fsk_mod.cpp
+    dsp/synth/g3ruh_mod.cpp
     dsp/synth/m17_mod.cpp
+    dsp/synth/apt_mod.cpp
+    dsp/synth/hrpt_mod.cpp
+    dsp/synth/zwave_mod.cpp
     dsp/synth/mfsk_mod.cpp
     dsp/synth/modulators.cpp
     dsp/synth/ofdm_mod.cpp
+    dsp/synth/opulent_voice_mod.cpp
     dsp/synth/psk31_mod.cpp
     dsp/synth/psk_mod.cpp
+    dsp/synth/dvbs_mod.cpp
+    dsp/synth/ft8_mod.cpp
     dsp/synth/rds_mod.cpp
     dsp/synth/sstv_mod.cpp
+    dsp/synth/sitor_a_mod.cpp
     dsp/synth/wfm_mod.cpp
     dsp/synth/wideband.cpp
     engine/audio_egress.cpp
@@ -260,6 +304,9 @@ target_link_libraries(revenant_core PRIVATE
 
 # PRIVATE for the same reason: hackrf.h is source/hackrf_source.cpp's alone.
 target_link_libraries(revenant_core PRIVATE HackRF::hackrf)
+
+# PRIVATE: codec2.h is decode/codec2_voice.cpp's alone.
+target_link_libraries(revenant_core PRIVATE codec2::codec2)
 
 revenant_add_shaders(revenant_core
     TARGET_ENV vulkan1.3

@@ -245,7 +245,59 @@ bool parse_static_report(AisMessage& m, std::span<const std::uint8_t> octets) {
     return false;
 }
 
+// M.1371-6 Table 61, Message 14: 40 bits of header and spare, then up to 968
+// bits of six-bit text, so at least one character.
+bool parse_safety_broadcast(AisMessage& m, std::span<const std::uint8_t> octets) {
+    const std::size_t bits = octets.size() * 8;
+    if (bits < 46) {
+        return false;
+    }
+    m.safety_text = ais_text(octets, 40, std::min<std::size_t>(bits - 40, 968) / 6);
+    return true;
+}
+
+// M.1371-6 Table 83, Message 27: 96 bits.
+bool parse_satellite(AisMessage& m, std::span<const std::uint8_t> octets) {
+    if (octets.size() * 8 < 96) {
+        return false;
+    }
+    m.position_accuracy = ais_field(octets, 38, 1) != 0U;
+    m.raim = ais_field(octets, 39, 1) != 0U;
+    m.navigational_status = static_cast<std::uint8_t>(ais_field(octets, 40, 4));
+    const std::int32_t lon = ais_signed_field(octets, 44, 18);
+    const std::int32_t lat = ais_signed_field(octets, 62, 17);
+    if (lon != kAis27LongitudeNotAvailable && lat != kAis27LatitudeNotAvailable) {
+        const AisPosition p{static_cast<double>(lon) / kAis27PositionUnitsPerDegree,
+                            static_cast<double>(lat) / kAis27PositionUnitsPerDegree};
+        if (std::abs(p.longitude) <= 180.0 && std::abs(p.latitude) <= 90.0) {
+            m.position = p;
+        }
+    }
+    const std::uint32_t sog = ais_field(octets, 79, 6);
+    if (sog != kAis27SogNotAvailable) {
+        m.sog_tenths = static_cast<std::uint16_t>(sog * 10U);
+    }
+    const std::uint32_t cog = ais_field(octets, 85, 9);
+    if (cog != kAis27CogNotAvailable) {
+        m.cog_tenths = static_cast<std::uint16_t>(cog * 10U);
+    }
+    m.position_latency = ais_field(octets, 94, 1) != 0U;
+    return true;
+}
+
 }  // namespace
+
+std::optional<AisLocatingDevice> ais_locating_device(std::uint32_t mmsi) {
+    if (mmsi < 100'000'000U || mmsi > 999'999'999U) {
+        return std::nullopt;
+    }
+    switch (mmsi / 1'000'000U) {
+        case 970: return AisLocatingDevice::Sart;
+        case 972: return AisLocatingDevice::Mob;
+        case 974: return AisLocatingDevice::Epirb;
+        default: return std::nullopt;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The link layer
@@ -329,6 +381,8 @@ AisMessage ais_parse(std::span<const std::uint8_t> octets) {
         case 19: m.parsed = parse_class_b_extended(m, octets); break;
         case 21: m.parsed = parse_aton(m, octets); break;
         case 24: m.parsed = parse_static_report(m, octets); break;
+        case 14: m.parsed = parse_safety_broadcast(m, octets); break;
+        case 27: m.parsed = parse_satellite(m, octets); break;
         default: m.parsed = false; break;
     }
     if (!m.parsed) {
@@ -338,8 +392,10 @@ AisMessage ais_parse(std::span<const std::uint8_t> octets) {
         bare.repeat = m.repeat;
         bare.mmsi = m.mmsi;
         bare.octets = std::move(m.octets);
+        bare.locating_device = ais_locating_device(bare.mmsi);
         return bare;
     }
+    m.locating_device = ais_locating_device(m.mmsi);
     return m;
 }
 
@@ -348,17 +404,17 @@ AisMessage ais_parse(std::span<const std::uint8_t> octets) {
 // ---------------------------------------------------------------------------
 
 Expected<AisDecoder> AisDecoder::create(const AisConfig& config) {
-    if (config.rate < kAisMinimumRate) {
+    if (static_cast<double>(config.rate) < 3.0 * config.bit_rate) {
         return fail(std::format("the AIS decoder needs at least {} samples a second, three to "
-                                "each of M.1371-5's 9600 bits, and was given {}",
-                                kAisMinimumRate, config.rate));
+                                "each bit, and was given {}",
+                                static_cast<SampleRate>(std::ceil(3.0 * config.bit_rate)), config.rate));
     }
     if (!(config.sync_threshold > 0.0 && config.sync_threshold < 1.0)) {
         return fail("the AIS sync threshold is a correlation and must lie in (0, 1)");
     }
     // One bit of samples, rounded, each weighted alike.
     const auto taps_count = static_cast<std::size_t>(
-        std::max(1.0, std::round(static_cast<double>(config.rate) / kAisBitRate)));
+        std::max(1.0, std::round(config.integrate_bits * static_cast<double>(config.rate) / config.bit_rate)));
     auto filter = RealFir::create(
         std::vector<float>(taps_count, 1.0F / static_cast<float>(taps_count)));
     if (!filter) {
@@ -370,7 +426,7 @@ Expected<AisDecoder> AisDecoder::create(const AisConfig& config) {
     d.filter_ = std::move(*filter);
     d.filter_delay_ = (taps_count - 1) / 2;
     d.rate_ = static_cast<std::uint64_t>(config.rate);
-    d.instant_denominator_ = static_cast<std::uint64_t>(kAisBitRate) * kAisPhases;
+    d.instant_denominator_ = static_cast<std::uint64_t>(config.bit_rate) * kAisPhases;
 
     // Clause 3.2.2.3's "010101..." then clause 3.2.2.4's 01111110, each bit
     // as clause 2.6's NRZI makes it a level: a zero changes the level.
@@ -447,7 +503,7 @@ void AisDecoder::process(ConstRealSpan audio, std::vector<AisMessage>& out) {
 
     // Forget reported frames no phase can still be finishing: every phase
     // closes the same frame within a bit of the first.
-    const double samples_per_bit = static_cast<double>(rate_) / kAisBitRate;
+    const double samples_per_bit = static_cast<double>(rate_) / config_.bit_rate;
     const auto horizon = static_cast<SampleIndex>(std::ceil(4.0 * samples_per_bit));
     const SampleIndex now = soft_count_ > delay ? soft_count_ - delay : 0;
     std::erase_if(recent_, [&](const Reported& r) { return r.last_sample + horizon < now; });
@@ -523,7 +579,7 @@ bool AisDecoder::on_bit(Attempt& a, std::uint8_t phase_index, float value, Sampl
             a.have_first = true;
         }
         // Clause 3.2.2.11's five slots and no end flag: lost.
-        return a.bits.size() <= kAisMaximumFrameBits;
+        return a.bits.size() <= config_.maximum_frame_bits;
     }
 
     const int run = a.ones;
@@ -553,7 +609,7 @@ bool AisDecoder::on_bit(Attempt& a, std::uint8_t phase_index, float value, Sampl
         a.have_first = true;
     }
     a.run_start = a.bits.size();
-    return a.bits.size() <= kAisMaximumFrameBits;
+    return a.bits.size() <= config_.maximum_frame_bits;
 }
 
 void AisDecoder::on_frame(const Attempt& a, std::uint8_t phase_index, SampleIndex last_sample,
@@ -584,7 +640,7 @@ void AisDecoder::on_frame(const Attempt& a, std::uint8_t phase_index, SampleInde
 
     // Another phase already reported this frame: the same octets closing
     // within a few bits of each other.
-    const double samples_per_bit = static_cast<double>(rate_) / kAisBitRate;
+    const double samples_per_bit = static_cast<double>(rate_) / config_.bit_rate;
     const auto near = static_cast<SampleIndex>(std::ceil(2.0 * samples_per_bit));
     for (const Reported& r : recent_) {
         const SampleIndex apart =
