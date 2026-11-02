@@ -44,4 +44,8 @@ struct SlowModConfig {
 [[nodiscard]] Status jt9_add(const SlowModConfig& config, std::string_view message, int submode,
                              std::span<float> audio);
 
+// JT4 submode 0 to 6 (A to G): core/decode/jt4.h's channel symbols.
+[[nodiscard]] Status jt4_add(const SlowModConfig& config, std::string_view message, int submode,
+                             std::span<float> audio);
+
 }  // namespace revenant::siggen
