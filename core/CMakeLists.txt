@@ -129,6 +129,7 @@ add_library(revenant_core STATIC
     decode/navtex.cpp
     decode/ofdm.cpp
     decode/ldpc.cpp
+    decode/opulent_voice.cpp
     decode/m17.cpp
     decode/mfsk_demod.cpp
     decode/p25_trunk.cpp
@@ -189,6 +190,7 @@ add_library(revenant_core STATIC
     dsp/synth/mfsk_mod.cpp
     dsp/synth/modulators.cpp
     dsp/synth/ofdm_mod.cpp
+    dsp/synth/opulent_voice_mod.cpp
     dsp/synth/psk31_mod.cpp
     dsp/synth/psk_mod.cpp
     dsp/synth/rds_mod.cpp
