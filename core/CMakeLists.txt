@@ -149,6 +149,8 @@ add_library(revenant_core STATIC
     decode/ermes.cpp
     decode/fsk.cpp
     decode/funcube.cpp
+    decode/gnss_acq.cpp
+    decode/gps_lnav.cpp
     decode/fx25.cpp
     decode/g3ruh.cpp
     decode/il2p.cpp
@@ -236,6 +238,8 @@ add_library(revenant_core STATIC
     dsp/synth/fsk_mod.cpp
     dsp/synth/g3ruh_mod.cpp
     dsp/synth/funcube_mod.cpp
+    dsp/synth/gnss_mod.cpp
+    dsp/synth/gps_lnav_mod.cpp
     dsp/synth/m17_mod.cpp
     dsp/synth/apt_mod.cpp
     dsp/synth/hrpt_mod.cpp

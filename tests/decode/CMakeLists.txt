@@ -146,6 +146,8 @@ add_executable(revenant_decode_tests
     test_crc.cpp
     test_fx25.cpp
     test_g3ruh.cpp
+    test_gnss_acq.cpp
+    test_gps_lnav.cpp
     test_il2p.cpp
     test_cvsd.cpp
     test_cw.cpp
