@@ -34,7 +34,7 @@
 // probes, the long interleaver giving 4.8 s), which is the public description
 // of that waveform; this file does not claim conformance to the STANAG text.
 // STANAG 4539 corresponds to the 3200 to 9600 bit/s medium data rate
-// waveform of Appendix C (5.3.1.3 c), which this file does not implement.
+// waveform of Appendix C (5.3.1.3 c), which mil110c.h implements.
 // 110C's Appendix C still calls itself "a non-mandatory part of
 // MIL-STD-188-110B" (C.1.2), so it is the 110B appendix carried forward;
 // docs/modes.md records the 4539 equivalence. Neither 110B nor STANAG 4539

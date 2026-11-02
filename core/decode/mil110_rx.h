@@ -30,6 +30,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "core/dsp/types.h"
@@ -123,8 +124,9 @@ public:
     void advance();
 
     // Least-squares solve of every tap over the known symbols given, with
-    // feedback on the same known symbols. Returns false if singular.
-    [[nodiscard]] bool solve(const FrontEnd& fe, std::int64_t origin, double omega,
+    // feedback on the same known symbols. Returns the mean squared error of
+    // the fit, or nothing if the system is singular.
+    [[nodiscard]] std::optional<double> solve(const FrontEnd& fe, std::int64_t origin, double omega,
                              std::int64_t first, const std::vector<C>& known);
 
     // Marks where the tap energy sits after training; recentre() keeps it

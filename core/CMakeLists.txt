@@ -116,6 +116,7 @@ add_library(revenant_core STATIC
     decode/ccsds.cpp
     decode/mil110.cpp
     decode/mil110_rx.cpp
+    decode/mil110c.cpp
     decode/atv.cpp
     decode/cospas_sarsat.cpp
     decode/ale_3g.cpp

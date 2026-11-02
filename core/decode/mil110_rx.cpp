@@ -237,8 +237,8 @@ void Equaliser::advance() {
     }
 }
 
-bool Equaliser::solve(const FrontEnd& fe, std::int64_t origin, double omega, std::int64_t first,
-                      const std::vector<C>& known) {
+std::optional<double> Equaliser::solve(const FrontEnd& fe, std::int64_t origin, double omega,
+                                       std::int64_t first, const std::vector<C>& known) {
     using D = std::complex<double>;
     const std::size_t nf = ff_.size();
     const std::size_t nb = fb_.size();
@@ -246,6 +246,8 @@ bool Equaliser::solve(const FrontEnd& fe, std::int64_t origin, double omega, std
     std::vector<D> r(n * n, D{});
     std::vector<D> b(n, D{});
     std::vector<D> a(n);
+    std::vector<D> rows;
+    rows.reserve(known.size() * n);
     Snapshot s;
     const double saved = theta_;
     theta_ = 0.0;
@@ -258,6 +260,7 @@ bool Equaliser::solve(const FrontEnd& fe, std::int64_t origin, double omega, std
             a[nf + i] = -D(known[m - 1 - i]);
         }
         const D d(known[m]);
+        rows.insert(rows.end(), a.begin(), a.end());
         for (std::size_t i = 0; i < n; ++i) {
             const D ci = std::conj(a[i]);
             for (std::size_t j = 0; j < n; ++j) {
@@ -286,7 +289,7 @@ bool Equaliser::solve(const FrontEnd& fe, std::int64_t origin, double omega, std
             }
         }
         if (std::abs(r[piv * n + c]) < 1e-15) {
-            return false;
+            return std::nullopt;
         }
         if (piv != c) {
             for (std::size_t j = 0; j < n; ++j) {
@@ -323,7 +326,18 @@ bool Equaliser::solve(const FrontEnd& fe, std::int64_t origin, double omega, std
     for (std::size_t i = 0; i < nb; ++i) {
         past_[i] = known[known.size() - 1 - i];
     }
-    return true;
+    double err = 0.0;
+    std::size_t count = 0;
+    for (std::size_t m = nb; m < known.size(); ++m, ++count) {
+        D y{};
+        for (std::size_t i = 0; i < n; ++i) {
+            y += rows[count * n + i] * w[i];
+        }
+        err += std::norm(D(known[m]) - y);
+    }
+    const double mse = count != 0 ? err / static_cast<double>(count) : 1.0;
+    sigma2_ = mse;
+    return mse;
 }
 
 double Equaliser::centroid() const {
