@@ -149,6 +149,7 @@ add_executable(revenant_decode_tests
     test_dsc.cpp
     test_dsc_hf.cpp
     test_dstar.cpp
+    test_dvbs.cpp
     test_dstar_blocking.cpp
     test_fs1016.cpp
     test_imbe.cpp

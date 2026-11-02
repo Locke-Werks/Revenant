@@ -120,6 +120,7 @@ add_library(revenant_core STATIC
     decode/dv_codes.cpp
     decode/fano.cpp
     decode/viterbi_stream.cpp
+    decode/dvbs.cpp
     decode/dv_phy.cpp
     decode/fs1016.cpp
     decode/fsk.cpp
@@ -198,6 +199,7 @@ add_library(revenant_core STATIC
     dsp/synth/opulent_voice_mod.cpp
     dsp/synth/psk31_mod.cpp
     dsp/synth/psk_mod.cpp
+    dsp/synth/dvbs_mod.cpp
     dsp/synth/rds_mod.cpp
     dsp/synth/sitor_a_mod.cpp
     dsp/synth/wfm_mod.cpp
