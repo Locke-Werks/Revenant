@@ -124,6 +124,7 @@ add_library(revenant_core STATIC
     decode/fs1016.cpp
     decode/fsk.cpp
     decode/fx25.cpp
+    decode/g3ruh.cpp
     decode/il2p.cpp
     decode/lpc10.cpp
     decode/imbe.cpp
@@ -189,6 +190,7 @@ add_library(revenant_core STATIC
     dsp/synth/dsc_hf_mod.cpp
     dsp/synth/dv_mod.cpp
     dsp/synth/fsk_mod.cpp
+    dsp/synth/g3ruh_mod.cpp
     dsp/synth/m17_mod.cpp
     dsp/synth/mfsk_mod.cpp
     dsp/synth/modulators.cpp
