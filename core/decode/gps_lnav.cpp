@@ -170,6 +170,14 @@ std::optional<LnavUtcIono> lnav_utc_iono(const LnavSubframe& sf) {
 // ---------------------------------------------------------------------------
 
 void LnavBitSync::push(const Prompt& p, std::vector<std::pair<std::uint8_t, SampleIndex>>& out) {
+    std::vector<std::pair<double, SampleIndex>> soft;
+    push_soft(p, soft);
+    for (const auto& [v, s] : soft) {
+        out.emplace_back(v < 0.0 ? 1 : 0, s);
+    }
+}
+
+void LnavBitSync::push_soft(const Prompt& p, std::vector<std::pair<double, SampleIndex>>& out) {
     const double i = p.prompt.real();
     const auto phase = static_cast<unsigned>(p.period % n_);
     if (!synced_) {
@@ -210,7 +218,7 @@ void LnavBitSync::push(const Prompt& p, std::vector<std::pair<std::uint8_t, Samp
     }
     if (phase == edge_) {
         if (count_ == n_) {
-            out.emplace_back(acc_ < 0.0 ? 1 : 0, bit_start_);
+            out.emplace_back(acc_, bit_start_);
         }
         acc_ = 0.0;
         count_ = 0;

@@ -130,6 +130,9 @@ public:
     explicit LnavBitSync(unsigned periods_per_bit = 20) : n_(periods_per_bit), hist_(n_, 0) {}
     // Appends (bit, sample of the bit's first period) to `out`.
     void push(const Prompt& p, std::vector<std::pair<std::uint8_t, SampleIndex>>& out);
+    // The same, with the summed in-phase prompt instead of its sign: GLONASS
+    // pairs its 10 ms meander symbols softly.
+    void push_soft(const Prompt& p, std::vector<std::pair<double, SampleIndex>>& out);
     [[nodiscard]] bool synced() const { return synced_; }
 
 private:
