@@ -150,6 +150,7 @@ add_library(revenant_core STATIC
     decode/m17.cpp
     decode/apt.cpp
     decode/hrpt.cpp
+    decode/zwave.cpp
     decode/mfsk_demod.cpp
     decode/codec2_voice.cpp
     decode/p25_trunk.cpp
@@ -216,6 +217,7 @@ add_library(revenant_core STATIC
     dsp/synth/m17_mod.cpp
     dsp/synth/apt_mod.cpp
     dsp/synth/hrpt_mod.cpp
+    dsp/synth/zwave_mod.cpp
     dsp/synth/mfsk_mod.cpp
     dsp/synth/modulators.cpp
     dsp/synth/ofdm_mod.cpp

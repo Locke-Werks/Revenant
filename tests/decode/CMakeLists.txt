@@ -166,6 +166,7 @@ add_executable(revenant_decode_tests
     test_apt.cpp
     test_hrpt.cpp
     test_m17_noise.cpp
+    test_zwave.cpp
     test_mfsk_demod.cpp
     test_m17_voice.cpp
     test_p25_trunk.cpp
