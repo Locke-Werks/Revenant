@@ -155,6 +155,7 @@ add_executable(revenant_decode_tests
     test_gnss_acq.cpp
     test_gps_lnav.cpp
     test_gps_l1c.cpp
+    test_gps_cnav.cpp
     test_il2p.cpp
     test_jpeg_baseline.cpp
     test_cvsd.cpp

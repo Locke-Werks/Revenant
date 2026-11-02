@@ -182,6 +182,68 @@ std::vector<characterise::Complex64> code_spectrum_conj(const SignalSpec& spec, 
     return c;
 }
 
+// A code long enough that every period carries a symbol or overlay edge
+// somewhere inside the block's periods, as L2 CM's 20 ms does with its 50 sps.
+constexpr double kLongCodeS = 0.004;
+
+// The prompt over block periods re-cut to start on the found code epoch, so
+// no symbol edge falls inside one, at carrier offset f.
+std::complex<double> aligned_prompt(const SearchGrid& g, const SignalSpec& spec,
+                                    std::size_t epoch_idx, unsigned j, double f) {
+    const std::size_t n0 = epoch_idx + static_cast<std::size_t>(j) * g.nfft;
+    const double dt = g.period_s / static_cast<double>(g.nfft);
+    const double len = static_cast<double>(spec.code.size());
+    const double w = -kTwoPi * (g.offset_hz + f) * dt;
+    std::complex<double> rot = std::polar(1.0, w * static_cast<double>(n0));
+    const std::complex<double> step = std::polar(1.0, w);
+    std::complex<double> acc{};
+    for (std::size_t q = 0; q < g.nfft; ++q) {
+        const std::size_t n = n0 + q;
+        const std::size_t k = n / g.nfft;
+        if (k >= g.resampled.size()) {
+            break;
+        }
+        const auto chip = static_cast<std::size_t>(static_cast<double>(q) * len /
+                                                   static_cast<double>(g.nfft));
+        acc += g.resampled[k][n % g.nfft] * rot *
+               static_cast<double>(spec.code[std::min(chip, spec.code.size() - 1)]);
+        rot *= step;
+    }
+    return acc;
+}
+
+// For long codes the block's periods each straddle a symbol edge, which
+// splits the correlation peak in frequency and can leave the best bin half a
+// coherent bandwidth, 1/(2T), off: exactly where the squared-phase refinement
+// and the tracker's FLL are both blind. So the bin is re-chosen among d and
+// d +- 1/(2T) on epoch-aligned periods, then refined on those.
+double refine_aligned(const SearchGrid& g, const SignalSpec& spec, std::size_t best_idx,
+                      double d) {
+    const auto periods = static_cast<unsigned>(g.resampled.size() - 1);
+    const double half = 0.5 / g.period_s;
+    double best = -1.0;
+    double f_best = d;
+    for (double f : {d - half, d, d + half}) {
+        double p = 0.0;
+        for (unsigned j = 0; j < periods; ++j) {
+            p += std::norm(aligned_prompt(g, spec, best_idx, j, f));
+        }
+        if (p > best) {
+            best = p;
+            f_best = f;
+        }
+    }
+    std::complex<double> sum{};
+    std::complex<double> last = aligned_prompt(g, spec, best_idx, 0, f_best);
+    for (unsigned j = 1; j < periods; ++j) {
+        const auto p = aligned_prompt(g, spec, best_idx, j, f_best);
+        const auto dd = p * std::conj(last);
+        sum += dd * dd;
+        last = p;
+    }
+    return f_best + std::arg(sum) / 2.0 / (kTwoPi * g.period_s);
+}
+
 std::vector<AcquisitionEvent> search(const SearchGrid& g, std::span<const SignalSpec* const> specs,
                                      const AcquisitionConfig& cfg) {
     struct State {
@@ -246,6 +308,10 @@ std::vector<AcquisitionEvent> search(const SearchGrid& g, std::span<const Signal
                               static_cast<double>(g.nfft);
         ev.doppler_hz = g.dopplers[s.best_bin];
 
+        if (g.period_s >= kLongCodeS && m >= 3) {
+            ev.doppler_hz = refine_aligned(g, *specs[i], s.best_idx, ev.doppler_hz);
+            continue;
+        }
         // Refine the Doppler from the prompt's phase advance period to
         // period, squared against sign flips: unambiguous to a quarter of
         // 1/T, which a half-bin error is inside.
