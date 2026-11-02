@@ -905,6 +905,9 @@ int main(int argc, char* argv[])
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("receiverPlacement"), &placement);
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
+    // The engine owns and deletes the provider; the shelf it reads is shared.
+    engine.addImageProvider(QStringLiteral("decoded"),
+                            new revenant::ui::DecodedImageProvider(link.decodedImages()->shelf()));
     engine.rootContext()->setContextProperty(QStringLiteral("captureSettings"), &capture_settings);
     engine.rootContext()->setContextProperty(QStringLiteral("audioPlayer"), &player);
     engine.rootContext()->setContextProperty(QStringLiteral("frequencyManager"), &memories);

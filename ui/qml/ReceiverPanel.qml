@@ -158,6 +158,10 @@ Item {
             fills: panel.sideBySide
         }
 
+        ImagePane {
+            Layout.minimumWidth: 0
+        }
+
         CallsPane {
             Layout.minimumWidth: 0
         }

@@ -1610,6 +1610,61 @@ struct DecodedMessage {
     }
 };
 
+// How a decoded image's row bytes are laid out: one byte per pixel, or three
+// in R, G, B order. Rows are always exactly width * bytes_per_pixel long.
+enum class ImageColour : std::uint8_t { Gray8, Rgb888 };
+
+[[nodiscard]] constexpr std::uint32_t bytes_per_pixel(ImageColour colour)
+{
+    return colour == ImageColour::Rgb888 ? 3U : 1U;
+}
+
+// One event in a decoded image's life: opened, a row, or closed.
+//
+// An image decoder (SSTV, weather fax, APT) produces a raster a line at a
+// time, which a DecodedMessage cannot carry. These ride the same
+// subscribeDecoded subscription as the decoder's messages and are keyed by
+// (vrx, decoder, image_id). Open comes first; rows follow in the order the
+// decoder produced them, normally ascending but a decoder may resend an index
+// to correct it; close comes last, once. An image whose close never arrives
+// ended with its subscription.
+struct DecodedImageEvent {
+    enum class Kind : std::uint8_t { Open, Row, Close };
+    Kind kind = Kind::Open;
+
+    std::uint64_t vrx = 0;
+    std::string decoder;
+
+    // Per decoder instance, counting from 1. Stable across the image's events.
+    std::uint64_t image_id = 0;
+
+    // Open. Height is not known up front: a fax or SSTV frame is as tall as
+    // the transmission. line_rate_hz is the nominal lines per second, for a
+    // client estimating progress, and mode is the decoder's own label for the
+    // format, "Robot 36", "IOC 576", empty when it has none. start_sample and
+    // sample_rate say where the image began in the receiver's stream, in the
+    // frame DecodedMessage::start_sample counts in.
+    std::uint32_t width = 0;
+    ImageColour colour = ImageColour::Gray8;
+    double line_rate_hz = 0.0;
+    std::string mode;
+    std::uint64_t start_sample = 0;
+    std::uint32_t sample_rate = 0;
+
+    // Row: the zero-based row index and width * bytes_per_pixel(colour) bytes.
+    std::uint32_t row = 0;
+    std::vector<std::uint8_t> pixels;
+
+    // Close: whether the decoder saw the image to its end, or gave up on it
+    // (signal lost, stream ended, retune).
+    bool complete = false;
+
+    // Image events THIS subscription lost from its queue before this one.
+    // A lost row leaves a hole the row indices show; a lost open or close is
+    // what a client should expect to tolerate.
+    std::uint64_t dropped_before = 0;
+};
+
 // What a decoder reads. A complex decoder is fed a receiver's raw tap, two
 // floats per sample, and an audio decoder a receiver's real audio.
 enum class DecoderInput : std::uint8_t { ComplexBaseband, RealAudio };

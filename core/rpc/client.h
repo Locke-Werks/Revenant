@@ -615,11 +615,17 @@ public:
     //
     // Refused, in words, for a receiver that does not exist, a decoder the
     // engine does not have, and an input the receiver cannot give.
+    //
+    // on_image, when set, takes the decoder's image events (open, rows,
+    // close; see DecodedImageEvent) on the same thread and under the same
+    // rule as on_message. Left empty, images are read off the wire and
+    // dropped here, and messages are unaffected.
     using DecodedCallback = std::function<void(const DecodedMessage&)>;
     using DecodedEndedCallback = std::function<void(const std::string& reason)>;
+    using DecodedImageCallback = std::function<void(const DecodedImageEvent&)>;
     [[nodiscard]] virtual Expected<std::string> subscribe_decoded(
         std::uint64_t vrx, std::string_view decoder, DecodedCallback on_message,
-        DecodedEndedCallback on_ended) = 0;
+        DecodedEndedCallback on_ended, DecodedImageCallback on_image = {}) = 0;
     virtual void unsubscribe_decoded(std::uint64_t vrx, std::string_view decoder) = 0;
     [[nodiscard]] virtual Expected<DecodedStats> decoded_stats(std::uint64_t vrx,
                                                                std::string_view decoder) = 0;

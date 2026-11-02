@@ -166,6 +166,7 @@
 #include "models/calibration.h"
 #include "models/call_model.h"
 #include "models/composite_probe.h"
+#include "models/decoded_image_model.h"
 #include "models/decoded_model.h"
 #include "models/detector_scope.h"
 #include "models/detector_settings.h"
@@ -1731,6 +1732,10 @@ class EngineLink : public QObject {
     // was decoded is still what was decoded; the operator clears it.
     Q_PROPERTY(revenant::ui::DecodedLogModel* decodedLog READ decodedLog CONSTANT)
 
+    // What image decoders sent, on the same subscriptions as the log and
+    // kept on the same terms: the operator clears it.
+    Q_PROPERTY(revenant::ui::DecodedImageModel* decodedImages READ decodedImages CONSTANT)
+
     // Who is talking, across every digital voice receiver and not only the
     // focused one. models/call_log.h.
     Q_PROPERTY(revenant::ui::CallLogModel* callLog READ callLog CONSTANT)
@@ -3079,6 +3084,7 @@ public:
     [[nodiscard]] QString decodeLabel() const { return decode_label_; }
     [[nodiscard]] QString decodeDetail() const { return decode_detail_; }
     [[nodiscard]] DecodedLogModel* decodedLog() { return &decoded_log_; }
+    [[nodiscard]] DecodedImageModel* decodedImages() { return &decoded_images_; }
     [[nodiscard]] CallLogModel* callLog() { return &call_log_; }
 
     // The engine's one sentence about a decoder, for the menu's tooltip.
@@ -5194,6 +5200,7 @@ private:
     // message into the hand-off and posts one wake; the second records the
     // engine's words and wakes the supervisor, which does the rest.
     void on_decoded_message(const rpc::DecodedMessage& message);
+    void on_decoded_image(const rpc::DecodedImageEvent& event);
     void on_decoded_ended(std::uint64_t vrx, const std::string& decoder,
                           const std::string& reason);
 
@@ -5231,6 +5238,7 @@ private:
 
     // Qt thread only.
     DecodedLogModel decoded_log_;
+    DecodedImageModel decoded_images_;
     CallLogModel call_log_;
     std::vector<rpc::DecoderInfo> decoder_infos_;
     QString decode_choice_ = QStringLiteral("auto");
@@ -5262,6 +5270,14 @@ private:
     std::vector<std::int64_t> pending_decoded_arrived_ms_;   // guarded by decoded_mutex_
     std::uint64_t pending_decoded_unkept_ = 0;               // guarded by decoded_mutex_
     std::vector<DecodedEnded> pending_decoded_ended_;        // guarded by decoded_mutex_
+
+    // Image events and their arrival, uncapped: an image is the only copy
+    // and a stalled GUI thread is the rarer loss. Subscriptions that ended,
+    // for the images they left open. Drained by drain_decoded.
+    std::vector<rpc::DecodedImageEvent> pending_images_;      // guarded by decoded_mutex_
+    std::vector<std::int64_t> pending_images_arrived_ms_;     // guarded by decoded_mutex_
+    std::vector<std::pair<std::uint64_t, std::string>>
+        pending_image_aborts_;                                // guarded by decoded_mutex_
     std::string requested_decode_choice_ = "auto";           // guarded by decoded_mutex_
     bool has_decode_handover_ = false;                       // guarded by decoded_mutex_
     std::vector<rpc::DecoderInfo> handover_decoder_infos_;   // guarded by decoded_mutex_

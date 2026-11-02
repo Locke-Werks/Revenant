@@ -1045,6 +1045,33 @@ void write_decoded_message(schema::DecodedMessage::Builder out, const DecodedMes
     }
 }
 
+void write_decoded_image(schema::DecodedImageEvent::Builder out, const DecodedImageEvent& in) {
+    out.setVrx(in.vrx);
+    out.setDecoder(in.decoder);
+    out.setImageId(in.image_id);
+    out.setDroppedBefore(in.dropped_before);
+    switch (in.kind) {
+        case DecodedImageEvent::Kind::Open: {
+            auto open = out.initOpen();
+            open.setWidth(in.width);
+            open.setColour(in.colour == ImageColour::Rgb888 ? schema::ImageColour::RGB888
+                                                            : schema::ImageColour::GRAY8);
+            open.setLineRate(in.line_rate_hz);
+            open.setMode(in.mode);
+            open.setStartSample(in.start_sample);
+            open.setSampleRate(in.sample_rate);
+            break;
+        }
+        case DecodedImageEvent::Kind::Row: {
+            auto row = out.initRow();
+            row.setRow(in.row);
+            row.setPixels(capnp::Data::Reader(in.pixels.data(), in.pixels.size()));
+            break;
+        }
+        case DecodedImageEvent::Kind::Close: out.initClose().setComplete(in.complete); break;
+    }
+}
+
 void write_decoder_info(schema::DecoderInfo::Builder out, std::string_view name,
                         DecoderInput input, std::string_view description,
                         std::span<const std::string_view> modes) {

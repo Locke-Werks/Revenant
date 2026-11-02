@@ -286,6 +286,9 @@ void write_rds_bits_status(schema::RdsHealth::Builder out, const decode::RdsBits
 // part with a case to forget.
 void write_decoded_message(schema::DecodedMessage::Builder out, const DecodedMessage& in);
 
+// An image decoder's open, row or close, outbound. See DecodedImageEvent.
+void write_decoded_image(schema::DecodedImageEvent::Builder out, const DecodedImageEvent& in);
+
 // `modes` is DecoderSpec::modes, where empty means every mode whose output is
 // `input`. The wire promises a whole list, so an empty one is written out here
 // as each engine::Demod on the right side of is_complex_tap, which is the one

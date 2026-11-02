@@ -1080,6 +1080,42 @@ holds it and answers the three questions:
   still refused, saying there is no AMBE or ACELP codec in the engine." D-STAR
   and DMR are served through a plugin since 2026-10-02, below.
 
+### Image decoders report on the same subscription
+
+Added 2026-11-02 for SSTV, fax and APT, which produce a raster a line at a
+time. `DecodedReceiver.image(event)` carries a `DecodedImageEvent` on the same
+`subscribeDecoded` subscription as the decoder's messages. A sibling
+`subscribeImages` was not added: the attach, the refusals, the retune fence and
+the lifetime would all be `subscribeDecoded`'s again, and one decoder would be
+two subscriptions to keep in step.
+
+- `DecodedImageEvent` is keyed by `(vrx, decoder, imageId)`, `imageId` counting
+  from 1 per decoder on a receiver, and is one of `open`, `row` or `close`.
+- `open` carries `width`, `colour` (`gray8`, or `rgb888` as R G B), `lineRate`
+  in nominal lines per second, `mode` (the decoder's format label, or empty),
+  and `startSample` at `sampleRate` in the receiver's own stream. No height:
+  an image is as tall as the transmission. No wall clock, per
+  docs/conventions.md.
+- `row` carries `row`, zero based, and `pixels`, exactly `width` or
+  `3 * width` bytes. Rows arrive in the order produced; a decoder may resend
+  an index to correct it.
+- `close` carries `complete`: false when the decoder gave up, the stream ended
+  or a retune reset it. Sent once, after every row.
+- Images queue apart from messages, 4096 events deep, with a flight flag of
+  their own, so a burst of rows never holds a message up. `droppedBefore`
+  counts image events this subscription lost; a lost row is a hole the indices
+  show.
+- A client built before `image` existed answers it unimplemented. The engine
+  then stops sending that subscription images and keeps its messages.
+- An engine plugin's decoded subscription is not given images.
+
+An adapter emits through `ChunkDecoder`'s protected `open_image`, `image_row`
+and `close_image` from inside `consume`, `flush` or `reset`, and the route
+drains `image_events()` after each. `register_test_decoder` in
+`core/rpc/decoders.h` adds a decoder only a test binary can attach;
+`tests/rpc/test_rpc_decode_image.cpp` attaches `test_raster`, a synthetic
+gradient, to carry an image end to end.
+
 ### D-STAR and DMR voice through a plugin
 
 Since 2026-10-02 `subscribeAudio` on a dstar or dmr receiver serves its voice

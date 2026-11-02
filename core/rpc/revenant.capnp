@@ -2920,6 +2920,68 @@ struct DecodedMessage {
     droppedBefore @9 :UInt64;
 }
 
+# A decoded image's pixel layout. Rows are width bytes for gray8 and
+# 3 * width bytes, R G B, for rgb888.
+enum ImageColour {
+    gray8 @0;
+    rgb888 @1;
+}
+
+# One event in the life of an image an image decoder (SSTV, fax, APT) is
+# producing a line at a time. Delivered on the same subscription as the
+# decoder's messages, through DecodedReceiver.image. Keyed by
+# (vrx, decoder, imageId): open first, rows in the order produced (a decoder
+# may resend an index to correct it), close last and once. An image with no
+# close ended with its subscription.
+struct DecodedImageEvent {
+    vrx @0 :UInt64;
+    decoder @1 :Text;
+
+    # Per decoder on this receiver, from 1.
+    imageId @2 :UInt64;
+
+    # Image events THIS subscription lost from its queue before this one, the
+    # way DecodedMessage.droppedBefore counts messages. A lost row is a hole
+    # the row indices show.
+    droppedBefore @3 :UInt64;
+
+    union {
+        open @4 :DecodedImageOpen;
+        row @5 :DecodedImageRow;
+        close @6 :DecodedImageClose;
+    }
+}
+
+struct DecodedImageOpen {
+    width @0 :UInt32;
+    colour @1 :ImageColour;
+
+    # Nominal lines per second, for a progress estimate. Zero when unknown.
+    lineRate @2 :Float64;
+
+    # The decoder's label for the format, "Robot 36", "IOC 576", or empty.
+    mode @3 :Text;
+
+    # Where the image began in the receiver's stream, in the frame
+    # DecodedMessage.startSample counts in. Not wall clock, per
+    # docs/conventions.md; a client stamps arrival time itself.
+    startSample @4 :UInt64;
+    sampleRate @5 :UInt32;
+}
+
+struct DecodedImageRow {
+    row @0 :UInt32;
+
+    # Exactly width * (1 or 3) bytes.
+    pixels @1 :Data;
+}
+
+struct DecodedImageClose {
+    # True when the decoder saw the image to its end, false when it gave up:
+    # signal lost, stream ended, retune.
+    complete @0 :Bool;
+}
+
 enum DecoderInput {
     # A receiver whose mode is a complex tap: raw, p25p1, dstar, tetra or dmr.
     complexBaseband @0;
@@ -2972,6 +3034,12 @@ interface DecodedReceiver {
     # coming back failed. Best effort, on the terms AudioReceiver::ended
     # states.
     ended @1 (reason :Text) -> ();
+
+    # An image event from an image decoder. Added 2026-11-02. A receiver
+    # built before this answers unimplemented, and the engine then stops
+    # sending images to that subscription without ending it, so an older
+    # client keeps its messages.
+    image @2 (event :DecodedImageEvent) -> ();
 }
 
 # Dropping this ends the subscription, and the decoder with it once nobody

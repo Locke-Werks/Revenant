@@ -1219,6 +1219,11 @@ struct RdsRoute {
 // few hundred bytes a message it is well under a megabyte a subscription.
 constexpr std::size_t kDecodedQueueDepth = 256;
 
+// Image events a subscription may hold, rows mostly. Far deeper than the
+// message queue because an image is hundreds of rows produced in a burst, and
+// evicting one is a visible hole. 4096 rows of 640 RGB pixels is 7.5 MiB.
+constexpr std::size_t kDecodedImageQueueDepth = 4096;
+
 // One subscriber to one decoder on one receiver.
 //
 // Split the way AudioNode is: the loop thread alone touches the capability and
@@ -1254,6 +1259,17 @@ struct DecodedNode : std::enable_shared_from_this<DecodedNode> {
     std::uint64_t dropped_before = 0;
     std::uint64_t messages_sent = 0;
     std::uint64_t messages_dropped = 0;
+
+    // Image events, queued apart from messages and paced by a flight flag of
+    // their own, so a burst of rows never holds up a message behind it. A
+    // plugin node (forward set) is never given any.
+    std::deque<DecodedImageEvent> image_queue;  // under `lock`
+    std::uint64_t image_dropped_before = 0;     // under `lock`
+    bool image_in_flight = false;               // loop thread only
+
+    // The receiver answered image() unimplemented: a client built before the
+    // method existed. Images stop for it; messages carry on. Loop thread only.
+    bool images_unsupported = false;
 };
 
 // One decoder attached to one receiver, shared by every subscriber to it.
@@ -1920,6 +1936,13 @@ private:
     // route.lock held. Stamps what the decoder left in route.scratch with the
     // receiver and the decoder's sequence and queues it on every node.
     void enqueue_decoded(DecodeRoute& route);
+
+    // route.lock held. Moves what the decoder left in image_events() onto
+    // every capability node's image queue, stamped with vrx and decoder.
+    void enqueue_images(DecodeRoute& route);
+
+    // Loop thread. One image event in flight per subscription.
+    void pump_images(const std::shared_ptr<DecodedNode>& node);
 
     // Engine plugins. start_plugins and stop_plugins run on the thread that
     // calls start() and stop(); everything else on the loop thread except the
@@ -6364,11 +6387,39 @@ void ServerImpl::on_decoded_chunk(DecodeRoute& route, const engine::AudioChunk& 
         wake_loop();
         return;
     }
-    if (route.scratch.empty()) {
+    const bool images = !route.decoder->image_events().empty();
+    if (route.scratch.empty() && !images) {
         return;
     }
     enqueue_decoded(route);
+    enqueue_images(route);
     wake_loop();
+}
+
+void ServerImpl::enqueue_images(DecodeRoute& route) {
+    if (route.decoder == nullptr) {
+        return;
+    }
+    std::vector<DecodedImageEvent>& events = route.decoder->image_events();
+    if (events.empty()) {
+        return;
+    }
+    for (DecodedImageEvent& event : events) {
+        event.vrx = route.vrx.value;
+        event.decoder = std::string(route.spec.name);
+        for (const auto& node : route.nodes) {
+            if (node->forward) {
+                continue;
+            }
+            const std::scoped_lock held(node->lock);
+            while (node->image_queue.size() >= kDecodedImageQueueDepth) {
+                node->image_queue.pop_front();
+                ++node->image_dropped_before;
+            }
+            node->image_queue.push_back(event);
+        }
+    }
+    events.clear();
 }
 
 void ServerImpl::enqueue_decoded(DecodeRoute& route) {
@@ -6592,6 +6643,7 @@ void ServerImpl::end_decode_route(const std::shared_ptr<DecodeRoute>& route,
             route->scratch.clear();
             route->decoder->flush(route->scratch);
             enqueue_decoded(*route);
+            enqueue_images(*route);
         }
         nodes = route->nodes;
     }
@@ -6632,6 +6684,25 @@ void ServerImpl::send_decoded_backlog(const std::shared_ptr<DecodedNode>& node) 
         write_decoded_message(request.initMessage(), message);
         sends_->add(request.send().ignoreResult().catch_([](kj::Exception&&) {}));
     }
+
+    // Images likewise, so the close of an image the flush ended lands ahead
+    // of ended().
+    std::deque<DecodedImageEvent> images;
+    std::uint64_t images_dropped = 0;
+    {
+        const std::scoped_lock held(node->lock);
+        images.swap(node->image_queue);
+        images_dropped = std::exchange(node->image_dropped_before, 0);
+    }
+    if (node->images_unsupported || node->forward) {
+        return;
+    }
+    for (DecodedImageEvent& event : images) {
+        event.dropped_before = std::exchange(images_dropped, 0);
+        auto request = node->receiver.imageRequest();
+        write_decoded_image(request.initEvent(), event);
+        sends_->add(request.send().ignoreResult().catch_([](kj::Exception&&) {}));
+    }
 }
 
 void ServerImpl::end_decoded_for_vrx(engine::VrxId vrx, kj::StringPtr reason) {
@@ -6666,6 +6737,10 @@ void ServerImpl::reset_decoded_for_vrx(engine::VrxId vrx, const engine::VrxStatu
         route->freq_upper_hz = upper;
         if (route->decoder != nullptr) {
             route->decoder->reset();
+
+            // An image decoder closes what it held open as aborted on reset.
+            // Queued now so the close goes ahead of the new tuning's rows.
+            enqueue_images(*route);
         }
 
         // Never lowered, on reset_rds_for_vrx's argument: another session may
@@ -6735,10 +6810,70 @@ void ServerImpl::drain_decoded() {
             continue;
         }
         pump_decoded(node);
+        pump_images(node);
     }
     for (const auto& node : gone) {
         end_decoded(node);
     }
+}
+
+void ServerImpl::pump_images(const std::shared_ptr<DecodedNode>& node) {
+    if (node->cancelled || node->image_in_flight || sends_ == nullptr || node->forward) {
+        return;
+    }
+
+    DecodedImageEvent event;
+    {
+        const std::scoped_lock held(node->lock);
+        if (node->images_unsupported) {
+            node->image_queue.clear();
+            return;
+        }
+        if (node->image_queue.empty()) {
+            return;
+        }
+        event = std::move(node->image_queue.front());
+        node->image_queue.pop_front();
+        event.dropped_before = std::exchange(node->image_dropped_before, 0);
+    }
+
+    auto request = node->receiver.imageRequest();
+    write_decoded_image(request.initEvent(), event);
+    node->image_in_flight = true;
+
+    auto weak = node->weak_from_this();
+    sends_->add(request.send().ignoreResult().then(
+        [this, weak]() {
+            if (auto live = weak.lock()) {
+                live->image_in_flight = false;
+                pump_images(live);
+            }
+        },
+        [this, weak](kj::Exception&& failure) {
+            auto live = weak.lock();
+            if (live == nullptr) {
+                return;
+            }
+            live->image_in_flight = false;
+
+            // A client older than DecodedReceiver.image: images stop, the
+            // subscription and its messages do not.
+            if (failure.getType() == kj::Exception::Type::UNIMPLEMENTED) {
+                live->images_unsupported = true;
+                const std::scoped_lock held(live->lock);
+                live->image_queue.clear();
+                return;
+            }
+
+            // Anything else is pump_decoded's failure, handled the same way.
+            live->cancelled = true;
+            if (failure.getType() == kj::Exception::Type::DISCONNECTED) {
+                return;
+            }
+            send_decoded_ended(live, kj::str("this receiver failed the image call, so the "
+                                             "engine stopped sending to it: ",
+                                             failure.getDescription()));
+        }));
 }
 
 void ServerImpl::pump_decoded(const std::shared_ptr<DecodedNode>& node) {

@@ -368,11 +368,23 @@ void EngineLink::drain_decoded()
     std::vector<rpc::DecodedMessage> messages;
     std::vector<std::int64_t> arrived;
     std::uint64_t unkept = 0;
+    std::vector<rpc::DecodedImageEvent> images;
+    std::vector<std::int64_t> images_arrived;
+    std::vector<std::pair<std::uint64_t, std::string>> image_aborts;
     {
         const std::lock_guard<std::mutex> lock(decoded_mutex_);
         messages.swap(pending_decoded_);
         arrived.swap(pending_decoded_arrived_ms_);
         unkept = std::exchange(pending_decoded_unkept_, 0);
+        images.swap(pending_images_);
+        images_arrived.swap(pending_images_arrived_ms_);
+        image_aborts.swap(pending_image_aborts_);
+    }
+    for (std::size_t i = 0; i < images.size(); ++i) {
+        decoded_images_.apply(images[i], images_arrived[i]);
+    }
+    for (const auto& [vrx, decoder] : image_aborts) {
+        decoded_images_.abort_open(vrx, decoder);
     }
     if (messages.empty() && unkept == 0) {
         return;
@@ -493,12 +505,31 @@ void EngineLink::on_decoded_message(const rpc::DecodedMessage& message)
     }
 }
 
+void EngineLink::on_decoded_image(const rpc::DecodedImageEvent& event)
+{
+    const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+    {
+        const std::lock_guard<std::mutex> lock(decoded_mutex_);
+        pending_images_.push_back(event);
+        pending_images_arrived_ms_.push_back(now_ms);
+    }
+    if (!decoded_wake_pending_.exchange(true, std::memory_order_acq_rel)) {
+        QMetaObject::invokeMethod(this, [this] { drain_decoded(); }, Qt::QueuedConnection);
+    }
+}
+
 void EngineLink::on_decoded_ended(std::uint64_t vrx, const std::string& decoder,
                                   const std::string& reason)
 {
     {
         const std::lock_guard<std::mutex> lock(decoded_mutex_);
         pending_decoded_ended_.push_back(DecodedEnded{vrx, decoder, reason});
+        pending_image_aborts_.emplace_back(vrx, decoder);
+    }
+    if (!decoded_wake_pending_.exchange(true, std::memory_order_acq_rel)) {
+        QMetaObject::invokeMethod(this, [this] { drain_decoded(); }, Qt::QueuedConnection);
     }
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
@@ -662,7 +693,8 @@ void EngineLink::apply_decode_request()
         // client holds it under is the pair the unsubscribe above passes.
         auto resolved = client_->subscribe_decoded(
             vrx, name, [this](const rpc::DecodedMessage& message) { on_decoded_message(message); },
-            [this, vrx, name](const std::string& why) { on_decoded_ended(vrx, name, why); });
+            [this, vrx, name](const std::string& why) { on_decoded_ended(vrx, name, why); },
+            [this](const rpc::DecodedImageEvent& event) { on_decoded_image(event); });
         if (!resolved) {
             decode_refusals_.emplace_back(name, resolved.error().message);
             continue;

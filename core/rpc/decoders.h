@@ -183,6 +183,100 @@ public:
                                          std::vector<DecodedMessage>& out) = 0;
     virtual void flush(std::vector<DecodedMessage>&) {}
     virtual void reset() = 0;
+
+    // Image events emitted since the caller last cleared this, in emission
+    // order. The caller (the server's decode route) drains it after every
+    // consume and flush, stamps vrx and decoder, and clears it. An adapter
+    // that never calls the helpers below leaves it empty.
+    [[nodiscard]] std::vector<DecodedImageEvent>& image_events() { return image_events_; }
+
+protected:
+    // THE IMAGE SINK. An adapter producing a raster calls these from inside
+    // consume, flush or reset; nothing else about the adapter changes.
+    //
+    // open_image starts an image and answers its id, unique within this
+    // decoder. `at` stamps where it began; the overload taking a sample index
+    // is for a decoder that knows the start more finely than the chunk.
+    // image_row hands over one row, exactly width * bytes_per_pixel(colour)
+    // bytes: shorter is padded with zero and longer is cut, so a client never
+    // sees a ragged row. close_image ends it, complete or aborted, once.
+    // Rows or a close for an id that is not open are ignored.
+    //
+    // A decoder holding an image open at reset (a retune) or flush (the
+    // stream ending) should close it with complete = false; the server does
+    // not do it on the decoder's behalf.
+    std::uint64_t open_image(const DecoderChunk& at, std::uint32_t width, ImageColour colour,
+                             double line_rate_hz, std::string mode)
+    {
+        return open_image(at.start, static_cast<std::uint32_t>(at.rate), width, colour,
+                          line_rate_hz, std::move(mode));
+    }
+
+    std::uint64_t open_image(std::uint64_t start_sample, std::uint32_t sample_rate,
+                             std::uint32_t width, ImageColour colour, double line_rate_hz,
+                             std::string mode)
+    {
+        DecodedImageEvent event;
+        event.kind = DecodedImageEvent::Kind::Open;
+        event.image_id = ++last_image_id_;
+        event.width = width;
+        event.colour = colour;
+        event.line_rate_hz = line_rate_hz;
+        event.mode = std::move(mode);
+        event.start_sample = start_sample;
+        event.sample_rate = sample_rate;
+        open_images_.push_back(OpenImage{event.image_id, width * bytes_per_pixel(colour)});
+        image_events_.push_back(std::move(event));
+        return last_image_id_;
+    }
+
+    void image_row(std::uint64_t image, std::uint32_t row, std::span<const std::uint8_t> pixels)
+    {
+        const OpenImage* open = find_open_image(image);
+        if (open == nullptr) {
+            return;
+        }
+        DecodedImageEvent event;
+        event.kind = DecodedImageEvent::Kind::Row;
+        event.image_id = image;
+        event.row = row;
+        event.pixels.assign(pixels.begin(),
+                            pixels.begin() + static_cast<std::ptrdiff_t>(
+                                                 std::min<std::size_t>(pixels.size(),
+                                                                       open->row_bytes)));
+        event.pixels.resize(open->row_bytes, 0);
+        image_events_.push_back(std::move(event));
+    }
+
+    void close_image(std::uint64_t image, bool complete)
+    {
+        const auto found = std::ranges::find(open_images_, image, &OpenImage::id);
+        if (found == open_images_.end()) {
+            return;
+        }
+        open_images_.erase(found);
+        DecodedImageEvent event;
+        event.kind = DecodedImageEvent::Kind::Close;
+        event.image_id = image;
+        event.complete = complete;
+        image_events_.push_back(std::move(event));
+    }
+
+private:
+    struct OpenImage {
+        std::uint64_t id = 0;
+        std::uint32_t row_bytes = 0;
+    };
+
+    [[nodiscard]] const OpenImage* find_open_image(std::uint64_t image) const
+    {
+        const auto found = std::ranges::find(open_images_, image, &OpenImage::id);
+        return found == open_images_.end() ? nullptr : &*found;
+    }
+
+    std::vector<DecodedImageEvent> image_events_;
+    std::vector<OpenImage> open_images_;
+    std::uint64_t last_image_id_ = 0;
 };
 
 // What an adapter is built for, known on the first chunk.
@@ -3952,11 +4046,36 @@ private:
     return out;
 }
 
+// Decoders a test binary attaches by name and the engine never lists.
+//
+// FOR TESTS ONLY. Nothing in the engine or the client calls
+// register_test_decoder, so a shipped build's table is always empty. A row
+// here is found by subscribeDecoded and left out of decoders() and
+// decoder_names(), so an operator never sees it. Register before any server
+// exists: the table is read without a lock. The spec must outlive every
+// lookup, which a static in the test file gives.
+[[nodiscard]] inline std::vector<const DecoderSpec*>& test_decoder_table() {
+    static std::vector<const DecoderSpec*> table;
+    return table;
+}
+
+inline void register_test_decoder(const DecoderSpec& spec) {
+    std::vector<const DecoderSpec*>& table = test_decoder_table();
+    if (std::ranges::find(table, &spec) == table.end()) {
+        table.push_back(&spec);
+    }
+}
+
 // The spec with this name, or null.
 [[nodiscard]] inline const DecoderSpec* find_decoder(std::string_view name) {
     for (const DecoderSpec& spec : decoder_registry()) {
         if (spec.name == name) {
             return &spec;
+        }
+    }
+    for (const DecoderSpec* spec : test_decoder_table()) {
+        if (spec->name == name) {
+            return spec;
         }
     }
     return nullptr;

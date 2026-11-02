@@ -1436,6 +1436,7 @@ public:
 
     kj::Promise<void> message(MessageContext context) override;
     kj::Promise<void> ended(EndedContext context) override;
+    kj::Promise<void> image(ImageContext context) override;
 
 private:
     ClientImpl& owner_;
@@ -1560,7 +1561,8 @@ public:
     [[nodiscard]] Expected<std::string> subscribe_decoded(std::uint64_t vrx,
                                                           std::string_view decoder,
                                                           DecodedCallback on_message,
-                                                          DecodedEndedCallback on_ended) override;
+                                                          DecodedEndedCallback on_ended,
+                                                          DecodedImageCallback on_image) override;
     void unsubscribe_decoded(std::uint64_t vrx, std::string_view decoder) override;
     [[nodiscard]] Expected<DecodedStats> decoded_stats(std::uint64_t vrx,
                                                        std::string_view decoder) override;
@@ -1593,6 +1595,7 @@ public:
     // Loop thread only, called by DecodedReceiverImpl.
     void deliver_decoded(const DecodedKey& key, schema::DecodedMessage::Reader in);
     void deliver_decoded_ended(const DecodedKey& key, capnp::Text::Reader reason);
+    void deliver_decoded_image(const DecodedKey& key, schema::DecodedImageEvent::Reader in);
 
     // Loop thread only, called by TranscriptReceiverImpl.
     void deliver_transcript(std::uint64_t generation, schema::Transcript::Reader in);
@@ -1718,6 +1721,7 @@ private:
     // floats whose buffer is worth keeping.
     std::map<DecodedKey, DecodedCallback> decoded_callbacks_;
     std::map<DecodedKey, DecodedEndedCallback> decoded_ended_;
+    std::map<DecodedKey, DecodedImageCallback> decoded_images_;
 
     // The transcript subscription's pair, and its generation: moved by every
     // subscribe and unsubscribe and carried by the receiver capability, so a
@@ -2655,6 +2659,11 @@ kj::Promise<void> DecodedReceiverImpl::ended(EndedContext context) {
     return kj::READY_NOW;
 }
 
+kj::Promise<void> DecodedReceiverImpl::image(ImageContext context) {
+    owner_.deliver_decoded_image(key_, context.getParams().getEvent());
+    return kj::READY_NOW;
+}
+
 kj::Promise<void> TranscriptReceiverImpl::transcript(TranscriptContext context) {
     owner_.deliver_transcript(generation_, context.getParams().getTranscript());
     return kj::READY_NOW;
@@ -3191,6 +3200,7 @@ Expected<std::vector<CaptureBucket>> ClientImpl::capture_occupancy(
 void ClientImpl::forget_decoded(const DecodedKey& key) {
     decoded_callbacks_.erase(key);
     decoded_ended_.erase(key);
+    decoded_images_.erase(key);
 
     // The capability too, which is the half forget_audio's note says used to
     // be left behind for audio.
@@ -3215,22 +3225,27 @@ kj::Promise<void> ClientImpl::end_decoded(LoopState& state, const DecodedKey& ke
 
 Expected<std::string> ClientImpl::subscribe_decoded(std::uint64_t vrx, std::string_view decoder,
                                                     DecodedCallback on_message,
-                                                    DecodedEndedCallback on_ended) {
+                                                    DecodedEndedCallback on_ended,
+                                                    DecodedImageCallback on_image) {
     if (!on_message) {
         return fail("subscribe_decoded: the message callback is empty. unsubscribe_decoded is "
                     "how a subscription ends");
     }
 
     DecodedKey key{vrx, std::string(decoder)};
-    return on_loop("subscribe_decoded", [this, &key, &on_message,
-                                         &on_ended](LoopState& state) {
+    return on_loop("subscribe_decoded", [this, &key, &on_message, &on_ended,
+                                         &on_image](LoopState& state) {
         // Replacing, as subscribe_audio does, and the old one is ended first
         // so a message from it cannot reach the new callback.
-        return end_decoded(state, key).then([this, &state, &key, &on_message, &on_ended]() {
+        return end_decoded(state, key).then([this, &state, &key, &on_message, &on_ended,
+                                             &on_image]() {
             // Installed before the request goes out, because the engine may
             // call message() before it answers the subscribe.
             decoded_callbacks_[key] = std::move(on_message);
             decoded_ended_[key] = std::move(on_ended);
+            if (on_image) {
+                decoded_images_[key] = std::move(on_image);
+            }
 
             auto request = state.session.subscribeDecodedRequest();
             request.setVrx(key.first);
@@ -3283,6 +3298,49 @@ void ClientImpl::deliver_decoded(const DecodedKey& key, schema::DecodedMessage::
     DecodedMessage message;
     read_decoded_message(message, in);
     callback->second(message);
+}
+
+void ClientImpl::deliver_decoded_image(const DecodedKey& key,
+                                       schema::DecodedImageEvent::Reader in) {
+    auto callback = decoded_images_.find(key);
+    if (callback == decoded_images_.end() || !callback->second) {
+        return;
+    }
+    DecodedImageEvent event;
+    event.vrx = in.getVrx();
+    event.decoder = read_text(in.getDecoder());
+    event.image_id = in.getImageId();
+    event.dropped_before = in.getDroppedBefore();
+    switch (in.which()) {
+        case schema::DecodedImageEvent::OPEN: {
+            const auto open = in.getOpen();
+            event.kind = DecodedImageEvent::Kind::Open;
+            event.width = open.getWidth();
+            event.colour = open.getColour() == schema::ImageColour::RGB888 ? ImageColour::Rgb888
+                                                                           : ImageColour::Gray8;
+            event.line_rate_hz = open.getLineRate();
+            event.mode = read_text(open.getMode());
+            event.start_sample = open.getStartSample();
+            event.sample_rate = open.getSampleRate();
+            break;
+        }
+        case schema::DecodedImageEvent::ROW: {
+            const auto row = in.getRow();
+            event.kind = DecodedImageEvent::Kind::Row;
+            event.row = row.getRow();
+            const capnp::Data::Reader pixels = row.getPixels();
+            event.pixels.assign(pixels.begin(), pixels.end());
+            break;
+        }
+        case schema::DecodedImageEvent::CLOSE:
+            event.kind = DecodedImageEvent::Kind::Close;
+            event.complete = in.getClose().getComplete();
+            break;
+        default:
+            // A kind this build cannot name is skipped rather than guessed.
+            return;
+    }
+    callback->second(event);
 }
 
 void ClientImpl::deliver_decoded_ended(const DecodedKey& key, capnp::Text::Reader reason) {

@@ -185,6 +185,9 @@ qt_add_executable(revenant_ui
     models/bookmark_link.cpp
     models/calibration.h
     models/calibration_link.cpp
+    models/decoded_image_model.cpp
+    models/decoded_image_model.h
+    models/decoded_images.h
     models/decoded_link.cpp
     models/decoded_log.h
     models/decoded_model.cpp
@@ -357,6 +360,7 @@ qt_add_qml_module(revenant_ui
         qml/FrequencyDial.qml
         qml/RdsPane.qml
         qml/DecodePane.qml
+        qml/ImagePane.qml
         qml/CallsPane.qml
         qml/TrunkPanel.qml
         qml/AudioPane.qml
@@ -767,6 +771,7 @@ if(REVENANT_UI_TESTS)
             tests/test_colour_map.cpp
             tests/test_composite_probe.cpp
             tests/test_decoded_log.cpp
+            tests/test_decoded_images.cpp
             tests/test_call_log.cpp
             tests/test_detector_settings.cpp
             tests/test_detector_scope.cpp
