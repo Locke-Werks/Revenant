@@ -399,3 +399,4 @@ target_sources(revenant_core PRIVATE
 )
 target_sources(revenant_core PRIVATE decode/ccsds_downlink.cpp dsp/synth/ccsds_downlink_mod.cpp decode/lrpt.cpp dsp/synth/lrpt_mod.cpp)
 target_sources(revenant_core PRIVATE decode/ahrpt.cpp dsp/synth/ahrpt_mod.cpp)
+target_sources(revenant_core PRIVATE decode/xrit.cpp dsp/synth/xrit_mod.cpp decode/gk2a_lrit.cpp dsp/synth/gk2a_lrit_mod.cpp)

@@ -239,3 +239,4 @@ catch_discover_tests(revenant_decode_tests
 )
 target_sources(revenant_decode_tests PRIVATE test_lrpt.cpp)
 target_sources(revenant_decode_tests PRIVATE test_ahrpt.cpp)
+target_sources(revenant_decode_tests PRIVATE test_gk2a_lrit.cpp)
