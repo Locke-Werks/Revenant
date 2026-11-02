@@ -506,6 +506,102 @@ TEST_CASE("AIS output does not depend on how the audio is blocked", "[decode][ai
     }
 }
 
+TEST_CASE("M.1371-6 A8-6 names locating devices by their MMSI", "[decode][ais][sart]") {
+    CHECK(decode::ais_locating_device(970012345) == decode::AisLocatingDevice::Sart);
+    CHECK(decode::ais_locating_device(972991234) == decode::AisLocatingDevice::Mob);
+    CHECK(decode::ais_locating_device(974000001) == decode::AisLocatingDevice::Epirb);
+    CHECK_FALSE(decode::ais_locating_device(971012345).has_value());
+    CHECK_FALSE(decode::ais_locating_device(366123456).has_value());
+    // Eight digits is not an identity at all.
+    CHECK_FALSE(decode::ais_locating_device(97012345).has_value());
+}
+
+TEST_CASE("Message 27 is laid out as Table 83 says", "[decode][ais][sart]") {
+    decode::AisMessage m;
+    m.message_id = 27;
+    m.repeat = 3;
+    m.mmsi = 236091959;
+    m.navigational_status = 0;
+    m.position = decode::AisPosition{-5.5, 36.1};
+    m.sog_tenths = 120;
+    m.cog_tenths = 2700;
+    m.position_latency = false;
+    auto octets = siggen::ais_encode(m);
+    REQUIRE(octets.has_value());
+    // Table 83: 96 bits.
+    REQUIRE(octets->size() == 12);
+    CHECK(decode::ais_field(*octets, 0, 6) == 27);
+    CHECK(decode::ais_field(*octets, 6, 2) == 3);
+    // -5.5 degrees is -3300 tenths of a minute, 36.1 is 21660.
+    CHECK(decode::ais_signed_field(*octets, 44, 18) == -3300);
+    CHECK(decode::ais_signed_field(*octets, 62, 17) == 21660);
+    CHECK(decode::ais_field(*octets, 79, 6) == 12);
+    CHECK(decode::ais_field(*octets, 85, 9) == 270);
+    const decode::AisMessage got = decode::ais_parse(*octets);
+    REQUIRE(got.parsed);
+    REQUIRE(got.position.has_value());
+    CHECK(std::abs(got.position->longitude + 5.5) < 1e-9);
+    CHECK(std::abs(got.position->latitude - 36.1) < 1e-9);
+    CHECK(got.sog_tenths == 120);
+    CHECK(got.cog_tenths == 2700);
+    CHECK(got.position_latency == false);
+
+    // The defaults Table 83 prints: 1A838h, D548h, 63 and 511.
+    decode::AisMessage blank;
+    blank.message_id = 27;
+    blank.mmsi = 236091959;
+    auto none = siggen::ais_encode(blank);
+    REQUIRE(none.has_value());
+    CHECK(decode::ais_field(*none, 44, 18) == 0x1A838U);
+    CHECK(decode::ais_field(*none, 62, 17) == 0xD548U);
+    const decode::AisMessage empty = decode::ais_parse(*none);
+    CHECK(empty.parsed);
+    CHECK_FALSE(empty.position.has_value());
+    CHECK_FALSE(empty.sog_tenths.has_value());
+    CHECK_FALSE(empty.cog_tenths.has_value());
+}
+
+TEST_CASE("an AIS-SART's Messages 1 and 14 and a Message 27 come back from RF",
+          "[decode][ais][sart]") {
+    std::vector<decode::AisMessage> sent;
+    decode::AisMessage pos = position_report(970012345, -70.25, 41.5);
+    pos.navigational_status = decode::kAisStatusLocatingDeviceActive;
+    sent.push_back(pos);
+    decode::AisMessage text;
+    text.message_id = 14;
+    text.mmsi = 970012345;
+    // Clause A1-2.1.5.1's active text, with an mpp of "A12".
+    text.safety_text = "SART ACTIVE A12";
+    sent.push_back(text);
+    decode::AisMessage sat;
+    sat.message_id = 27;
+    sat.repeat = 3;
+    sat.mmsi = 974051234;
+    sat.navigational_status = decode::kAisStatusLocatingDeviceActive;
+    sat.position = decode::AisPosition{12.5, -33.75};
+    sat.sog_tenths = 30;
+    sat.cog_tenths = 450;
+    sent.push_back(sat);
+
+    siggen::AisModConfig mod;
+    auto rf = siggen::ais_render(mod, sent);
+    REQUIRE(rf.has_value());
+    const auto audio = receive(std::move(*rf), 25.0, 0x5A27ULL);
+    const auto got = decode_audio(audio);
+    REQUIRE(got.size() == 3);
+    CHECK(got[0].locating_device == decode::AisLocatingDevice::Sart);
+    CHECK(got[0].navigational_status == decode::kAisStatusLocatingDeviceActive);
+    CHECK(got[1].message_id == 14);
+    CHECK(got[1].safety_text == "SART ACTIVE A12");
+    CHECK(got[1].locating_device == decode::AisLocatingDevice::Sart);
+    CHECK(got[2].message_id == 27);
+    CHECK(got[2].locating_device == decode::AisLocatingDevice::Epirb);
+    REQUIRE(got[2].position.has_value());
+    CHECK(std::abs(got[2].position->latitude + 33.75) < 1e-9);
+    CHECK(got[2].sog_tenths == 30);
+    CHECK(got[2].cog_tenths == 450);
+}
+
 TEST_CASE("a message's sample indices are where its flags were", "[decode][ais]") {
     siggen::AisModConfig mod;
     mod.lead_bits = 100;

@@ -245,7 +245,59 @@ bool parse_static_report(AisMessage& m, std::span<const std::uint8_t> octets) {
     return false;
 }
 
+// M.1371-6 Table 61, Message 14: 40 bits of header and spare, then up to 968
+// bits of six-bit text, so at least one character.
+bool parse_safety_broadcast(AisMessage& m, std::span<const std::uint8_t> octets) {
+    const std::size_t bits = octets.size() * 8;
+    if (bits < 46) {
+        return false;
+    }
+    m.safety_text = ais_text(octets, 40, std::min<std::size_t>(bits - 40, 968) / 6);
+    return true;
+}
+
+// M.1371-6 Table 83, Message 27: 96 bits.
+bool parse_satellite(AisMessage& m, std::span<const std::uint8_t> octets) {
+    if (octets.size() * 8 < 96) {
+        return false;
+    }
+    m.position_accuracy = ais_field(octets, 38, 1) != 0U;
+    m.raim = ais_field(octets, 39, 1) != 0U;
+    m.navigational_status = static_cast<std::uint8_t>(ais_field(octets, 40, 4));
+    const std::int32_t lon = ais_signed_field(octets, 44, 18);
+    const std::int32_t lat = ais_signed_field(octets, 62, 17);
+    if (lon != kAis27LongitudeNotAvailable && lat != kAis27LatitudeNotAvailable) {
+        const AisPosition p{static_cast<double>(lon) / kAis27PositionUnitsPerDegree,
+                            static_cast<double>(lat) / kAis27PositionUnitsPerDegree};
+        if (std::abs(p.longitude) <= 180.0 && std::abs(p.latitude) <= 90.0) {
+            m.position = p;
+        }
+    }
+    const std::uint32_t sog = ais_field(octets, 79, 6);
+    if (sog != kAis27SogNotAvailable) {
+        m.sog_tenths = static_cast<std::uint16_t>(sog * 10U);
+    }
+    const std::uint32_t cog = ais_field(octets, 85, 9);
+    if (cog != kAis27CogNotAvailable) {
+        m.cog_tenths = static_cast<std::uint16_t>(cog * 10U);
+    }
+    m.position_latency = ais_field(octets, 94, 1) != 0U;
+    return true;
+}
+
 }  // namespace
+
+std::optional<AisLocatingDevice> ais_locating_device(std::uint32_t mmsi) {
+    if (mmsi < 100'000'000U || mmsi > 999'999'999U) {
+        return std::nullopt;
+    }
+    switch (mmsi / 1'000'000U) {
+        case 970: return AisLocatingDevice::Sart;
+        case 972: return AisLocatingDevice::Mob;
+        case 974: return AisLocatingDevice::Epirb;
+        default: return std::nullopt;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The link layer
@@ -329,6 +381,8 @@ AisMessage ais_parse(std::span<const std::uint8_t> octets) {
         case 19: m.parsed = parse_class_b_extended(m, octets); break;
         case 21: m.parsed = parse_aton(m, octets); break;
         case 24: m.parsed = parse_static_report(m, octets); break;
+        case 14: m.parsed = parse_safety_broadcast(m, octets); break;
+        case 27: m.parsed = parse_satellite(m, octets); break;
         default: m.parsed = false; break;
     }
     if (!m.parsed) {
@@ -338,8 +392,10 @@ AisMessage ais_parse(std::span<const std::uint8_t> octets) {
         bare.repeat = m.repeat;
         bare.mmsi = m.mmsi;
         bare.octets = std::move(m.octets);
+        bare.locating_device = ais_locating_device(bare.mmsi);
         return bare;
     }
+    m.locating_device = ais_locating_device(m.mmsi);
     return m;
 }
 
