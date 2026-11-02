@@ -216,6 +216,7 @@ add_executable(revenant_decode_tests
     test_fsq.cpp
     test_feld_hell.cpp
     test_wspr.cpp
+    test_jt9.cpp
 )
 
 target_link_libraries(revenant_decode_tests PRIVATE

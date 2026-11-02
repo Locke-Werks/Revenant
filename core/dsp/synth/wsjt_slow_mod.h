@@ -39,4 +39,9 @@ struct SlowModConfig {
 [[nodiscard]] Status wspr_add(const SlowModConfig& config, std::string_view call, std::string_view grid,
                               int power_dbm, std::span<float> audio);
 
+// JT9 slow submode 0 to 7 (A to H): core/decode/wsjt72.h's packing and
+// core/decode/jt9.h's channel symbols.
+[[nodiscard]] Status jt9_add(const SlowModConfig& config, std::string_view message, int submode,
+                             std::span<float> audio);
+
 }  // namespace revenant::siggen

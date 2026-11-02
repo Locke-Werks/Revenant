@@ -3,6 +3,7 @@
 #include <cmath>
 #include <numbers>
 
+#include "core/decode/jt9.h"
 #include "core/decode/wspr.h"
 
 namespace revenant::siggen {
@@ -30,6 +31,13 @@ Status wspr_add(const SlowModConfig& config, std::string_view call, std::string_
     if (!bits) return std::unexpected(bits.error());
     const auto tones = decode::wspr_channel_tones(*bits);
     return slow_add(config, decode::wspr_protocol(), tones, audio);
+}
+
+Status jt9_add(const SlowModConfig& config, std::string_view message, int submode, std::span<float> audio) {
+    auto bits = decode::wsjt72_pack(message);
+    if (!bits) return std::unexpected(bits.error());
+    const auto tones = decode::jt9_channel_tones(*bits);
+    return slow_add(config, decode::jt9_protocol(submode), tones, audio);
 }
 
 }  // namespace revenant::siggen
