@@ -351,6 +351,7 @@ TrackingChannel::TrackingChannel(const SignalSpec& spec, const FrontEndConfig& c
       next_(start_sample),
       period_start_(start_sample),
       code_phase_(code_phase_chips),
+      start_phase_(code_phase_chips),
       carrier_hz_(doppler_hz),
       nco_hz_(doppler_hz) {
     code_rate_ = spec_.chip_rate_hz * (1.0 + carrier_hz_ / spec_.carrier_hz);
@@ -394,6 +395,9 @@ void TrackingChannel::process(std::span<const Complex32> samples, SampleIndex fi
         prompt_ += z * static_cast<double>(code[idx(cp)]);
         early_ += z * static_cast<double>(code[idx(cp + d)]);
         late_ += z * static_cast<double>(code[idx(cp - d)]);
+        if (!spec_.aux_code.empty()) {
+            aux_ += z * static_cast<double>(spec_.aux_code[idx(cp)]);
+        }
         cp += step;
         ++next_;
         if (cp >= code_len_) {
@@ -409,6 +413,7 @@ void TrackingChannel::process(std::span<const Complex32> samples, SampleIndex fi
             lo = std::polar(1.0, -kTwoPi * carrier_phase_);
             lo_step_ = std::polar(1.0, -kTwoPi * (spec_.offset_hz + nco_hz_) / fs_);
             period_start_ = next_;
+            start_phase_ = cp;
         }
     }
     code_phase_ = cp;
@@ -490,6 +495,8 @@ void TrackingChannel::dump(std::vector<Prompt>& out) {
     pr.sample = period_start_;
     pr.period = periods_;
     pr.prompt = p;
+    pr.aux = aux_;
+    pr.code_phase_chips = start_phase_;
     pr.doppler_hz = carrier_hz_;
     pr.cn0_dbhz = cn0_;
     pr.phase_locked = lock_metric_ > 0.6 && elapsed >= cfg_.fll_only_periods;
@@ -497,7 +504,7 @@ void TrackingChannel::dump(std::vector<Prompt>& out) {
 
     last_prompt_ = p;
     have_last_ = true;
-    early_ = prompt_ = late_ = {};
+    early_ = prompt_ = late_ = aux_ = {};
     ++periods_;
 }
 

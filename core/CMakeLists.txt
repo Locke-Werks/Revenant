@@ -169,6 +169,8 @@ add_library(revenant_core STATIC
     decode/glonass_l1.cpp
     decode/gnss_acq.cpp
     decode/gps_lnav.cpp
+    decode/gps_l1c.cpp
+    decode/gps_l1c_tables.cpp
     decode/fx25.cpp
     decode/g3ruh.cpp
     decode/il2p.cpp
@@ -266,6 +268,7 @@ add_library(revenant_core STATIC
     dsp/synth/gnss_mod.cpp
     dsp/synth/gps_lnav_mod.cpp
     dsp/synth/link11_mod.cpp
+    dsp/synth/gps_l1c_mod.cpp
     dsp/synth/m17_mod.cpp
     dsp/synth/apt_mod.cpp
     dsp/synth/hrpt_mod.cpp

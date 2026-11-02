@@ -122,6 +122,10 @@ struct SignalSpec {
     // Zero for CDMA signals on a tap centred on them; the FDMA channel offset
     // for GLONASS.
     double offset_hz = 0.0;
+    // A second code on the same carrier and timing, correlated at the prompt
+    // only and reported as Prompt::aux: GPS L1C tracks its pilot and reads its
+    // data channel this way. Same length as `code`, or empty.
+    std::vector<std::int8_t> aux_code;
 };
 
 struct AcquisitionConfig {
@@ -164,6 +168,10 @@ struct Prompt {
     SampleIndex sample = 0;    // absolute index of the period's first sample
     std::uint64_t period = 0;  // periods since the channel started
     std::complex<double> prompt;
+    std::complex<double> aux;  // SignalSpec::aux_code at the prompt, else zero
+    // The code phase, in chips, the loop held at `sample`: the fraction of a
+    // chip by which the period really began before that sample.
+    double code_phase_chips = 0.0;
     double doppler_hz = 0.0;   // carrier Doppler, relative to offset_hz
     double cn0_dbhz = 0.0;     // 0 until the first estimate
     bool phase_locked = false;
@@ -234,7 +242,8 @@ private:
     std::complex<double> lo_{1.0, 0.0};
     std::complex<double> lo_step_{1.0, 0.0};
     bool nco_ready_ = false;
-    std::complex<double> early_{}, prompt_{}, late_{};
+    std::complex<double> early_{}, prompt_{}, late_{}, aux_{};
+    double start_phase_ = 0.0;  // code phase at period_start_
     std::complex<double> last_prompt_{};
     bool have_last_ = false;
 
