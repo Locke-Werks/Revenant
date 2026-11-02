@@ -144,6 +144,7 @@ add_library(revenant_core STATIC
     decode/dect.cpp
     decode/mfsk16.cpp
     decode/dominoex.cpp
+    decode/fsq.cpp
     decode/dv_phy.cpp
     decode/enocean.cpp
     decode/fs1016.cpp
@@ -253,6 +254,7 @@ add_library(revenant_core STATIC
     dsp/synth/mfsk_mod.cpp
     dsp/synth/mfsk16_mod.cpp
     dsp/synth/dominoex_mod.cpp
+    dsp/synth/fsq_mod.cpp
     dsp/synth/modulators.cpp
     dsp/synth/ofdm_mod.cpp
     dsp/synth/opulent_voice_mod.cpp
