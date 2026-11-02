@@ -30,8 +30,8 @@ Expected<std::vector<std::uint8_t>> vdes_asm_build_payload(
     unsigned link_id, const decode::VdesAsmMessage& header,
     std::span<const std::uint8_t> application_data) {
     const auto format = decode::vdes_asm_format(link_id);
-    if (!format || !format->uncoded) {
-        return fail(std::format("VDES ASM Link ID {} is not an uncoded format", link_id));
+    if (!format) {
+        return fail(std::format("VDES ASM Link ID {} is not an ASM-TER format", link_id));
     }
     const std::size_t octets = format->packet_bits / 8 - 4;
     const std::size_t room = octets * 8 - decode::kVdesAsmHeaderBits;
@@ -63,8 +63,10 @@ Expected<std::vector<Complex32>> vdes_asm_render(const VdesAsmModConfig& config,
     std::vector<Complex32> symbols(config.gap_symbols, Complex32{});
     for (const VdesAsmBurstSpec& b : bursts) {
         const auto format = decode::vdes_asm_format(b.link_id);
-        if (!format || !format->uncoded) {
-            return fail(std::format("VDES ASM Link ID {} is not an uncoded format", b.link_id));
+        const decode::TurboCode* turbo =
+            format && !format->uncoded ? decode::vdes_asm_turbo(b.link_id) : nullptr;
+        if (!format || (!format->uncoded && turbo == nullptr)) {
+            return fail(std::format("VDES ASM Link ID {} is not an ASM-TER format", b.link_id));
         }
         const std::size_t octets = format->packet_bits / 8 - 4;
         if (b.payload.size() != octets) {
@@ -80,6 +82,10 @@ Expected<std::vector<Complex32>> vdes_asm_render(const VdesAsmModConfig& config,
         bits.reserve(format->data_symbols * 2);
         for (std::size_t i = 0; i < format->packet_bits; ++i) {
             bits.push_back(static_cast<std::uint8_t>((packet[i / 8] >> (7U - i % 8)) & 1U));
+        }
+        if (turbo != nullptr) {
+            // Figure 6: FEC, then the scrambler over the coded bits.
+            bits = turbo->encode(bits);
         }
         bits.resize(format->data_symbols * 2, 0);
         decode::vdes_scramble(bits);

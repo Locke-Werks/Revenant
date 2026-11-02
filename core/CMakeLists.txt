@@ -111,6 +111,7 @@ add_library(revenant_core STATIC
     decode/ale_2g.cpp
     decode/vdl4.cpp
     decode/vdes.cpp
+    decode/turbo.cpp
     decode/asterix_cat021.cpp
     decode/b2f.cpp
     decode/ccsds.cpp

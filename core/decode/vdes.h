@@ -35,9 +35,29 @@
 //
 // At Link IDs 1, 2 and 3, the one, two and three slot formats Table 7 gives an
 // FEC rate of 1. Link IDs 5, 6 and 7 carry the same payload through clause
-// A2-1.2.4's rate 3/4 turbo code, which is not implemented; those bursts are
-// reported with their Link ID and no payload. Link ID 4 is the satellite
-// format, which uses a different syncword. VDE-TER (Table 8) is not decoded.
+// A2-1.2.4's rate 3/4 turbo code, decoded by core/decode/turbo.h with the
+// Table 4 interleaver and puncturing parameters for each. Link ID 4 is the
+// satellite format, which uses a different syncword. VDE-TER (Table 8) is
+// not decoded.
+//
+// THE TURBO CODED FORMATS
+//
+// Table 4 gives Link IDs 5, 6 and 7 information lengths 288, 672 and 1056,
+// k1|k2 of 2|144, 2|336 and 4|264, eight interleaver primes each, Table 5
+// puncturing pattern 8 and Table 6 tail pattern 8b. Figure 6 orders the
+// operations: pad, CRC, FEC, then the bit scrambler, so the scrambler runs
+// over the coded bits.
+//
+// One deviation. Table 6 pattern 8b sends 8 tail bits, but Table 7 gives each
+// of these formats 10 ("padding + FEC tail 0+10": 394 channel bits against
+// 384 coded, 906 against 896, 1418 against 1408), and the worked example of
+// Annex 4 (Link ID 5, an ASM acknowledgement, steps (c) and (d)) ends its 394
+// coded bits with the ten tail bits 1111010001, which are what Table 6
+// pattern 8a produces from that input and 8b does not. The data part of that
+// example, 384 bits, is reproduced exactly by the code here; so is the tail
+// under 8a. So this uses 8a, the pattern that fills the slot and matches the
+// Recommendation's own example; tests/decode/test_vdes.cpp carries the
+// example as a vector.
 //
 // From a decoded packet, the header of Tables 26 to 28 is read for every
 // message ID: message ID, retransmit flag, repeat indicator, session ID, source
@@ -84,6 +104,7 @@
 #include <vector>
 
 #include "core/decode/dv_phy.h"
+#include "core/decode/turbo.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
 
@@ -139,6 +160,10 @@ struct VdesAsmFormat {
     // FEC rate 1 in Table 7.
     bool uncoded = false;
 };
+
+// Table 4 and clause A2-1.2.4: the turbo code of Link ID 5, 6 or 7, built
+// once; nullptr for any other.
+[[nodiscard]] const TurboCode* vdes_asm_turbo(unsigned link_id);
 
 // Table 7's ASM-TER formats, Link IDs 1, 2, 3, 5, 6 and 7, or nothing.
 [[nodiscard]] std::optional<VdesAsmFormat> vdes_asm_format(unsigned link_id);
@@ -203,6 +228,10 @@ struct VdesAsmConfig {
 
     // Matched filter length in symbols.
     std::size_t filter_span_symbols = 8;
+
+    // Turbo decoder iterations at most, Link IDs 5 to 7. The decoder stops
+    // at the first iteration whose output passes the CRC.
+    std::size_t turbo_iterations = 8;
 };
 
 struct VdesAsmBurst {
@@ -212,8 +241,10 @@ struct VdesAsmBurst {
     double link_id_quality = 0.0;
     std::optional<VdesAsmFormat> format;
 
-    // False when the format is not decoded (turbo coded) or the CRC failed.
+    // False when the CRC failed.
     bool crc_ok = false;
+    // Turbo decoder iterations run, Link IDs 5 to 7.
+    std::size_t turbo_iterations = 0;
     // Payload without the CRC, when crc_ok.
     std::vector<std::uint8_t> payload;
     std::optional<VdesAsmMessage> message;

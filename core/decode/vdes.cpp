@@ -50,6 +50,60 @@ std::optional<VdesAsmFormat> vdes_asm_format(unsigned link_id) {
     return std::nullopt;
 }
 
+const TurboCode* vdes_asm_turbo(unsigned link_id) {
+    // Table 4, rows 5 to 7: k1, k2 and the eight primes.
+    struct Row {
+        std::size_t k1;
+        std::size_t k2;
+        std::array<std::uint32_t, 8> primes;
+    };
+    static constexpr std::array<Row, 3> kRows{{
+        {2, 144, {47, 17, 233, 127, 239, 139, 199, 163}},
+        {2, 336, {37, 101, 191, 149, 79, 131, 229, 31}},
+        {4, 264, {23, 31, 167, 223, 59, 113, 47, 211}},
+    }};
+    // Table 5, pattern 8 (rate 3/4): six clocks of X, Y0, Y1, X', Y'0, Y'1.
+    static constexpr std::array<TurboClockPattern, 6> kPattern8{{
+        {1, 0, 1, 0, 0, 0},
+        {1, 0, 0, 0, 0, 0},
+        {1, 0, 0, 0, 0, 0},
+        {1, 0, 0, 0, 0, 0},
+        {1, 0, 0, 0, 0, 0},
+        {1, 0, 0, 0, 0, 1},
+    }};
+    // Table 6, pattern 8a: ten tail bits. vdes.h says why not 8b.
+    static constexpr std::array<TurboClockPattern, 6> kTail8a{{
+        {1, 0, 1, 0, 0, 0},
+        {1, 0, 1, 0, 0, 0},
+        {1, 0, 0, 0, 0, 0},
+        {0, 0, 0, 1, 0, 1},
+        {0, 0, 0, 1, 0, 1},
+        {0, 0, 0, 1, 0, 0},
+    }};
+    static const std::array<std::optional<TurboCode>, 3> kCodes = [] {
+        std::array<std::optional<TurboCode>, 3> codes;
+        for (std::size_t i = 0; i < kRows.size(); ++i) {
+            auto pi = ccsds_turbo_permutation(kRows[i].k1, kRows[i].k2, kRows[i].primes);
+            if (!pi) {
+                continue;
+            }
+            TurboCodeSpec spec;
+            spec.permutation = std::move(*pi);
+            spec.data_pattern.assign(kPattern8.begin(), kPattern8.end());
+            spec.tail_pattern = kTail8a;
+            auto code = TurboCode::create(std::move(spec));
+            if (code) {
+                codes[i] = std::move(*code);
+            }
+        }
+        return codes;
+    }();
+    if (link_id < 5 || link_id > 7 || !kCodes[link_id - 5]) {
+        return nullptr;
+    }
+    return &*kCodes[link_id - 5];
+}
+
 std::uint32_t vdes_link_id_codeword(unsigned link_id) {
     std::uint32_t word = kVdesLinkIdScramble;
     for (unsigned i = 0; i < 6; ++i) {
@@ -269,7 +323,7 @@ void VdesAsmDecoder::process(dsp::ConstComplexSpan samples, std::vector<VdesAsmB
         const Front f = front(p.t, p.metric, p.corr);
         const auto format = vdes_asm_format(f.link_id);
         const std::size_t data_symbols =
-            (format && format->uncoded) ? format->data_symbols : 0;
+            format ? format->data_symbols : 0;
         const std::int64_t end =
             p.t + static_cast<std::int64_t>(kKnownSymbols + data_symbols) * sps + 2 * sps;
         if (end >= total_) {
@@ -411,7 +465,9 @@ void VdesAsmDecoder::decode_at(const Front& f, double metric, std::vector<VdesAs
     const double intercept = (sy - slope * sx) / count;
     burst.cfo_hz += slope * kVdesAsmSymbolRate / (2.0 * kPi);
 
-    if (!burst.format->uncoded) {
+    const TurboCode* turbo = burst.format->uncoded ? nullptr : vdes_asm_turbo(id);
+    if (!burst.format->uncoded &&
+        (turbo == nullptr || turbo->encoded_bits() != burst.format->data_symbols * 2)) {
         ++stats_.not_decoded;
         out.push_back(std::move(burst));
         return;
@@ -420,6 +476,9 @@ void VdesAsmDecoder::decode_at(const Front& f, double metric, std::vector<VdesAs
     const std::size_t data_symbols = burst.format->data_symbols;
     std::vector<std::uint8_t> bits;
     bits.reserve(data_symbols * 2);
+    // Soft values, positive for a one, kept for the turbo decoder.
+    std::vector<float> soft;
+    soft.reserve(data_symbols * 2);
     float theta = 0.0F;
     double err_power = 0.0;
     const auto gain = static_cast<float>(1.0 / std::max(amp_sync, 1e-12));
@@ -434,6 +493,8 @@ void VdesAsmDecoder::decode_at(const Front& f, double metric, std::vector<VdesAs
         const unsigned lb = l1 > 0.0F ? 1U : 0U;
         bits.push_back(static_cast<std::uint8_t>(mb));
         bits.push_back(static_cast<std::uint8_t>(lb));
+        soft.push_back(m1);
+        soft.push_back(l1);
         const Complex32 point = vdes_pi4qpsk_point(n, mb, lb);
         err_power += static_cast<double>(std::norm(v - point));
         theta += kPhaseGain * std::arg(v * std::conj(point));
@@ -444,7 +505,36 @@ void VdesAsmDecoder::decode_at(const Front& f, double metric, std::vector<VdesAs
     burst.cqi = static_cast<std::uint8_t>(
         std::clamp(std::floor(40.0 + 4.0 * burst.sinr_db), 0.0, 255.0));
 
-    vdes_scramble(bits);
+    if (turbo != nullptr) {
+        // Figure 6: the scrambler ran over the coded bits, so it is undone
+        // on the soft values by sign before decoding. LLRs are log P(0) /
+        // P(1); max-log decoding needs them only up to a common scale.
+        std::vector<std::uint8_t> sequence(soft.size(), 0);
+        vdes_scramble(sequence);
+        std::vector<float> llr(soft.size());
+        for (std::size_t i = 0; i < soft.size(); ++i) {
+            llr[i] = sequence[i] != 0 ? soft[i] : -soft[i];
+        }
+        const std::size_t info = turbo->information_bits();
+        auto crc_passes = [info](std::span<const std::uint8_t> u) {
+            std::vector<std::uint8_t> octets(info / 8, 0);
+            for (std::size_t i = 0; i < info; ++i) {
+                octets[i / 8] = static_cast<std::uint8_t>(octets[i / 8] | (u[i] << (7U - i % 8)));
+            }
+            const std::size_t n = octets.size();
+            const std::uint32_t sent = (static_cast<std::uint32_t>(octets[n - 4]) << 24U) |
+                                       (static_cast<std::uint32_t>(octets[n - 3]) << 16U) |
+                                       (static_cast<std::uint32_t>(octets[n - 2]) << 8U) |
+                                       octets[n - 1];
+            return vdes_crc32(std::span<const std::uint8_t>(octets.data(), n - 4)) == sent;
+        };
+        auto decoded =
+            turbo->decode(llr, std::max<std::size_t>(config_.turbo_iterations, 1), crc_passes);
+        burst.turbo_iterations = decoded.iterations;
+        bits = std::move(decoded.bits);
+    } else {
+        vdes_scramble(bits);
+    }
     const std::size_t octets = burst.format->packet_bits / 8;
     std::vector<std::uint8_t> packet(octets, 0);
     for (std::size_t i = 0; i < burst.format->packet_bits; ++i) {

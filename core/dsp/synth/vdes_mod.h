@@ -7,7 +7,9 @@
 // modulation during the ramp unspecified; this sends the syncword's first
 // set of points with a raised cosine envelope. The ten bits Table 7 adds
 // after the CRC of an uncoded burst are zeros, scrambled; core/decode/vdes.h
-// says why that choice cannot matter to a receiver.
+// says why that choice cannot matter to a receiver. Link IDs 5 to 7 pass
+// payload and CRC through the clause A2-1.2.4 turbo encoder before the
+// scrambler, Figure 6.
 
 #pragma once
 
@@ -31,7 +33,7 @@ struct VdesAsmModConfig {
 };
 
 struct VdesAsmBurstSpec {
-    // 1, 2 or 3: the uncoded formats.
+    // 1, 2 or 3 (uncoded) or 5, 6 or 7 (turbo coded).
     unsigned link_id = 1;
     // Exactly the format's packet bits / 8 - 4 octets.
     std::vector<std::uint8_t> payload;
