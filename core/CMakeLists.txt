@@ -150,6 +150,8 @@ add_library(revenant_core STATIC
     decode/dominoex.cpp
     decode/fsq.cpp
     decode/feld_hell.cpp
+    decode/wsjt_slow.cpp
+    decode/wspr.cpp
     decode/dv_phy.cpp
     decode/enocean.cpp
     decode/fs1016.cpp
@@ -274,6 +276,7 @@ add_library(revenant_core STATIC
     dsp/synth/psk_mod.cpp
     dsp/synth/dvbs_mod.cpp
     dsp/synth/ft8_mod.cpp
+    dsp/synth/wsjt_slow_mod.cpp
     dsp/synth/rds_mod.cpp
     dsp/synth/sstv_mod.cpp
     dsp/synth/wefax_mod.cpp
