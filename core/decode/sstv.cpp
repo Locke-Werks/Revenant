@@ -332,7 +332,7 @@ void SstvDecoder::trim(double keep_from) {
     base_ += drop;
 }
 
-void SstvDecoder::process(std::span<const float> samples, ImageSink& sink) {
+void SstvDecoder::process(std::span<const float> samples, const ImageSink& sink) {
     freq_.reserve(freq_.size() + samples.size() / decimation_ + 1);
     sum_.reserve(sum_.size() + samples.size() / decimation_ + 1);
     dev_sum_.reserve(sum_.capacity());
@@ -342,14 +342,14 @@ void SstvDecoder::process(std::span<const float> samples, ImageSink& sink) {
     run(sink, false);
 }
 
-void SstvDecoder::flush(ImageSink& sink) {
+void SstvDecoder::flush(const ImageSink& sink) {
     run(sink, true);
     if (image_) {
         finish(sink, false);
     }
 }
 
-void SstvDecoder::reset(ImageSink& sink) {
+void SstvDecoder::reset(const ImageSink& sink) {
     if (image_) {
         finish(sink, false);
     }
@@ -358,7 +358,7 @@ void SstvDecoder::reset(ImageSink& sink) {
     stats_ = kept;
 }
 
-void SstvDecoder::run(ImageSink& sink, bool at_end) {
+void SstvDecoder::run(const ImageSink& sink, bool at_end) {
     for (;;) {
         if (image_) {
             if (!step_image(sink, at_end)) {
@@ -372,7 +372,7 @@ void SstvDecoder::run(ImageSink& sink, bool at_end) {
 
 // "VIS Code and Robot calibration header". The candidate is the start of the
 // start bit: the second leader before it, 1200 Hz after it.
-bool SstvDecoder::hunt(ImageSink& sink) {
+bool SstvDecoder::hunt(const ImageSink& sink) {
     for (;;) {
         double c = hunt_at_;
         if (c + ms(kVisBitMs * 10.0 + 20.0) > end()) {
@@ -394,10 +394,7 @@ bool SstvDecoder::hunt(ImageSink& sink) {
                                  1, std::vector<std::uint8_t>(fax->width, 0)));
             ++stats_.images;
             stats_.last_offset_hz = image_->offset_hz;
-            const double delay = static_cast<double>(taps_.size() / 2);
-            const double input = std::max(0.0, c * decimation_ - delay);
-            sink.open(static_cast<std::uint64_t>(input), fax->width, ImagePixels::Gray,
-                      fax->line_rate_hz(), fax->name);
+            open_on(sink, *fax);
             return true;
         }
         const double lead = mean(c - ms(260.0), c - ms(20.0));
@@ -461,11 +458,7 @@ bool SstvDecoder::hunt(ImageSink& sink) {
                              static_cast<std::size_t>(mode->lines_per_period),
                              std::vector<std::uint8_t>(mode->width, 0)));
         ++stats_.images;
-        const double delay = static_cast<double>(taps_.size() / 2);
-        const double input = std::max(0.0, after * decimation_ - delay);
-        sink.open(static_cast<std::uint64_t>(input), mode->width,
-                  mode->colour == SstvColour::Gray ? ImagePixels::Gray : ImagePixels::Rgb,
-                  mode->line_rate_hz(), mode->name);
+        open_on(sink, *mode);
         return true;
     }
 }
@@ -503,6 +496,27 @@ bool SstvDecoder::fax_header(double at) {
     const double offset = centre - kSstvLeaderHz;
     return mean(at + ms(0.5), at + ms(4.5)) - offset < kSstvSyncHz + 150.0 &&
            mean(at - ms(4.5), at - ms(0.5)) - offset > kSstvSyncHz + 150.0;
+}
+
+void SstvDecoder::open_on(const ImageSink& sink, const SstvMode& mode) {
+    ++image_id_;
+    rows_sent_ = 0;
+    if (sink.on_open) {
+        sink.on_open(ImageOpen{image_id_, mode.width,
+                               mode.colour == SstvColour::Gray ? ImageRow::Gray8 : ImageRow::Rgb888,
+                               std::string(mode.name), mode.line_rate_hz()});
+    }
+}
+
+void SstvDecoder::row_on(const ImageSink& sink, std::uint32_t row,
+                         std::span<const std::uint8_t> bytes) {
+    ++rows_sent_;
+    if (sink.on_row) {
+        const SstvMode& mode = *image_->mode;
+        sink.on_row(ImageRow{image_id_, row, mode.width,
+                             mode.colour == SstvColour::Gray ? ImageRow::Gray8 : ImageRow::Rgb888,
+                             std::vector<std::uint8_t>(bytes.begin(), bytes.end())});
+    }
 }
 
 double SstvDecoder::fit(double period) const {
@@ -571,7 +585,7 @@ void SstvDecoder::refit() {
     stats_.last_period_ratio = period / im.nominal;
 }
 
-bool SstvDecoder::step_image(ImageSink& sink, bool at_end) {
+bool SstvDecoder::step_image(const ImageSink& sink, bool at_end) {
     Image& im = *image_;
     const SstvMode& mode = *im.mode;
     const std::uint32_t periods = mode.periods();
@@ -644,7 +658,7 @@ bool SstvDecoder::step_image(ImageSink& sink, bool at_end) {
     return false;
 }
 
-void SstvDecoder::emit_period(std::uint32_t period, ImageSink& sink) {
+void SstvDecoder::emit_period(std::uint32_t period, const ImageSink& sink) {
     const Image& im = *image_;
     const SstvMode& mode = *im.mode;
     if (period < static_cast<std::uint32_t>(mode.skip_periods)) {
@@ -675,7 +689,7 @@ void SstvDecoder::emit_period(std::uint32_t period, ImageSink& sink) {
             break;
         }
         if (mode.colour == SstvColour::Gray) {
-            sink.row(row, scans_[0][l]);
+            row_on(sink, row, scans_[0][l]);
             continue;
         }
         row_.resize(static_cast<std::size_t>(mode.width) * 3);
@@ -692,12 +706,14 @@ void SstvDecoder::emit_period(std::uint32_t period, ImageSink& sink) {
                 row_[3 * i + 2] = clamp_byte(c.b);
             }
         }
-        sink.row(row, row_);
+        row_on(sink, row, row_);
     }
 }
 
-void SstvDecoder::finish(ImageSink& sink, bool complete) {
-    sink.close(complete);
+void SstvDecoder::finish(const ImageSink& sink, bool complete) {
+    if (sink.on_close) {
+        sink.on_close(ImageClose{image_id_, rows_sent_, complete});
+    }
     if (complete) {
         ++stats_.images_complete;
     }

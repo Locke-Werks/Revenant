@@ -41,34 +41,39 @@ std::vector<std::uint8_t> test_image(std::uint32_t w, std::uint32_t h) {
     return out;
 }
 
-struct Collected : decode::ImageSink {
+struct Collected {
     int opens = 0;
     int closes = 0;
     bool complete = false;
     std::uint32_t width = 0;
-    decode::ImagePixels pixels = decode::ImagePixels::Rgb;
+    std::uint32_t rows_closed = 0;
+    decode::ImageRow::Model pixels = decode::ImageRow::Rgb888;
     std::string mode;
     std::vector<std::vector<std::uint8_t>> rows;
     std::vector<bool> seen;
 
-    void open(std::uint64_t, std::uint32_t w, decode::ImagePixels p, double,
-              std::string_view m) override {
-        ++opens;
-        width = w;
-        pixels = p;
-        mode = std::string(m);
-    }
-    void row(std::uint32_t index, std::span<const std::uint8_t> data) override {
-        if (rows.size() <= index) {
-            rows.resize(index + 1);
-            seen.resize(index + 1, false);
-        }
-        rows[index].assign(data.begin(), data.end());
-        seen[index] = true;
-    }
-    void close(bool c) override {
-        ++closes;
-        complete = c;
+    [[nodiscard]] decode::ImageSink sink() {
+        decode::ImageSink s;
+        s.on_open = [this](const decode::ImageOpen& o) {
+            ++opens;
+            width = o.width;
+            pixels = o.model;
+            mode = o.label;
+        };
+        s.on_row = [this](const decode::ImageRow& r) {
+            if (rows.size() <= r.row) {
+                rows.resize(r.row + 1);
+                seen.resize(r.row + 1, false);
+            }
+            rows[r.row] = r.bytes;
+            seen[r.row] = true;
+        };
+        s.on_close = [this](const decode::ImageClose& c) {
+            ++closes;
+            complete = c.complete;
+            rows_closed = c.rows;
+        };
+        return s;
     }
 };
 
@@ -77,7 +82,8 @@ Collected decode_audio(std::span<const float> audio, dsp::SampleRate rate,
                        std::uint64_t seed = 1) {
     auto decoder = decode::SstvDecoder::create(decode::SstvConfig{rate});
     REQUIRE(decoder.has_value());
-    Collected out;
+    Collected collected;
+    const decode::ImageSink out = collected.sink();
     if (max_chunk == 0) {
         decoder->process(audio, out);
     } else {
@@ -94,7 +100,7 @@ Collected decode_audio(std::span<const float> audio, dsp::SampleRate rate,
     if (stats != nullptr) {
         *stats = decoder->stats();
     }
-    return out;
+    return collected;
 }
 
 // Over every row the decoder delivered and every row it did not, which count
@@ -198,6 +204,7 @@ TEST_CASE("every mode crosses the round trip clean, VIS code included", "[decode
         CHECK(got.opens == 1);
         CHECK(got.closes == 1);
         CHECK(got.complete);
+        CHECK(got.rows_closed == mode.height);
         CHECK(got.mode == mode.name);
         if (!mode.fax_start) {
             CHECK(stats.last_vis == mode.vis);
@@ -222,7 +229,7 @@ TEST_CASE("FAX480 opens on its start tone and phasing, against noise and mistuni
                          "missed",
                          snr, score, stats.syncs_found, stats.syncs_missed));
         CHECK(got.opens == 1);
-        CHECK(got.pixels == decode::ImagePixels::Gray);
+        CHECK(got.pixels == decode::ImageRow::Gray8);
         CHECK(got.opens <= 1);
         CHECK(score >= floor);
     }

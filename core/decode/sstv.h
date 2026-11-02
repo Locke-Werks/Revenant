@@ -189,14 +189,14 @@ public:
 
     // Every row the samples complete goes to `sink`, with open and close
     // around each image.
-    void process(std::span<const float> samples, ImageSink& sink);
+    void process(std::span<const float> samples, const ImageSink& sink);
 
     // The stream has ended: rows still recoverable go out, and an image still
     // open closes incomplete.
-    void flush(ImageSink& sink);
+    void flush(const ImageSink& sink);
 
     // Forget the transmitter. An image still open closes incomplete.
-    void reset(ImageSink& sink);
+    void reset(const ImageSink& sink);
 
     [[nodiscard]] const SstvStats& stats() const { return stats_; }
     [[nodiscard]] bool image_open() const { return image_.has_value(); }
@@ -218,12 +218,14 @@ private:
     explicit SstvDecoder(const SstvConfig& config);
 
     void push(float x);
-    void run(ImageSink& sink, bool at_end);
-    bool hunt(ImageSink& sink);
-    bool step_image(ImageSink& sink, bool at_end);
-    void emit_period(std::uint32_t period, ImageSink& sink);
+    void run(const ImageSink& sink, bool at_end);
+    bool hunt(const ImageSink& sink);
+    bool step_image(const ImageSink& sink, bool at_end);
+    void emit_period(std::uint32_t period, const ImageSink& sink);
+    void open_on(const ImageSink& sink, const SstvMode& mode);
+    void row_on(const ImageSink& sink, std::uint32_t row, std::span<const std::uint8_t> bytes);
     void refit();
-    void finish(ImageSink& sink, bool complete);
+    void finish(const ImageSink& sink, bool complete);
     void trim(double keep_from);
 
     [[nodiscard]] double end() const { return static_cast<double>(base_ + freq_.size()); }
@@ -258,6 +260,8 @@ private:
     std::optional<Image> image_;
     std::vector<std::vector<std::vector<std::uint8_t>>> scans_;   // [channel][line][pixel]
     std::vector<std::uint8_t> row_;
+    std::uint32_t image_id_ = 0;
+    std::uint32_t rows_sent_ = 0;
     SstvStats stats_;
 };
 
