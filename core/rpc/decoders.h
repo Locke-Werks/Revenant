@@ -7517,7 +7517,8 @@ private:
     std::optional<Library> decoder_;
     std::vector<dsp::Complex32> iq_;
     std::vector<DecodedMessage> pending_;
-=======
+};
+
 // Reads a usb receiver's audio, core/decode/wefax.h: every chart a start tone
 // and phasing open, out through the image sink a row at a time, closed by the
 // stop signal. HF radiofax is sent for upper sideband reception 1.9 kHz below
