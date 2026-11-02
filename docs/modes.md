@@ -517,17 +517,23 @@ nothing because the payload is encrypted would miss most of it.
 | Cospas-Sarsat 406 MHz first generation | 160 ms unmodulated carrier then biphase-L at 400 bit/s, +/-1.1 radians; 440 or 520 ms burst every 50 s; 112 or 144 bits; BCH(82,61) and BCH(106,83) | C/S T.001, free. Issue 4 Revision 7 (March 2021) read, from a copy at sar.mot.go.th; Revision 13 exists and was not read. Done, see below | Small |
 | Cospas-Sarsat second generation (SGB) | 406.05 MHz, DSSS OQPSK, 38400 chip/s from a truncated 23-stage m-sequence, 256 chips per bit per arm; 1 s burst, 250-bit message, BCH(250,202) | C/S T.018, free. Issue 1 Revision 7 (March 2021) read from cospas-sarsat.int; its pages are watermarked as superseded and no later issue was found. The LFSR initialisation values are tabulated in it. Done, see below | Medium |
 | GPS L1 C/A (LNAV) | 1575.42 MHz, BPSK-R(1), 1.023 Mchip/s, 1023-chip Gold codes, 50 bit/s in 300-bit subframes | IS-GPS-200 Revision N (2022-08-22) with IRN-003, free at gps.gov | Large |
-| GPS L2C and L5 (CNAV) | L2C at 1227.60 MHz, CM and CL time-multiplexed at 511.5 kchip/s each; L5 at 1176.45 MHz, 10.23 Mchip/s, 10230-chip codes with NH overlays | IS-GPS-200N and IS-GPS-705 Revision J (2022-08-22), free | Medium |
-| GPS L1C (CNAV-2) | TMBOC(6,1,4/33) pilot and BOC(1,1) data, 10230-chip primaries, 1800-symbol 18 s frames, LDPC | IS-GPS-800 Revision J (2022-08-22), free | Medium |
+| GPS L2C and L5 (CNAV) | L2C at 1227.60 MHz, CM and CL time-multiplexed at 511.5 kchip/s each; L5 at 1176.45 MHz, 10.23 Mchip/s, 10230-chip codes with NH overlays | IS-GPS-200N and IS-GPS-705J, both 1 August 2022, free at gps.gov. Done, see below | Medium |
+| GPS L1C (CNAV-2) | TMBOC(6,1,4/33) pilot and BOC(1,1) data, 10230-chip primaries, 1800-symbol 18 s frames, LDPC | IS-GPS-800J (1 August 2022), free at gps.gov. Done, see below | Medium |
 | GLONASS L1OF and L2OF | FDMA, L1 at 1602 + 0.5625k MHz, 511 kchip/s, 50 bit/s Manchester to 100 sym/s, 2 s strings in 30 s frames | GLONASS ICD Edition 5.1 (2008), free in English translation; separate free ICDs for the L1OC/L2OC/L3OC CDMA signals | Medium |
 | BeiDou B1I, B1C, B2a | B1I at 1561.098 MHz BPSK 2.046 Mchip/s; B1C at 1575.42 MHz BOC(1,1) with QMBOC pilot; B2a at 1176.45 MHz BPSK(10) | BDS SIS ICD Open Service B1I v3.0 (2019-02) and the matching B1C, B2a, B2b and B3I documents, free in English | Medium |
 | QZSS | GPS-interoperable L1 C/A, L1C, L2C and L5, plus L6 CLAS at 2000 bit/s and L1S at 250 bit/s | IS-QZSS-PNT, IS-QZSS-L6 and IS-QZSS-L1S, free (unverified: current revisions) | Small |
-| NavIC / IRNSS L5 SPS | 1176.45 MHz, BPSK(1), 1.023 Mchip/s, 50 bit/s r=1/2 to 100 sym/s, 600-bit master frames, CRC-24 | ISRO-IRNSS-ICD-SPS-1.1, free | Medium |
+| NavIC / IRNSS L5 SPS | 1176.45 MHz, BPSK(1), 1.023 Mchip/s, 50 bit/s r=1/2 to 100 sym/s, 600-bit master frames, CRC-24 | ISRO-IRNSS-ICD-SPS-1.1. Stopped: the document forbids reproduction without ISRO's written consent; see the open questions | Medium |
 | SBAS L1 (WAAS, EGNOS, MSAS, GAGAN) | 1575.42 MHz, BPSK(1), PRNs 120 to 158, 250 bit/s r=1/2 K=7 to 500 sym/s, 250-bit messages once per second, CRC-24 | RTCA DO-229F, purchasable; ICAO Annex 10 Volume I is the international equivalent | Medium |
 | Inmarsat-C / STD-C NCS TDM | BPSK 1200 sym/s, r=1/2 K=7 with block interleaving, 600 bit/s net, 1530.0 to 1545.0 MHz, 5 kHz raster, 10368-symbol 8.64 s frame, about 2.5 kHz occupied | No lawful air-interface document. ETSI ETS 300 460 is free for RF parameters; IEC 61097-4:2024 is purchasable and its coverage of frame layout is unverified. Frame and symbol timing come from measurement of the live signal, labelled as observation | Medium |
 | Inmarsat-C EGC: SafetyNET and FleetNET | Rides the TDM above; LES id, service code, priority, repetition and presentation descriptors; C0 to C5 addressing plus NAVAREA, circular and rectangular | IMO International SafetyNET Manual, free; Inmarsat International SafetyNET Handbook Edition Six (April 2020), free; IMO COMSAR.1/Circ.41 and MSC.1/Circ.1364 | Small |
 | Inmarsat Classic Aero P, R and T (data) | A-BPSK at 600 and 1200 bit/s, A-QPSK at 10500 bit/s with r=1/2 convolutional; 1530 to 1559 MHz; 2.5 to 17.5 kHz occupied | ICAO Annex 10 Volume III Part I Chapter 4 and ICAO Doc 9925, purchasable (unverified: whether they specify to demodulator level). Voice on the C channel is AMBE-family and is excluded | Large |
 | Iridium Ring Alert | 1626.270833 MHz simplex, 41.667 kHz channel; 12-byte BPSK preamble then about 103 bytes DQPSK at 25 kBd; unencrypted | No official document. Peer-reviewed literature gives the field layout: satellite id, beam id, sub-satellite latitude, longitude and altitude, handover information | Medium |
+
+WHAT THREE ROWS OF THIS TABLE USED TO SAY, until 2026-11-02. GPS L2C and L5:
+"IS-GPS-200N and IS-GPS-705 Revision J (2022-08-22), free". GPS L1C:
+"IS-GPS-800 Revision J (2022-08-22), free". The cover dates of all three are 1
+August 2022. NavIC: "ISRO-IRNSS-ICD-SPS-1.1, free"; it is free to download and
+forbids reproduction without ISRO's written consent, so no decoder was written.
 
 **The Inmarsat-C System Definition Manual is off limits.** It is stamped
 Inmarsat Confidential and copies sit at the top of a web search for it. That is
@@ -1797,7 +1803,10 @@ meander conventions were read from a figure and are proven only against this
 project's own transmitter. BeiDou B1I, 0.48 s per second
 (`test_beidou_b1i.cpp`). Not done: a position fix; BeiDou D2 from the GEO
 satellites; SBAS, whose codes are free and whose message layer is only in the
-purchasable RTCA DO-229; L1C, L2C, L5 and NavIC.
+purchasable RTCA DO-229; NavIC, stopped on its document's reproduction
+terms. L1C, L2C and L5 are done; see "Decoders merged later on 2026-11-02"
+below. WHAT THE LAST SENTENCE USED TO SAY, at its end: "purchasable RTCA
+DO-229; L1C, L2C, L5 and NavIC".
 
 **Short-range and paging.** BLE advertising, 200 packets a point in
 `tests/decode/test_ble.cpp`: packet error rate 0.99, 0.905, 0.51 and 0.175 at
@@ -1856,6 +1865,9 @@ point up, that point is given; below it the test prints and does not fail.
 | JT65 | `core/decode/jt65.h`, `rs64.h` | K1JT, QEX September/October 2005; Franke and Taylor, QEX May/June 2016 | 72-bit messages and the OOO form |
 | VDES turbo, Link IDs 5 to 7 | `core/decode/turbo.h`, `vdes.h` | ITU-R M.2092-2 (02/2026) Annex 2 A2-1.2.4, Tables 4 to 7, Annex 4 | ASM-TER packets at rate 3/4 |
 | Cospas-Sarsat 406 MHz SGB | `core/decode/cospas_sarsat.h` | C/S T.018 Issue 1 Revision 7 (March 2021) | Second-generation messages with BCH(250,202) checked and the 23 Hex ID |
+| GPS L1C CNAV-2 | `core/decode/gps_l1c.h`, `gps_l1c_tables.h` | IS-GPS-800J (1 August 2022) | Per satellite: handover, TOI, subframe 2's WN, ITOW, top, toe, URA_ED and L1C health, subframe 3's PRN and page with raw bits |
+| GPS L2C CNAV | `core/decode/gps_cnav.h` | IS-GPS-200N (1 August 2022) 3.3.2.4, 3.3.3.1, Appendix III | CRC-checked 300-bit messages: header, and type 10's WN, top and toe |
+| GPS L5 CNAV | `core/decode/gps_cnav.h` | IS-GPS-705J (1 August 2022) 3.3.2.2, 3.3.3.1, Appendix II | The same, from I5 |
 
 **Keyboard modes.** Error rates are character error rates, means of three or
 four runs in 2500 Hz with drift. MFSK16 is held to 0.01 at 0 and -9 dB, MFSK8
@@ -1951,6 +1963,25 @@ dB-Hz, 8 in 10 at 36 and none at 34. T.018 Issue 1 Revision 7 is watermarked as
 superseded and no later issue was found. A decode is a report, not an alert
 service.
 
+**GPS L1C, L2C and L5.** The codes are checked against the documents' tables:
+all 126 L1C ranging codes match Table 3.2-2's first and last 24 chips, the
+overlays match Table 3.2-3, and the LDPC submatrix counts match Tables 6.2-14
+to 6.2-17 (`tests/decode/test_gps_l1c.cpp`); the L2 CM and CL generator
+reproduces Table 3-IIa's end states for all 37 PRNs and the L5 I5 and Q5 codes
+Table 3-Ia for all 74 (`test_gps_cnav.cpp`). L1C is not searched for cold: it
+is handed over from C/A tracking, and six of six satellites at C/A 35 to 45
+dB-Hz hand over on the first try and decode frames. The LDPC decodes 20 of 20
+words at Eb/N0 3 dB, held to 18. The pilot replica is plain BOC(1,1), so
+TMBOC's BOC(6,1) symbols are not modelled and about 1.1 dB of pilot power is
+lost. The TOI bit order was read from Figure 3.2-4 and no test vector checks
+it. L2C correlates CM alone, 3 dB under a CM+CL receiver; it decodes six
+satellites at 35 to 45 dB-Hz at 2.048 MS/s. L5 is synthesised over the full
+20.46 MHz main lobe and decimated to 4.092 MS/s, which loses about 9 dB; it
+still decodes four satellites. Only the CNAV header and message type 10's WN,
+top and toe are parsed; every other type is passed on as its 300 bits. Not
+done: a position fix, CNAV clock and ephemeris types, QZSS on these signals,
+and NavIC, stopped on its document's terms.
+
 **Reaching them from a client.** Decoder names a client can now attach,
 through `Session::subscribeDecoded`: `mfsk16`, `mfsk8`, `dominoex4`,
 `dominoex5`, `dominoex8`, `dominoex11`, `dominoex16`, `dominoex22`, `fsq`,
@@ -1958,7 +1989,9 @@ through `Session::subscribeDecoded`: `mfsk16`, `mfsk8`, `dominoex4`,
 through `subscribeWidebandDecoded`, which feeds a decoder the source's own
 stream decimated to at least its floor, `lrpt` and `lrpt_oqpsk` from 288000
 S/s, `ahrpt` from 6000000, `gk2a_lrit` from 512000 and `goes_hrit` from
-2400000. `docs/rpc.md` has the registry table. WSPR, JT9, JT4, JT65, GRB and
+2400000. The registry also holds `gps_l1c` and `gps_l2c`, each at 2.048 MS/s
+or more on a tap at 1575.42 and 1227.60 MHz, and `gps_l5` at 4.092 MS/s or
+more at 1176.45 MHz (`core/rpc/decoders.h`). `docs/rpc.md` has the registry table. WSPR, JT9, JT4, JT65, GRB and
 SGB decode in `core/` and are not in the registry yet. `revenant-cli` under
 `auto` now attaches only the decoders that can be built at the receiver's rate,
 so `vdl4` on a 48 kHz `nfm` receiver is skipped rather than refusing its first
@@ -2086,3 +2119,7 @@ Raised by the decoder work of that day and not decided by it.
   word and pilot values, the mappings and the tone and carrier frequencies,
   which are only in codec2 source. Link libcodec2's FreeDV modem as a recorded
   copyleft exception, measure its transmit output, or leave FreeDV undecoded?
+- **NavIC.** ISRO-IRNSS-ICD-SPS-1.1 is a free download and forbids
+  reproduction without ISRO's written consent, so its code tables and frame
+  layout could not be transcribed with citation as the GPS ones are. No
+  decoder was written. Write to ISRO for consent, or leave NavIC out?

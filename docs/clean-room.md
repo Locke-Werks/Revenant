@@ -1237,6 +1237,13 @@ further exposure, in the SSDV line, and it reached no code.
   bristol-seds/ssdv, naming packet types 0x68 and 0x69 and the CRC's coverage.
   The pages were not opened and nothing from the summary is used; SSDV stays
   blocked on its document.
+- GPS L1C, L2C and L5: IS-GPS-800J, IS-GPS-200N and IS-GPS-705J, all 1 August
+  2022, from gps.gov, read 2026-11-02. US Government works; the L1C tables are
+  transcribed with citation in `core/decode/gps_l1c_tables.h` and the L2C and
+  L5 tables in `core/decode/gps_cnav.cpp`. No GNSS receiver source read.
+- NavIC, not written: ISRO-IRNSS-ICD-SPS-1.1 was read far enough to find that
+  it forbids reproduction without ISRO's written consent. Nothing from it is in
+  the tree.
 
 **FT8 and FT4 generator matrices: the public-domain basis.** `ft4_ft8_protocols.tgz`
 is no longer served at the princeton.edu or ARRL QEX paths; it was read from

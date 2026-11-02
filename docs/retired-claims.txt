@@ -2541,3 +2541,20 @@ phrase: GOES Rebroadcast Downlink specification at goes-r.gov
 retired: 2026-11-02
 commit: "Document the decoders merged later on 2026-11-02"
 instead: GRB is written from GOES-R PUG Volume 4, 416-R-PUG-GRB-0348 Rev 2.3.
+
+phrase: IS-GPS-705 Revision J (2022-08-22)
+phrase: IS-GPS-800 Revision J (2022-08-22)
+retired: 2026-11-02
+commit: "Document the GPS L1C, L2C and L5 decoders"
+instead: IS-GPS-800J, IS-GPS-200N and IS-GPS-705J are all dated 1 August 2022.
+
+phrase: ISRO-IRNSS-ICD-SPS-1.1, free
+retired: 2026-11-02
+commit: "Document the GPS L1C, L2C and L5 decoders"
+instead: The ICD forbids reproduction without ISRO's written consent; NavIC is
+    stopped and listed as an open question in docs/modes.md.
+
+phrase: purchasable RTCA DO-229; L1C, L2C, L5 and NavIC
+retired: 2026-11-02
+commit: "Document the GPS L1C, L2C and L5 decoders"
+instead: L1C, L2C and L5 decode through core/decode/gps_l1c.h and gps_cnav.h.
