@@ -160,6 +160,7 @@ add_executable(revenant_decode_tests
     test_pocsag.cpp
     test_pocsag_false_pages.cpp
     test_psk31.cpp
+    test_psk_demod.cpp
     test_rds_bits.cpp
     test_rds_groups.cpp
     test_rtty.cpp

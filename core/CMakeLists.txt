@@ -131,6 +131,7 @@ add_library(revenant_core STATIC
     decode/p25p1.cpp
     decode/pocsag.cpp
     decode/psk31.cpp
+    decode/psk_demod.cpp
     decode/rds_bits.cpp
     decode/reed_solomon.cpp
     decode/rds_groups.cpp
@@ -182,6 +183,7 @@ add_library(revenant_core STATIC
     dsp/synth/modulators.cpp
     dsp/synth/ofdm_mod.cpp
     dsp/synth/psk31_mod.cpp
+    dsp/synth/psk_mod.cpp
     dsp/synth/rds_mod.cpp
     dsp/synth/wfm_mod.cpp
     dsp/synth/wideband.cpp
