@@ -7630,9 +7630,10 @@ private:
          &DscChunkDecoder::make, kFmModes},
         {SstvChunkDecoder::kName, DecoderInput::RealAudio,
          "Analog SSTV and FAX480, N7CXI's Dayton paper: Martin, Scottie, Robot 36 and 72, "
-         "Wraase SC2-180, Pasokon and PD images by their VIS code, FAX480 by its start tone, "
-         "as images a row at a time with slant corrected. Reads a usb, lsb or nfm receiver's "
-         "audio",
+         "Wraase SC2-180, Pasokon and PD images by their VIS code, FAX480 by its start tone; "
+         "and from Bruchanov's handbook AVT 24, 90, 94, 188 and 125 BW by their digital header, "
+         "MSCAN TV-1 and TV-2, and MMSSTV's MP, MR and ML by their 16-bit VIS; as images a row "
+         "at a time with slant corrected. Reads a usb, lsb or nfm receiver's audio",
          &SstvChunkDecoder::make, SstvChunkDecoder::kModes},
         {FtChunkDecoder<false>::kName, DecoderInput::RealAudio,
          "FT8, the WSJT-X 77-bit protocol: 15 s slots, 8-GFSK, LDPC (174,91), each decode with "
