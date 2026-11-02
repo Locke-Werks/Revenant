@@ -2424,3 +2424,74 @@ commit: "Stop the M17 row verifying on D-STAR and take mayfail off"
 instead: The M17 row counts a link setup frame only when its CRC checks and a
     stream frame only when its Frame Number follows the one before;
     "D-STAR does not verify the M17 row" holds it. No case is [!mayfail].
+
+phrase: 1600 is 16 DQPSK carriers in about 1.1 kHz
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: FreeDV 1600 is 14 DQPSK data carriers and one DBPSK pilot in 1125 Hz,
+    per the codec2 design notes.
+
+phrase: G4JNT December 2021 LDPC modes document, free
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: No free MSK144 LDPC document was found; the (128,90) matrices are only
+    in the GPL-3 WSJT-X tree.
+
+phrase: which prints the complete Huffman table, packet structure, status byte
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: The ARRL PACTOR page lacks the status byte layout and the CRC preset
+    and bit order, and its Huffman table has duplicate and mislabelled codes.
+
+phrase: and released to the public domain by its author
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: The only ARDOP specification found is the Revision 0.7 draft of July
+    2015, which says the protocol "will be" public domain.
+
+phrase: The two modems have no standards document and are cited to Bell 202
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: No document gives 300 baud HF packet's tones, shift or sideband; the
+    citations cover the 1200 and 9600 baud modems only.
+
+phrase: 2-FSK, 170 Hz shift, 100 baud, CW preamble, 4 to 6 digit addresses | ITU-R M.493-16
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: ITU-R M.493-16 is the DSC Recommendation and has no 4 to 6 digit
+    selcall and no CW preamble; HF Selcall has no located document.
+
+phrase: FSK at 96 or 192 baud, 170 to 400 Hz shift
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: ITU-R F.342-2 gives ARQ-M's code, channel layout and 96 and 192 Bd
+    rates, and no shift or emission class.
+
+phrase: ASM at 161.950 and 162.000 MHz reuses the AIS physical layer
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: ASM-TER is pi/4-QPSK at 9600 symbol/s with a 27-symbol double Barker
+    syncword, ITU-R M.2092-2 Annex 2 Tables 1 and 7.
+
+phrase: ITU-R M.2010-2 for 500 kHz and M.2058-1 for HF
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: ITU-R M.2010-3 (02/2026) is in force and superseded M.2010-2.
+
+phrase: ASK 125 kbit/s Manchester at 868.3 MHz
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: EnOcean ERP1 V1.2 specifies 8-to-12 bit coding, not Manchester.
+
+phrase: 31500 bit/s, 25 kHz, raised cosine 0.6; AVLC per ISO 13239, RS(255,249) on the burst | ETSI EN 301 841-1, free from etsi.org | Medium
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: EN 301 841-1 covers VDL Mode 2's RF and modulation only; the unique
+    word, scrambler, mapping, header FEC, RS parameters and AVLC are in ICAO
+    Doc 9776 and Annex 10.
+
+phrase: the arXiv identifier carrying the field detail is unverified
+retired: 2026-11-02
+commit: "Correct scope rows the free documents do not support"
+instead: arXiv:2603.12062 resolves (Jedermann et al., 2026-03-12) and gives no
+    Ring Alert field layout.

@@ -167,10 +167,16 @@ what these systems carry in the clear.
 | D-STAR DV | GMSK BT 0.5, 4800 bit/s, 6.25 kHz; 2400 AMBE plus 1200 FEC plus 1200 data | JARL "アマチュア無線のデジタル化技術の標準方式" Ver 7.0, free at `jarl.com/d-star/STD7_0.pdf`. Japanese only: the English edition this row used to name is gone, see the note below the table | Small |
 | D-STAR DD | GMSK 128 kbit/s on 23 cm, Ethernet frames, roughly 150 kHz | Same JARL standard | Medium |
 | M17 | 4FSK, 4800 sym/s, h=1/3, 9 kHz occupied, 384-bit 40 ms frames, a 368-bit randomiser table (PRBS9 fills BERT frames only), Golay(24,12), punctured r=1/2 K=5, QPP interleaver, CRC-16 0x5935 init 0xFFFF | M17 Protocol Specification Part I, free at spec.m17project.org, complete to bit level | Medium |
-| FreeDV 1600, 700C, 700D, 700E | OFDM in an SSB passband; 1600 is 16 DQPSK carriers in about 1.1 kHz; 700D is 17 coherent QPSK carriers at 25 baud, 160 ms frame, 2 ms cyclic prefix, LDPC | No standards document. Project design notes and the FreeDV user manual, cited per file with a retrieval date | Large |
+| FreeDV 1600, 700C, 700D, 700E | OFDM in an SSB passband; 1600 is 14 DQPSK data carriers and one DBPSK pilot in 1125 Hz; 700D is 17 coherent QPSK carriers at 25 baud, 160 ms frame, 2 ms cyclic prefix, LDPC | No standards document. Project design notes and the FreeDV user manual, cited per file with a retrieval date | Large |
 | FreeDV 2400A, 2400B, 800XA | 4FSK; 2400A at 2400 bit/s in about 5 kHz of RF, 2400B through an analogue FM audio path, 800XA at 800 bit/s | As above | Medium |
 | Opulent Voice | 40 ms frames of 134 bytes, CCSDS K=7 r=1/2 to 268 bytes, 67x32 interleaver, 24-bit sync 0x02B8DB, roughly 81.3 kHz | `opulent_voice_protocol.md` in OpenResearchInstitute/interlocutor, free and public | Medium |
 | MPT-1327 | FFSK 1200 bit/s sub-audio over analogue FM, 12.5 or 25 kHz, 64-bit codewords, BCH(63,48) plus parity | MPT 1327, UK DTI 1988 rev 1997, now Ofcom, free | Small |
+
+WHAT THE FREEDV 1600, 700C, 700D, 700E ROW USED TO SAY, until 2026-11-02:
+"1600 is 16 DQPSK carriers in about 1.1 kHz". The codec2 design notes give 14
+DQPSK data carriers and one DBPSK pilot in 1125 Hz. FreeDV is still not
+written: those notes lack the LDPC matrix, the unique word and pilot values,
+the mappings and the carrier frequencies, which are only in the codec2 source.
 
 Three cautions carried forward.
 
@@ -217,7 +223,7 @@ FDL for the text; the repository's LICENSE file is what said GPL-2.0.
 | JT4 A through G | 4-FSK, 4.375 baud, 207 symbols, tone spacing 4.375 Hz to 315 Hz by submode | "The JT4 Coding Process", G4JNT, free | Small |
 | WSPR | 4-FSK CPM, 1.4648 baud, 162 symbols, 110.6 s, 50-bit message, K=32 r=1/2 taps 0xF2D05351 and 0xE4613C47 | "The WSPR Coding Process", G4JNT, 2009, free | Medium |
 | FST4 and FST4W | 4-GFSK, 160 symbols, five 8-symbol sync words, slots 15 s to 1800 s, CRC-24 0x100065b, LDPC(240,101) and (240,74) | Quick-Start Guide to FST4 and FST4W, free. The two generator matrices are not printed in it and exist only in the GPL-3 WSJT-X tree | Medium |
-| MSK144 | MSK, 2000 baud, 1000 Hz shift, 144-bit 72 ms frames, 77-bit payload, CRC-13, LDPC(128,90) | G4JNT December 2021 LDPC modes document, free. The QEX 2017 paper describes the superseded 72-bit form | Medium |
+| MSK144 | MSK, 2000 baud, 1000 Hz shift, 144-bit 72 ms frames, 77-bit payload, CRC-13, LDPC(128,90) | No free document located. The G4JNT LDPC modes document of December 2021 was searched for on 2026-11-02 and not found, and the (128,90) parity-check and generator matrices are only in the GPL-3 WSJT-X tree. The QEX 2017 paper describes the superseded 72-bit form | Medium |
 | Q65 | 65-FSK, 85 symbols with a 22-symbol sync vector, submodes 15 s to 300 s, QRA(65,15) over GF(64), CRC-12 | Quick-Start Guide to Q65 and "The Q65 Coding Process", G4JNT, both free | Large |
 | JS8 | 8-GFSK, 79 symbols, four speeds from 3.125 to 20 baud, 75-bit frames in six types | JS8Call User Guide, free; Appendix A prints the modified Huffman code. The dictionary compression table is not published | Medium |
 | PSK31, PSK63, QPSK31 | BPSK 31.25 or 62.5 baud, cosine envelope, roughly 60 Hz occupied; QPSK adds r=1/2 K=5 | G3PLX in RadCom Dec 1998 and Jan 1999, reprinted free by ARRL with the full varicode table | Small |
@@ -232,12 +238,12 @@ FDL for the text; the repository's LICENSE file is what said GPL-2.0.
 | FSQ and FSQCall | IFK+ over 33 tones at three times the symbol rate, 8.79 Hz spacing at 2.93 baud | Author documentation at w1hkj.org and qsl.net/zl1bpu, publicly disclosed by the authors | Small |
 | Hellschreiber (Feld-Hell and variants) | OOK raster, 122.5 baud element rate, 7x14 element cell, 2.5 char/s, about 75 Hz | "Hellschreiber Modes - Technical Specifications", ZL1BPU 1998, free | Small |
 | Throb and ThrobX | Multi-tone OOK at 1, 2 or 4 symbols/s over 9 or 11 tones | fldigi mode documentation only | Small |
-| AX.25 packet | 1200 baud Bell 202 AFSK, 9600 baud G3RUH scrambled FSK, 300 baud HF FSK; HDLC with bit stuffing and the X.25 FCS | AX.25 v2.2, TAPR/ARRL July 1998, free. The two modems have no standards document and are cited to Bell 202 and to Miller's 1988 article. 1200 baud done, see below | Medium |
+| AX.25 packet | 1200 baud Bell 202 AFSK, 9600 baud G3RUH scrambled FSK, 300 baud HF FSK; HDLC with bit stuffing and the X.25 FCS | AX.25 v2.2, TAPR/ARRL July 1998, free. The 1200 and 9600 baud modems have no standards document and are cited to Bell 202 and to Miller's 1988 article. No document of any kind gives 300 baud HF packet's tones, shift or sideband, so it is not writable as a cited mode. 1200 baud and 9600 baud G3RUH done, see below | Medium |
 | APRS | AX.25 UI frames; position, weather, telemetry, object, status, message, Mic-E and base-91 compressed formats | APRS Protocol Reference 1.0.1, free at aprs.org, plus the WB2OSZ consolidated 1.2. Position, status, message and Mic-E done, see below | Medium |
 | FX.25 | AX.25 with a 64-bit correlation tag selecting one of several Reed-Solomon configurations | "FX.25: Forward Error Correction Extension to AX.25 Link Protocol For Amateur Packet Radio", Stensat Group, Version 0.01 DRAFT, document version 0.01.06, 1 September 2006, TAPR DCC 2006, free. Read on 2026-10-02 from the Internet Archive's capture of stensat.org/docs/FX-25_01_06.pdf, which no longer answers. It does not state the Reed-Solomon field or first root. 1200 baud done, see below | Small |
 | IL2P | Reed-Solomon header and payload blocks replacing HDLC on the same physical layers | "IL2P Specification Draft v0.6, 16 March 2024", Nino Carrillo KK4HEJ, free. Read on 2026-10-02 from https://tarpn.net/t/il2p/il2p-specification_draft_v0-6.pdf. Its three example packets fix what the prose leaves open. 1200 baud AFSK done, see below | Small |
-| PACTOR-I | 2-FSK, 100 or 200 baud, 200 Hz shift, 1.25 s ARQ cycle, 0x55 sync header, ITU-T CRC | ARRL PACTOR technical characteristics page, free, which prints the complete Huffman table, packet structure, status byte and ARQ timing | Medium |
-| ARDOP | 200, 500, 1000 and 2000 Hz sessions, 50/100/167 baud, 4FSK narrow and OFDM wide, two-tone leader at 1450 and 1550 Hz | ARDOP Specification, Winlink Development Team, free, and released to the public domain by its author | Large |
+| PACTOR-I | 2-FSK, 100 or 200 baud, 200 Hz shift, 1.25 s ARQ cycle, 0x55 sync header, ITU-T CRC | ARRL PACTOR technical characteristics page, free. It prints the packet structure and ARQ timing; it does not give the status byte layout or the CRC preset and bit order, and its Huffman table has duplicate and mislabelled codes. Not writable from it alone | Medium |
+| ARDOP | 200, 500, 1000 and 2000 Hz sessions, 50/100/167 baud, 4FSK narrow and OFDM wide, two-tone leader at 1450 and 1550 Hz | ARDOP Specification Revision 0.7 (July 2015), Winlink Development Team, free. A draft, which says the protocol "will be" placed in the public domain; no later revision or completed grant was found | Large |
 | WINMOR | OFDM in 500 or 1600 Hz, DPSK and 4FSK | ARRL WINMOR technical characteristics page and the author's TNC specification, free. Winlink retired the mode in 2020 | Small |
 | Winlink B2F | Message structure and forwarding over any bearer, LZHUF-compressed body | "Open B2F", Winlink Development Team, free at winlink.org/B2F | Small |
 | CW | OOK, 5 to 40 WPM, dot length 1200/WPM ms, 100 to 200 Hz occupied | ITU-R M.1677-1 (10/2009), free | Small |
@@ -255,6 +261,15 @@ FDL for the text; the repository's LICENSE file is what said GPL-2.0.
 | DSSTV over HamDRM | COFDM in 2.3 or 2.5 kHz; modes A/B/E at 53/57, 45/51 and 29/31 subcarriers; QAM-4/16/64; 400 ms frames; FAC at QAM-4 with a 40-bit descriptor and CRC-8 | ETSI ES 201 980 free for the parent system; the narrow parameter sets are not in it and are derived by measurement, labelled as observation | Large |
 | DSSTV over RDFT | Eight subcarriers 590 to 2200 Hz at 230 Hz spacing, differential phase, outer RS plus inner RS(8,4) | Bruchanov chapter 10, free | Medium |
 | Analog fast-scan ATV | NTSC 525/29.97 with 3.579545 MHz subcarrier, PAL 625/25 with 4.43361875 MHz, 6 MHz or wider | ITU-R BT.470 (archived) and BT.1700, free | Large |
+
+WHAT FOUR ROWS OF THIS TABLE USED TO SAY, until 2026-11-02, each found
+wrong when somebody went to write the mode from the document named. MSK144:
+"G4JNT December 2021 LDPC modes document, free". PACTOR-I: "which prints the
+complete Huffman table, packet structure, status byte and ARQ timing". ARDOP:
+"released to the public domain by its author"; the only revision found is the
+0.7 draft, which says it "will be". AX.25 packet: "The two modems have no
+standards document", which counted 300 baud HF FSK as covered by a citation
+it does not have.
 
 **Where the WSJT-X generator matrices come from matters.** FT8 and FT4 take
 theirs from `ft4_ft8_protocols.tgz`, which the authors placed in the public
@@ -291,14 +306,20 @@ reads as a working decoder having a bad day.
 | STANAG 4481 | 2-FSK 50 to 600 bit/s, usually 50 or 75 with 850 Hz shift; multi-channel FSK; a 300 bit/s BPSK variant | STANAG 4481, purchasable; the FSK variants need little beyond the emission definitions in Radio Regulations Appendix 1, free | Small |
 | STANAG 5066 | Not a waveform. D_PDU framing, ARQ, addressing and the subnetwork interface above 4285, 4539 and 110 | STANAG 5066 Edition 4 (May 2022), purchasable | Medium |
 | Link-11 CLEW | 16 tones: 605 Hz Doppler reference, 14 carriers from 935 Hz on 110 Hz spacing, 2915 Hz; DQPSK, 1364 or 2250 bit/s | MIL-STD-188-203-1A, free. The payload catalogue MIL-STD-6011 is distribution limited, so the deliverable stops at bits and net cycle timing | Medium |
-| HF Selcall | 2-FSK, 170 Hz shift, 100 baud, CW preamble, 4 to 6 digit addresses | ITU-R M.493-16 (12/2023, verified in force), free | Small |
-| ARQ-M2 and ARQ-M4 | FSK at 96 or 192 baud, 170 to 400 Hz shift, two or four interleaved telegraph channels, 7-unit 4/3 code | ITU-R F.342-2 (1970), free | Medium |
+| HF Selcall | 2-FSK, 170 Hz shift, 100 baud, CW preamble, 4 to 6 digit addresses | No document located. ITU-R M.493-16 (12/2023) was read for it and specifies DSC; it has no 4 to 6 digit selective call and no CW preamble | Small |
+| ARQ-M2 and ARQ-M4 | FSK at 96 or 192 baud, two or four interleaved telegraph channels, 7-unit 4/3 code; the shift is practice, not cited | ITU-R F.342-2 (1970), free, for the code, the channel layout and the 96 and 192 Bd rates. It gives no shift and no emission class | Medium |
 | Piccolo MK6 and MK12 | MFSK, classic form 32-ary at about 10 baud with 10 Hz spacing, roughly 320 Hz; MK6 is 6 tones in about 180 Hz | IEE 1963 and 1982 papers, purchasable from the IET digital library. They describe the modulation rather than a full profile | Medium |
 | LPC-10e | 2400 bit/s, 54-bit frames of 22.5 ms | FED-STD-1015 (1984), free US Government work with the complete algorithm and tables | Small |
 | FS-1016 CELP | 4800 bit/s, 30 ms frames, stochastic codebook | FED-STD-1016 (1991), free | Medium |
 | CVSD | 16 or 32 kbit/s, one bit per sample, adaptive step | MIL-STD-188-113, free | Small |
 | MELPe 2400 | 2400 bit/s, 54-bit frames of 22.5 ms over 180 samples at 8 kHz | MIL-STD-3005, not located (unverified). Patents confirmed expired | Large |
 | DRM30 and DRM+ system layer | COFDM, modes A to D in 4.5 to 20 kHz below 30 MHz, mode E in 96 kHz VHF; FAC at 4-QAM, SDC and MSC at 16 or 64-QAM | ETSI ES 201 980, free, with TS 102 979 for Journaline and TS 102 821 and TS 101 968 alongside | Large |
+
+WHAT TWO ROWS OF THIS TABLE USED TO SAY, until 2026-11-02. HF Selcall:
+"ITU-R M.493-16 (12/2023, verified in force), free", as its specification;
+M.493-16 is the DSC Recommendation and holds neither the selcall format nor
+its CW preamble. ARQ-M2 and ARQ-M4: "FSK at 96 or 192 baud, 170 to 400 Hz
+shift", all cited to F.342-2, which states the rates and not the shift.
 
 **The normal case here is a clean waveform carrying an encrypted payload.**
 STANAG 4481 is KW-46 or KG-84 ciphertext, STANAG 4197 puts COMSEC between the
@@ -331,7 +352,7 @@ Excluded.
 | TIS-B and ADS-R | DF18 with CF codes 2, 3, 5 and 6 on 1090; dedicated payload types on UAT | DO-260C and DO-282C, purchasable | Small |
 | TCAS DF16 and BDS 3,0 | 1090 MHz replies carrying the MV coordination field and the resolution advisory register | RTCA DO-185B or -185C (which is current is unverified) plus ICAO Doc 9871, purchasable | Small |
 | ACARS (VHF) | MSK 2400 bit/s, tones 1200 and 2400 Hz, AM on the VHF carrier, 25 kHz; per-character odd parity plus a 16-bit block check | ARINC 618-9, purchasable from SAE ITC | Medium |
-| VDL Mode 2 | D8PSK, 10500 sym/s, 31500 bit/s, 25 kHz, raised cosine 0.6; AVLC per ISO 13239, RS(255,249) on the burst | ETSI EN 301 841-1, free from etsi.org | Medium |
+| VDL Mode 2 | D8PSK, 10500 sym/s, 31500 bit/s, 25 kHz, raised cosine 0.6; AVLC per ISO 13239, RS(255,249) on the burst | ETSI EN 301 841-1, free from etsi.org, covers the RF and modulation only. The unique word, scrambler, symbol mapping, header FEC, Reed-Solomon parameters and AVLC are in ICAO Doc 9776 and Annex 10, purchasable | Medium |
 | VDL Mode 4 | GFSK 19200 bit/s in 25 kHz, self-organising TDMA, 4500 slots per minute | ETSI EN 301 842-1, free | Medium |
 | HFDL | 1440 Hz subcarrier, 1800 sym/s, BPSK/QPSK/8PSK giving 300 to 1800 bit/s, 32 s TDMA frame of 13 slots | ARINC 635-4, purchasable from SAE ITC | Large |
 | ADS-C and FANS-1/A | No physical layer of its own; rides ACARS, HFDL, VDL2 or satellite | ARINC 622, purchasable, plus ICAO Doc 9880 | Medium |
@@ -363,13 +384,19 @@ clean-room breach and is wrong within a year.
 | AIS Class A, Class B, AtoN, base station, SAR aircraft | GMSK BT 0.4 over FM, 9600 bit/s, 25 kHz at 161.975 and 162.025 MHz; NRZI, HDLC with 0x7E flags and bit stuffing, CRC-16-CCITT; 26.67 ms slots, 2250 per minute per channel | ITU-R M.1371-6 (02/2026, verified in force, supersedes -5 of 02/2014), free. Done from -5, checked against -6, see "AIS and VHF DSC" below | Medium |
 | AIS-SART, AIS-MOB, AIS-EPIRB | Identical physical layer; a burst of eight position reports once per minute, navigation status 14, message 14 text | Annex 8 of ITU-R M.1371-6, free; IMO Resolution MSC.246(83), free | Small |
 | Satellite AIS and message 27 | Same GMSK; AIS3 at 156.775 and AIS4 at 156.825 MHz; message 27 is the reduced long-range report | ITU-R M.1371-6, free | Medium |
-| VDES and AIS ASM channels | ASM at 161.950 and 162.000 MHz reuses the AIS physical layer; VDE-TER is pi/4-QPSK, 8PSK and 16QAM across 25, 50 and 100 kHz to about 307 kbit/s | ITU-R M.2092-2 (02/2026, verified in force), free; IALA G1117 Edition 3.0, free | Medium |
+| VDES and AIS ASM channels | ASM at 161.950 and 162.000 MHz is pi/4-QPSK at 9.6 ksym/s, root raised cosine 0.35, with a 27-symbol syncword of 1, Barker 13 and inverted Barker 13 (M.2092-2 Annex 2 Table 1 and Table 7), sharing only the AIS slot frame. ASM-TER Link IDs 1 to 3 done, see below; VDE-TER is pi/4-QPSK, 8PSK and 16QAM across 25, 50 and 100 kHz to about 307 kbit/s | ITU-R M.2092-2 (02/2026, verified in force), free; IALA G1117 Edition 3.0, free | Medium |
 | DSC on VHF (channel 70) | FFSK 1200 baud on 156.525 MHz, mark 1300 Hz, space 2100 Hz, 10-bit symbols, time diversity | ITU-R M.493-16 (12/2023, verified in force), free; M.541-11 for procedures. Done from -15, checked against -16, see "AIS and VHF DSC" below | Small |
 | DSC on MF and HF | 2-FSK 100 baud, 170 Hz shift, centre 1700 Hz in J2B; same symbol alphabet and diversity | ITU-R M.493-16, free | Small |
 | NAVTEX | F1B FSK, 170 Hz shift, 100 baud, CCIR 476 7-unit 4/3 code, 280 ms time-diversity FEC, about 300 Hz; 518, 490 and 4209.5 kHz | ITU-R M.540-2 (06/1990, verified still in force), free, plus the IMO NAVTEX Manual for the B1 to B4 header semantics. Framing done without the IMO semantics, see below | Small |
 | NBDP SITOR-A and SITOR-B | FSK 100 baud, 170 Hz shift; SITOR-A is a 450 ms ARQ cycle, SITOR-B is the NAVTEX FEC mode | ITU-R M.625-4 (03/2012, verified in force) and M.476-5, free. SITOR-B done, see below | Small |
-| NAVDAT (500 kHz and HF) | OFDM in 10.5 kHz, QPSK, 16-QAM and 64-QAM, 12 to 18 kbit/s | ITU-R M.2010-2 for 500 kHz and M.2058-1 for HF, free | Large |
+| NAVDAT (500 kHz and HF) | OFDM in 10.5 kHz, QPSK, 16-QAM and 64-QAM, 12 to 18 kbit/s | ITU-R M.2010-3 (02/2026, in force, superseding M.2010-2) for 500 kHz and M.2058-1 for HF, free | Large |
 | HF radiofax / WEFAX | FM subcarrier, 1900 Hz centre plus or minus 400 Hz, 1500 and 2300 Hz at the extremes, 60 to 240 lines per minute, IOC 576 or 288, start tone 300 or 675 Hz, stop 450 Hz | WMO-No. 386 (frozen 2024-12-31) plus the free NOAA/NWS Worldwide Marine Radiofacsimile Broadcast Schedules, which is the practical citation for the constants | Medium |
+
+WHAT TWO ROWS OF THIS TABLE USED TO SAY, until 2026-11-02. VDES: "ASM at
+161.950 and 162.000 MHz reuses the AIS physical layer". AIS is GMSK at 9600
+bit/s; M.2092-2 Table 7 makes ASM-TER pi/4-QPSK at 9600 symbol/s with a Barker
+syncword, and `core/decode/vdes.h` uses nothing of `core/decode/ais.h`.
+NAVDAT named M.2010-2, which M.2010-3 (02/2026) has superseded.
 
 **NAVTEX is not SITOR-B on a different frequency.** The B1 to B4 header
 semantics, the station and subject filtering and the 518 kHz channel plan live
@@ -429,8 +456,14 @@ pictures.
 | IEEE 802.15.4 and Zigbee | 2.4 GHz O-QPSK half-sine, 2 Mchip/s, 16-ary orthogonal spreading, 62.5 ksym/s, 250 kbit/s; 868/915 MHz BPSK DSSS at 20 and 40 kbit/s; preamble 32 zero chips, SFD 0xA7 | IEEE 802.15.4-2020, free through the IEEE GET Program; Zigbee PRO 2023 free from csa-iot.org | Medium |
 | Bluetooth Low Energy advertising | GFSK BT 0.5, index 0.45 to 0.55, 1 or 2 Msym/s, 2 MHz channels; advertising on 2402, 2426 and 2480 MHz; access address 0x8E89BED6, CRC-24, 7-bit LFSR whitening seeded by channel index | Bluetooth Core Specification 6.x, free from bluetooth.com | Medium |
 | Wi-SUN FAN / 802.15.4g SUN FSK | 2-FSK and 4-FSK, 50 to 300 kbit/s, index 0.5 or 1.0, 200 to 600 kHz channels in 902 to 928 MHz, 16-bit PHY header, CRC-16 or -32 | IEEE 802.15.4-2020 clause 19, free through GET; Wi-SUN FAN 1.1 Technical Profile, free | Medium |
-| EnOcean | ASK 125 kbit/s Manchester at 868.3 MHz, 315 or 902 MHz elsewhere; 14 to 21 byte telegrams sent in triplicate | ISO/IEC 14543-3-10:2020, purchasable; EnOcean Equipment Profiles free from the Alliance | Small |
+| EnOcean | ASK 125 kbit/s with ERP1's 8-to-12 bit coding at 868.3 MHz, 315 or 902 MHz elsewhere; 14 to 21 byte telegrams sent in triplicate | ISO/IEC 14543-3-10:2020, purchasable; EnOcean Equipment Profiles free from the Alliance | Small |
 | DECT | GFSK BT 0.5, 1.152 Mbit/s, 1.728 MHz spacing, TDMA/TDD, 24 slots per 10 ms frame, 32 kbit/s per duplex bearer, 16-bit A-field CRC | ETSI EN 300 175 parts 1 to 8, free; ITU-T G.726 for the codec, free | Large |
+
+WHAT TWO ROWS OF THESE TABLES USED TO SAY, until 2026-11-02. VDL Mode 2 named
+"ETSI EN 301 841-1, free from etsi.org" as its whole specification; it lacks
+everything above the modulation. EnOcean: "ASK 125 kbit/s Manchester at 868.3
+MHz"; EnOcean Radio Protocol 1 V1.2 specifies 8-to-12 coding, which is what
+`core/decode/enocean.h` implements.
 
 **DECT is licence-clean and patent-clean, and rendering its audio is a separate
 decision.** The 1992 air interface has nothing live in it and G.726's patents
@@ -455,7 +488,7 @@ nothing because the payload is encrypted would miss most of it.
 | CubeSat Space Protocol over AX100-class radios | GMSK and GFSK, 100 bit/s to 38.4 kbit/s, usually 9600, in 435 to 438 and 145.8 to 146.0 MHz; randomiser, RS(255,223), ASM, 32-bit CSP header | GS-CSP-1.1 and the NanoCom AX100 datasheet, free, plus the CCSDS Blue Books | Medium |
 | AX.25 amateur satellite packet | 1200 baud Bell 202 AFSK and 9600 baud G3RUH in 145.8 to 146.0 and 435 to 438 MHz | AX.25 v2.2, free from TAPR. See the amateur table | Small |
 | FUNcube-class BPSK telemetry | 1200 bit/s DBPSK, r=1/2 K=7 with an RS outer code, 256-byte frames, on a 145.9 MHz class downlink | AMSAT-UK published frame layouts and per-mission telemetry dictionaries. No document number exists; cite the page and the dictionary per constant | Small |
-| Cospas-Sarsat 406 MHz first generation | 160 ms unmodulated carrier then biphase-L at 400 bit/s, +/-1.1 radians; 440 or 520 ms burst every 50 s; 112 or 144 bits; BCH(82,61) and BCH(106,83) | C/S T.001, free from cospas-sarsat.int (unverified: current issue and revision) | Small |
+| Cospas-Sarsat 406 MHz first generation | 160 ms unmodulated carrier then biphase-L at 400 bit/s, +/-1.1 radians; 440 or 520 ms burst every 50 s; 112 or 144 bits; BCH(82,61) and BCH(106,83) | C/S T.001, free. Issue 4 Revision 7 (March 2021) read, from a copy at sar.mot.go.th; Revision 13 exists and was not read. Done, see below | Small |
 | Cospas-Sarsat second generation (SGB) | 406.05 MHz, DSSS OQPSK, 38400 chip/s from a truncated 23-stage m-sequence, 256 chips per bit per arm; 1 s burst, 250-bit message, BCH(250,202) | C/S T.018, free (unverified: current issue). The LFSR initialisation values are tabulated in it | Medium |
 | GPS L1 C/A (LNAV) | 1575.42 MHz, BPSK-R(1), 1.023 Mchip/s, 1023-chip Gold codes, 50 bit/s in 300-bit subframes | IS-GPS-200 Revision N (2022-08-22) with IRN-003, free at gps.gov | Large |
 | GPS L2C and L5 (CNAV) | L2C at 1227.60 MHz, CM and CL time-multiplexed at 511.5 kchip/s each; L5 at 1176.45 MHz, 10.23 Mchip/s, 10230-chip codes with NH overlays | IS-GPS-200N and IS-GPS-705 Revision J (2022-08-22), free | Medium |
@@ -513,7 +546,7 @@ assignment and mode changes all travel outside the encrypted or vocoded part.
 | Inmarsat BGAN, FleetBroadband, SwiftBroadband | Carrier detection, bearer type, symbol rate (8.4 to 168 kBd), modulation, frame length, from the free ETSI TS 102 744 | User traffic is encrypted and voice is AMBE+2 |
 | Thuraya GMR-1 and GMR-1 3G | pi/4-CQPSK 23.4 kBd framing, 40 ms frames of 24 slots, GSM-derived signalling, from the free ETSI TS 101 376 | AMBE voice or encrypted packet data |
 | Inmarsat mini-M / GMR-2 | pi/4-DQPSK 8.4 kBd framing from the free ETSI TS 101 377 | AMBE voice |
-| Iridium L-band burst and TDMA framing | Burst detection, 90 ms frame with a 20.32 ms simplex slot and eight 8.28 ms slots, DQPSK 25 kBd after a BPSK unique word | Literature and expired Motorola patents describe the burst; the patent conclusion rests on the design programme's filing era rather than a docket check, and the arXiv identifier carrying the field detail is unverified. Ring Alert is a full include |
+| Iridium L-band burst and TDMA framing | Burst detection, 90 ms frame with a 20.32 ms simplex slot and eight 8.28 ms slots, DQPSK 25 kBd after a BPSK unique word | Literature and expired Motorola patents describe the burst; the patent conclusion rests on the design programme's filing era rather than a docket check, and arXiv:2603.12062 (Jedermann et al., 12 March 2026) resolves but gives no Ring Alert field layout. Ring Alert is a full include |
 | ORBCOMM subscriber downlink | SDPSK 4800 bit/s demodulation, the twelve-channel plan in 137.0 to 138.0 MHz, presence and rate, all from the free A80TD0008 Rev G | The ORBCOMM Air Interface Specification carries the packet layer and has never been published (unverified: whether it exists in obtainable form) |
 | Argos / A-DCS platform terminals | Burst detection, 401.65 MHz plus or minus 30 kHz, 400 bit/s Manchester, burst interval | No air-interface document comparable to C/S T.001 was found; platform ID and sensor layouts are undocumented, and the traffic belongs to identifiable operators |
 | FY-3 AHRPT and FY-1 CHRPT | Signal identification, demodulator lock, frame recovery | No public CMA instrument format document was located |
@@ -1618,13 +1651,18 @@ answer a GET). ARRL technical-characteristics pages for CLOVER, CLOVER-2000,
 Q15X25, CHIP64, RWOP and FDMDV. IEC 61097-4:2024, and whether it carries the
 Inmarsat-C frame layout or only equipment performance.
 
-**Identifiers that carry a verdict and did not resolve.** arXiv:2603.12062, the
-Iridium security analysis under the Iridium burst entry. The web.archive.org
+**Identifiers that carry a verdict and did not resolve.** The web.archive.org
 capture of the barberdsp Dayton SSTV paper. EPS.ASPI.DS.0675 (Metop).
 417-R-IRD-0168 (GOES HRIT header type 131). MIL-STD-188-203-3 (Link-4A). The
-ORBCOMM Air Interface Specification. Whether ARRL still serves
-`ft4_ft8_protocols.tgz` at the QEX Binaries 2020 path, which is what makes the
-FT8 and FT4 generator matrices public domain rather than a recorded exception.
+ORBCOMM Air Interface Specification.
+
+WHAT THE LIST ABOVE USED TO SAY, until 2026-11-02, also held
+"arXiv:2603.12062, the Iridium security analysis under the Iridium burst
+entry", which now resolves and lacks the Ring Alert layout, and "Whether ARRL
+still serves `ft4_ft8_protocols.tgz` at the QEX Binaries 2020 path". It does
+not, nor does princeton.edu; the archive was read from the Wayback Machine's
+capture of 2020-01-07, and the public-domain grant is in section 9 of the QEX
+2020 paper rather than in the archive. `docs/clean-room.md` records both.
 
 **Patent positions resting on the era of the system rather than a search.** For
 anything standardised after roughly 2006 the twenty-year argument is
