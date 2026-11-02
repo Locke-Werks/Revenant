@@ -158,6 +158,7 @@ add_executable(revenant_decode_tests
     test_dstar_blocking.cpp
     test_enocean.cpp
     test_fs1016.cpp
+    test_ermes.cpp
     test_imbe.cpp
     test_lpc10.cpp
     test_navtex.cpp

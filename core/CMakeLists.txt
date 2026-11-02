@@ -139,6 +139,7 @@ add_library(revenant_core STATIC
     decode/dv_phy.cpp
     decode/enocean.cpp
     decode/fs1016.cpp
+    decode/ermes.cpp
     decode/fsk.cpp
     decode/fx25.cpp
     decode/g3ruh.cpp
@@ -216,6 +217,7 @@ add_library(revenant_core STATIC
     dsp/synth/dect_mod.cpp
     dsp/synth/dv_mod.cpp
     dsp/synth/enocean_mod.cpp
+    dsp/synth/ermes_mod.cpp
     dsp/synth/fsk_mod.cpp
     dsp/synth/g3ruh_mod.cpp
     dsp/synth/m17_mod.cpp
