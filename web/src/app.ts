@@ -33,6 +33,7 @@ import { Ruler } from "./ui/ruler";
 import { levelInBand, TopBar } from "./ui/top_bar";
 import { CentreTuner } from "./centre_tuner";
 import { clampToRanges } from "./band_edge";
+import { LeaseScreen, leaseScreenHtml } from "./ui/lease_screen";
 
 export function appScreenHtml(): string {
   return `
@@ -60,6 +61,7 @@ export function appScreenHtml(): string {
   </nav>
   <div id="sheet-slot"></div>
   <audio id="kl-audio" playsinline preload="none"></audio>
+  ${leaseScreenHtml()}
 </main>`;
 }
 
@@ -704,6 +706,14 @@ export function mountApp(root: HTMLElement): AppHandle {
   link.on("link", (e) => {
     status.link(e.state, e.detail, e.recreated !== undefined || e.lost !== undefined);
     renderStatus();
+  });
+  // The engine is someone else's: the notice covers the app, and this
+  // phone's sound stops with the session the gateway destroyed.
+  new LeaseScreen(root.querySelector<HTMLElement>("#lease")!, link);
+  link.on("lease", (e) => {
+    if (e.state === "held") return;
+    audio.stop();
+    keep.off();
   });
   link.on("vrxEventsEnded", (e) => {
     status.eventsEnded(typeof e.reason === "string" ? e.reason : "ended");

@@ -1084,3 +1084,22 @@ test("a decoder the engine ended is reported by name", async () => {
   r.link.emit("vrxStatus", { event: "vrxStatus", vrx: 1, decoder: "pocsag", decoderError: "the decoder refused 8000 S/s. It needs 22050." });
   assert.deepEqual(r.toasts, ["pocsag: the decoder refused 8000 S/s"]);
 });
+
+test("every receiver the engine has is listed, whoever opened it", async () => {
+  const r = rig();
+  r.link.emit("vrx", { event: "vrx", vrx: 7, hz: 162_550_000, mode: "nfm", bandwidthHz: 12_500, squelchDbfs: -80, openedBy: "another client" });
+  r.link.emit("vrx", { event: "vrx", vrx: 3, hz: 853_050_100, mode: "p25p1", bandwidthHz: 12_500, openedBy: "trunk follower" });
+  assert.deepEqual(r.chips(), ["3:853050100:p25p1", "7:162550000:nfm"]);
+  // A change the engine reports moves the chip.
+  r.link.emit("vrx", { event: "vrx", vrx: 7, hz: 162_400_000, mode: "nfm", openedBy: "another client" });
+  assert.deepEqual(r.chips(), ["3:853050100:p25p1", "7:162400000:nfm"]);
+  r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 7, reason: "removed by another client" });
+  assert.deepEqual(r.chips(), ["3:853050100:p25p1"]);
+});
+
+test("a vrx event cannot move the previewed frequency mid-drag", async () => {
+  const r = await dragRig();
+  r.ctl.preview(146_700_000);
+  r.link.emit("vrx", { event: "vrx", vrx: 1, hz: 146_520_000, mode: "nfm" });
+  assert.deepEqual(r.chips(), ["1:146700000:nfm"]);
+});

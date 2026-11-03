@@ -350,6 +350,7 @@ export class ReceiverController {
   constructor(private readonly deps: ControllerDeps) {
     const link = deps.link;
     link.on("vrxStatus", (e) => this.onStatus(e));
+    link.on("vrx", (e) => this.onListed(e));
     link.on("vrxRemoved", (e) => this.onRemoved(e));
     link.on("link", (e) => this.onLink(e));
   }
@@ -768,6 +769,27 @@ export class ReceiverController {
       const name = typeof e.decoder === "string" && e.decoder !== "" ? e.decoder : "decoder";
       this.deps.toast(`${name}: ${shortRefusal(e.decoderError)}`, "decoder");
     }
+  }
+
+  // A receiver the engine has, whoever opened it: one user holds the engine,
+  // so the list is the engine's whole list. A replace in flight answers for
+  // its own new id, and a removal asked for is not undone by a late event;
+  // a receiver being dragged keeps the phone's own preview.
+  private onListed(e: GatewayEvent): void {
+    const vrx = num(e.vrx);
+    if (vrx === undefined || this.removing.has(vrx) || this.replacing.size > 0) return;
+    if (this.dragging && vrx === this.list.active) return;
+    const r = this.list.upsert({
+      vrx,
+      hz: num(e.hz),
+      mode: typeof e.mode === "string" ? e.mode : undefined,
+      bandwidthHz: (num(e.bandwidthHz) ?? 0) > 0 ? num(e.bandwidthHz) : undefined,
+      squelchDbfs: num(e.squelchDbfs),
+      transcribe: choiceOf(e.transcribe),
+      transcribing: typeof e.transcribing === "boolean" ? e.transcribing : undefined,
+      decoders: Array.isArray(e.decoders) ? e.decoders.filter((n): n is string => typeof n === "string") : undefined,
+    });
+    this.confirmed.set(r.vrx, r.hz);
   }
 
   private onRemoved(e: GatewayEvent): void {

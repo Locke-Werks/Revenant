@@ -49,6 +49,7 @@ export const OPS = [
   "pong",
   "listDecoders",
   "setDecoders",
+  "takeOver",
 ] as const;
 export type Op = (typeof OPS)[number];
 
@@ -67,6 +68,8 @@ export const EVENTS = [
   "detections",
   "display",
   "rds",
+  "lease",
+  "vrx",
 ] as const;
 export type EventName = (typeof EVENTS)[number];
 
@@ -219,7 +222,7 @@ export interface GatewayEvent {
 export type ServerMessage = Reply | GatewayEvent;
 
 // "link". After an engine restart, the Up event of a session the gateway
-// rebuilt carries recreated and lost: each receiver the phone owned was added
+// rebuilt carries recreated and lost: each receiver the phone opened was added
 // again at the same frequency and mode under a new id, or could not be, with
 // the engine's reason (and a vrxRemoved for that id as well). Audio, keep
 // listening and the rest follow the new ids; the app swaps old for new.
@@ -230,6 +233,24 @@ export interface LinkEvent {
   recreated?: { old: number; new: number }[];
   lost?: { vrx: number; reason: string }[];
 }
+
+// "lease": the engine serves one user at a time (tools/webgate/phone_hub.h).
+// "held" is the first event on a connection whose phone holds the engine;
+// "inUse" means another client holds it, since `since`, and every command but
+// takeOver is refused; "lost" means `holder` took it over from this phone,
+// whose session is gone. takeOver from inUse or lost takes the engine, and the
+// connection then gets a fresh session: lease held, hello, link.
+export interface LeaseEvent {
+  event: "lease";
+  state: "held" | "inUse" | "lost";
+  holder: string;
+  since?: string;
+  message?: string;
+}
+
+// "vrx": one receiver the engine has, whoever opened it, shaped like the
+// addVrx result plus openedBy. Sent for every receiver when a session starts
+// or resumes and whenever one is added or changed.
 
 // "transcriptionStatus" carries the fields of the setTranscription result
 // (enabled, modelState, modelName, bytesDone, bytesTotal, detail, ...). The
