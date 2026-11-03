@@ -133,6 +133,14 @@ test("placeCaption pins at the receiver's frequency and the rows its samples cov
   assert.equal(p.height, 3 * 2);
 });
 
+test("placeCaption rides the waterfall's scroll between rows", () => {
+  // A third of the newest row scrolled in: every row sits two thirds of a
+  // row above where it rests, the caption with them, and its height is kept.
+  const p = placeCaption(caption(), clockOf(CLOCK_STARTS), VIEW, 1000, 2, 1024, -2 / 3)!;
+  assert.ok(Math.abs(p.top - (14 - 2 / 3) * 2) < 1e-9);
+  assert.equal(p.height, 3 * 2);
+});
+
 test("placeCaption follows pan and zoom", () => {
   const panned = { ...VIEW, centerHz: 99_000_000 };
   assert.equal(placeCaption(caption(), clockOf(CLOCK_STARTS), panned, 1000, 2, 1024)!.x, 1000);

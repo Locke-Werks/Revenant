@@ -167,6 +167,9 @@ export function placeCaption(
   widthCss: number,
   rowHeightCss: number,
   visibleRows: number,
+  // Where the rows sit between arrivals, in rows: 0 at rest, negative while
+  // the newest row is still scrolling in (smooth.ts).
+  offsetRows = 0,
 ): Placement | null {
   const newest = clock.ageOf(c.sourceEnd);
   if (newest === null || newest >= visibleRows) return null;
@@ -177,7 +180,7 @@ export function placeCaption(
   const f = newest / visibleRows;
   return {
     x,
-    top: newest * rowHeightCss,
+    top: (newest + offsetRows) * rowHeightCss,
     height: (oldest - newest + 1) * rowHeightCss,
     opacity: f <= FADE_FROM ? 1 : Math.max(0, 1 - (f - FADE_FROM) / (1 - FADE_FROM)),
     visible: x >= -EDGE_PX && x <= widthCss + EDGE_PX,
@@ -189,6 +192,7 @@ export interface LayerGeometry {
   widthCss: number;
   rowHeightCss: number;
   visibleRows: number;
+  offsetRows?: number;
 }
 
 // The elements for the live captions inside the waterfall's box, which clips
@@ -206,7 +210,7 @@ export class CaptionLayer {
   layout(g: LayerGeometry): void {
     const live = new Set<number>();
     for (const c of this.store.list()) {
-      const p = placeCaption(c, this.clock, g.view, g.widthCss, g.rowHeightCss, g.visibleRows);
+      const p = placeCaption(c, this.clock, g.view, g.widthCss, g.rowHeightCss, g.visibleRows, g.offsetRows);
       if (!p) continue;
       live.add(c.id);
       let el = this.els.get(c.id);
