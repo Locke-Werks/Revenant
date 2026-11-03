@@ -145,6 +145,12 @@ fail            = "The Revenant engine is running. Close it and the install can 
 
 [[preflight]]
 type            = "process_not_running"
+name            = "revenant-webgate.exe"
+restart_manager = true
+fail            = "The Revenant phone gateway is running. Close it and the install can continue."
+
+[[preflight]]
+type            = "process_not_running"
 name            = "revenant-ui.exe"
 restart_manager = true
 fail            = "Revenant is running. Close the window and the install can continue."
@@ -186,6 +192,18 @@ when   = "desktop_shortcut"
 # service would hold both against whoever is logged in. It is started by a
 # person, or by a scheduled task they write, until there is a design for
 # multi-user arbitration.
+#
+# NO FIREWALL RULE FOR THE PHONE GATEWAY, AND NO START MENU ENTRY FOR IT.
+#
+# revenant-webgate.exe and its web/ directory ride in the payload beside the
+# engine, and it listens on 0.0.0.0:17700 and 17701. Forge has no firewall
+# action, and a hook can only run a digest-pinned payload member, so adding a
+# rule would mean shipping and signing a helper exe whose only job is to run
+# netsh. The gateway is started by a person on purpose, so the first start
+# raises Windows' own "allow access" prompt, which offers Private networks by
+# default; docs/webgate.md gives the netsh line for a machine where that
+# prompt was dismissed or never appears. It is started from a terminal, like
+# the engine, until it has a launcher of its own.
 #
 # NO FILE ASSOCIATIONS. The file source reads SigMF and RIFF WAV recordings, and
 # .wav belongs to whatever a person already plays audio with. Registering it,

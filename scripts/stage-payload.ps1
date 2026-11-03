@@ -314,6 +314,39 @@ if ($Only -in @("both", "engine")) {
     }
     Copy-Item -LiteralPath $serialExe -Destination (Join-Path $outDir "revenant-rtl-serial.exe") -Force
 
+    # The phone gateway and the web app it serves. The gateway finds web/
+    # beside its own exe, so the two travel together. The revenant_web target
+    # is skipped with only a STATUS line when Node is missing at configure
+    # time, so a build without Node produces a perfectly good exe that serves
+    # 404s. Staging is where that gets caught, loudly, because the alternative
+    # is a release that installs a phone gateway with no phone app.
+    $webgateExe = Join-Path $engineDir "tools/webgate/revenant-webgate.exe"
+    if (-not (Test-Path -LiteralPath $webgateExe)) {
+        throw "revenant-webgate.exe is not at $webgateExe. It builds with the engine."
+    }
+    $webSource = Join-Path $engineDir "tools/webgate/web"
+    $webRequired = @("index.html", "app.js", "sw.js", "manifest.webmanifest")
+    $webMissing = @($webRequired | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $webSource $_) -PathType Leaf) })
+    if ($webMissing.Count -gt 0) {
+        throw "the phone web app is not built at $webSource (missing: $($webMissing -join ', ')). " +
+              "The revenant_web target needs Node and npm on PATH when CMake configures; " +
+              "install them, reconfigure the ci preset and build again."
+    }
+    Copy-Item -LiteralPath $webgateExe -Destination (Join-Path $outDir "revenant-webgate.exe") -Force
+    $webDest = Join-Path $outDir "web"
+    if (Test-Path -LiteralPath $webDest) {
+        Remove-Item -LiteralPath $webDest -Recurse -Force
+    }
+    # The directory and the parent of its destination, not "<dir>\*", for the
+    # reason Copy-Tree gives.
+    Copy-Item -LiteralPath $webSource -Destination $webDest -Recurse -Force
+    foreach ($name in $webRequired) {
+        if (-not (Test-Path -LiteralPath (Join-Path $webDest $name) -PathType Leaf)) {
+            throw "web/$name did not make it into the payload."
+        }
+    }
+
     # The engine plugins plugins/CMakeLists.txt builds, in the folder the
     # engine scans beside itself. None ship at present; add each DLL's name
     # to the list when one is declared there.

@@ -64,6 +64,15 @@
     Leave the receiver window closed. Not the target load: it is the control
     that says whether a second vsync-paced window costs the main one frames.
 
+.PARAMETER Phone
+    Run revenant-webgate against the same engine and keep a simulated phone
+    connected to it for the whole measurement (scripts/webgate-phone-sim.mjs:
+    a 1179 px view, one NFM receiver, its audio on). This is the control for
+    the question docs/webgate.md asks, whether a phone costs the engine
+    anything the desktop client can see. The gateway takes its own ports
+    (-PhonePort and the one above it) and its own certificates under -Work,
+    so it never meets a gateway already running on this machine.
+
 .PARAMETER Work
     Where the token, the engine's output, the JSON and the receiver window's
     picture go.
@@ -74,6 +83,9 @@ param(
     [switch]$Visible,
     [switch]$OnTop,
     [switch]$NoReceiverWindow,
+    [switch]$Phone,
+    [int]$PhonePort = 27700,
+    [string]$Webgate = (Join-Path $PSScriptRoot '..\build\ci\tools\webgate\revenant-webgate.exe'),
     [string]$Work = (Join-Path $env:TEMP 'revenant-frame-budget'),
     [string]$Engine = (Join-Path $PSScriptRoot '..\build\ci\tools\engined\revenant-engine.exe'),
     [string]$Client = (Join-Path $PSScriptRoot '..\ui\build\vs\RelWithDebInfo\revenant-ui.exe'),
@@ -83,7 +95,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-foreach ($path in $Engine, $Client) {
+$required = @($Engine, $Client)
+if ($Phone) { $required += $Webgate }
+foreach ($path in $required) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "$path does not exist. Build the engine with .\scripts\build.ps1 -Preset ci -NoTest and the client from ui\ with the vs preset."
     }
@@ -107,6 +121,9 @@ $stderr = Join-Path $Work 'engine.err'
 $mode = if ($Visible) { 'visible' } else { 'offscreen' }
 if ($NoReceiverWindow) {
     $mode += '-main-only'
+}
+if ($Phone) {
+    $mode += '-phone'
 }
 $stats = Join-Path $Work "frame-stats-$mode.json"
 $picture = Join-Path $Work "receivers-$mode.png"
@@ -171,6 +188,42 @@ try {
         $clientArgs += @('--receiver', $receiver)
     }
 
+    $webgateProcess = $null
+    $simProcess = $null
+    if ($Phone) {
+        $node = (Get-Command node -ErrorAction Stop).Source
+        $wgOut = Join-Path $Work 'webgate.out'
+        $wgErr = Join-Path $Work 'webgate.err'
+        $wgArgs = @('--port', $PhonePort, '--http-port', ($PhonePort + 1),
+            '--engine', "127.0.0.1:$port", '--token-file', "`"$token`"",
+            '--state-dir', "`"$(Join-Path $Work 'webgate-state')`"")
+        $webgateProcess = Start-Process -FilePath $Webgate -ArgumentList $wgArgs -NoNewWindow -PassThru `
+            -RedirectStandardOutput $wgOut -RedirectStandardError $wgErr
+        $deadline = (Get-Date).AddSeconds(30)
+        while (-not (Select-String -LiteralPath $wgOut -Pattern 'https port' -ErrorAction SilentlyContinue)) {
+            if ($webgateProcess.HasExited -or (Get-Date) -gt $deadline) {
+                Get-Content -LiteralPath $wgOut, $wgErr -ErrorAction SilentlyContinue
+                throw 'revenant-webgate did not come up'
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        # Ends a little after the client does, so the phone is connected for
+        # the whole measured window and not only most of it.
+        $simJson = Join-Path $Work "phone-sim-$mode.json"
+        $env:NODE_TLS_REJECT_UNAUTHORIZED = '0'
+        try {
+            $simProcess = Start-Process -FilePath $node -NoNewWindow -PassThru `
+                -ArgumentList @("`"$(Join-Path $PSScriptRoot 'webgate-phone-sim.mjs')`"",
+                    "wss://127.0.0.1:$PhonePort/ws", ($clientSeconds + 4), "`"$simJson`"") `
+                -RedirectStandardError (Join-Path $Work 'phone-sim.err')
+        }
+        finally {
+            Remove-Item Env:NODE_TLS_REJECT_UNAUTHORIZED -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 2
+        'phone connected through webgate on port ' + $PhonePort
+    }
+
     # Start-Process -Wait rather than the call operator: revenant-ui is a
     # windowed program, and PowerShell does not wait for one of those, which
     # left the engine stopped under a client still measuring.
@@ -209,6 +262,13 @@ try {
     }
 }
 finally {
+    foreach ($extra in 'simProcess', 'webgateProcess') {
+        $process = Get-Variable -Name $extra -ValueOnly -ErrorAction SilentlyContinue
+        if ($process -and -not $process.HasExited) {
+            if ($extra -eq 'simProcess') { $process.WaitForExit(15000) | Out-Null }
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+        }
+    }
     if (-not $engineProcess.HasExited) {
         Stop-Process -Id $engineProcess.Id -Force
         $engineProcess.WaitForExit(10000) | Out-Null
