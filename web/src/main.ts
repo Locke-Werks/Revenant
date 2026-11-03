@@ -1,7 +1,7 @@
 import { chooseScreen, installScreenHtml, type StandaloneEnv } from "./install";
 import { gatewayReachable, offlineScreenHtml, type Probe } from "./offline";
 import { appScreenHtml, mountApp } from "./app";
-import { insetsToggle, isEditable, pinViewport, showInsets, trackAppGeometry, wantsInsets } from "./insets";
+import { insetsToggle, isEditable, pinViewport, showInsets, wantsInsets } from "./insets";
 import { reloadOnUpdate } from "./sw_reload";
 
 export interface Host {
@@ -63,7 +63,6 @@ if (typeof document !== "undefined") {
     });
   }
   pinViewport(window);
-  trackAppGeometry(window);
   insetsToggle(document, window);
   let store: Storage | null = null;
   try {

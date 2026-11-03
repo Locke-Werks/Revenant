@@ -138,7 +138,7 @@ export function showInsets(doc: Document, win: Window): void {
       `scrollY ${win.scrollY}  screen ${win.screen.width}x${win.screen.height}  availHeight ${win.screen.availHeight}`,
       units.map((x) => `${x.u} ${x.p.getBoundingClientRect().height.toFixed(1)}`).join("  "),
       `standalone ${nav.standalone === true}`,
-      `--app-top ${root.style.getPropertyValue("--app-top") || "unset"}  --app-h ${root.style.getPropertyValue("--app-h") || "unset"}  overshoot top ${root.dataset.overshootTop ?? "n/a"}`,
+      `scale ${vv ? vv.scale.toFixed(3) : "n/a"}  scrollWidth ${root.scrollWidth}  innerWidth ${win.innerWidth}`,
     ].join("\n");
   };
   render();
@@ -147,70 +147,6 @@ export function showInsets(doc: Document, win: Window): void {
   win.visualViewport?.addEventListener("scroll", render);
   // The app and its sheet mount after this runs and move when the sheet opens.
   win.setInterval(render, 1000);
-}
-
-// Where the glass is inside the layout viewport. An installed app on iOS 27
-// reports a viewport taller than the screen (innerHeight 1052 on a 956 tall
-// screen): it reaches a top inset above the glass and a bottom inset below
-// it, so a fixed box at top 0 starts under the status bar, out of sight. When
-// the overshoot is exactly the two insets the glass starts a top inset down;
-// otherwise nothing is assumed and the viewport is taken as it is.
-export interface Geometry {
-  topPx: number;
-  heightPx: number;
-}
-
-export function appGeometry(g: {
-  innerHeight: number;
-  screenTall: number;
-  insetTop: number;
-  insetBottom: number;
-}): Geometry {
-  const overshoot = g.innerHeight - g.screenTall;
-  if (g.screenTall > 0 && overshoot > 0 && Math.abs(g.insetTop + g.insetBottom - overshoot) < 1) {
-    return { topPx: Math.round(overshoot - g.insetBottom), heightPx: Math.round(g.screenTall) };
-  }
-  return { topPx: 0, heightPx: Math.round(g.innerHeight) };
-}
-
-// The screen's length along the current orientation.
-export function screenTallPx(width: number, height: number, landscape: boolean): number {
-  return landscape ? Math.min(width, height) : Math.max(width, height);
-}
-
-// env() insets are only readable through CSS, so a hidden probe carries them.
-function insetProbe(doc: Document): HTMLElement {
-  const probe = doc.createElement("div");
-  probe.style.cssText =
-    "position:fixed;visibility:hidden;pointer-events:none;" +
-    "padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)";
-  doc.body.append(probe);
-  return probe;
-}
-
-export function trackAppGeometry(win: Window): void {
-  const doc = win.document;
-  const probe = insetProbe(doc);
-  const landscape = win.matchMedia("(orientation: landscape)");
-  const set = () => {
-    const cs = win.getComputedStyle(probe);
-    const g = appGeometry({
-      innerHeight: win.innerHeight,
-      screenTall: screenTallPx(win.screen.width, win.screen.height, landscape.matches),
-      insetTop: parseFloat(cs.paddingTop) || 0,
-      insetBottom: parseFloat(cs.paddingBottom) || 0,
-    });
-    // Round 2 applied g.topPx here and the phone showed the top bar pushed
-    // down by it, so the overshoot is not where the glass starts. Kept at 0
-    // until the ruler in showInsets says otherwise; the overlay prints it.
-    doc.documentElement.style.setProperty("--app-top", "0px");
-    doc.documentElement.dataset.overshootTop = String(g.topPx);
-    doc.documentElement.style.setProperty("--app-h", `${g.heightPx}px`);
-  };
-  set();
-  win.addEventListener("resize", set);
-  win.visualViewport?.addEventListener("resize", set);
-  landscape.addEventListener("change", set);
 }
 
 // The page itself never scrolls, but iOS scrolls the layout viewport to keep
