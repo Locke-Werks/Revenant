@@ -1,6 +1,8 @@
 add_executable(test_webgate
     ../support/no_modal_dialogs.cpp
     test_certs.cpp
+    test_static_files.cpp
+    test_http.cpp
 )
 
 target_link_libraries(test_webgate PRIVATE
