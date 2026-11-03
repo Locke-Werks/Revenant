@@ -4,7 +4,7 @@ import { AutoScale, remapRow, rowExtentsDb } from "../src/autoscale";
 import { colormap } from "../src/colormap";
 import { rulerTicks, tickStepHz } from "../src/ui/ruler";
 import { isEditable } from "../src/insets";
-import { clampView, coveredBand, rowCoverage } from "../src/view";
+import { clampView, viewBand } from "../src/view";
 
 const TAU = 30_000;
 
@@ -19,23 +19,24 @@ test("the viewport pin leaves the scroll alone while something takes typing", ()
   assert.equal(isEditable(null), false);
 });
 
-test("a row ending in a long floor run at the band edge trims the band to the data", () => {
-  const band = { centerHz: 98_100_000, rateHz: 2_400_000 };
-  const px = new Uint8Array(780).fill(40);
-  px.fill(0, 730);
-  const c = rowCoverage({ centerHz: band.centerHz, spanHz: band.rateHz, px }, band);
-  assert.equal(c.lowHz, null);
-  assert.ok(Math.abs(c.highHz! - (96_900_000 + (730 * 2_400_000) / 780)) < 1);
-  const b = coveredBand(band, c.lowHz, c.highHz);
-  const v = clampView({ centerHz: band.centerHz, spanHz: band.rateHz, widthPx: 780 }, b);
-  // The whole view now lies on data, so the row fills the width.
-  assert.ok(v.centerHz + v.spanHz / 2 <= c.highHz! + 1e-6);
-  assert.ok(v.centerHz - v.spanHz / 2 >= 96_900_000 - 1e-6);
-  // A few quiet pixels, or a row that stops short of the band edge, say nothing.
-  const quiet = new Uint8Array(780).fill(40);
-  quiet.fill(0, 777);
-  assert.equal(rowCoverage({ centerHz: band.centerHz, spanHz: band.rateHz, px: quiet }, band).highHz, null);
-  assert.equal(rowCoverage({ centerHz: band.centerHz - 500_000, spanHz: 1_000_000, px }, band).highHz, null);
+test("the view is clamped to the spectrum's reported edges, inside the band", () => {
+  // As the engine lays bins out: from half a channel below the band to half
+  // a channel short of its top.
+  const b = viewBand(98_100_000, 2_400_000, 96_800_000, 99_200_000);
+  assert.deepEqual(b, { centerHz: 98_050_000, rateHz: 2_300_000 });
+  const v = clampView({ centerHz: 98_100_000, spanHz: 2_400_000, widthPx: 780 }, b);
+  assert.equal(v.centerHz + v.spanHz / 2, 99_200_000);
+  assert.equal(v.centerHz - v.spanHz / 2, 96_900_000);
+  // A pan to the top edge stops where the data does.
+  const top = clampView({ centerHz: 99_000_000, spanHz: 400_000, widthPx: 780 }, b);
+  assert.equal(top.centerHz + top.spanHz / 2, 99_200_000);
+});
+
+test("an older gateway without the edges leaves the full band", () => {
+  assert.deepEqual(viewBand(98_100_000, 2_400_000), { centerHz: 98_100_000, rateHz: 2_400_000 });
+  assert.deepEqual(viewBand(98_100_000, 2_400_000, Number.NaN, undefined), { centerHz: 98_100_000, rateHz: 2_400_000 });
+  // Nonsense edges are ignored rather than collapsing the band.
+  assert.deepEqual(viewBand(98_100_000, 2_400_000, 99_000_000, 97_000_000), { centerHz: 98_100_000, rateHz: 2_400_000 });
 });
 
 test("autoscale snaps to the first row", () => {

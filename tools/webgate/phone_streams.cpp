@@ -371,6 +371,19 @@ std::string PhoneStreams::source_event() const
             .add_u64("epoch", source_epoch_)
             .add_double("realtimeFactor", realtime_factor_)
             .add_double("pacedBy", paced_by_);
+        // The spectrum starts half a coarse channel below the band and so
+        // stops half a channel short of its top (SpectrumGeometry::bin_zero_hz),
+        // and the reducer fills pixels past it with the floor. These are the
+        // edges reduce() treats as the spectrum's: bin j spans half a bin
+        // either side of first_bin_hz + j * bin_hz.
+        const double bin_hz = spectrum_.bin_width.hertz();
+        if (spectrum_.enabled() && bin_hz > 0.0) {
+            const double first_bin_hz =
+                static_cast<double>(source_center_) + spectrum_.bin_zero.hertz();
+            fields.add_double("dataLowHz", first_bin_hz - bin_hz / 2.0)
+                .add_double("dataHighHz",
+                            first_bin_hz + (static_cast<double>(spectrum_.bins) - 0.5) * bin_hz);
+        }
     }
     return event("source", fields);
 }
@@ -477,6 +490,7 @@ void PhoneStreams::refresh_source()
     source_center_ = info->source_center;
     source_epoch_ = info->source_epoch;
     spectrum_enabled_ = info->spectrum.enabled();
+    spectrum_ = info->spectrum;
     realtime_factor_ = info->realtime_factor;
     paced_by_ = info->source_paced_by;
 

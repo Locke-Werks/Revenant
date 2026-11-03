@@ -56,43 +56,20 @@ export function clampView(view: View, band: Band): View {
   return { centerHz, spanHz, widthPx };
 }
 
-// The engine's spectrum starts half a coarse channel below the band and so
-// ends half a channel short of its top (SpectrumGeometry::bin_zero_hz), and
-// the gateway fills pixels past the spectrum with 0. Allowing the view out to
-// the band's nominal edge leaves an empty strip at the right of every row. A
-// row that reaches a band edge and ends in a long run of zeros says where the
-// data really stops; null when this row says nothing about that.
-// Shorter runs are left alone: a quiet stretch of max-reduced noise rarely
-// sits below the floor for more than a few pixels together.
-export const EDGE_RUN_FRACTION = 0.01;
-
-export function rowCoverage(
-  row: { centerHz: number; spanHz: number; px: Uint8Array },
-  band: Band,
-): { lowHz: number | null; highHz: number | null } {
-  const n = row.px.length;
-  const out = { lowHz: null as number | null, highHz: null as number | null };
-  if (n === 0 || !(row.spanHz > 0)) return out;
-  const pxHz = row.spanHz / n;
-  const minRun = Math.max(4, Math.ceil(n * EDGE_RUN_FRACTION));
-  const rowLo = row.centerHz - row.spanHz / 2;
-  const rowHi = row.centerHz + row.spanHz / 2;
-  const bandLo = band.centerHz - band.rateHz / 2;
-  const bandHi = band.centerHz + band.rateHz / 2;
-  let r = 0;
-  while (r < n && row.px[n - 1 - r] === 0) r++;
-  if (r >= minRun && r < n && rowHi >= bandHi - pxHz) out.highHz = rowHi - r * pxHz;
-  let l = 0;
-  while (l < n && row.px[l] === 0) l++;
-  if (l >= minRun && l < n && rowLo <= bandLo + pxHz) out.lowHz = rowLo + l * pxHz;
-  return out;
-}
-
-// The band trimmed to where the spectrum has data.
-export function coveredBand(band: Band, lowHz: number | null, highHz: number | null): Band {
-  const lo = Math.max(band.centerHz - band.rateHz / 2, lowHz ?? -Infinity);
-  const hi = Math.min(band.centerHz + band.rateHz / 2, highHz ?? Infinity);
-  if (!(hi > lo)) return band;
+// The band the view may cover: the source's band, trimmed to where the
+// engine's spectrum has bins when the gateway says so. The spectrum starts
+// half a coarse channel low and stops that much short of the top, and past
+// it the gateway sends floor, so an untrimmed view shows an empty strip.
+export function viewBand(
+  centerHz: number,
+  rateHz: number,
+  dataLowHz?: number,
+  dataHighHz?: number,
+): Band {
+  const ok = (x: number | undefined): x is number => typeof x === "number" && Number.isFinite(x);
+  const lo = Math.max(centerHz - rateHz / 2, ok(dataLowHz) ? dataLowHz : -Infinity);
+  const hi = Math.min(centerHz + rateHz / 2, ok(dataHighHz) ? dataHighHz : Infinity);
+  if (!(hi > lo)) return { centerHz, rateHz };
   return { centerHz: (lo + hi) / 2, rateHz: hi - lo };
 }
 

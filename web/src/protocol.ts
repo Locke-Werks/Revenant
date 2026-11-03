@@ -218,6 +218,11 @@ export interface SourceEvent {
   epoch?: number;
   realtimeFactor?: number;
   pacedBy?: number;
+  // Where the engine's spectrum bins really lie, which is not the band: it
+  // starts half a coarse channel low and stops that much short of the top.
+  // Absent from older gateways and when the spectrum is off.
+  dataLowHz?: number;
+  dataHighHz?: number;
 }
 
 // "detections" is {items: [...]}, each item shaped like Detection in

@@ -12,7 +12,7 @@ import { AutoScale, remapRow, rowExtentsDb } from "./autoscale";
 import { DEFAULT_ACCENT, DETECTION_COLOR, detectionBoxes, passbandHz } from "./markers";
 import { drawReceivers, type ReceiverMark } from "./overlay";
 import { SpectrumTrace } from "./spectrum_trace";
-import { clampView, coveredBand, rowCoverage, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
+import { clampView, viewBand, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
 import { createWaterfall, RING_ROWS } from "./waterfall";
 import type { SourceEvent } from "./protocol";
 import { captionFromEvent, CaptionLayer, CaptionStore, RowClock } from "./ui/captions";
@@ -118,10 +118,9 @@ export function mountApp(root: HTMLElement): AppHandle {
   };
 
   let band: Band | null = null;
-  // Where the spectrum's data really ends inside the band; null until a row
-  // that reaches that edge has shown it.
-  let coverLo: number | null = null;
-  let coverHi: number | null = null;
+  // The band trimmed to the spectrum's real edges, as the source event gives
+  // them; what the view is clamped to.
+  let limits: Band | null = null;
   let view: View | null = null;
   let widthDev = 1;
   let drawQueued = false;
@@ -174,7 +173,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   );
 
   const apply = (next: View) => {
-    const v = band ? clampView(next, coveredBand(band, coverLo, coverHi)) : next;
+    const v = limits ? clampView(next, limits) : next;
     if (sameView(v, view)) return;
     view = v;
     waterfall.setView(v);
@@ -634,17 +633,23 @@ export function mountApp(root: HTMLElement): AppHandle {
     renderStatus();
     if (e.open !== true || typeof e.centerHz !== "number" || typeof e.rateHz !== "number") {
       band = null;
+      limits = null;
       return;
     }
     const changed = !band || band.centerHz !== e.centerHz || band.rateHz !== e.rateHz;
     band = { centerHz: e.centerHz, rateHz: e.rateHz };
-    if (!changed && view) return;
-    coverLo = null;
-    coverHi = null;
+    const nextLimits = viewBand(e.centerHz, e.rateHz, e.dataLowHz, e.dataHighHz);
+    const limitsMoved = !limits || limits.centerHz !== nextLimits.centerHz || limits.rateHz !== nextLimits.rateHz;
+    limits = nextLimits;
+    if (!changed && view) {
+      // Same band, edges newly known (the spectrum switched on): re-clamp.
+      if (limitsMoved) apply(view);
+      return;
+    }
     // A retuned or reopened source: history was cut for another band.
     waterfall.clear();
     forgetRows();
-    apply({ centerHz: band.centerHz, spanHz: band.rateHz, widthPx: widthDev });
+    apply({ centerHz: limits.centerHz, spanHz: limits.rateHz, widthPx: widthDev });
   });
   link.on("ready", () => {
     // The gateway may hold no view for this socket, or a resumed one from
@@ -674,20 +679,6 @@ export function mountApp(root: HTMLElement): AppHandle {
     const shown = { ...f, px: remapRow(f, s, new Uint8Array(f.px.length)) };
     waterfall.pushRow(shown);
     trace.setRow(shown);
-    if (band) {
-      const c = rowCoverage(f, band);
-      const pxHz = f.spanHz / Math.max(1, f.px.length);
-      let narrowed = false;
-      if (c.highHz !== null && (coverHi === null || c.highHz < coverHi - pxHz)) {
-        coverHi = c.highHz;
-        narrowed = true;
-      }
-      if (c.lowHz !== null && (coverLo === null || c.lowHz > coverLo + pxHz)) {
-        coverLo = c.lowHz;
-        narrowed = true;
-      }
-      if (narrowed && view) apply(view);
-    }
     const active = receivers.list.active;
     const r = active === null ? undefined : receivers.list.get(active);
     if (r) {

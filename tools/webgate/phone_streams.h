@@ -311,6 +311,9 @@ private:
     double sent_realtime_factor_ = 0.0;
     double sent_paced_by_ = 0.0;
     bool spectrum_enabled_ = false;
+    // Where the engine's bins really lie, which is not the band: see
+    // source_event.
+    rpc::SpectrumGeometry spectrum_{};
     std::optional<std::chrono::steady_clock::time_point> last_refresh_;
     // The speech state at the last read, and at the last event sent.
     std::optional<rpc::TranscriptionStatus> transcription_;

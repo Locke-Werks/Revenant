@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -363,6 +364,67 @@ TEST_CASE("the source event carries the engine's realtime factor", "[gpu][webgat
     CHECK(last != first);
     CHECK(contains(last, R"("realtimeFactor":)"));
     CHECK_FALSE(contains(last, R"("realtimeFactor":0,)"));
+}
+
+[[nodiscard]] std::optional<double> number_field(const std::string& json, std::string_view key)
+{
+    const std::string needle = "\"" + std::string(key) + "\":";
+    const auto at = json.find(needle);
+    if (at == std::string::npos) {
+        return std::nullopt;
+    }
+    return std::stod(json.substr(at + needle.size()));
+}
+
+TEST_CASE("the source event carries the spectrum's real edges", "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    auto options = still_engine();
+    options.spectrum_transform = revenant::test::kSpectrumTransform;
+    rig.open(options);
+    rig.attach();
+
+    std::string text;
+    for (const auto& m : rig.socket.sent) {
+        if (m.kind == Kind::Text && contains(m.text, R"("event":"source")")) {
+            text = m.text;
+        }
+    }
+    INFO(text);
+    const auto info = rig.harness.client().info();
+    REQUIRE(info.has_value());
+    REQUIRE(info->spectrum.enabled());
+    const double bin = info->spectrum.bin_width.hertz();
+    const double first = static_cast<double>(info->source_center) + info->spectrum.bin_zero.hertz();
+    const auto low = number_field(text, "dataLowHz");
+    const auto high = number_field(text, "dataHighHz");
+    REQUIRE(low.has_value());
+    REQUIRE(high.has_value());
+    CHECK(std::abs(*low - (first - bin / 2.0)) < 1e-3);
+    CHECK(std::abs(*high - (first + (static_cast<double>(info->spectrum.bins) - 0.5) * bin)) < 1e-3);
+    // The edges are where the bins lie, which is not the band: the low edge
+    // sits below centre - rate/2 and the high one short of centre + rate/2.
+    const double half_rate = static_cast<double>(info->source_rate) / 2.0;
+    CHECK(*low <= static_cast<double>(info->source_center) - half_rate);
+    CHECK(*high < static_cast<double>(info->source_center) + half_rate);
+}
+
+TEST_CASE("no spectrum, no edges in the source event", "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.open(still_engine());
+    rig.attach();
+    std::string text;
+    for (const auto& m : rig.socket.sent) {
+        if (m.kind == Kind::Text && contains(m.text, R"("event":"source")")) {
+            text = m.text;
+        }
+    }
+    INFO(text);
+    REQUIRE(contains(text, R"("open":true)"));
+    CHECK_FALSE(contains(text, R"("dataLowHz")"));
 }
 
 [[nodiscard]] std::size_t count_events(const FakeSocket& socket, std::string_view name)
