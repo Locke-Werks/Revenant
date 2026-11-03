@@ -437,6 +437,11 @@ inline constexpr float kAutoPivotMinSeparationDb = 9.0F;
 inline constexpr float kAutoPivotNoiseMarginDb = 6.0F;
 inline constexpr double kAutoPivotSeconds = 2.0;
 
+// How far the eased automatic pivot moves before a waterfall recolours its
+// history through it. It eases on every row, and a recolour per row would cost
+// the desktop's frame budget and the phone a palette event per row.
+inline constexpr float kAutoPivotRecolourTolerance = 0.02F;
+
 // The level dividing the noise from the signals in the history.
 //
 // Otsu's two-class threshold over the histogram: the cut that maximises the

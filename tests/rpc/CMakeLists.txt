@@ -25,10 +25,17 @@
 # rational survived rather than that both ends agree about a rounded one.
 
 if(TARGET revenant_rpc_server)
+    # The in-process engine, server and client. A library of its own so
+    # tests/webgate drives the same engine and does not carry a copy.
+    add_library(revenant_rpc_fixture STATIC rpc_fixture.cpp)
+    target_link_libraries(revenant_rpc_fixture PUBLIC revenant_rpc_server)
+    target_include_directories(revenant_rpc_fixture PUBLIC "${CMAKE_SOURCE_DIR}")
+    revenant_apply_warnings(revenant_rpc_fixture)
+    revenant_apply_reference_fp(revenant_rpc_fixture)
+
     add_executable(revenant_rpc_tests
         ../support/no_modal_dialogs.cpp
         ../reference/gpu_fixture.cpp
-        rpc_fixture.cpp
         test_decode_lane.cpp
         test_rpc_agc.cpp
         test_rpc_audio.cpp
@@ -59,7 +66,7 @@ if(TARGET revenant_rpc_server)
     )
 
     target_link_libraries(revenant_rpc_tests PRIVATE
-        revenant_rpc_server
+        revenant_rpc_fixture
         Catch2::Catch2WithMain
     )
     target_include_directories(revenant_rpc_tests PRIVATE "${CMAKE_SOURCE_DIR}")

@@ -11,19 +11,19 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "models/engine_start.h"
+#include "core/launch/engine_start.h"
 #include "models/status_summary.h"
 
-using revenant::ui::engine_exit_reason_line;
-using revenant::ui::engine_exit_sentence;
-using revenant::ui::EngineLaunch;
-using revenant::ui::EngineLaunchFacts;
-using revenant::ui::is_launchable_address;
-using revenant::ui::LastSourceAction;
-using revenant::ui::LastSourceFacts;
-using revenant::ui::plan_engine_launch;
-using revenant::ui::plan_last_source;
-using revenant::ui::remembers_as_last_radio;
+using revenant::launch::engine_exit_reason_line;
+using revenant::launch::engine_exit_sentence;
+using revenant::launch::EngineLaunch;
+using revenant::launch::EngineLaunchFacts;
+using revenant::launch::is_launchable_address;
+using revenant::launch::LastSourceAction;
+using revenant::launch::LastSourceFacts;
+using revenant::launch::plan_engine_launch;
+using revenant::launch::plan_last_source;
+using revenant::launch::remembers_as_last_radio;
 using revenant::ui::StatusInputs;
 using revenant::ui::StatusLevel;
 using revenant::ui::summarise_status;

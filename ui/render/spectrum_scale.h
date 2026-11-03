@@ -245,6 +245,8 @@ struct ScalePins {
     float floor_db = 0.0F;
     bool ceiling_pinned = false;
     float ceiling_db = 0.0F;
+
+    [[nodiscard]] bool operator==(const ScalePins&) const = default;
 };
 
 // The ends a span display draws against, from where its noise is drawn and
@@ -559,6 +561,91 @@ inline constexpr float kMaxWaterfallContrast = 2.0F;
     const float peak = held.valid ? held.level_db : frame_ceiling_db;
     return blend_ends(padded, tight_ends(noise, peak, kSpectrumTightGuardDb, pins), fit);
 }
+
+// How much quieter or louder a zoomed view is than the whole frame, added to
+// the engine's two ends before they are placed.
+//
+// The engine measures its ends over every bin. Rather than redo its outlier
+// rejection and smoothing for the view, the same two percentiles are measured
+// over both the whole frame and the view and the difference carried, so the
+// engine's ends move by exactly how much quieter or louder the zoomed part is.
+// The quarter is the noise, for the reason render/waterfall_scale.h gives; the
+// thousandth is the strong level. A view of the whole frame carries nothing.
+struct ViewOffsets {
+    float floor_db = 0.0F;
+    float ceiling_db = 0.0F;
+    bool valid = false;
+
+    // A second either way: the percentiles of a narrow view are a small
+    // sample and jump frame to frame, and the engine's own ends already carry
+    // the attack and decay a signal arriving needs.
+    static constexpr double kSeconds = 1.0;
+
+    static constexpr double kFloorFraction = 0.25;
+    static constexpr double kCeilingFraction = 0.999;
+
+    struct Levels {
+        float floor_db = 0.0F;
+        float ceiling_db = 0.0F;
+    };
+
+    // The two percentiles the offsets compare, from one copy. The ceiling's
+    // rank lies above the floor's, and after the first nth_element everything
+    // past the floor's rank is no smaller than it, so the second search only
+    // needs that tail. The values are the same exact order statistics two
+    // separate searches give.
+    [[nodiscard]] static Levels levels(std::span<const float> bins, std::vector<float>& scratch)
+    {
+        scratch.assign(bins.begin(), bins.end());
+        const auto rank = [&scratch](double fraction) {
+            return static_cast<std::ptrdiff_t>(fraction *
+                                               static_cast<double>(scratch.size() - 1));
+        };
+        const auto low = rank(kFloorFraction);
+        const auto high = rank(kCeilingFraction);
+        std::nth_element(scratch.begin(), scratch.begin() + low, scratch.end());
+        Levels out;
+        out.floor_db = scratch[static_cast<std::size_t>(low)];
+        if (high > low) {
+            std::nth_element(scratch.begin() + low + 1, scratch.begin() + high, scratch.end());
+        }
+        out.ceiling_db = scratch[static_cast<std::size_t>(high)];
+        return out;
+    }
+
+    void track(std::span<const float> whole, std::span<const float> shown, double seconds,
+               std::vector<float>& scratch)
+    {
+        if (shown.size() >= whole.size() || shown.empty()) {
+            *this = ViewOffsets{};
+            return;
+        }
+        track(levels(whole, scratch), whole.size(), shown, seconds, scratch);
+    }
+
+    // The same, with the whole frame's levels measured once by the caller, so
+    // several views of one frame share that work.
+    void track(const Levels& whole, std::size_t whole_bins, std::span<const float> shown,
+               double seconds, std::vector<float>& scratch)
+    {
+        if (shown.size() >= whole_bins || shown.empty()) {
+            *this = ViewOffsets{};
+            return;
+        }
+        const Levels view = levels(shown, scratch);
+        const float floor_target = view.floor_db - whole.floor_db;
+        const float ceiling_target = view.ceiling_db - whole.ceiling_db;
+        if (!valid) {
+            floor_db = floor_target;
+            ceiling_db = ceiling_target;
+            valid = true;
+            return;
+        }
+        const auto step = static_cast<float>(1.0 - std::exp(-std::max(seconds, 0.0) / kSeconds));
+        floor_db += (floor_target - floor_db) * step;
+        ceiling_db += (ceiling_target - ceiling_db) * step;
+    }
+};
 
 [[nodiscard]] inline float pin_level(float drawn_db)
 {

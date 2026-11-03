@@ -603,3 +603,25 @@ TEST_CASE("smoothing off passes frames through, a replay keeps the averages", "[
 }
 
 }  // namespace smooth_cases
+
+// Rejects offsets measured the wrong way round, or carried for a view that is
+// the whole frame, where the engine's own ends are already the answer.
+TEST_CASE("a zoomed view's offsets carry how much quieter it is", "[scale][view]")
+{
+    using revenant::ui::ViewOffsets;
+    std::vector<float> whole(1000, -60.0F);
+    for (std::size_t i = 0; i < 500; ++i) {
+        whole[i] = -100.0F;
+    }
+    std::vector<float> scratch;
+    ViewOffsets offsets;
+    offsets.track(whole, std::span<const float>(whole).subspan(0, 400), 0.0, scratch);
+    CHECK(offsets.valid);
+    CHECK(offsets.floor_db == 0.0F);
+    CHECK(offsets.ceiling_db == -40.0F);
+
+    offsets.track(whole, whole, 0.1, scratch);
+    CHECK_FALSE(offsets.valid);
+    CHECK(offsets.floor_db == 0.0F);
+    CHECK(offsets.ceiling_db == 0.0F);
+}

@@ -1,0 +1,85 @@
+import { chooseScreen, installScreenHtml, type StandaloneEnv } from "./install";
+import { gatewayReachable, offlineScreenHtml, type Probe } from "./offline";
+import { appScreenHtml, mountApp } from "./app";
+import { insetsToggle, isEditable, pinViewport, trackShortViewport, showInsets, wantsInsets } from "./insets";
+import { reloadOnUpdate } from "./sw_reload";
+
+export interface Host {
+  root: { innerHTML: string; querySelector(sel: string): { addEventListener(ev: string, fn: () => void): void } | null };
+  env: StandaloneEnv;
+  search: string;
+  probe: Probe;
+  // Starts the app once its markup is in place. Absent under node.
+  mount?: () => void;
+}
+
+export async function render(host: Host): Promise<void> {
+  if (chooseScreen(host.env, host.search) === "install") {
+    host.root.innerHTML = installScreenHtml();
+    return;
+  }
+  if (await gatewayReachable(host.probe)) {
+    host.root.innerHTML = appScreenHtml();
+    host.mount?.();
+    return;
+  }
+  host.root.innerHTML = offlineScreenHtml();
+  host.root.querySelector("#retry")?.addEventListener("click", () => {
+    void render(host);
+  });
+}
+
+// Skipped under node, where the tests import this module without a page.
+if (typeof document !== "undefined") {
+  if ("serviceWorker" in navigator) {
+    let fingers = 0;
+    const count = (ev: TouchEvent) => void (fingers = ev.touches.length);
+    for (const t of ["touchstart", "touchend", "touchcancel"]) document.addEventListener(t, count as EventListener, { passive: true, capture: true });
+    let pointers = 0;
+    document.addEventListener("pointerdown", () => void pointers++, { capture: true });
+    for (const t of ["pointerup", "pointercancel"]) document.addEventListener(t, () => void (pointers = Math.max(0, pointers - 1)), { capture: true });
+    let store: Storage | null = null;
+    try {
+      store = window.sessionStorage;
+    } catch {
+      // The in-page flag still holds.
+    }
+    reloadOnUpdate({
+      controlled: navigator.serviceWorker.controller !== null,
+      onControllerChange: (fn) => navigator.serviceWorker.addEventListener("controllerchange", fn),
+      busy: () => fingers > 0 || pointers > 0 || isEditable(document.activeElement as HTMLInputElement | null),
+      reload: () => location.reload(),
+      now: () => Date.now(),
+      setTimeout: (fn, ms) => void window.setTimeout(fn, ms),
+      store,
+    });
+    // A home screen app is resumed far more often than it is launched, and the
+    // browser only checks for a new worker on navigation. Checking when the app
+    // comes back to the foreground is what lets an update land.
+    void navigator.serviceWorker.register("/sw.js").then((reg) => {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") void reg.update().catch(() => {});
+      });
+    });
+  }
+  pinViewport(window);
+  trackShortViewport(window);
+  insetsToggle(document, window);
+  let store: Storage | null = null;
+  try {
+    store = window.localStorage;
+  } catch {
+    // Private browsing: the query string still works.
+  }
+  if (wantsInsets(location.search, store)) showInsets(document, window);
+  const root = document.getElementById("app");
+  if (root) {
+    void render({
+      root,
+      env: { navigator: navigator as { standalone?: boolean }, matchMedia: (q) => window.matchMedia(q) },
+      search: location.search,
+      probe: (input, init) => fetch(input, init),
+      mount: () => void mountApp(root),
+    });
+  }
+}

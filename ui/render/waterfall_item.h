@@ -480,7 +480,6 @@ private:
     // The pivot the history is coloured at. The automatic pivot eases on
     // every row, and a full recolour per row would cost the frame budget, so
     // it is taken only once it has moved kAutoPivotRecolourTolerance.
-    static constexpr float kAutoPivotRecolourTolerance = 0.02F;
     float drawn_pivot_ = kDefaultCurvePivot;
     void onPivotChanged();
     float headroom_db_ = 0.0F;

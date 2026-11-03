@@ -248,7 +248,7 @@ reads as a broken build.
 Machine scope, `{ProgramFiles}\Revenant`, elevation required. `installer.toml`
 carries the reasoning for each of these inline; the summary:
 
-- **Preflights.** Windows 11 by build number, 256 MB free on the install
+- **Preflights.** Windows 11 by build number, 512 MB free on the install
   volume, and neither `revenant-engine.exe` nor `revenant-ui.exe` running. A
   running copy refuses the install with exit 1603 and the person has to close
   it: `restart_manager = true` is set on both and Forge v0.4.0 does nothing
