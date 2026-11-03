@@ -70,6 +70,17 @@ export interface Receiver {
   // sent; shown as such, not as an error.
   statusUnavailable: boolean;
   audioError: string | null;
+  // Whether speech on this receiver is left to the engine ("auto"), forced on
+  // or off, and whether it is being transcribed right now.
+  transcribe: TranscribeChoice;
+  transcribing: boolean;
+}
+
+export const TRANSCRIBE_CHOICES = ["auto", "on", "off"] as const;
+export type TranscribeChoice = (typeof TRANSCRIBE_CHOICES)[number];
+
+function choiceOf(v: JsonValue | undefined): TranscribeChoice | undefined {
+  return TRANSCRIBE_CHOICES.find((c) => c === v);
 }
 
 export class ReceiverList {
@@ -116,6 +127,8 @@ export class ReceiverList {
       squelchDbfs: r.squelchDbfs ?? was?.squelchDbfs ?? null,
       statusUnavailable: r.statusUnavailable ?? false,
       audioError: r.audioError ?? was?.audioError ?? null,
+      transcribe: r.transcribe ?? was?.transcribe ?? "auto",
+      transcribing: r.transcribing ?? was?.transcribing ?? false,
     };
     this.items.set(r.vrx, next);
     this.changed();
@@ -265,6 +278,19 @@ export class ReceiverController {
   // Receivers with a setMode or setBandwidth in flight. A tap tuning one
   // would land on an id about to be removed.
   private replacing = new Set<number>();
+  private remapFns = new Set<(pairs: { old: number; new: number }[]) => void>();
+
+  // Everything else that keys on a receiver id (captions, the feed) follows
+  // the same moves the list makes, from the one place that knows them: a
+  // replace's single pair and an engine restart's map.
+  onRemap(fn: (pairs: { old: number; new: number }[]) => void): void {
+    this.remapFns.add(fn);
+  }
+
+  private remapped(pairs: { old: number; new: number }[]): void {
+    if (pairs.length === 0) return;
+    for (const fn of this.remapFns) fn(pairs);
+  }
 
   constructor(private readonly deps: ControllerDeps) {
     const link = deps.link;
@@ -323,6 +349,12 @@ export class ReceiverController {
     void this.call("setSquelch", { vrx, dbfs });
   }
 
+  setTranscribe(choice: TranscribeChoice): void {
+    const vrx = this.list.active;
+    if (vrx === null) return;
+    void this.call("setVrxTranscribe", { vrx, choice });
+  }
+
   remove(vrx: number): void {
     this.removing.add(vrx);
     this.deps.link.request("removeVrx", { vrx }).then(
@@ -372,6 +404,7 @@ export class ReceiverController {
           // Everything moves before the old id's removal is let through.
           this.deps.audio.retarget(replaced, r.vrx);
           this.deps.keep.retarget(replaced, r.vrx);
+          this.remapped([{ old: replaced, new: r.vrx }]);
           const active = this.list.active === replaced;
           this.list.remove(replaced);
           if (active) this.list.select(r.vrx);
@@ -415,6 +448,8 @@ export class ReceiverController {
       bandwidthHz: num(reply.bandwidthHz),
       squelchDbfs: num(reply.squelchDbfs),
       statusUnavailable: reply.statusUnavailable === true,
+      transcribe: choiceOf(reply.transcribe),
+      transcribing: typeof reply.transcribing === "boolean" ? reply.transcribing : undefined,
     });
     if (reply.clamped === true) {
       const why = typeof reply.clampReason === "string" && reply.clampReason !== "" ? reply.clampReason : "the engine clamped this receiver";
@@ -461,5 +496,6 @@ export class ReceiverController {
       this.deps.toast(`Receiver ${where} lost when the engine restarted: ${l.reason}`);
     }
     this.list.remap(e.recreated ?? []);
+    this.remapped(e.recreated ?? []);
   }
 }

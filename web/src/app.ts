@@ -8,11 +8,14 @@ import { attachGestures } from "./gestures";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
 import { SpectrumTrace } from "./spectrum_trace";
 import { clampView, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
-import { createWaterfall } from "./waterfall";
+import { createWaterfall, RING_ROWS } from "./waterfall";
 import type { SourceEvent } from "./protocol";
+import { captionFromEvent, CaptionLayer, CaptionStore, RowClock } from "./ui/captions";
+import { decodedEntry, FeedModel, FeedView, transcriptEntry } from "./ui/feed";
 import { RadioPanel } from "./ui/radio_panel";
 import { formatMHz, ReceiverController, ReplaceGate } from "./ui/receivers";
 import { Sheet } from "./ui/sheet";
+import { SpeechModel, speechLine, SpeechSwitch } from "./ui/speech_switch";
 import { StatusModel } from "./ui/status";
 import { Notes, Toasts } from "./ui/toast";
 import { levelInBand, TopBar } from "./ui/top_bar";
@@ -23,7 +26,7 @@ export function appScreenHtml(): string {
   <div class="top" id="top-slot"></div>
   <div class="stage" id="stage">
     <canvas id="trace" class="wf-trace"></canvas>
-    <div id="wf-body" class="wf-body"><canvas id="waterfall" class="wf-canvas"></canvas></div>
+    <div id="wf-body" class="wf-body"><canvas id="waterfall" class="wf-canvas"></canvas><div id="captions" class="captions" aria-hidden="true"></div></div>
     <div class="overlay">
       <div class="status-chips" id="status-chips"></div>
       <div class="pill" id="status-pill" role="status" hidden></div>
@@ -83,6 +86,17 @@ export function mountApp(root: HTMLElement): AppHandle {
   const waterfall = createWaterfall(wfCanvas);
   const trace = new SpectrumTrace(traceCanvas);
 
+  // Captions ride on the same rows as the waterfall: the clock keeps each
+  // row's source_start in the waterfall's own ring order.
+  const clock = new RowClock();
+  const captionStore = new CaptionStore();
+  const captionLayer = new CaptionLayer(root.querySelector<HTMLElement>("#captions")!, captionStore, clock);
+  let rendererState = waterfall.state;
+  const forgetRows = () => {
+    clock.clear();
+    captionStore.clear();
+  };
+
   let band: Band | null = null;
   let view: View | null = null;
   let widthDev = 1;
@@ -92,6 +106,19 @@ export function mountApp(root: HTMLElement): AppHandle {
     drawQueued = false;
     waterfall.draw();
     trace.draw();
+    layoutCaptions();
+  };
+  const layoutCaptions = () => {
+    if (!view) return;
+    const heightCss = body.clientHeight;
+    const widthCss = body.clientWidth;
+    if (!(heightCss > 0) || !(widthCss > 0)) return;
+    // The GL ring is stretched over the whole height; the 2D fallback
+    // scrolls a fixed number of device pixels per row.
+    const twoD = waterfall.state === "2d";
+    const rowHeightCss = twoD ? 2 / (window.devicePixelRatio || 1) : heightCss / RING_ROWS;
+    const visibleRows = twoD ? Math.max(1, Math.floor(heightCss / rowHeightCss)) : RING_ROWS;
+    captionLayer.layout({ view, widthCss, rowHeightCss, visibleRows });
   };
   const requestDraw = () => {
     if (drawQueued) return;
@@ -198,6 +225,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     setMode: (m) => receivers.setMode(m),
     setBandwidth: (hz) => receivers.setBandwidth(hz),
     setSquelch: (db) => receivers.setSquelch(db),
+    setTranscribe: (c) => receivers.setTranscribe(c),
     remove: (vrx) => receivers.remove(vrx),
     // The HLS element needs this gesture to play.
     toggleKeepListening: () => {
@@ -208,6 +236,60 @@ export function mountApp(root: HTMLElement): AppHandle {
   root.querySelector("#sheet-slot")!.append(sheet.el);
   const radio = new RadioPanel({ link: gate, toast });
   sheet.extra.append(radio.el);
+
+  // ---- Speech, transcripts and the feed -------------------------------------
+  const speechModel = new SpeechModel({
+    link: gate,
+    timers: { setTimeout: (fn, ms) => window.setTimeout(fn, ms), clearTimeout: (h) => window.clearTimeout(h as number) },
+  });
+  const feedModel = new FeedModel();
+  const feedPanel = document.createElement("section");
+  feedPanel.className = "panel feed-panel";
+  const feedHead = document.createElement("h2");
+  feedHead.textContent = "Decoded and spoken";
+  const feedHost = document.createElement("div");
+  feedHost.className = "feed";
+  feedPanel.append(feedHead, feedHost);
+  sheet.extra.prepend(feedPanel);
+  const feedView = new FeedView(feedHost, feedModel, () => document.createElement("div"));
+  let feedQueued = false;
+  const queueFeed = () => {
+    if (!sheet!.open || feedQueued) return;
+    feedQueued = true;
+    requestAnimationFrame(() => {
+      feedQueued = false;
+      feedView.render(receivers.list.active);
+    });
+  };
+  feedModel.onChange(queueFeed);
+  receivers.list.onChange(queueFeed);
+  sheet.onOpen((open) => {
+    if (open) feedView.render(receivers.list.active);
+  });
+  receivers.onRemap((pairs) => {
+    captionStore.remap(pairs);
+    feedModel.remap(pairs);
+  });
+  speechModel.onChange(() => {
+    sheet!.speechLine(speechLine(speechModel.status));
+    const s = speechModel.status;
+    notes.set("speech", s?.enabled === true && s.modelState === "failed" ? speechLine(s) : null);
+  });
+  sheet.speechLine(speechLine(null));
+  link.on("transcript", (e) => {
+    speechModel.heardTranscript();
+    const c = captionFromEvent(e);
+    if (c) {
+      captionStore.add(c);
+      requestDraw();
+    }
+    const f = transcriptEntry(e);
+    if (f) feedModel.add(f);
+  });
+  link.on("decoded", (e) => {
+    const f = decodedEntry(e);
+    if (f) feedModel.add(f);
+  });
   sheet.onOpen((open) => openSheetBtn.setAttribute("aria-expanded", String(open)));
   openSheetBtn.addEventListener("click", () => sheet!.setOpen(!sheet!.open));
 
@@ -216,6 +298,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     openSheet: () => sheet!.setOpen(true),
     toast,
   });
+  top.el.append(new SpeechSwitch(speechModel, toast).el);
   root.querySelector("#top-slot")!.append(top.el);
 
   const chipsEl = root.querySelector<HTMLElement>("#chips")!;
@@ -302,8 +385,13 @@ export function mountApp(root: HTMLElement): AppHandle {
     hzAt,
   );
 
+  let sourceEpoch: number | undefined;
   link.on("source", (raw) => {
     const e = raw as unknown as SourceEvent;
+    // Another source counts samples from its own zero: captions and rows
+    // from before it must not be matched against the new clock.
+    if (e.open !== true || (sourceEpoch !== undefined && e.epoch !== sourceEpoch)) forgetRows();
+    sourceEpoch = e.epoch;
     status.source(e);
     radio.source(e);
     renderStatus();
@@ -316,6 +404,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     if (!changed && view) return;
     // A retuned or reopened source: history was cut for another band.
     waterfall.clear();
+    forgetRows();
     apply({ centerHz: band.centerHz, spanHz: band.rateHz, widthPx: widthDev });
   });
   link.on("ready", () => {
@@ -331,6 +420,13 @@ export function mountApp(root: HTMLElement): AppHandle {
     if (!view) apply({ centerHz: f.centerHz, spanHz: f.spanHz, widthPx: widthDev });
     // Frozen means the engine is gone: whatever trickles in is not news.
     if (status.frozen()) return;
+    // A context loss or the 2D handover drops history, and the rows it kept
+    // are not the ones the clock holds.
+    if (waterfall.state !== rendererState) {
+      rendererState = waterfall.state;
+      forgetRows();
+    }
+    if (waterfall.state !== "lost" && clock.push(Number(f.sourceStart))) captionStore.clear();
     waterfall.pushRow(f);
     trace.setRow(f);
     const active = receivers.list.active;

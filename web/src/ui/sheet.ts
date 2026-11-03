@@ -1,7 +1,7 @@
 // The bottom sheet (a side panel in landscape): tuning for the active
 // receiver, keep listening, and the radio panel.
 
-import { BANDWIDTHS_HZ, formatMHz, MODES, type Receiver } from "./receivers";
+import { BANDWIDTHS_HZ, formatMHz, MODES, TRANSCRIBE_CHOICES, type Receiver, type TranscribeChoice } from "./receivers";
 
 export const SQUELCH_MIN_DBFS = -140;
 export const SQUELCH_MAX_DBFS = 0;
@@ -10,6 +10,7 @@ export interface SheetDeps {
   setMode(mode: string): void;
   setBandwidth(hz: number): void;
   setSquelch(dbfs: number): void;
+  setTranscribe(choice: TranscribeChoice): void;
   remove(vrx: number): void;
   // Runs in the tap: the HLS element needs the gesture.
   toggleKeepListening(): void;
@@ -33,6 +34,8 @@ export class Sheet {
   private readonly bandwidth: HTMLSelectElement;
   private readonly squelch: HTMLInputElement;
   private readonly squelchOut: HTMLOutputElement;
+  private readonly speech: HTMLSelectElement;
+  private readonly speechLineEl: HTMLElement;
   private readonly keep: HTMLButtonElement;
   private readonly removeBtn: HTMLButtonElement;
   private active: Receiver | null = null;
@@ -62,11 +65,16 @@ export class Sheet {
       <output id="sh-sq-out" for="sh-sq"></output>
     </div>
     <div class="row">
+      <label for="sh-speech">Speech</label>
+      <select id="sh-speech" aria-label="Transcribe this receiver"></select>
+    </div>
+    <div class="row">
       <button type="button" class="btn toggle" id="sh-keep" aria-pressed="false">Keep listening</button>
       <button type="button" class="btn danger" id="sh-remove">Remove receiver</button>
     </div>
   </section>
   <p class="hint" id="sh-hint">Tap the waterfall to listen there; press and hold to add another receiver.</p>
+  <p class="panel-status" id="sh-speech-line"></p>
   <div id="sh-extra"></div>
 </div>`;
     this.title = this.el.querySelector("#sh-title")!;
@@ -75,6 +83,8 @@ export class Sheet {
     this.bandwidth = this.el.querySelector("#sh-bw")!;
     this.squelch = this.el.querySelector("#sh-sq")!;
     this.squelchOut = this.el.querySelector("#sh-sq-out")!;
+    this.speech = this.el.querySelector("#sh-speech")!;
+    this.speechLineEl = this.el.querySelector("#sh-speech-line")!;
     this.keep = this.el.querySelector("#sh-keep")!;
     this.removeBtn = this.el.querySelector("#sh-remove")!;
     this.extra = this.el.querySelector("#sh-extra")!;
@@ -100,6 +110,14 @@ export class Sheet {
     this.bandwidth.addEventListener("change", () => deps.setBandwidth(Number(this.bandwidth.value)));
     this.squelch.addEventListener("input", () => (this.squelchOut.textContent = `${this.squelch.value} dB`));
     this.squelch.addEventListener("change", () => deps.setSquelch(Number(this.squelch.value)));
+    const labels: Record<TranscribeChoice, string> = { auto: "Auto", on: "On", off: "Off" };
+    for (const c of TRANSCRIBE_CHOICES) {
+      const o = document.createElement("option");
+      o.value = c;
+      o.textContent = labels[c];
+      this.speech.append(o);
+    }
+    this.speech.addEventListener("change", () => deps.setTranscribe(this.speech.value as TranscribeChoice));
     this.keep.addEventListener("click", () => deps.toggleKeepListening());
     this.removeBtn.addEventListener("click", () => {
       if (this.active) deps.remove(this.active.vrx);
@@ -119,6 +137,11 @@ export class Sheet {
 
   onOpen(fn: (open: boolean) => void): void {
     this.openListeners.add(fn);
+  }
+
+  // The engine-wide speech state, as a sentence.
+  speechLine(text: string): void {
+    this.speechLineEl.textContent = text;
   }
 
   keepListening(on: boolean): void {
@@ -148,6 +171,8 @@ export class Sheet {
       }
       this.bandwidth.value = String(r.bandwidthHz);
     }
+    this.speech.value = r.transcribe;
+    this.speech.title = r.transcribing ? "Being transcribed now" : "";
     if (r.squelchDbfs !== null && document.activeElement !== this.squelch) {
       this.squelch.value = String(Math.round(r.squelchDbfs));
       this.squelchOut.textContent = `${Math.round(r.squelchDbfs)} dB`;

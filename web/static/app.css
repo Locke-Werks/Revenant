@@ -329,5 +329,42 @@ button {
   }
 }
 
+/* Captions sit over the waterfall rows their speech was on. The layer clips
+   them to the view and passes touches through to the gestures beneath. */
+.captions {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.caption {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  border-left: 2px solid rgba(255, 255, 255, 0.55);
+  will-change: transform, opacity;
+}
+.caption-text {
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(14em, 60vw);
+  font-size: 0.8rem;
+  line-height: 1.25;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(20, 20, 24, 0.82);
+  overflow-wrap: anywhere;
+}
+.caption.doubt .caption-text { font-style: italic; color: var(--muted); }
+.app .chip.speech { flex: 0 0 auto; font-size: 0.8rem; }
+.app .chip.speech.failed { border-color: var(--warn); color: var(--warn); }
+
+.feed { max-height: 14em; overflow-y: auto; }
+.feed-row { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.feed-label { flex: 0 0 5.5em; color: var(--muted); font-size: 0.8rem; }
+.feed-text { flex: 1 1 auto; overflow-wrap: anywhere; }
+.feed-empty { color: var(--muted); }
+
 /* Out of the grid, so they take no cell in either orientation. */
 #sheet-slot, .app > audio { position: absolute; }

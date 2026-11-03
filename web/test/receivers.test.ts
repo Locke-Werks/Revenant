@@ -542,3 +542,54 @@ test("the receiver-events chip clears on a rebuilt session or a fresh one", () =
   s.ready(false);
   assert.deepEqual(s.chips(), []);
 });
+
+// ---- Speech per receiver and id changes ----------------------------------------
+
+test("the speech choice goes to setVrxTranscribe for the active receiver and the reply is kept", async () => {
+  const r = rig();
+  r.ctl.tap(146_520_000);
+  r.link.reply(status(1, 146_520_000, "nfm", { transcribe: "auto", transcribing: false }));
+  await flush();
+  assert.equal(r.ctl.list.get(1)!.transcribe, "auto");
+  r.ctl.setTranscribe("on");
+  assert.deepEqual(r.link.last(), { op: "setVrxTranscribe", args: { vrx: 1, choice: "on" }, timeoutMs: undefined });
+  r.link.reply(status(1, 146_520_000, "nfm", { transcribe: "on", transcribing: true }));
+  await flush();
+  assert.equal(r.ctl.list.get(1)!.transcribe, "on");
+  assert.equal(r.ctl.list.get(1)!.transcribing, true);
+});
+
+test("a refused speech choice toasts the engine's sentence and keeps the old one", async () => {
+  const r = rig();
+  r.ctl.tap(146_520_000);
+  r.link.reply(status(1, 146_520_000));
+  await flush();
+  r.ctl.setTranscribe("off");
+  r.link.refuse("transcription is not available");
+  await flush();
+  assert.deepEqual(r.toasts, ["transcription is not available"]);
+  assert.equal(r.ctl.list.get(1)!.transcribe, "auto");
+});
+
+test("a replace carries the speech choice to the new id and tells remap listeners", async () => {
+  const r = rig();
+  const moves: { old: number; new: number }[][] = [];
+  r.ctl.onRemap((p) => moves.push(p));
+  r.ctl.tap(146_520_000);
+  r.link.reply(status(1, 146_520_000, "nfm", { transcribe: "on" }));
+  await flush();
+  r.ctl.setMode("am");
+  r.link.reply(status(2, 146_520_000, "am", { replaced: 1 }));
+  await flush();
+  assert.deepEqual(moves, [[{ old: 1, new: 2 }]]);
+  assert.equal(r.ctl.list.get(2)!.transcribe, "on");
+});
+
+test("an engine restart's id map reaches remap listeners once", async () => {
+  const r = rig();
+  const moves: { old: number; new: number }[][] = [];
+  r.ctl.onRemap((p) => moves.push(p));
+  r.link.emit("link", { event: "link", state: "up", detail: "", recreated: [{ old: 1, new: 5 }], lost: [] });
+  r.link.emit("link", { event: "link", state: "up", detail: "", recreated: [], lost: [] });
+  assert.deepEqual(moves, [[{ old: 1, new: 5 }]]);
+});
