@@ -1957,16 +1957,24 @@ hears is the voice stream running dry, four to six times in 30 s for 82 to
   fed by a spectrum sink that copies the frame into one of four slots and sheds
   it when none is free. A poll and `sourceStats` read a copy the lane publishes
   after each decision, so the loop never waits on the detector's lock.
-- Both sigID threads hold a CPU budget charged in their own CPU time,
-  `core/engine/cpu_budget.h`: a quarter of a core for the detector,
-  `ServerOptions::detector_cpu_budget`, and half a core for the probes,
-  `EngineConfig::probe_cpu_budget`. Past it the detector sheds frames and the
-  probes start later. On an unthrottled Demand source neither sheds; the
+- Signal identification holds two cores between its threads, the owner's
+  decision of 2026-11-03 ("I'd be fine with 2 cores maxed all the time for
+  detection"), each charged in its own CPU time, `core/engine/cpu_budget.h`:
+  a quarter of a core for the detector, `ServerOptions::detector_cpu_budget`,
+  and 1.75 cores for the probe pool's two finishing threads,
+  `EngineConfig::probe_cpu_budget` and `probe_threads`. Past it the detector
+  sheds frames and the probes start later. Below-normal priority is what
+  keeps them off the source, completion and decode threads; the budget is
+  what bounds the total. WHAT THIS USED TO SAY: "half a core for the probes",
+  on one thread. That half core was sized when probes were the only thing
+  bounding the worker, and the measurements below were taken under it; they
+  stand as the record of that configuration. docs/detection.md, "Which
+  detection tier two looks at first", has the measurement of this one. On an unthrottled Demand source neither sheds; the
   completion thread waits instead, which is the graph's own rule for a source
   with no clock.
-- `revenant-engine` sets all three: `--detector-cpu` and `--probe-cpu` take a
-  share of one core above 0 and at most 1, because each budget holds one
-  thread, and `--decode-lanes` takes 1 to 16 lanes, 16 being the 7950X's
+- `revenant-engine` sets all three: `--detector-cpu` takes a share of one core
+  above 0 and at most 1, because it holds one thread, `--probe-cpu` cores
+  above 0 and at most 2, the pool's two finishing threads, and `--decode-lanes` takes 1 to 16 lanes, 16 being the 7950X's
   physical cores and every lane running above normal priority. Zero is refused
   for a budget rather than read as off, since a bucket that never refills
   starts nothing; `--probes 0` is how to run without probes. A budget for a
