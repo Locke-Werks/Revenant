@@ -1103,3 +1103,17 @@ test("a vrx event cannot move the previewed frequency mid-drag", async () => {
   r.link.emit("vrx", { event: "vrx", vrx: 1, hz: 146_520_000, mode: "nfm" });
   assert.deepEqual(r.chips(), ["1:146700000:nfm"]);
 });
+test("a fresh session's snapshot replaces the list, so a receiver removed meanwhile goes", async () => {
+  const r = rig();
+  r.link.emit("vrx", { event: "vrx", vrx: 5, hz: 146_520_000, mode: "nfm" });
+  r.link.emit("vrx", { event: "vrx", vrx: 6, hz: 162_550_000, mode: "nfm" });
+  r.ctl.list.select(6);
+  // Taken over, then taken back: the new session lists only what exists now.
+  r.link.emit("lease", { event: "lease", state: "lost", holder: "Revenant desktop on VALKYRIE" });
+  r.link.emit("vrxList", { event: "vrxList", items: [{ vrx: 6, hz: 162_550_000, mode: "nfm" }] });
+  assert.deepEqual(r.chips(), ["6:162550000:nfm"]);
+  assert.equal(r.ctl.list.active, 6);
+  r.link.emit("vrxList", { event: "vrxList", items: [] });
+  assert.deepEqual(r.chips(), []);
+  assert.equal(r.ctl.list.active, null);
+});

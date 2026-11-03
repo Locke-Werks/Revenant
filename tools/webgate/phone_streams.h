@@ -392,6 +392,8 @@ private:
     };
     std::map<std::uint64_t, Described> described_;
     void send_receiver(std::uint64_t vrx);
+    // The "vrxList" snapshot: every receiver the engine has now.
+    void send_receiver_list();
 
     std::set<std::uint64_t> audio_subscribed_;
     std::map<std::uint64_t, AudioPath> audio_;

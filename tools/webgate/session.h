@@ -102,6 +102,10 @@ public:
     // after the mode when it has one (cw, p25p1, dstar, tetra, dmr, ...),
     // else none. A mode with no decoder of its own costs nothing undecoded.
     [[nodiscard]] std::vector<std::string> default_decoders(rpc::Demod demod) const;
+    // False while the default cannot be told because the engine's decoder
+    // list could not be read: an empty answer then means "unknown", and is
+    // not to be applied as the receiver's set.
+    [[nodiscard]] bool decoders_known(std::uint64_t vrx) const;
     // Null while the phone has made no choice for the receiver.
     [[nodiscard]] const std::vector<std::string>* decoder_choice(std::uint64_t vrx) const;
     void set_decoders(std::uint64_t vrx, std::vector<std::string> names);

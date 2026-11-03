@@ -87,6 +87,7 @@ export interface LinkEvents {
   rds: GatewayEvent;
   lease: LeaseEvent;
   vrx: GatewayEvent;
+  vrxList: GatewayEvent;
 }
 export type LinkEventName = keyof LinkEvents;
 

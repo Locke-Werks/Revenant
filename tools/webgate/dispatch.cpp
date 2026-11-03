@@ -868,13 +868,19 @@ std::string_view demod_name(rpc::Demod demod)
     return mode_name(demod);
 }
 
-std::string receiver_event(const rpc::VrxStatus& status, std::int64_t center,
-                           const std::vector<std::string>& decoders, std::string_view opened_by)
+std::string receiver_json(const rpc::VrxStatus& status, std::int64_t center,
+                          const std::vector<std::string>& decoders, std::string_view opened_by)
 {
     std::string body = vrx_json(status, center, decoders);
     body.pop_back();
     body += ",\"openedBy\":" + json_string(opened_by) + "}";
-    return R"({"event":"vrx",)" + body.substr(1);
+    return body;
+}
+
+std::string receiver_event(const rpc::VrxStatus& status, std::int64_t center,
+                           const std::vector<std::string>& decoders, std::string_view opened_by)
+{
+    return R"({"event":"vrx",)" + receiver_json(status, center, decoders, opened_by).substr(1);
 }
 
 std::string transcription_status_event(const rpc::TranscriptionStatus& status)

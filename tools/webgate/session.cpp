@@ -81,6 +81,15 @@ std::vector<std::string> PhoneSession::decoders(std::uint64_t vrx) const
     return default_decoders(params->demod);
 }
 
+bool PhoneSession::decoders_known(std::uint64_t vrx) const
+{
+    if (decoder_choice(vrx) != nullptr || last_params(vrx) == nullptr) {
+        return true;
+    }
+    static_cast<void>(default_decoders(last_params(vrx)->demod));
+    return engine_decoders_.has_value();
+}
+
 std::vector<std::string> PhoneSession::default_decoders(rpc::Demod demod) const
 {
     // The decoder named after the mode whenever the engine has one (cw,

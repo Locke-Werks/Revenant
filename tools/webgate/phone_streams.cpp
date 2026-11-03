@@ -330,8 +330,53 @@ void PhoneStreams::start()
     static_cast<void>(transcripts);
 
     refresh_source();
+    send_receiver_list();
     refresh_transcription();
     refresh_display();
+}
+
+void PhoneStreams::send_receiver_list()
+{
+    // Read now rather than from the event replay, which arrives later and
+    // one receiver at a time: the phone replaces its whole list with this,
+    // so receivers removed while it had no session (taken over, a refused
+    // resume) do not linger there as ghosts.
+    const auto ids = session_.client().vrx_ids();
+    if (!ids) {
+        return;
+    }
+    for (const auto known : session_.receiver_ids()) {
+        if (std::ranges::find(*ids, known) == ids->end()) {
+            session_.forget(known);
+            known_.erase(known);
+            described_.erase(known);
+        }
+    }
+    std::string items = "[";
+    for (const auto id : *ids) {
+        const auto status = session_.client().vrx_status(id);
+        if (!status) {
+            continue;
+        }
+        if (session_.has_receiver(id)) {
+            session_.remember(id, status->params);
+        } else {
+            session_.learn(id, status->params, status->owned_by_caller);
+        }
+        known_.insert(id);
+        auto& described = described_[id];
+        described.status = *status;
+        if (described.opened_by.empty()) {
+            described.opened_by = status->owned_by_caller ? "this phone" : "another client";
+        }
+        if (items.size() > 1) {
+            items += ',';
+        }
+        items += receiver_json(*status, source_center_, session_.decoders(id), described.opened_by);
+    }
+    items += ']';
+    queue_text(event("vrxList", JsonObject().add_raw("items", items)));
+    reconcile();
 }
 
 void PhoneStreams::refresh_display()
@@ -495,9 +540,7 @@ void PhoneStreams::announce_state()
         sent_paced_by_ = paced_by_;
         queue_text(source_event());
     }
-    for (const auto& [vrx, described] : described_) {
-        send_receiver(vrx);
-    }
+    send_receiver_list();
     if (!sent_detections_.empty()) {
         queue_text(sent_detections_);
     }
@@ -1088,6 +1131,11 @@ void PhoneStreams::reconcile_decoded()
     std::erase_if(decoded_applied_, [this](const auto& entry) { return !session_.has_receiver(entry.first); });
 
     for (const auto vrx : session_.receiver_ids()) {
+        // Not recorded as applied, so the next reconcile tries again once the
+        // engine's decoder list can be read.
+        if (!session_.decoders_known(vrx)) {
+            continue;
+        }
         auto wanted = session_.decoders(vrx);
         if (const auto it = decoded_applied_.find(vrx); it != decoded_applied_.end() && it->second == wanted) {
             continue;

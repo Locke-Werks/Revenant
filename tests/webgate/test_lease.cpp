@@ -399,3 +399,42 @@ TEST_CASE("a phone sees and controls a receiver it did not open", "[gpu][webgate
     CHECK(contains(reply_to(socket, 4), R"("ok":true)"));
     CHECK_FALSE((*other)->vrx_status(*made).has_value());
 }
+
+TEST_CASE("every new session and resume sends the engine's whole receiver list",
+          "[gpu][webgate][lease]")
+{
+    REVENANT_NEEDS_GPU();
+    LeaseRig rig;
+    FakeSocket a;
+    const auto a_id = rig.admit(a, kPhoneA);
+    REQUIRE(texts_with(a, R"("event":"vrxList","items":[])").size() == 1);
+    rig.text(a_id, R"({"id":1,"op":"addVrx","args":{"hz":100100000,"mode":"am"}})");
+    const auto vrx = vrx_of(reply_to(a, 1));
+
+    // B takes over and removes the receiver while A has no session to hear it.
+    FakeSocket b;
+    const auto b_id = rig.admit(b, kPhoneB);
+    rig.text(b_id, R"({"id":2,"op":"takeOver"})");
+    REQUIRE(rig.pump_until([&] { return !texts_with(a, R"("state":"lost")").empty(); }));
+    const auto listed = R"("event":"vrxList","items":[{"vrx":)" + std::to_string(vrx) + ",";
+    CHECK(texts_with(b, listed).size() == 1);
+    rig.text(b_id, R"({"id":3,"op":"removeVrx","args":{"vrx":)" + std::to_string(vrx) + "}}");
+    REQUIRE(contains(reply_to(b, 3), R"("ok":true)"));
+
+    // Take back: the snapshot A gets has no ghost of it.
+    const auto mark = a.sent.size();
+    rig.text(a_id, R"({"id":4,"op":"takeOver"})");
+    REQUIRE(contains(reply_to(a, 4), R"("ok":true)"));
+    const auto lists = texts_with(a, R"("event":"vrxList")", mark);
+    REQUIRE(lists.size() == 1);
+    CHECK(contains(lists.front(), R"("items":[])"));
+
+    // A resume gets one too.
+    const auto token = rig.hub->token(a_id);
+    rig.hub->disconnect(a_id);
+    FakeSocket again;
+    const auto again_id = rig.admit(again, kPhoneA);
+    rig.text(again_id, R"({"id":5,"op":"resume","args":{"token":")" + token + "\"}}");
+    REQUIRE(contains(reply_to(again, 5), R"("ok":true)"));
+    CHECK(texts_with(again, R"("event":"vrxList")").size() == 2);
+}

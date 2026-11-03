@@ -54,6 +54,10 @@ namespace revenant::webgate {
 // fields of the addVrx result plus "openedBy" ("this phone", "another
 // client", the plugin's name, or "the engine"). Sent for every receiver when
 // a session starts or resumes and whenever one is added or changed.
+// The same receiver as a bare object, one item of the "vrxList" snapshot.
+[[nodiscard]] std::string receiver_json(const rpc::VrxStatus& status, std::int64_t center,
+                                        const std::vector<std::string>& decoders,
+                                        std::string_view opened_by);
 [[nodiscard]] std::string receiver_event(const rpc::VrxStatus& status, std::int64_t center,
                                          const std::vector<std::string>& decoders,
                                          std::string_view opened_by);

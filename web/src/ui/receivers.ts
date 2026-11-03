@@ -351,6 +351,7 @@ export class ReceiverController {
     const link = deps.link;
     link.on("vrxStatus", (e) => this.onStatus(e));
     link.on("vrx", (e) => this.onListed(e));
+    link.on("vrxList", (e) => this.onSnapshot(e));
     link.on("vrxRemoved", (e) => this.onRemoved(e));
     link.on("link", (e) => this.onLink(e));
   }
@@ -779,6 +780,32 @@ export class ReceiverController {
     const vrx = num(e.vrx);
     if (vrx === undefined || this.removing.has(vrx) || this.replacing.size > 0) return;
     if (this.dragging && vrx === this.list.active) return;
+    this.listed(e, vrx);
+  }
+
+  // "vrxList", the engine's whole list at the start of a session or a resume.
+  // It replaces the list: a receiver removed while the phone had no session
+  // (taken over, a refused resume) would otherwise stay as a ghost chip. The
+  // active selection survives when its receiver is still there.
+  private onSnapshot(e: GatewayEvent): void {
+    if (!Array.isArray(e.items)) return;
+    const present = new Map<number, GatewayEvent>();
+    for (const item of e.items) {
+      if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+      const vrx = num(item.vrx);
+      if (vrx !== undefined) present.set(vrx, item as GatewayEvent);
+    }
+    for (const r of this.list.list()) {
+      if (present.has(r.vrx)) continue;
+      this.gone(r.vrx);
+      this.list.remove(r.vrx);
+      this.confirmed.delete(r.vrx);
+    }
+    this.removing.clear();
+    for (const [vrx, item] of present) this.listed(item, vrx);
+  }
+
+  private listed(e: GatewayEvent, vrx: number): void {
     const r = this.list.upsert({
       vrx,
       hz: num(e.hz),
