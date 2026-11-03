@@ -303,10 +303,10 @@ export function mountApp(root: HTMLElement): AppHandle {
     active: () => {
       const id = receivers.list.active;
       const r = id === null ? undefined : receivers.list.get(id);
-      return r ? { hz: r.hz, mode: r.mode } : null;
+      return r ? { vrx: r.vrx, hz: r.hz, mode: r.mode } : null;
     },
     preview: (hz) => receivers.preview(hz) !== null,
-    tune: (hz) => receivers.tuneDragged(hz),
+    tune: (vrx, hz) => receivers.tuneDragged(hz, vrx),
     end: () => receivers.endDrag(),
     now: () => performance.now(),
     schedule: (fn, ms) => {
@@ -356,6 +356,8 @@ export function mountApp(root: HTMLElement): AppHandle {
     const current = active === null ? null : receivers.list.get(active) ?? null;
     top.show(current);
     sheet!.show(current, list.length > 0);
+    // Replacement, removal, resume and a restart's remap all end up here.
+    dial.check();
     dial.draw();
   };
   receivers.list.onChange(renderReceivers);

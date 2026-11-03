@@ -1,21 +1,11 @@
 // The dial strip: a tick ribbon under a fixed centre line. Dragging it retunes
-// the active receiver and a flick coasts. The physics live in ../dial; this
-// is the pointer wiring, the drawing and the hand-off to the tune limiter.
+// the active receiver and a flick coasts. The session logic lives in
+// ../dial_session; this is the pointer wiring and the drawing.
 
-import { DialPhysics, PX_PER_STEP, fineStep, roundToStep } from "../dial";
-import { TuneLimiter } from "../tune_limiter";
+import { PX_PER_STEP, fineStep } from "../dial";
+import { DialSession, type DialDeps } from "../dial_session";
 
-export interface DialDeps {
-  // The receiver the dial would move, or null when there is none.
-  active(): { hz: number; mode: string } | null;
-  // Shows hz on the receiver at once; false when it cannot be dragged.
-  preview(hz: number): boolean;
-  // One rate-limited tune to the engine.
-  tune(hz: number): void;
-  // The dial has settled and its final tune has been sent.
-  end(): void;
-  now(): number;
-  schedule(fn: () => void, ms: number): () => void;
+export interface DialStripDeps extends DialDeps {
   frame(fn: (tMs: number) => void): () => void;
 }
 
@@ -29,17 +19,23 @@ const ACCENT = "#e0524f";
 export class DialStrip {
   readonly el: HTMLElement;
   private readonly canvas: HTMLCanvasElement;
-  private readonly physics = new DialPhysics("nfm");
-  private readonly limiter: TuneLimiter;
-  // Where the dial has taken the receiver, unrounded; null outside a session.
-  private dialHz: number | null = null;
+  private readonly session: DialSession;
   private pointer: number | null = null;
   private lastX = 0;
   private travelled = 0;
   private cancelFrame: (() => void) | null = null;
 
-  constructor(private readonly deps: DialDeps) {
-    this.limiter = new TuneLimiter((hz) => deps.tune(hz), deps.now, deps.schedule);
+  constructor(private readonly deps: DialStripDeps) {
+    this.session = new DialSession({
+      ...deps,
+      preview: (hz) => {
+        const ok = deps.preview(hz);
+        // The receiver only hears whole Hz, so a slow coast would not redraw
+        // through the list's change event.
+        this.draw();
+        return ok;
+      },
+    });
     this.el = document.createElement("div");
     this.el.className = "dial-strip";
     this.canvas = document.createElement("canvas");
@@ -54,17 +50,18 @@ export class DialStrip {
     new ResizeObserver(() => this.draw()).observe(this.el);
   }
 
-  // Any other tune source calls this before it acts: the dial lets go of the
-  // receiver without a final tune of its own.
+  // Any other tune source calls this before it acts: what the dial already
+  // showed is sent to its receiver, then it lets go.
   stop(): void {
-    this.physics.stop();
     this.pointer = null;
     this.stopFrames();
-    this.limiter.cancel();
-    if (this.dialHz !== null) {
-      this.dialHz = null;
-      this.deps.end();
-    }
+    this.session.stop();
+  }
+
+  // After anything that can change the active receiver.
+  check(): void {
+    this.session.check();
+    if (!this.session.moving) this.stopFrames();
   }
 
   private down(e: PointerEvent): void {
@@ -74,12 +71,8 @@ export class DialStrip {
     this.canvas.setPointerCapture(e.pointerId);
     this.lastX = e.clientX;
     this.travelled = 0;
-    // A finger on a coasting ribbon catches it where it is.
-    this.physics.stop();
     this.stopFrames();
-    // Before the first move, since the step of that move depends on it.
-    const r = this.deps.active();
-    if (r) this.physics.setMode(r.mode);
+    this.session.down();
   }
 
   private move(e: PointerEvent): void {
@@ -90,26 +83,22 @@ export class DialStrip {
     this.travelled += Math.abs(dx);
     if (this.travelled < SLOP_PX) return;
     // The slop is paid out of the first move so the ribbon does not jump.
-    this.physics.drag(before < SLOP_PX ? Math.sign(dx) * (this.travelled - SLOP_PX) : dx, e.timeStamp);
-    this.pump(e.timeStamp);
+    this.session.drag(before < SLOP_PX ? Math.sign(dx) * (this.travelled - SLOP_PX) : dx, e.timeStamp);
   }
 
   private up(e: PointerEvent): void {
     if (e.pointerId !== this.pointer) return;
     this.pointer = null;
-    this.physics.release(e.timeStamp);
-    this.pump(e.timeStamp);
-    if (this.physics.moving) this.startFrames();
-    else this.settle();
+    this.session.release(e.timeStamp);
+    if (this.session.moving) this.startFrames();
   }
 
   private startFrames(): void {
     if (this.cancelFrame) return;
     const tick = (t: number) => {
       this.cancelFrame = null;
-      this.pump(t);
-      if (this.physics.moving) this.cancelFrame = this.deps.frame(tick);
-      else if (this.pointer === null) this.settle();
+      this.session.tick(t);
+      if (this.session.moving) this.cancelFrame = this.deps.frame(tick);
     };
     this.cancelFrame = this.deps.frame(tick);
   }
@@ -117,43 +106,6 @@ export class DialStrip {
   private stopFrames(): void {
     this.cancelFrame?.();
     this.cancelFrame = null;
-  }
-
-  private pump(tMs: number): void {
-    const d = this.physics.frame(tMs);
-    if (d === 0) return;
-    if (this.dialHz === null) {
-      const r = this.deps.active();
-      if (!r) {
-        this.physics.stop();
-        return;
-      }
-      this.dialHz = r.hz;
-    }
-    this.dialHz = Math.max(1, this.dialHz + d);
-    if (!this.deps.preview(this.dialHz)) {
-      // Nothing to move, so the finger's travel must not pile up unseen.
-      this.dialHz = null;
-      this.physics.stop();
-      return;
-    }
-    this.limiter.set(this.dialHz);
-    // The receiver only hears whole Hz, so a slow coast would not redraw
-    // through the list's change event.
-    this.draw();
-  }
-
-  // The dial came to rest: land on a whole fine step, send it, and let the
-  // receiver controller apply the engine's answer.
-  private settle(): void {
-    if (this.dialHz === null) return;
-    const r = this.deps.active();
-    const hz = roundToStep(this.dialHz, fineStep(r?.mode ?? "nfm"));
-    this.dialHz = null;
-    if (r && hz !== r.hz && this.deps.preview(hz)) this.limiter.set(hz);
-    this.limiter.flush();
-    this.deps.end();
-    this.draw();
   }
 
   // Redraws from the receiver's own frequency, which the preview keeps in step
@@ -177,7 +129,7 @@ export class DialStrip {
     const step = fineStep(r.mode);
     // The unrounded dial value while a session runs, so the ribbon is smooth
     // between the whole Hz the receiver is told.
-    const centerHz = this.dialHz ?? r.hz;
+    const centerHz = this.session.hz ?? r.hz;
     const centerX = w / 2;
     const first = Math.floor((centerHz - (centerX / PX_PER_STEP) * step) / step);
     const last = Math.ceil((centerHz + (centerX / PX_PER_STEP) * step) / step);

@@ -706,3 +706,19 @@ test("gone listeners hear of own removals, engine removals and lost receivers", 
   r.link.emit("link", { event: "link", state: "up", detail: "", recreated: [], lost: [{ vrx: 7, reason: "gone" }] });
   assert.deepEqual(gone, [2, 1, 7]);
 });
+
+test("a flushed drag tune reaches the receiver it names after the active one changed", async () => {
+  const r = await dragRig();
+  r.ctl.tap(162_550_000); // active still 1: tunes it
+  r.link.reply(status(1, 162_550_000));
+  await flush();
+  r.ctl.tuneDragged(146_700_000, 1);
+  assert.deepEqual(r.link.last(), { op: "tune", args: { vrx: 1, hz: 146_700_000 }, timeoutMs: undefined });
+});
+
+test("a drag tune for a receiver that is gone is not sent", async () => {
+  const r = await dragRig();
+  const n = r.link.sent.length;
+  r.ctl.tuneDragged(146_700_000, 9);
+  assert.equal(r.link.sent.length, n);
+});

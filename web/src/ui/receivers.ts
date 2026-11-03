@@ -358,9 +358,11 @@ export class ReceiverController {
   // One tune of a drag. Replies arrive out of step with the finger, so only
   // the newest request's reply is applied; an older one would pull the marker
   // back behind the finger.
-  tuneDragged(hz: number): void {
-    const vrx = this.list.active;
-    if (vrx === null || this.replacing.has(vrx)) return;
+  // vrx names the receiver being dragged, which a final flush must still
+  // reach after the active one has changed.
+  tuneDragged(hz: number, target: number | null = this.list.active): void {
+    const vrx = target;
+    if (vrx === null || !this.list.has(vrx) || this.replacing.has(vrx)) return;
     const seq = ++this.tuneSeq;
     this.deps.link.request("tune", { vrx, hz: Math.round(hz) }).then(
       (reply) => {
