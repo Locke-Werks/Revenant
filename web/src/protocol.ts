@@ -11,8 +11,12 @@ export const Tag = {
 } as const;
 
 // tag u8, offset_db f32, scale_db f32, source_start u64, center_hz f64,
-// span_hz f64, width_px u32, px[width_px]
+// span_hz f64, width_px u32, px[width_px], then the trace: trace_offset_db
+// f32, trace_scale_db f32, trace_px[width_px]. px is the waterfall row in the
+// desktop waterfall's window, trace_px the spectrum trace in the desktop
+// spectrum's; a frame that stops after px draws px as its trace.
 export const SPECTRUM_HEADER_SIZE = 1 + 4 + 4 + 8 + 8 + 8 + 4;
+export const SPECTRUM_TRACE_HEADER_SIZE = 4 + 4;
 
 // tag u8, vrx u64, seq u32, packet[...]
 export const OPUS_HEADER_SIZE = 1 + 8 + 4;
@@ -59,6 +63,7 @@ export const EVENTS = [
   "ping",
   "vrxEventsEnded",
   "detections",
+  "display",
 ] as const;
 export type EventName = (typeof EVENTS)[number];
 
@@ -71,8 +76,12 @@ export interface SpectrumFrame {
   sourceStart: bigint;
   centerHz: number;
   spanHz: number;
-  // db = offsetDb + px * scaleDb, so px 0 is the floor.
+  // db = offsetDb + px * scaleDb, so px 0 is the floor. The waterfall row.
   px: Uint8Array;
+  // The trace row, the same width, in its own window.
+  traceOffsetDb: number;
+  traceScaleDb: number;
+  tracePx: Uint8Array;
 }
 
 export interface OpusFrame {
@@ -96,15 +105,24 @@ export function decodeBinary(buf: ArrayBuffer): BinaryFrame | null {
   if (tag === Tag.Spectrum) {
     if (buf.byteLength < SPECTRUM_HEADER_SIZE) return null;
     const width = dv.getUint32(33, true);
-    if (buf.byteLength !== SPECTRUM_HEADER_SIZE + width) return null;
+    const plain = SPECTRUM_HEADER_SIZE + width;
+    const traced = plain + SPECTRUM_TRACE_HEADER_SIZE + width;
+    if (buf.byteLength !== plain && buf.byteLength !== traced) return null;
+    const offsetDb = dv.getFloat32(1, true);
+    const scaleDb = dv.getFloat32(5, true);
+    const px = new Uint8Array(buf, SPECTRUM_HEADER_SIZE, width);
+    const hasTrace = buf.byteLength === traced;
     return {
       tag: Tag.Spectrum,
-      offsetDb: dv.getFloat32(1, true),
-      scaleDb: dv.getFloat32(5, true),
+      offsetDb,
+      scaleDb,
       sourceStart: dv.getBigUint64(9, true),
       centerHz: dv.getFloat64(17, true),
       spanHz: dv.getFloat64(25, true),
-      px: new Uint8Array(buf, SPECTRUM_HEADER_SIZE, width),
+      px,
+      traceOffsetDb: hasTrace ? dv.getFloat32(plain, true) : offsetDb,
+      traceScaleDb: hasTrace ? dv.getFloat32(plain + 4, true) : scaleDb,
+      tracePx: hasTrace ? new Uint8Array(buf, plain + SPECTRUM_TRACE_HEADER_SIZE, width) : px,
     };
   }
 
@@ -122,9 +140,20 @@ export function decodeBinary(buf: ArrayBuffer): BinaryFrame | null {
 }
 
 // Encoders exist so the web tests can build frames the gateway would send.
-export function encodeSpectrum(f: SpectrumFrame): ArrayBuffer {
-  const buf = new ArrayBuffer(SPECTRUM_HEADER_SIZE + f.px.length);
+// The trace is optional here so a test can build an older gateway's frame.
+export type SpectrumFrameInput = Omit<SpectrumFrame, "traceOffsetDb" | "traceScaleDb" | "tracePx"> &
+  Partial<Pick<SpectrumFrame, "traceOffsetDb" | "traceScaleDb" | "tracePx">>;
+
+export function encodeSpectrum(f: SpectrumFrameInput): ArrayBuffer {
+  const trace = f.tracePx && f.tracePx.length === f.px.length ? f.tracePx : null;
+  const plain = SPECTRUM_HEADER_SIZE + f.px.length;
+  const buf = new ArrayBuffer(plain + (trace ? SPECTRUM_TRACE_HEADER_SIZE + trace.length : 0));
   const dv = new DataView(buf);
+  if (trace) {
+    dv.setFloat32(plain, f.traceOffsetDb ?? f.offsetDb, true);
+    dv.setFloat32(plain + 4, f.traceScaleDb ?? f.scaleDb, true);
+    new Uint8Array(buf, plain + SPECTRUM_TRACE_HEADER_SIZE).set(trace);
+  }
   dv.setUint8(0, Tag.Spectrum);
   dv.setFloat32(1, f.offsetDb, true);
   dv.setFloat32(5, f.scaleDb, true);
@@ -230,6 +259,19 @@ export interface SourceEvent {
 export interface DetectionEvent {
   event: "detections";
   items: JsonValue[];
+}
+
+// "display" is the desktop's colours, sent on connect, on resume and when the
+// desktop's settings change them (tools/webgate/display_sync.h). waterfall
+// and spectrum are 256 colours of 6 hex digits, rrggbb, indexed by a row's
+// byte: the waterfall's through the desktop's contrast curve, and the fill
+// under the trace. trace and background are "#rrggbb".
+export interface DisplayEvent {
+  event: "display";
+  waterfall: string;
+  spectrum: string;
+  trace: string;
+  background: string;
 }
 
 export function encodeCommand(cmd: Command): string {

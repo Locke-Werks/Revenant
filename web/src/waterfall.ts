@@ -6,8 +6,14 @@
 //
 // WebGL2 when available (every iOS since 15); otherwise a 2D canvas that
 // scrolls its own pixels and cannot re-place history.
+//
+// The colours are the desktop's, from the gateway's display event. A new
+// palette recolours the whole history under WebGL, where the palette is a
+// lookup at draw time over the stored bytes. The 2D canvas keeps no bytes,
+// only pixels, so there a new palette colours new rows and the rows already
+// drawn keep theirs until they scroll off.
 
-import { colormap } from "./colormap";
+import { DEFAULT_DISPLAY } from "./display";
 import { boxPx, parseHexColor, type DetectionBox } from "./markers";
 import type { SpectrumFrame } from "./protocol";
 import { MAX_WIDTH_PX, rowTransform, type RowTransform, type View } from "./view";
@@ -105,6 +111,8 @@ export interface Renderer {
   resize(widthDev: number, heightDev: number): void;
   setView(view: View): void;
   pushRow(f: SpectrumFrame): void;
+  // 256 RGBA entries, indexed by a row's byte.
+  setPalette(rgba: Uint8Array): void;
   clear(): void;
   draw(): void;
   // Stamps the latest detections onto the row current now.
@@ -175,7 +183,7 @@ class GlRenderer implements Renderer {
     this.metaTex = texture(gl, 1, gl.NEAREST);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, RING_ROWS, 1, 0, gl.RGBA, gl.FLOAT, this.ring.meta);
     this.pal = texture(gl, 2, gl.LINEAR);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, colormap());
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, DEFAULT_DISPLAY.waterfall);
 
     gl.uniform1i(gl.getUniformLocation(this.prog, "u_data"), 0);
     gl.uniform1i(gl.getUniformLocation(this.prog, "u_meta"), 1);
@@ -213,6 +221,13 @@ class GlRenderer implements Renderer {
       this.ring.place(this.view, slot);
       this.uploadMeta(slot);
     }
+  }
+
+  setPalette(rgba: Uint8Array): void {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.pal);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
   }
 
   clear(): void {
@@ -326,7 +341,7 @@ const ROW_PX = 2;
 class CanvasRenderer implements Renderer {
   private ctx: CanvasRenderingContext2D;
   private line: ImageData | null = null;
-  private pal = colormap();
+  private pal = DEFAULT_DISPLAY.waterfall;
   private view: View | null = null;
   private t: RowTransform = { a: 0, b: 0, limit: 0 };
   private carry: readonly DetectionBox[] = NO_BOXES;
@@ -391,8 +406,14 @@ class CanvasRenderer implements Renderer {
     for (let y = 0; y < ROW_PX; y++) this.ctx.putImageData(line, 0, y);
   }
 
+  setPalette(rgba: Uint8Array): void {
+    this.pal = rgba;
+  }
+
+  // Entry 0, the desktop's map bottom, so an empty history is an empty band.
   clear(): void {
-    this.ctx.fillStyle = "#0a0a0c";
+    const p = this.pal;
+    this.ctx.fillStyle = `rgb(${p[0]}, ${p[1]}, ${p[2]})`;
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
@@ -425,6 +446,7 @@ export class WaterfallHost implements Renderer {
   private r: Renderer | null;
   private size: [number, number] | null = null;
   private view: View | null = null;
+  private palette: Uint8Array | null = null;
   private wait: unknown = null;
 
   constructor(
@@ -470,6 +492,10 @@ export class WaterfallHost implements Renderer {
   pushRow(f: SpectrumFrame): void {
     this.r?.pushRow(f);
   }
+  setPalette(rgba: Uint8Array): void {
+    this.palette = rgba;
+    this.r?.setPalette(rgba);
+  }
   clear(): void {
     this.r?.clear();
   }
@@ -490,6 +516,8 @@ export class WaterfallHost implements Renderer {
 
   private adopt(r: Renderer): void {
     this.r = r;
+    // Before the resize, which clears a 2D canvas to the palette's bottom.
+    if (this.palette) r.setPalette(this.palette);
     if (this.size) r.resize(this.size[0], this.size[1]);
     if (this.view) r.setView(this.view);
   }

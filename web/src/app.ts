@@ -8,7 +8,7 @@ import { parseDetections, snapTap, type Detection } from "./detections";
 import { attachGestures } from "./gestures";
 import { TuneLimiter } from "./tune_limiter";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
-import { AutoScale, remapRow, rowExtentsDb } from "./autoscale";
+import { parseDisplay } from "./display";
 import { DEFAULT_ACCENT, DETECTION_COLOR, detectionBoxes, passbandHz } from "./markers";
 import { drawReceivers, type ReceiverMark } from "./overlay";
 import { SpectrumTrace } from "./spectrum_trace";
@@ -105,7 +105,6 @@ export function mountApp(root: HTMLElement): AppHandle {
   const trace = new SpectrumTrace(traceCanvas, accent);
   const rulerCanvas = root.querySelector<HTMLCanvasElement>("#ruler")!;
   const ruler = new Ruler(rulerCanvas);
-  const scale = new AutoScale();
   const marksCanvas = root.querySelector<HTMLCanvasElement>("#wf-marks")!;
   const marks = marksCanvas.getContext("2d");
 
@@ -641,6 +640,15 @@ export function mountApp(root: HTMLElement): AppHandle {
   const hzAt = (x: number) => (view ? pxToHz({ ...view, widthPx: body.clientWidth || 1 }, x) : Number.NaN);
   // Latest list from the engine; empty until the first event.
   let detections: Detection[] = [];
+  // The desktop's colours. A malformed event is ignored and the last good
+  // colours stay, the build's defaults before any arrives.
+  link.on("display", (e) => {
+    const colours = parseDisplay(e);
+    if (!colours) return;
+    waterfall.setPalette(colours.waterfall);
+    trace.setColours(colours);
+    requestDraw();
+  });
   link.on("detections", (e) => {
     detections = parseDetections(e);
     signals.update(detections);
@@ -787,13 +795,10 @@ export function mountApp(root: HTMLElement): AppHandle {
       forgetRows();
     }
     if (waterfall.state !== "lost" && clock.push(Number(f.sourceStart))) captionStore.clear();
-    // The rows are the view, so their extents are what is in view. The meter
-    // below reads the gateway's own bytes, which the remap does not touch.
-    const ext = rowExtentsDb(f);
-    const s = scale.update(ext.minDb, ext.maxDb, performance.now());
-    const shown = { ...f, px: remapRow(f, s, new Uint8Array(f.px.length)) };
-    waterfall.pushRow(shown);
-    trace.setRow(shown);
+    // Both rows arrive already in the desktop's windows; nothing is rescaled
+    // here.
+    waterfall.pushRow(f);
+    trace.setRow(f);
     const active = receivers.list.active;
     const r = active === null ? undefined : receivers.list.get(active);
     if (r) {

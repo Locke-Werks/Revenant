@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { colormap } from "../src/colormap";
 import { BOX_CARRY_ROWS, RESTORE_WAIT_MS, RING_ROWS, RowRing, WaterfallHost, type Renderer } from "../src/waterfall";
 import { panBy, type View } from "../src/view";
 
@@ -75,19 +74,12 @@ test("rows wider than the texture are clipped to it", () => {
   assert.equal(r.width[slot], 512);
 });
 
-test("colour map runs from the background to yellow-white, opaque", () => {
-  const c = colormap();
-  assert.equal(c.length, 1024);
-  assert.deepEqual([...c.subarray(0, 4)], [0x0a, 0x0a, 0x0c, 255]);
-  assert.deepEqual([...c.subarray(1020, 1024)], [0xff, 0xf0, 0xa0, 255]);
-  for (let i = 3; i < 1024; i += 4) assert.equal(c[i], 255);
-});
-
 function fakeRenderer(kind: string, log: string[]): Renderer {
   return {
     resize: (w, h) => log.push(`${kind} resize ${w}x${h}`),
     setView: (x) => log.push(`${kind} view ${x.centerHz}`),
     pushRow: () => log.push(`${kind} row`),
+    setPalette: (p) => log.push(`${kind} palette ${p[0]}`),
     clear: () => log.push(`${kind} clear`),
     draw: () => log.push(`${kind} draw`),
     setDetections: () => log.push(`${kind} detections`),
@@ -124,7 +116,23 @@ function hostRig(glWorks: () => boolean) {
   return { host, log, fire, pending: () => timers.size };
 }
 
-const row = { offsetDb: 0, scaleDb: 1, sourceStart: 0n, centerHz: 1, spanHz: 1, px: new Uint8Array(4) };
+const row = {
+  offsetDb: 0, scaleDb: 1, sourceStart: 0n, centerHz: 1, spanHz: 1, px: new Uint8Array(4),
+  traceOffsetDb: 0, traceScaleDb: 1, tracePx: new Uint8Array(4),
+};
+
+test("the desktop's palette reaches the renderer and outlives a handover", () => {
+  const { host, log, fire } = hostRig(() => true);
+  const palette = new Uint8Array(1024).fill(7);
+  host.setPalette(palette);
+  assert.deepEqual(log, ["gl palette 7"]);
+  host.resize(10, 10);
+  host.contextLost();
+  log.length = 0;
+  fire();
+  // Given before the resize, which clears a 2D canvas to the palette's bottom.
+  assert.deepEqual(log, ["2d palette 7", "2d resize 10x10"]);
+});
 
 test("a GL setup failure falls back to 2D at once", () => {
   const { host, log } = hostRig(() => false);

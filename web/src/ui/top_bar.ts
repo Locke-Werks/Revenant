@@ -10,8 +10,21 @@ export const METER_TOP_DB = -20;
 
 // The strongest bin of frame inside lowHz..highHz, in dB, or null when the
 // band is outside the frame. The gateway sends no receiver level, and the
-// spectrum row the phone already has answers the question the meter asks.
-export function levelInBand(frame: SpectrumFrame, lowHz: number, highHz: number): number | null {
+// spectrum row the phone already has answers the question the meter asks. The
+// trace row when the frame has one: the waterfall's window is tight around the
+// history and clips a strong carrier, the trace's keeps room above the peak.
+export type MeterRow = Pick<SpectrumFrame, "offsetDb" | "scaleDb" | "centerHz" | "spanHz" | "px"> &
+  Partial<Pick<SpectrumFrame, "traceOffsetDb" | "traceScaleDb" | "tracePx">>;
+
+export function levelInBand(row: MeterRow, lowHz: number, highHz: number): number | null {
+  const traced = row.tracePx !== undefined && row.tracePx.length === row.px.length;
+  const frame = {
+    centerHz: row.centerHz,
+    spanHz: row.spanHz,
+    px: traced ? row.tracePx! : row.px,
+    offsetDb: traced ? (row.traceOffsetDb ?? row.offsetDb) : row.offsetDb,
+    scaleDb: traced ? (row.traceScaleDb ?? row.scaleDb) : row.scaleDb,
+  };
   const n = frame.px.length;
   if (n === 0 || !(frame.spanHz > 0)) return null;
   const left = frame.centerHz - frame.spanHz / 2;
