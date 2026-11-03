@@ -684,7 +684,9 @@ template <class Edit>
         session.set_audio_vrx(std::nullopt);
         session.set_audio_on(false);
     }
-    return JsonObject().add_u64("vrx", *vrx).add_bool("on", on).str();
+    // The switch as it now stands: an off for a receiver that is not the lead
+    // leaves the phone's audio on.
+    return JsonObject().add_u64("vrx", *vrx).add_bool("on", session.audio_on()).str();
 }
 
 [[nodiscard]] Result op_keep_listening(PhoneSession& session, const Command& command)

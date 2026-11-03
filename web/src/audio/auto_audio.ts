@@ -35,6 +35,12 @@ export class AutoAudio {
     });
   }
 
+  // A new gateway session: the link came back, or the lease returned to this
+  // phone. A refusal was the old session's, so the next update asks again.
+  newSession(): void {
+    this.refused = false;
+  }
+
   // wants: a DV receiver exists or Auto DV is on.
   update(wants: boolean): void {
     const audio = this.deps.audio;

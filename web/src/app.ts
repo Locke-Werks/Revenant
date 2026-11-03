@@ -412,6 +412,10 @@ export function mountApp(root: HTMLElement): AppHandle {
   sheet.dvHost.append(dvPanel.el);
   sheet.alwaysHost.append(dvPanel.autoBtn);
   const autoAudio = new AutoAudio({ audio, note: (text) => notes.set("audio", text), notStarted: NOT_STARTED });
+  link.on("ready", () => {
+    autoAudio.newSession();
+    syncDv();
+  });
   const syncDv = () => {
     const list = receivers.list.list();
     // Auto DV on with nothing found yet still shows the tab, so the empty call
@@ -781,7 +785,12 @@ export function mountApp(root: HTMLElement): AppHandle {
   // phone's sound stops with the session the gateway destroyed.
   new LeaseScreen(root.querySelector<HTMLElement>("#lease")!, link);
   link.on("lease", (e) => {
-    if (e.state === "held") return;
+    if (e.state === "held") {
+      // Taken back: a new session, which auto audio may turn on again.
+      autoAudio.newSession();
+      syncDv();
+      return;
+    }
     audio.stop();
     keep.off();
   });

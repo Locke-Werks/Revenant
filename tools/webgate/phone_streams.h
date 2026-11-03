@@ -227,6 +227,11 @@ struct StreamCounters {
     std::uint64_t text_dropped = 0;
 };
 
+// The most receivers one phone mix holds: the desktop's rack limit. Lead
+// first, then digital voice, then analogue. The rack cannot hold more, so this
+// bounds a gateway bug rather than being a rule anyone should hear.
+inline constexpr std::size_t kMaxMixMembers = 64;
+
 class PhoneStreams {
 public:
     // socket may be null: a session can exist without a connection.
@@ -482,8 +487,8 @@ private:
 
     // The sum of every mixed receiver, and the one Opus stream cut from it.
     // It is tagged kPhoneMixStream whichever receiver leads, so a new lead is
-    // the same stream; the encoder and sequence start again only when the
-    // phone's audio is turned off.
+    // the same stream; the encoder and sequence start again when the phone's
+    // audio is turned off (reconcile_audio).
     PhoneMixer mixer_;
     // The desktop's boost as of the last start() or tick().
     double voice_gain_db_ = 0.0;

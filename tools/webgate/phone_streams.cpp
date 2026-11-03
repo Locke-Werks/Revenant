@@ -1164,16 +1164,30 @@ std::vector<PhoneStreams::MixMember> PhoneStreams::mix_members() const
     if (led) {
         members.push_back({*lead, digital(*lead)});
     }
-    for (const auto vrx : session_.receiver_ids()) {
-        if (!led || vrx != *lead) {
-            members.push_back({vrx, digital(vrx)});
+    // Digital voice before analogue, so if the cap is ever reached a call is
+    // kept over an open squelch.
+    for (const bool voice : {true, false}) {
+        for (const auto vrx : session_.receiver_ids()) {
+            if ((!led || vrx != *lead) && digital(vrx) == voice) {
+                members.push_back({vrx, voice});
+            }
         }
+    }
+    if (members.size() > kMaxMixMembers) {
+        members.resize(kMaxMixMembers);
     }
     return members;
 }
 
 void PhoneStreams::reconcile_audio()
 {
+    // Here, where the off is applied, not in emit_mix: with audio off nothing
+    // is subscribed, so no chunk would arrive to reset it. The phone resets
+    // its decoder on off, so the next on must start a new stream from seq 0.
+    if (!session_.audio_on()) {
+        mix_opus_.reset();
+        mix_opus_seq_ = 0;
+    }
     std::set<std::uint64_t> wanted;
     for (const auto& member : mix_members()) {
         wanted.insert(member.vrx);
@@ -1395,11 +1409,7 @@ void PhoneStreams::emit_mix(std::span<const float> mixed,
     if (mixed.empty()) {
         return;
     }
-    if (!session_.audio_on()) {
-        // Turning it back on is a new stream to the phone, from seq 0.
-        mix_opus_.reset();
-        mix_opus_seq_ = 0;
-    } else if (attached()) {
+    if (session_.audio_on() && attached()) {
         if (!mix_opus_) {
             auto created = LiveOpusEncoder::create(kPhoneAudioRate);
             if (!created) {

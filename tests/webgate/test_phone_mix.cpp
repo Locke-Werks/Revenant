@@ -1,5 +1,5 @@
-// tools/webgate/phone_mix.h: the one stream a phone hears, summed from the
-// receiver it listens to and every digital voice receiver. Each case names the
+// tools/webgate/phone_mix.h: the one stream a phone hears, summed from
+// every receiver it mixes, the one it listens to as the lead. Each case names the
 // wrong implementation it rejects. The clock is the test's.
 
 #include <algorithm>
@@ -376,4 +376,26 @@ TEST_CASE("a removed stream holds nothing back", "[webgate][mix]")
     mix.set_lead(std::nullopt);
     feed(mix, 2, true, 0.0, dc(kPrime * kB, 0.2F), t);
     CHECK(mix.take(t).size() >= kB);
+}
+
+TEST_CASE("twenty streams at listening level sum under the limiter's ceiling", "[webgate][mix]")
+{
+    // Rejects a plain sum handed on unlimited: twenty streams at 0.25 reach
+    // 5.0 without the limiter.
+    auto t = Clock::now();
+    PhoneMixer mix;
+    mix.set_lead(1);
+    float peak = 0.0F;
+    for (int b = 0; b < 200; ++b) {
+        t += PhoneMixer::kBlockTime;
+        for (std::uint64_t vrx = 1; vrx <= 20; ++vrx) {
+            feed(mix, vrx, vrx == 2, 0.0, dc(kB, 0.25F), t);
+        }
+        const auto out = taken(mix, t);
+        if (b > 50) {
+            peak = std::max(peak, peak_of(out));
+        }
+    }
+    CHECK(peak > 0.5F);
+    CHECK(peak <= 0.8913F + 1e-3F);
 }

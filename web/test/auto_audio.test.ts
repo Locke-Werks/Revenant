@@ -59,6 +59,27 @@ test("auto audio: a context the browser will not start shows the tap note until 
   assert.deepEqual(notes, ["tap to play", null]);
 });
 
+test("auto audio: after a lease loss and take back it asks again on the new session", async () => {
+  const { audio, auto } = rig();
+  auto.update(true);
+  await flush();
+  // Lease lost: audio stopped, and the old session refuses the next ask.
+  audio.on = false;
+  audio.refuse = "the lease is held elsewhere";
+  auto.update(true);
+  await flush();
+  auto.update(true);
+  await flush();
+  assert.equal(audio.starts.length, 2);
+  // Taken back.
+  audio.refuse = null;
+  auto.newSession();
+  auto.update(true);
+  await flush();
+  assert.equal(audio.starts.length, 3);
+  assert.equal(audio.on, true);
+});
+
 test("auto audio: a refusal is reported once and not asked again", async () => {
   const { audio, auto, notes } = rig();
   audio.refuse = "no engine";

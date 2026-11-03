@@ -9,12 +9,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,6 +33,7 @@
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
 #include "tests/rpc/rpc_fixture.h"
+#include "tools/webgate/dv_feed.h"
 #include "tools/webgate/hls_playlist.h"
 #include "tools/webgate/phone_streams.h"
 #include "tools/webgate/protocol.h"
@@ -916,6 +919,180 @@ TEST_CASE("phone audio with no receiver selected mixes every receiver under the 
     CHECK_FALSE(rig.session->audio_on());
     CHECK_FALSE(rig.session->audio_vrx().has_value());
     CHECK(rig.streams->audio_subscriptions().empty());
+}
+
+namespace {
+
+// 20 ms of a tone at 8000 S/s, carrying its phase on.
+void tone_chunk(revenant::rpc::AudioChunk& chunk, double hz, float amplitude, double& phase)
+{
+    chunk.sample_rate = 8000;
+    chunk.channel_count = 1;
+    chunk.samples.assign(160, 0.0F);
+    for (float& s : chunk.samples) {
+        s = amplitude * static_cast<float>(std::sin(phase));
+        phase += 2.0 * 3.14159265358979323846 * hz / 8000.0;
+    }
+}
+
+[[nodiscard]] std::vector<float> decoded_opus(const FakeSocket& socket, std::size_t from = 0)
+{
+    int err = 0;
+    ::OpusDecoder* decoder = opus_decoder_create(48000, 1, &err);
+    REQUIRE(err == OPUS_OK);
+    std::vector<float> samples;
+    for (std::size_t i = from; i < socket.sent.size(); ++i) {
+        const auto& m = socket.sent[i];
+        if (m.kind != Kind::Opus) {
+            continue;
+        }
+        std::vector<float> frame(960);
+        const int n = opus_decode_float(
+            decoder, m.binary.data() + revenant::webgate::kOpusHeaderSize,
+            static_cast<opus_int32>(m.binary.size() - revenant::webgate::kOpusHeaderSize),
+            frame.data(), 960, 0);
+        REQUIRE(n == 960);
+        samples.insert(samples.end(), frame.begin(), frame.end());
+    }
+    opus_decoder_destroy(decoder);
+    return samples;
+}
+
+// Power at one frequency over the samples, as the mean square of a sinusoid
+// of that amplitude.
+[[nodiscard]] double tone_power(std::span<const float> x, double hz)
+{
+    double re = 0.0;
+    double im = 0.0;
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        const double w = 2.0 * 3.14159265358979323846 * hz * static_cast<double>(i) / 48000.0;
+        re += x[i] * std::cos(w);
+        im += x[i] * std::sin(w);
+    }
+    const double n = static_cast<double>(x.size());
+    return 2.0 * (re * re + im * im) / (n * n);
+}
+
+}  // namespace
+
+TEST_CASE("each audio on after an off starts the mix stream at seq 0", "[gpu][webgate][streams][mix]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.use_fake_clock = true;
+    rig.open(still_engine());
+    rig.attach();
+    rig.command(R"({"id":1,"op":"addVrx","args":{"hz":100300000,"mode":"p25p1"}})");
+    const auto voice = vrx_of(reply_to(rig.socket, 1));
+
+    revenant::rpc::AudioChunk chunk;
+    double phase = 0.0;
+    for (int round = 0; round < 2; ++round) {
+        rig.command(R"({"id":2,"op":"audio","args":{"on":true}})");
+        const auto from = rig.socket.sent.size();
+        for (int c = 0; c < 50; ++c) {
+            tone_chunk(chunk, 700.0, 0.1F, phase);
+            rig.fake_now += std::chrono::milliseconds(20);
+            rig.streams->deliver_audio(voice, chunk);
+            rig.strand.run_pending();
+        }
+        std::optional<std::uint32_t> first;
+        for (std::size_t i = from; i < rig.socket.sent.size() && !first; ++i) {
+            if (rig.socket.sent[i].kind == Kind::Opus) {
+                first = seq_of(rig.socket.sent[i]);
+            }
+        }
+        REQUIRE(first.has_value());
+        CHECK(*first == 0);
+        rig.command(R"({"id":3,"op":"audio","args":{"on":false}})");
+    }
+}
+
+TEST_CASE("twenty receivers sum bounded, the lead and a DV call clear of the analogue bed",
+          "[gpu][webgate][streams][mix]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.use_fake_clock = true;
+    rig.open(still_engine());
+    rig.attach();
+
+    // A lead, a DV call, and eighteen analogue receivers with their squelch
+    // open on noise at the engine's listening level.
+    std::vector<std::uint64_t> ids;
+    for (int i = 0; i < 20; ++i) {
+        const char* mode = i == 1 ? "p25p1" : (i == 0 ? "nfm" : "am");
+        rig.command(R"({"id":)" + std::to_string(10 + i) + R"(,"op":"addVrx","args":{"hz":)" +
+                    std::to_string(100'000'000 + i * 25'000) + R"(,"mode":")" + mode + R"("}})");
+        ids.push_back(vrx_of(reply_to(rig.socket, 10 + i)));
+    }
+    rig.command(R"({"id":40,"op":"audio","args":{"vrx":)" + std::to_string(ids[0]) + "}}");
+    REQUIRE(rig.streams->audio_subscriptions().size() == 20);
+
+    std::uint32_t noise = 12345;
+    const auto next_noise = [&noise] {
+        noise = noise * 1664525U + 1013904223U;
+        return static_cast<float>(noise >> 8) / static_cast<float>(1U << 24) * 2.0F - 1.0F;
+    };
+    revenant::rpc::AudioChunk chunk;
+    double lead_phase = 0.0;
+    double voice_phase = 0.0;
+    const int chunks = 250;
+    const auto started = std::chrono::steady_clock::now();
+    for (int c = 0; c < chunks; ++c) {
+        rig.fake_now += std::chrono::milliseconds(20);
+        tone_chunk(chunk, 1000.0, 0.25F, lead_phase);
+        rig.streams->deliver_audio(ids[0], chunk);
+        tone_chunk(chunk, 700.0, 0.25F, voice_phase);
+        rig.streams->deliver_audio(ids[1], chunk);
+        for (std::size_t i = 2; i < ids.size(); ++i) {
+            chunk.samples.assign(160, 0.0F);
+            for (float& s : chunk.samples) {
+                s = 0.25F * next_noise();
+            }
+            rig.streams->deliver_audio(ids[i], chunk);
+        }
+        rig.strand.run_pending();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    const auto out = decoded_opus(rig.socket);
+    REQUIRE(out.size() > 960 * 150);
+    // The last three seconds, past priming and the limiter's first frames.
+    const std::span<const float> tail(out.data() + out.size() - 960 * 150, 960 * 150);
+    float peak = 0.0F;
+    double total = 0.0;
+    for (const float s : tail) {
+        peak = std::max(peak, std::abs(s));
+        total += static_cast<double>(s) * s;
+    }
+    total /= static_cast<double>(tail.size());
+    const double lead = tone_power(tail, 1000.0);
+    const double voice = tone_power(tail, 700.0);
+    // What noise puts in one bin, averaged over bins with no tone in them.
+    double bed = 0.0;
+    for (const double hz : {1300.0, 1700.0, 2100.0, 2500.0, 2900.0, 3300.0}) {
+        bed += tone_power(tail, hz) / 6.0;
+    }
+    const double blocks = static_cast<double>(out.size()) / 960.0;
+    const double us_per_block =
+        std::chrono::duration<double, std::micro>(elapsed).count() / std::max(blocks, 1.0);
+    std::printf("mix of 20: peak %.3f, lead %.1f dB and DV %.1f dB of the sum, "
+                "%.1f and %.1f dB over the bed bin, %.1f us per 20 ms block\n",
+                peak, 10.0 * std::log10(lead / total), 10.0 * std::log10(voice / total),
+                10.0 * std::log10(lead / bed), 10.0 * std::log10(voice / bed), us_per_block);
+
+    // The limiter holds the sum at -1 dBFS (test_phone_mix.cpp checks that
+    // before the codec); Opus on a dense noise bed overshoots it by about
+    // 2 dB, measured 1.10, so this bounds the decoded stream, not the sum.
+    CHECK(peak < 1.25F);
+    CHECK(10.0 * std::log10(lead / bed) > 20.0);
+    CHECK(10.0 * std::log10(voice / bed) > 20.0);
+}
+
+TEST_CASE("the mix is capped at the rack limit, lead then digital voice first", "[webgate][mix]")
+{
+    CHECK(revenant::webgate::kMaxMixMembers == revenant::webgate::kAutoDvMaxReceivers);
 }
 
 TEST_CASE("voice subscriptions end with the audio, not with the HLS linger",

@@ -333,7 +333,21 @@ same thing.
   on, or Keep listening has its stream up, and unsubscribes when the receiver
   is removed or either ends. The 30 second linger after Keep listening ends
   does not hold them. Removing the lead leaves the rest playing. Which
-  receivers are mixed is decided in one function, `PhoneStreams::mix_members`.
+  receivers are mixed is decided in one function, `PhoneStreams::mix_members`,
+  capped at the desktop's rack limit of 64: lead first, then digital voice,
+  then analogue.
+- Gain staging is the desktop's (`ui/audio/audio_mix.h`,
+  `ui/audio/audio_player.cpp`): every stream arrives levelled by the engine
+  (`core/engine/listener_level.h`), digital voice is scaled by the voice boost,
+  the streams are summed plainly with no per-stream headroom, and the soft
+  limiter is the only stage on the sum. The desktop's per-strip gain is not
+  known to the gateway and is taken as unity. Squelch needs nothing here: the
+  engine writes zeros into a subscription while a receiver's squelch is
+  closed, so a closed receiver adds silence.
+- With 20 receivers, eighteen of them analogue on open-squelch noise at the
+  engine's level, the test "twenty receivers sum bounded" measures the sum
+  held under full scale and the lead's tone and a DV tone each well above the
+  noise bed in their own bin, and prints the gateway's cost per 20 ms block.
 - The engine delivers voice continuously, not an LDU at a time: one chunk per
   receiver chunk covering the same time, zeros between calls
   (`core/rpc/voice_audio.h`). The mix is built to take a burst of an LDU
@@ -358,8 +372,11 @@ same thing.
 - Live Opus packets carry the fixed stream id 0 (`kPhoneMixStream`,
   `tools/webgate/protocol.h`; `MIX_STREAM` in `web/src/protocol.ts`), meaning
   the phone's mix, whichever receiver leads or none. Engine receiver ids start
-  at 1. A new lead is the same stream; the sequence restarts only when audio is
-  turned off and on again. Keep
+  at 1. A new lead is the same stream. The encoder and sequence are reset when
+  audio is turned off, so every on starts at seq 0 against the decoder the
+  phone reset on off. A page cached from before this release filters Opus by
+  receiver id and would drop the mix; the service worker reloads the page on
+  update, so it does not outlive the upgrade. Keep
   listening has one playlist per session, `/hls/<id>/live.m3u8`; the `hls`
   event gives the id, and the URL stays the same when the listener moves to
   another receiver, so the player is not reloaded. An engine restart builds a
