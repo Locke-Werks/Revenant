@@ -47,6 +47,12 @@ HLS stream from webgate, locked, for ten minutes on the owner's iPhone. If
 standalone mode kills it, keep-listening is redesigned before anything else
 is built on it.
 
+Result, 2026-11-02: proved. iOS 27.2 RC 2 on the owner's iPhone, installed
+home screen app, HLS from webgate's AAC/fMP4 path: audio played without a
+dropout for the whole ten-minute locked test. Keep-listening stands as
+designed. App switching, lock screen controls and the start ramp were not
+reported and are covered by the Task 15 phone check.
+
 ## Decisions
 
 - LAN only. No authentication on the phone side. Anyone on the LAN who can
