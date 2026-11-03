@@ -1,21 +1,14 @@
 import { chooseScreen, installScreenHtml, type StandaloneEnv } from "./install";
 import { gatewayReachable, offlineScreenHtml, type Probe } from "./offline";
-
-// The real app arrives in later tasks; until then standalone shows a
-// placeholder so the install, icon and offline paths can be checked on a phone.
-export function placeholderHtml(): string {
-  return `
-<main class="screen app">
-  <img class="mark" src="/icons/icon-192.png" width="96" height="96" alt="">
-  <h1>Revenant</h1>
-</main>`;
-}
+import { appScreenHtml, mountApp } from "./app";
 
 export interface Host {
   root: { innerHTML: string; querySelector(sel: string): { addEventListener(ev: string, fn: () => void): void } | null };
   env: StandaloneEnv;
   search: string;
   probe: Probe;
+  // Starts the app once its markup is in place. Absent under node.
+  mount?: () => void;
 }
 
 export async function render(host: Host): Promise<void> {
@@ -24,7 +17,8 @@ export async function render(host: Host): Promise<void> {
     return;
   }
   if (await gatewayReachable(host.probe)) {
-    host.root.innerHTML = placeholderHtml();
+    host.root.innerHTML = appScreenHtml();
+    host.mount?.();
     return;
   }
   host.root.innerHTML = offlineScreenHtml();
@@ -52,6 +46,7 @@ if (typeof document !== "undefined") {
       env: { navigator: navigator as { standalone?: boolean }, matchMedia: (q) => window.matchMedia(q) },
       search: location.search,
       probe: (input, init) => fetch(input, init),
+      mount: () => void mountApp(root),
     });
   }
 }

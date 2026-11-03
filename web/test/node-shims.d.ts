@@ -5,10 +5,11 @@ declare module "node:test" {
 }
 declare module "node:assert/strict" {
   const assert: {
-    equal(actual: unknown, expected: unknown): void;
+    equal(actual: unknown, expected: unknown, message?: string): void;
     deepEqual(actual: unknown, expected: unknown): void;
     match(actual: string, re: RegExp): void;
-    rejects(p: Promise<unknown>): Promise<void>;
+    rejects(p: Promise<unknown>, expected?: RegExp | { message?: string | RegExp }): Promise<void>;
+    ok(value: unknown, message?: string): void;
   };
   export default assert;
 }

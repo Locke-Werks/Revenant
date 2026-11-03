@@ -65,7 +65,7 @@ test("render shows the offline screen with Retry, and Retry recovers", async () 
   state.reachable = true;
   listeners["click"]!();
   await new Promise((r) => setTimeout(r, 0));
-  assert.match(root.innerHTML, /<h1>Revenant<\/h1>/);
+  assert.match(root.innerHTML, /id="waterfall"/);
 });
 
 test("gatewayReachable is false on a network error or a bad status", async () => {
