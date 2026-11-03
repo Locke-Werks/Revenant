@@ -728,7 +728,9 @@ export function mountApp(root: HTMLElement): AppHandle {
   });
   // The list and the spectrum trace keep lost signals for a while, fading.
   // The gateway sends nothing for a signal that is gone, so the fade is
-  // driven by this tick instead of by events.
+  // driven by this tick instead of by events. Ten steps a second, with the
+  // rows' CSS transition bridging them, reads as one continuous fade.
+  const LINGER_TICK_MS = 100;
   const linger = new LingerTracker();
   const showListed = () => {
     const listed = linger.view(performance.now());
@@ -742,7 +744,7 @@ export function mountApp(root: HTMLElement): AppHandle {
           window.clearInterval(lingerTick);
           lingerTick = null;
         }
-      }, 1000);
+      }, LINGER_TICK_MS);
     }
   };
   let lingerTick: number | null = null;

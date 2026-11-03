@@ -82,9 +82,10 @@ export function sortForList<T extends Detection>(d: readonly T[]): T[] {
 // How long a signal the gateway has stopped reporting stays in the phone's
 // list and on its spectrum, so the user can park a receiver on it while
 // waiting for it to come back.
-export const LOST_LINGER_MS = 120_000;
-// Where the fade ends up just before the entry is removed.
-export const LOST_MIN_OPACITY = 0.35;
+export const LOST_LINGER_MS = 20_000;
+// The fade runs all the way out, so removal at the end of the linger is
+// invisible rather than a row vanishing at a third of its brightness.
+export const LOST_MIN_OPACITY = 0;
 
 // A detection as the phone shows it. lostForMs is the time since the gateway
 // last listed it, absent while it is still listed.

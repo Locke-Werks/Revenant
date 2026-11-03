@@ -111,10 +111,10 @@ test("a detection that leaves the list lingers as lost, then is removed", () => 
   const a = det({ id: "1", centerHz: 100_000_000, bandwidthHz: 10_000 });
   t.update([a], 1000);
   t.update([], 1500);
-  const [lost] = t.view(1500 + 42_000);
+  const [lost] = t.view(1500 + 4_200);
   assert.equal(lost?.id, "1");
   // Time since last listed: the last update that held it was at 1000.
-  assert.equal(lost?.lostForMs, 42_500);
+  assert.equal(lost?.lostForMs, 4_700);
   assert.equal(t.hasLost(), true);
   assert.deepEqual(t.view(1000 + LOST_LINGER_MS - 1).length, 1);
   assert.deepEqual(t.view(1000 + LOST_LINGER_MS), []);
@@ -127,7 +127,7 @@ test("the fade runs from 1 to the floor over the linger", () => {
   assert.ok(Math.abs(lostOpacity(LOST_LINGER_MS / 2) - (1 + LOST_MIN_OPACITY) / 2) < 1e-9);
   assert.ok(Math.abs(lostOpacity(LOST_LINGER_MS) - LOST_MIN_OPACITY) < 1e-9);
   assert.ok(Math.abs(lostOpacity(LOST_LINGER_MS * 5) - LOST_MIN_OPACITY) < 1e-9);
-  assert.ok(lostOpacity(30_000) > lostOpacity(60_000));
+  assert.ok(lostOpacity(LOST_LINGER_MS / 4) > lostOpacity(LOST_LINGER_MS / 2));
 });
 
 test("lost age reads as minutes and seconds", () => {

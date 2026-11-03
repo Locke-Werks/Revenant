@@ -480,6 +480,8 @@ html:has(.app), html:has(.app) body {
   font-variant-numeric: tabular-nums;
 }
 .signal.held { color: var(--muted); }
+/* Bridges the linger tick's 100 ms steps so a lost row fades continuously. */
+.signal { transition: opacity 120ms linear; }
 .panel { padding: 8px 0; border-top: 1px solid var(--line); }
 .panel:first-child { border-top: 0; }
 .panel-status { margin: 6px 0; color: var(--muted); }
