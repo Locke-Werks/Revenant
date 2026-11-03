@@ -272,7 +272,7 @@ export interface ControllerDeps {
   audioNote(text: string | null): void;
 }
 
-const NOT_STARTED = "The phone has not started sound yet. Tap the waterfall or a receiver to allow it.";
+export const NOT_STARTED = "The phone has not started sound yet. Tap the waterfall or a receiver to allow it.";
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -649,8 +649,9 @@ export class ReceiverController {
       () => {
         // The reply settles it: an event still to come finds no chip, and an
         // id the engine reuses later is reported as anyone else's would be.
+        // The phone's audio stays on for the rest of the mix; LiveAudio drops
+        // the lead on the removal event.
         this.removing.delete(vrx);
-        if (this.deps.audio.vrx === vrx) this.deps.audio.stop();
         this.list.remove(vrx);
         this.gone(vrx);
       },

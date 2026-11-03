@@ -803,7 +803,7 @@ TEST_CASE("digital voice reaches the phone boosted and analogue does not",
     CHECK(analogue / analogue_flat == Catch::Approx(1.0).epsilon(0.02));
 }
 
-TEST_CASE("audio subscriptions follow the digital voice receivers", "[gpu][webgate][streams][mix]")
+TEST_CASE("audio subscriptions follow every receiver", "[gpu][webgate][streams][mix]")
 {
     REVENANT_NEEDS_GPU();
     Rig rig;
@@ -829,9 +829,11 @@ TEST_CASE("audio subscriptions follow the digital voice receivers", "[gpu][webga
     rig.command(R"({"id":5,"op":"removeVrx","args":{"vrx":)" + std::to_string(voice) + "}}");
     CHECK(rig.streams->audio_subscriptions() == std::set<std::uint64_t>{analogue, second});
 
-    // An analogue receiver that is not the active one is never mixed.
+    // An analogue receiver that is not the active one is mixed too.
     rig.command(R"({"id":6,"op":"addVrx","args":{"hz":100400000,"mode":"nfm"}})");
-    CHECK(rig.streams->audio_subscriptions() == std::set<std::uint64_t>{analogue, second});
+    const auto other = vrx_of(reply_to(rig.socket, 6));
+    CHECK(rig.streams->audio_subscriptions() ==
+          std::set<std::uint64_t>{analogue, second, other});
 
     // Audio off again ends them all.
     rig.command(R"({"id":7,"op":"audio","args":{"vrx":)" + std::to_string(analogue) +
@@ -845,7 +847,75 @@ TEST_CASE("audio subscriptions follow the digital voice receivers", "[gpu][webga
                 R"(,"mode":"p25p1"}})");
     const auto replaced = vrx_of(reply_to(rig.socket, 9));
     REQUIRE(replaced != analogue);
-    CHECK(rig.streams->audio_subscriptions() == std::set<std::uint64_t>{replaced, second});
+    CHECK(rig.streams->audio_subscriptions() ==
+          std::set<std::uint64_t>{replaced, second, other});
+    CHECK(rig.session->audio_vrx() == replaced);
+}
+
+TEST_CASE("phone audio with no receiver selected mixes every receiver under the mix id",
+          "[gpu][webgate][streams][mix]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.use_fake_clock = true;
+    rig.open(still_engine());
+    rig.attach();
+
+    rig.command(R"({"id":1,"op":"addVrx","args":{"hz":100100000,"mode":"am"}})");
+    const auto am = vrx_of(reply_to(rig.socket, 1));
+    rig.command(R"({"id":2,"op":"addVrx","args":{"hz":100200000,"mode":"nfm"}})");
+    const auto nfm = vrx_of(reply_to(rig.socket, 2));
+    rig.command(R"({"id":3,"op":"addVrx","args":{"hz":100300000,"mode":"p25p1"}})");
+    const auto voice = vrx_of(reply_to(rig.socket, 3));
+    rig.command(R"({"id":4,"op":"addVrx","args":{"hz":100400000,"mode":"dmr"}})");
+    const auto voice2 = vrx_of(reply_to(rig.socket, 4));
+    CHECK(rig.streams->audio_subscriptions().empty());
+
+    rig.command(R"({"id":5,"op":"audio","args":{"on":true}})");
+    CHECK(contains(reply_to(rig.socket, 5), R"("on":true)"));
+    CHECK_FALSE(rig.session->audio_vrx().has_value());
+    CHECK(rig.streams->audio_subscriptions() == std::set<std::uint64_t>{am, nfm, voice, voice2});
+
+    // With no lead the mix runs off the clock: two DV receivers talking.
+    revenant::rpc::AudioChunk chunk;
+    chunk.sample_rate = 8000;
+    chunk.channel_count = 1;
+    double phase = 0.0;
+    for (int c = 0; c < 100; ++c) {
+        chunk.samples.assign(160, 0.0F);
+        for (float& s : chunk.samples) {
+            s = 0.1F * static_cast<float>(std::sin(phase));
+            phase += 2.0 * 3.14159265358979323846 * 1000.0 / 8000.0;
+        }
+        rig.fake_now += std::chrono::milliseconds(20);
+        rig.streams->deliver_audio(voice, chunk);
+        rig.streams->deliver_audio(voice2, chunk);
+        rig.strand.run_pending();
+    }
+    int opus = 0;
+    for (const auto& m : rig.socket.sent) {
+        if (m.kind != Kind::Opus) {
+            continue;
+        }
+        ++opus;
+        REQUIRE(m.binary.size() > revenant::webgate::kOpusHeaderSize);
+        std::uint64_t tag = 0;
+        for (int b = 0; b < 8; ++b) {
+            tag |= static_cast<std::uint64_t>(m.binary[1 + b]) << (8 * b);
+        }
+        CHECK(tag == revenant::webgate::kPhoneMixStream);
+    }
+    CHECK(opus > 10);
+
+    // Selecting one makes it the lead of the same set.
+    rig.command(R"({"id":6,"op":"audio","args":{"vrx":)" + std::to_string(nfm) + "}}");
+    CHECK(rig.session->audio_vrx() == nfm);
+    CHECK(rig.streams->audio_subscriptions() == std::set<std::uint64_t>{am, nfm, voice, voice2});
+
+    rig.command(R"({"id":7,"op":"audio","args":{"on":false}})");
+    CHECK_FALSE(rig.session->audio_on());
+    CHECK_FALSE(rig.session->audio_vrx().has_value());
+    CHECK(rig.streams->audio_subscriptions().empty());
 }
 
 TEST_CASE("voice subscriptions end with the audio, not with the HLS linger",

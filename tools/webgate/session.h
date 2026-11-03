@@ -120,6 +120,12 @@ public:
     [[nodiscard]] std::optional<std::uint64_t> audio_vrx() const { return audio_vrx_; }
     void set_audio_vrx(std::optional<std::uint64_t> vrx) { audio_vrx_ = vrx; }
 
+    // The phone's own sound switch, apart from which receiver leads: Auto DV
+    // opens receivers the phone never selected, and those must be heard too.
+    // audio_vrx() is only the lead of the mix this turns on.
+    [[nodiscard]] bool audio_on() const { return audio_on_; }
+    void set_audio_on(bool on) { audio_on_ = on; }
+
     [[nodiscard]] bool keep_listening() const { return keep_listening_; }
     void set_keep_listening(bool on) { keep_listening_ = on; }
 
@@ -198,6 +204,7 @@ private:
     std::optional<View> view_;
     std::optional<std::uint64_t> audio_vrx_;
     bool keep_listening_ = false;
+    bool audio_on_ = false;
     double min_confidence_ = 0.0;
     TestHooks hooks_;
 };

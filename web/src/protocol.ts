@@ -102,6 +102,11 @@ export interface SpectrumFrame {
   tracePx: Uint8Array;
 }
 
+// The vrx of every Opus frame the gateway sends: the phone's mix of all its
+// receivers, whichever leads (kPhoneMixStream, tools/webgate/protocol.h). The
+// engine numbers receivers from 1, so this is no receiver's id.
+export const MIX_STREAM = 0n;
+
 export interface OpusFrame {
   vrx: bigint;
   seq: number;

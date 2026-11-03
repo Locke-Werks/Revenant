@@ -478,10 +478,11 @@ test("removing the active receiver clears the selection", async () => {
   await flush();
   assert.deepEqual(r.chips(), []);
   assert.equal(r.ctl.list.active, null);
-  assert.equal(r.audio.vrx, null);
-  // The removal event that follows is not news.
+  // The removal event that follows is not news, and drops the lead without
+  // turning the phone's audio off.
   r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 1, reason: "removed" });
   assert.deepEqual(r.toasts, []);
+  assert.equal(r.audio.vrx, null);
 });
 
 // ---- Status --------------------------------------------------------------------

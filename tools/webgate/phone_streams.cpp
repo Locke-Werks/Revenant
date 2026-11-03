@@ -1149,25 +1149,24 @@ void PhoneStreams::reconcile_hls()
 std::vector<PhoneStreams::MixMember> PhoneStreams::mix_members() const
 {
     std::vector<MixMember> members;
-    const auto active = session_.audio_vrx();
-    const bool listening = active && session_.has_receiver(*active);
-    if (listening) {
-        const auto* params = session_.last_params(*active);
-        members.push_back({*active, params != nullptr && is_digital_voice(params->demod)});
+    // Only while something listens: the phone's audio switch, or keep
+    // listening's stream. Not through the HLS linger, which exists so a quick
+    // lock and unlock does not rebuild the stream and has no listener.
+    if (!session_.audio_on() && !(hls_ && !hls_->ends_at)) {
+        return members;
     }
-    // Digital voice receivers join only while audio is on: the active receiver
-    // is being heard, or keep listening has its stream up. Not through the
-    // linger after either ends, which exists so a quick lock and unlock does
-    // not rebuild the stream and has no listener.
-    if (listening || (hls_ && !hls_->ends_at)) {
-        for (const auto vrx : session_.receiver_ids()) {
-            if (listening && vrx == *active) {
-                continue;
-            }
-            const auto* params = session_.last_params(vrx);
-            if (params != nullptr && is_digital_voice(params->demod)) {
-                members.push_back({vrx, true});
-            }
+    const auto digital = [this](std::uint64_t vrx) {
+        const auto* params = session_.last_params(vrx);
+        return params != nullptr && is_digital_voice(params->demod);
+    };
+    const auto lead = session_.audio_vrx();
+    const bool led = lead && session_.has_receiver(*lead);
+    if (led) {
+        members.push_back({*lead, digital(*lead)});
+    }
+    for (const auto vrx : session_.receiver_ids()) {
+        if (!led || vrx != *lead) {
+            members.push_back({vrx, digital(vrx)});
         }
     }
     return members;
@@ -1396,15 +1395,11 @@ void PhoneStreams::emit_mix(std::span<const float> mixed,
     if (mixed.empty()) {
         return;
     }
-    const auto active = session_.audio_vrx();
-    if (active && attached()) {
-        // A different receiver is a different stream to the phone, which
-        // starts its sequence again (web/src/audio/live.ts).
-        if (mix_opus_for_ != active) {
-            mix_opus_.reset();
-            mix_opus_seq_ = 0;
-            mix_opus_for_ = active;
-        }
+    if (!session_.audio_on()) {
+        // Turning it back on is a new stream to the phone, from seq 0.
+        mix_opus_.reset();
+        mix_opus_seq_ = 0;
+    } else if (attached()) {
         if (!mix_opus_) {
             auto created = LiveOpusEncoder::create(kPhoneAudioRate);
             if (!created) {
@@ -1416,7 +1411,7 @@ void PhoneStreams::emit_mix(std::span<const float> mixed,
         if (mix_opus_) {
             mix_opus_->push(mixed);
             for (const auto& packet : mix_opus_->take_packets()) {
-                opus_.push_back(encode_opus(*active, mix_opus_seq_++, packet));
+                opus_.push_back(encode_opus(kPhoneMixStream, mix_opus_seq_++, packet));
             }
             while (opus_.size() > config_.max_queued_opus) {
                 opus_.pop_front();

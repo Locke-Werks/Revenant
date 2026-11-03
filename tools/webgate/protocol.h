@@ -46,6 +46,11 @@ inline constexpr std::size_t kSpectrumTraceHeaderSize = 4 + 4;
 // tag u8, vrx u64, seq u32, packet[...]
 inline constexpr std::size_t kOpusHeaderSize = 1 + 8 + 4;
 
+// The vrx field of every Opus packet the gateway sends: the phone's mix of
+// all its receivers, whichever leads or none. The engine numbers receivers
+// from 1, so no receiver can be mistaken for it.
+inline constexpr std::uint64_t kPhoneMixStream = 0;
+
 // width_px on the wire is frame.px.size(), not frame.view.width_px: the pixels
 // actually present are what the decoder must read, and the reducer caps both
 // at kMaxWidthPx anyway. Only the view's centre and span are taken from it.
