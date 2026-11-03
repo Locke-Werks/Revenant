@@ -581,6 +581,38 @@ struct ViewOffsets {
     // the attack and decay a signal arriving needs.
     static constexpr double kSeconds = 1.0;
 
+    static constexpr double kFloorFraction = 0.25;
+    static constexpr double kCeilingFraction = 0.999;
+
+    struct Levels {
+        float floor_db = 0.0F;
+        float ceiling_db = 0.0F;
+    };
+
+    // The two percentiles the offsets compare, from one copy. The ceiling's
+    // rank lies above the floor's, and after the first nth_element everything
+    // past the floor's rank is no smaller than it, so the second search only
+    // needs that tail. The values are the same exact order statistics two
+    // separate searches give.
+    [[nodiscard]] static Levels levels(std::span<const float> bins, std::vector<float>& scratch)
+    {
+        scratch.assign(bins.begin(), bins.end());
+        const auto rank = [&scratch](double fraction) {
+            return static_cast<std::ptrdiff_t>(fraction *
+                                               static_cast<double>(scratch.size() - 1));
+        };
+        const auto low = rank(kFloorFraction);
+        const auto high = rank(kCeilingFraction);
+        std::nth_element(scratch.begin(), scratch.begin() + low, scratch.end());
+        Levels out;
+        out.floor_db = scratch[static_cast<std::size_t>(low)];
+        if (high > low) {
+            std::nth_element(scratch.begin() + low + 1, scratch.begin() + high, scratch.end());
+        }
+        out.ceiling_db = scratch[static_cast<std::size_t>(high)];
+        return out;
+    }
+
     void track(std::span<const float> whole, std::span<const float> shown, double seconds,
                std::vector<float>& scratch)
     {
@@ -588,16 +620,21 @@ struct ViewOffsets {
             *this = ViewOffsets{};
             return;
         }
-        const auto at = [&scratch](std::span<const float> bins, double fraction) {
-            scratch.assign(bins.begin(), bins.end());
-            const auto rank =
-                static_cast<std::size_t>(fraction * static_cast<double>(scratch.size() - 1));
-            std::nth_element(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(rank),
-                             scratch.end());
-            return scratch[rank];
-        };
-        const float floor_target = at(shown, 0.25) - at(whole, 0.25);
-        const float ceiling_target = at(shown, 0.999) - at(whole, 0.999);
+        track(levels(whole, scratch), whole.size(), shown, seconds, scratch);
+    }
+
+    // The same, with the whole frame's levels measured once by the caller, so
+    // several views of one frame share that work.
+    void track(const Levels& whole, std::size_t whole_bins, std::span<const float> shown,
+               double seconds, std::vector<float>& scratch)
+    {
+        if (shown.size() >= whole_bins || shown.empty()) {
+            *this = ViewOffsets{};
+            return;
+        }
+        const Levels view = levels(shown, scratch);
+        const float floor_target = view.floor_db - whole.floor_db;
+        const float ceiling_target = view.ceiling_db - whole.ceiling_db;
         if (!valid) {
             floor_db = floor_target;
             ceiling_db = ceiling_target;

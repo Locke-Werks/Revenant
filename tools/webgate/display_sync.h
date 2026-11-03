@@ -112,6 +112,44 @@ struct DisplayRow {
     std::vector<float> trace_columns;
 };
 
+// The whole frame's share of the view offsets: the same for every phone
+// looking at one frame, so measured once and handed to each phone's take().
+// Two nth_element searches over every bin are most of a zoomed row's cost.
+struct FrameLevels {
+    std::size_t bins = 0;
+    ui::ViewOffsets::Levels levels;
+
+    // measure false leaves the levels unmeasured, which is right for a frame
+    // no phone is zoomed into: track() never reads them then.
+    [[nodiscard]] static FrameLevels of(std::span<const float> whole, bool measure = true);
+};
+
+// The levels of the frames the phones were last handed, so the second phone
+// to cut a frame reuses the first one's measurement. Phones receive copies of
+// the same engine frame, so a frame is known by where it starts in the stream,
+// its size and a few of its bins. Any thread.
+class FrameLevelsCache {
+public:
+    [[nodiscard]] FrameLevels get(std::uint64_t epoch, std::uint64_t start,
+                                  std::span<const float> whole);
+
+    [[nodiscard]] std::uint64_t measured() const;
+
+private:
+    struct Entry {
+        std::uint64_t epoch = 0;
+        std::uint64_t start = 0;
+        std::array<float, 3> probe{};
+        FrameLevels levels;
+    };
+    // Phones a frame or two apart still hit: a slow socket's pending frame is
+    // an older one than a fast socket's.
+    static constexpr std::size_t kEntries = 4;
+    mutable std::mutex mutex_;
+    std::deque<Entry> entries_;
+    std::uint64_t measured_ = 0;
+};
+
 // One phone's share of the desktop's display state: the trace's averages and
 // peak hold, the view offsets, and the waterfall's history of levels. Not
 // thread-safe; it lives on the phone's strand.
@@ -130,11 +168,24 @@ public:
     void view_changed();
 
     // One row. columns are the view's reduced pixels over the spectrum, the
-    // largest bin of each, bins_per_column of them; whole is the frame's bins
-    // and shown the ones the view covers.
-    [[nodiscard]] DisplayRow take(const DisplayFrame& frame, std::span<const float> whole,
-                                  std::span<const float> shown, std::span<const float> columns,
-                                  std::size_t bins_per_column);
+    // largest bin of each, bins_per_column of them; whole describes the
+    // frame's bins and shown is the ones the view covers. The row is this
+    // object's and is overwritten by the next take(): its buffers are reused
+    // rather than allocated per row.
+    [[nodiscard]] const DisplayRow& take(const DisplayFrame& frame, const FrameLevels& whole,
+                                         std::span<const float> shown,
+                                         std::span<const float> columns,
+                                         std::size_t bins_per_column);
+
+    // The same, measuring the whole frame here; for one phone or a test.
+    [[nodiscard]] const DisplayRow& take(const DisplayFrame& frame, std::span<const float> whole,
+                                         std::span<const float> shown,
+                                         std::span<const float> columns,
+                                         std::size_t bins_per_column)
+    {
+        return take(frame, FrameLevels::of(whole, shown.size() < whole.size()), shown, columns,
+                    bins_per_column);
+    }
 
     // The pivot the waterfall palette is drawn at.
     [[nodiscard]] float drawn_pivot() const { return drawn_pivot_; }
@@ -164,6 +215,8 @@ private:
 
     bool event_dirty_ = true;
     std::string event_;
+
+    DisplayRow row_;
 };
 
 }  // namespace revenant::webgate

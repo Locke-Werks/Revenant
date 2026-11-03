@@ -1,12 +1,15 @@
 // tools/webgate/display_sync.h: the phone following the desktop's display
 // settings. Each case names the wrong implementation it rejects.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <map>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -345,5 +348,129 @@ TEST_CASE("the web build's default colours are the gateway's", "[webgate][displa
         // The value printed is what display_defaults.ts should hold.
         INFO(key << " = " << field(key));
         CHECK(text.str().find("\"" + field(key) + "\"") != std::string::npos);
+    }
+}
+
+namespace {
+
+[[nodiscard]] float nth_of(std::vector<float> bins, double fraction)
+{
+    const auto rank = static_cast<std::ptrdiff_t>(fraction * static_cast<double>(bins.size() - 1));
+    std::nth_element(bins.begin(), bins.begin() + rank, bins.end());
+    return bins[static_cast<std::size_t>(rank)];
+}
+
+}  // namespace
+
+// Rejects a ceiling searched only in the tail when the tail is not what the
+// first search left there: one copy and two searches must give the two
+// separate searches' order statistics, ties and tiny inputs included.
+TEST_CASE("the view offsets' two levels come from one copy", "[webgate][display]")
+{
+    std::vector<float> scratch;
+    for (const std::size_t n : {1U, 2U, 3U, 7U, 1000U, 65'536U}) {
+        std::vector<float> bins = noisy_columns(n, static_cast<std::uint32_t>(n), -30.0F);
+        if (n > 10) {
+            // Plateaus, as a clipped or floored spectrum has.
+            std::fill(bins.begin(), bins.begin() + static_cast<std::ptrdiff_t>(n / 3), -120.0F);
+        }
+        const ui::ViewOffsets::Levels got = ui::ViewOffsets::levels(bins, scratch);
+        INFO(n << " bins");
+        CHECK(got.floor_db == nth_of(bins, ui::ViewOffsets::kFloorFraction));
+        CHECK(got.ceiling_db == nth_of(bins, ui::ViewOffsets::kCeilingFraction));
+    }
+}
+
+// Rejects a shared measurement that differs from the phone's own: two phones
+// zoomed into the same frames, one measuring and one handed the cache's
+// levels, draw the same rows.
+TEST_CASE("a phone handed the frame's levels draws what one measuring them does",
+          "[webgate][display]")
+{
+    revenant::webgate::FrameLevelsCache cache;
+    PhoneDisplay own;
+    PhoneDisplay shared;
+    for (std::uint64_t n = 0; n < 6; ++n) {
+        const DisplayFrame f = frame_at(n * 2048);
+        const std::vector<float> whole =
+            noisy_columns(4096, static_cast<std::uint32_t>(n + 11), n == 2 ? -30.0F : -70.0F);
+        const std::span<const float> shown = std::span<const float>(whole).subspan(1024, 512);
+        const std::vector<float> columns(shown.begin(), shown.end());
+        const DisplayRow a = own.take(f, whole, shown, columns, 1);
+        const DisplayRow& b =
+            shared.take(f, cache.get(0, f.start, whole), shown, columns, 1);
+        CHECK(a.trace.floor_db == b.trace.floor_db);
+        CHECK(a.trace.ceiling_db == b.trace.ceiling_db);
+        CHECK(a.trace_columns == b.trace_columns);
+        CHECK(a.waterfall.floor_db == b.waterfall.floor_db);
+    }
+}
+
+// Rejects a cache keyed too loosely (a retune or a different frame reusing
+// stale levels) or not at all (every phone measuring again).
+TEST_CASE("the frame levels are measured once a frame", "[webgate][display]")
+{
+    revenant::webgate::FrameLevelsCache cache;
+    const std::vector<float> one = noisy_columns(2048, 1, -40.0F);
+    std::vector<float> other = one;
+    other.back() = -10.0F;
+
+    const auto first = cache.get(3, 100, one);
+    CHECK(cache.measured() == 1);
+    const auto again = cache.get(3, 100, one);
+    CHECK(cache.measured() == 1);
+    CHECK(again.levels.floor_db == first.levels.floor_db);
+    CHECK(again.levels.ceiling_db == first.levels.ceiling_db);
+
+    static_cast<void>(cache.get(3, 200, one));
+    CHECK(cache.measured() == 2);
+    static_cast<void>(cache.get(4, 100, one));
+    CHECK(cache.measured() == 3);
+    static_cast<void>(cache.get(3, 100, other));
+    CHECK(cache.measured() == 4);
+    // Still held: a slow phone a frame behind hits too.
+    static_cast<void>(cache.get(3, 100, one));
+    CHECK(cache.measured() == 4);
+}
+
+// Rejects a recycled history row carrying the old row's levels or size: past
+// the ring's length the ends must still be the desktop's over exactly the
+// last kHistoryRows rows.
+TEST_CASE("the waterfall window holds past a full history", "[webgate][display]")
+{
+    PhoneDisplay display;
+    ui::LevelHistogram histogram;
+    ui::HistoryLevels levels;
+    std::deque<std::vector<float>> held;
+    const std::size_t rows = PhoneDisplay::kHistoryRows + 40;
+    for (std::uint64_t n = 0; n < rows; ++n) {
+        const DisplayFrame f = frame_at(n * 2048);
+        // Widths change, as they do when the phone rotates.
+        const std::size_t width = n % 3 == 0 ? 300 : 200;
+        const float carrier = n > PhoneDisplay::kHistoryRows ? -20.0F : -60.0F;
+        const std::vector<float> columns =
+            noisy_columns(width, static_cast<std::uint32_t>(n + 3), carrier);
+        const DisplayRow& row = display.take(f, columns, columns, columns, 1);
+
+        for (const float c : columns) {
+            histogram.add(ui::encode_level(c));
+        }
+        held.push_back(columns);
+        if (held.size() > PhoneDisplay::kHistoryRows) {
+            for (const float c : held.front()) {
+                histogram.remove(ui::encode_level(c));
+            }
+            held.pop_front();
+        }
+        levels.update(histogram.percentile(ui::kHistoryNoisePermille),
+                      histogram.percentile(ui::kHistoryStrongPermille), 2048.0 / 2'048'000.0,
+                      histogram.percentile(ui::kHistoryWeakPermille));
+        if (n + 3 >= rows) {
+            const DisplaySettings defaults;
+            const ui::MapEnds ends = levels.ends(
+                defaults.pins, static_cast<float>(defaults.waterfall_contrast));
+            CHECK(row.waterfall.floor_db == ends.floor_db);
+            CHECK(row.waterfall.ceiling_db == ends.ceiling_db);
+        }
     }
 }

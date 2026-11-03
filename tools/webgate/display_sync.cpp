@@ -236,6 +236,49 @@ std::string display_event(const ui::DisplaySettings& s, float pivot)
     return out;
 }
 
+FrameLevels FrameLevels::of(std::span<const float> whole, bool measure)
+{
+    FrameLevels out;
+    out.bins = whole.size();
+    if (measure && !whole.empty()) {
+        // The strand's one scratch, kept so a 65,536-bin copy is not an
+        // allocation every frame.
+        thread_local std::vector<float> scratch;
+        out.levels = ui::ViewOffsets::levels(whole, scratch);
+    }
+    return out;
+}
+
+FrameLevels FrameLevelsCache::get(std::uint64_t epoch, std::uint64_t start,
+                                  std::span<const float> whole)
+{
+    if (whole.empty()) {
+        return FrameLevels::of(whole, false);
+    }
+    const std::array<float, 3> probe{whole.front(), whole[whole.size() / 2], whole.back()};
+    const std::lock_guard lock(mutex_);
+    for (const Entry& e : entries_) {
+        // Bitwise, since a NaN bin must still match itself.
+        if (e.epoch == epoch && e.start == start && e.levels.bins == whole.size() &&
+            std::memcmp(e.probe.data(), probe.data(), sizeof probe) == 0) {
+            return e.levels;
+        }
+    }
+    Entry e{epoch, start, probe, FrameLevels::of(whole, true)};
+    ++measured_;
+    entries_.push_front(e);
+    if (entries_.size() > kEntries) {
+        entries_.pop_back();
+    }
+    return e.levels;
+}
+
+std::uint64_t FrameLevelsCache::measured() const
+{
+    const std::lock_guard lock(mutex_);
+    return measured_;
+}
+
 PhoneDisplay::PhoneDisplay(const ui::DisplaySettings& settings)
     : settings_(settings), drawn_pivot_(stored_pivot(settings))
 {
@@ -271,11 +314,11 @@ void PhoneDisplay::view_changed()
     view_offsets_.valid = false;
 }
 
-DisplayRow PhoneDisplay::take(const DisplayFrame& frame, std::span<const float> whole,
-                              std::span<const float> shown, std::span<const float> columns,
-                              std::size_t bins_per_column)
+const DisplayRow& PhoneDisplay::take(const DisplayFrame& frame, const FrameLevels& whole,
+                                     std::span<const float> shown, std::span<const float> columns,
+                                     std::size_t bins_per_column)
 {
-    DisplayRow row;
+    DisplayRow& row = row_;
 
     // SpectrumItem::sourceSecondsSinceLast: source time between frames, and
     // none across a retune or a stream that went backwards.
@@ -293,7 +336,7 @@ DisplayRow PhoneDisplay::take(const DisplayFrame& frame, std::span<const float> 
     ui::smooth_trace(smooth_state_, row.trace_columns, dt, settings_.spectrum_smoothing,
                      settings_.spectrum_floor_smoothing);
     peak_ = ui::hold_peak(peak_, ui::drawn_max(row.trace_columns), dt);
-    view_offsets_.track(whole, shown, dt, scratch_);
+    view_offsets_.track(whole.levels, whole.bins, shown, dt, scratch_);
     row.trace = ui::resolve_ends_fit(
         frame.floor_db + view_offsets_.floor_db, frame.ceiling_db + view_offsets_.ceiling_db,
         ui::peak_reduction_headroom_db(std::max<std::size_t>(bins_per_column, 1)), peak_,
@@ -301,16 +344,20 @@ DisplayRow PhoneDisplay::take(const DisplayFrame& frame, std::span<const float> 
 
     // WaterfallItem::takeFrame: the row into the history as levels, the
     // oldest out, and the ends eased toward the history's percentiles.
-    std::vector<std::uint16_t> codes(columns.size());
+    // A full history hands its oldest row's buffer to the newest, so a phone
+    // in steady state allocates no row at all.
+    std::vector<std::uint16_t> codes;
+    if (rows_.size() >= kHistoryRows) {
+        histogram_.remove_row(rows_.front().data(), static_cast<int>(rows_.front().size()));
+        codes = std::move(rows_.front());
+        rows_.pop_front();
+    }
+    codes.resize(columns.size());
     for (std::size_t i = 0; i < columns.size(); ++i) {
         codes[i] = ui::encode_level(columns[i]);
     }
     histogram_.add_row(codes.data(), static_cast<int>(codes.size()));
     rows_.push_back(std::move(codes));
-    while (rows_.size() > kHistoryRows) {
-        histogram_.remove_row(rows_.front().data(), static_cast<int>(rows_.front().size()));
-        rows_.pop_front();
-    }
     const std::uint64_t frame_end = frame.start + frame.count;
     double seconds = 0.0;
     if (frame.rate > 0) {
