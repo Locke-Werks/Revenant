@@ -322,6 +322,7 @@ export function mountApp(root: HTMLElement): AppHandle {
 
   // A digit swipe previews and sends like a waterfall drag, so the readout
   // follows the finger and the gateway sees a rate-limited stream.
+  let swiping = false;
   const digitLimiter = new TuneLimiter(
     (hz) => receivers.tuneDragged(hz),
     () => performance.now(),
@@ -335,8 +336,12 @@ export function mountApp(root: HTMLElement): AppHandle {
       dial.stop();
       receivers.tap(hz);
     },
+    // A waterfall drag in progress owns the receiver, so the swipe is ignored;
+    // the reverse is guarded in dragTune.
     swipeBegin: () => {
+      if (dragHz !== null) return null;
       dial.stop();
+      swiping = true;
       const id = receivers.list.active;
       const r = id === null ? undefined : receivers.list.get(id);
       return r ? r.hz : null;
@@ -346,6 +351,7 @@ export function mountApp(root: HTMLElement): AppHandle {
       digitLimiter.set(hz);
     },
     swipeEnd: () => {
+      swiping = false;
       digitLimiter.flush();
       receivers.endDrag();
     },
@@ -450,7 +456,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     body,
     {
       dragTune: (dHz) => {
-        if (!Number.isFinite(dHz)) return;
+        if (!Number.isFinite(dHz) || swiping) return;
         let next = dragHz;
         if (next === null) {
           dial.stop();

@@ -26,11 +26,19 @@ test("stepping clamps at zero", () => {
 
 test("the readout labels each digit with its place and leaves the rest inert", () => {
   const r = readoutDigits(98_100_000);
-  assert.equal(r.map((d) => d.ch).join(""), "98.1000");
+  assert.equal(r.map((d) => d.ch).join(""), "98.10000");
   assert.deepEqual(
     r.map((d) => d.index),
-    [7, 6, null, 5, 4, 3, 2],
+    [7, 6, null, 5, 4, 3, 2, 1],
   );
+});
+
+test("the readout reaches the 10 Hz place", () => {
+  const r = readoutDigits(14_074_100);
+  assert.equal(r.map((d) => d.ch).join(""), "14.07410");
+  assert.equal(r[r.length - 2]!.index, 2);
+  assert.equal(r[r.length - 1]!.index, 1);
+  assert.equal(digitStep(14_074_100, 1, 1), 14_074_110);
 });
 
 function harness(hz: number | null) {

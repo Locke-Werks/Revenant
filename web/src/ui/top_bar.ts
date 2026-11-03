@@ -40,10 +40,11 @@ export interface ReadoutDigit {
   index: number | null;
 }
 
-// formatMHz carries 100 Hz, so its last digit is the 10^2 place.
+// Five decimals so the 10 Hz step CW and SSB use is reachable; formatMHz stops
+// at 100 Hz and its other callers (chips, entry field) keep that.
 export function readoutDigits(hz: number): ReadoutDigit[] {
-  const text = formatMHz(hz);
-  let place = 2;
+  const text = (hz / 1e6).toFixed(5);
+  let place = 1;
   const out: ReadoutDigit[] = [];
   for (let i = text.length - 1; i >= 0; i--) {
     const ch = text[i]!;
