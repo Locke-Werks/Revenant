@@ -1,9 +1,11 @@
 #include "tools/webgate/host.h"
 
 #include <cstdio>
+#include <cwchar>
 #include <fstream>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include <fcntl.h>
 #include <io.h>
@@ -15,6 +17,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+
+#include <sddl.h>
+#include <tlhelp32.h>
 
 namespace revenant::webgate {
 
@@ -84,6 +89,32 @@ std::string instance_name(std::uint16_t port)
 
 namespace {
 
+// See kStopEventName for why each part is there. 0x100000 is SYNCHRONIZE.
+constexpr const wchar_t* kStopEventSddl =
+    L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;0x100000;;;WD)S:(ML;;NW;;;LW)";
+
+[[nodiscard]] HANDLE open_stop_event(const std::string& name)
+{
+    const std::wstring wide(name.begin(), name.end());
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(kStopEventSddl, SDDL_REVISION_1,
+                                                             &descriptor, nullptr) == 0) {
+        descriptor = nullptr;
+    }
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
+    HANDLE event = CreateEventW(descriptor != nullptr ? &attributes : nullptr, TRUE, FALSE,
+                                wide.c_str());
+    if (event == nullptr) {
+        // Exists, made by an account whose DACL gives this one SYNCHRONIZE
+        // and nothing else.
+        event = OpenEventW(SYNCHRONIZE, FALSE, wide.c_str());
+    }
+    if (descriptor != nullptr) {
+        LocalFree(descriptor);
+    }
+    return event;
+}
+
 [[nodiscard]] bool usable(HANDLE handle)
 {
     return handle != nullptr && handle != INVALID_HANDLE_VALUE &&
@@ -91,6 +122,101 @@ namespace {
 }
 
 }  // namespace
+
+StopWatch::StopWatch(std::function<void()> on_stop, std::string name)
+{
+    HANDLE event = open_stop_event(name);
+    if (event == nullptr) {
+        return;
+    }
+    HANDLE quit = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (quit == nullptr) {
+        CloseHandle(event);
+        return;
+    }
+    event_ = event;
+    quit_ = quit;
+    thread_ = std::thread([event, quit, on_stop = std::move(on_stop)] {
+        const HANDLE both[2] = {quit, event};
+        if (WaitForMultipleObjects(2, both, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {
+            on_stop();
+        }
+    });
+}
+
+StopWatch::~StopWatch()
+{
+    if (quit_ != nullptr) {
+        SetEvent(static_cast<HANDLE>(quit_));
+    }
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+    if (event_ != nullptr) {
+        CloseHandle(static_cast<HANDLE>(event_));
+    }
+    if (quit_ != nullptr) {
+        CloseHandle(static_cast<HANDLE>(quit_));
+    }
+}
+
+int stop_running_gateways(std::chrono::milliseconds wait, std::string name, std::wstring image)
+{
+    HANDLE event = open_stop_event(name);
+    if (event == nullptr || SetEvent(event) == 0) {
+        std::printf("revenant-webgate --stop: could not signal running gateways (error %lu)\n",
+                    GetLastError());
+        if (event != nullptr) {
+            CloseHandle(event);
+        }
+        return 2;
+    }
+
+    // Every gateway on the machine but this one, found by image name, which
+    // is what the installer's files are held open by.
+    std::vector<HANDLE> running;
+    int unreachable = 0;
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W entry{};
+        entry.dwSize = sizeof entry;
+        for (BOOL more = Process32FirstW(snapshot, &entry); more != 0;
+             more = Process32NextW(snapshot, &entry)) {
+            if (entry.th32ProcessID == GetCurrentProcessId() ||
+                _wcsicmp(entry.szExeFile, image.c_str()) != 0) {
+                continue;
+            }
+            if (HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, entry.th32ProcessID)) {
+                running.push_back(process);
+            } else {
+                ++unreachable;
+            }
+        }
+        CloseHandle(snapshot);
+    }
+
+    const auto until = std::chrono::steady_clock::now() + wait;
+    int remaining = 0;
+    for (HANDLE process : running) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            until - std::chrono::steady_clock::now());
+        const DWORD ms = left.count() > 0 ? static_cast<DWORD>(left.count()) : 0;
+        if (WaitForSingleObject(process, ms) != WAIT_OBJECT_0) {
+            ++remaining;
+        }
+        CloseHandle(process);
+    }
+
+    // Cleared, or a gateway started after this (the next sign-in) would see
+    // the old signal and exit at once. The event lives only while a handle
+    // to it does, so this matters only while some gateway still holds one.
+    ResetEvent(event);
+    CloseHandle(event);
+
+    std::printf("revenant-webgate --stop: %zu stopped, %d still running, %d not reachable\n",
+                running.size() - static_cast<std::size_t>(remaining), remaining, unreachable);
+    return remaining == 0 && unreachable == 0 ? 0 : 1;
+}
 
 OutputTee::OutputTee(std::filesystem::path log_path) : log_(std::move(log_path))
 {

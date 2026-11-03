@@ -11,8 +11,10 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -61,6 +63,48 @@ private:
 
 // The mutex name for a gateway serving HTTPS on port.
 [[nodiscard]] std::string instance_name(std::uint16_t port);
+
+// THE STOP SIGNAL, for the installer. An upgrade must not swap the files under
+// a running gateway, and the gateway runs at sign-in with no window to close,
+// so the installer's pre_install hook runs `revenant-webgate.exe --stop`.
+//
+// One manual-reset event, Global\Revenant-webgate-stop, which every gateway
+// opens and waits on. Global because the hook runs elevated in the
+// installer's session while gateways run in every signed-in user's session,
+// and a Local\ name would reach only the installer's own. The DACL lets
+// SYSTEM, Administrators and the creating account set it and everyone else
+// only wait on it, so one user cannot stop another's gateway; the low
+// integrity label lets a gateway at medium integrity open an event an
+// elevated --stop created first.
+inline constexpr std::string_view kStopEventName = "Global\\Revenant-webgate-stop";
+
+// Watches the stop signal on a thread of its own and calls on_stop once when
+// it is set. Destroying it ends the watch without calling.
+class StopWatch {
+public:
+    StopWatch(std::function<void()> on_stop, std::string name = std::string(kStopEventName));
+    ~StopWatch();
+    StopWatch(const StopWatch&) = delete;
+    StopWatch& operator=(const StopWatch&) = delete;
+
+    // Whether the event could be opened at all. Without it the gateway runs,
+    // and only Task Manager stops it.
+    [[nodiscard]] bool watching() const { return event_ != nullptr; }
+
+private:
+    void* event_ = nullptr;
+    void* quit_ = nullptr;
+    std::thread thread_;
+};
+
+// --stop: sets the signal, waits up to wait for every other
+// revenant-webgate.exe on the machine to exit, then clears it so the next
+// sign-in's gateway starts normally. 0 when none remain; 1 when one is still
+// running or could not be waited on (a gateway of another account, when not
+// elevated); 2 when the signal could not be set. Messages go to stdout.
+[[nodiscard]] int stop_running_gateways(std::chrono::milliseconds wait,
+                                        std::string name = std::string(kStopEventName),
+                                        std::wstring image = L"revenant-webgate.exe");
 
 // Takes over stdout and stderr; see the top of this file. Construct first
 // thing in main, before anything prints.

@@ -79,7 +79,9 @@ void usage() {
         "  --session-linger-ms N\n"
         "                how long a phone's session outlives its dropped socket\n"
         "                (default 30000, 30 s; keep listening extends it while\n"
-        "                the phone fetches audio); tests shorten it");
+        "                the phone fetches audio); tests shorten it\n"
+        "  --stop        ask every running gateway on this machine to exit, waiting\n"
+        "                up to 10 s; exit code 0 when none remain (the installer's)");
 }
 
 [[nodiscard]] bool parse_port(std::string_view text, int& out) {
@@ -123,6 +125,14 @@ struct Runtime {
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
     ~Runtime() {
+        // Claims on worker threads call into the link, so they finish before
+        // it goes; cancel_waits stops one waiting out an engine start.
+        if (link) {
+            link->cancel_waits();
+        }
+        if (gateway) {
+            gateway->join_claims();
+        }
         link.reset();
         if (gateway) {
             gateway->shutdown();
@@ -172,6 +182,13 @@ void log_start() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Before the log: the installer runs this elevated, and the log would land
+    // in the administrator's profile. Its output reaches whoever started it
+    // with handles to read, which is enough for a hook's report.
+    if (argc == 2 && std::string_view(argv[1]) == "--stop") {
+        return revenant::webgate::stop_running_gateways(std::chrono::seconds(10));
+    }
+
     Options options;
     options.state_dir = default_state_dir();
     options.web_root = exe_directory() / "web";
@@ -316,7 +333,24 @@ int main(int argc, char** argv) {
                     options.web_root.string().c_str());
         std::fflush(stdout);
 
-        rt.server->run().exclusiveJoin(gateway->run()).wait(io.waitScope);
+        // The installer's --stop. Ending the loop runs Runtime's teardown,
+        // which ends an engine this gateway started the same way an idle
+        // stop does, so its files are released along with the gateway's.
+        auto stop = kj::newPromiseAndCrossThreadFulfiller<void>();
+        auto* stop_fulfiller = stop.fulfiller.get();
+        const revenant::webgate::StopWatch watch([stop_fulfiller] {
+            std::printf("asked to stop (revenant-webgate --stop): exiting\n");
+            stop_fulfiller->fulfill();
+        });
+        if (!watch.watching()) {
+            std::fprintf(stderr, "revenant-webgate: cannot watch for --stop; an upgrade will "
+                                 "find this gateway running\n");
+        }
+
+        rt.server->run()
+            .exclusiveJoin(gateway->run())
+            .exclusiveJoin(kj::mv(stop.promise))
+            .wait(io.waitScope);
     } catch (const kj::Exception& e) {
         std::fprintf(stderr, "revenant-webgate: %s\n", e.getDescription().cStr());
         return 1;

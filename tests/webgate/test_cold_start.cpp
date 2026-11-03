@@ -363,3 +363,63 @@ TEST_CASE("an engine the gateway did not start is never stopped", "[gpu][webgate
     INFO(revenant::test::message_of(still));
     CHECK(still.has_value());
 }
+
+TEST_CASE("a claim at the end of the grace either cancels the stop or follows it",
+          "[gpu][webgate][coldstart]")
+{
+    REVENANT_NEEDS_GPU();
+    ColdRig rig(300ms);
+    // Each round lets the lease go free and claims again around the moment
+    // the grace runs out, from just before to just after. Whichever side of
+    // the decision a claim lands on, it must get an engine: never one that is
+    // being ended under it.
+    for (int round = 0; round < 8; ++round) {
+        auto phone = rig.claim("phone 10.1.10.57 via webgate");
+        auto status = phone->lease_status();
+        REQUIRE(status.has_value());
+        CHECK(status->held);
+        phone.reset();
+        std::this_thread::sleep_for(std::chrono::milliseconds(250 + 25 * round));
+    }
+    auto last = rig.claim("phone 10.1.10.57 via webgate");
+    const auto info = last->info();
+    INFO(revenant::test::message_of(info));
+    CHECK(info.has_value());
+    // Starts and stops pair up: never two engines at once.
+    CHECK(rig.process.starts - rig.process.stops == 1);
+}
+
+TEST_CASE("--stop signals every watcher and waits for no process", "[webgate][coldstart]")
+{
+    const std::string name =
+        "Global\\Revenant-webgate-stop-test-" + std::to_string(GetCurrentProcessId());
+    std::atomic<int> stopped{0};
+    {
+        revenant::webgate::StopWatch first([&] { ++stopped; }, name);
+        revenant::webgate::StopWatch second([&] { ++stopped; }, name);
+        REQUIRE(first.watching());
+        REQUIRE(second.watching());
+        // An image name nothing runs as, so the case never waits on (or
+        // stops) a real gateway on this machine.
+        CHECK(revenant::webgate::stop_running_gateways(1s, name, L"no-such-gateway.exe") == 0);
+        CHECK(wait_until([&] { return stopped == 2; }, 5s));
+    }
+
+    // Cleared afterwards: a watcher that starts later is not stopped by it.
+    std::atomic<bool> late{false};
+    revenant::webgate::StopWatch later([&] { late = true; }, name);
+    std::this_thread::sleep_for(200ms);
+    CHECK_FALSE(late);
+}
+
+TEST_CASE("a watcher ended normally does not report a stop", "[webgate][coldstart]")
+{
+    const std::string name =
+        "Global\\Revenant-webgate-stop-test2-" + std::to_string(GetCurrentProcessId());
+    std::atomic<bool> fired{false};
+    {
+        revenant::webgate::StopWatch watch([&] { fired = true; }, name);
+        REQUIRE(watch.watching());
+    }
+    CHECK_FALSE(fired);
+}
