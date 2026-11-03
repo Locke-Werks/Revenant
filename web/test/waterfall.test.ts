@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BOX_CARRY_ROWS, RESTORE_WAIT_MS, RING_ROWS, RowRing, rowAt, rowTop, WaterfallHost, type Renderer } from "../src/waterfall";
+import { BOX_CARRY_MS, BOX_CARRY_ROWS, boxCarryRows, RESTORE_WAIT_MS, RING_ROWS, RowRing, rowAt, rowTop, WaterfallHost, type Renderer } from "../src/waterfall";
 import { panBy, type View } from "../src/view";
 
 const v: View = { centerHz: 100_000_000, spanHz: 2_000_000, widthPx: 1000 };
@@ -38,6 +38,23 @@ test("detection boxes are stamped on the row current when they arrive", () => {
   assert.deepEqual(r.boxes[next], [box]);
   let last = next;
   for (let i = 0; i < BOX_CARRY_ROWS; i++) last = r.push(v.centerHz, v.spanHz, 1000);
+  assert.deepEqual(r.boxes[last], []);
+});
+
+test("boxes carry the same time at any row rate", () => {
+  for (const rate of [3.8, 36.6, 60]) {
+    const rows = boxCarryRows(1000 / rate);
+    assert.ok(Math.abs((rows * 1000) / rate - BOX_CARRY_MS) <= 1000 / rate / 2 + 1e-9, `${rate}`);
+  }
+  assert.equal(boxCarryRows(5000), 1);
+  assert.equal(boxCarryRows(0.01), RING_ROWS);
+  const r = new RowRing(2000);
+  r.push(v.centerHz, v.spanHz, 1000);
+  r.stamp([box], 3);
+  let last = 0;
+  for (let i = 0; i < 3; i++) last = r.push(v.centerHz, v.spanHz, 1000);
+  assert.deepEqual(r.boxes[last], [box]);
+  last = r.push(v.centerHz, v.spanHz, 1000);
   assert.deepEqual(r.boxes[last], []);
 });
 

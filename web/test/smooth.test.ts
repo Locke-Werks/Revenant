@@ -76,6 +76,39 @@ test("the interval follows a new row rate and ignores a pause", () => {
   close(p.interval, 20, 0.5);
 });
 
+for (const rate of [3.8, 37, 50]) {
+  test(`at ${rate} rows/s the scroll slides for the whole gap between rows`, () => {
+    const gap = 1000 / rate;
+    const p = new RowPacer();
+    const last = steady(p, 30, gap);
+    close(p.interval, gap, 0.01);
+    close(p.phase(last + gap / 2), 0.5, 0.02);
+    assert.equal(p.moving(last + gap * 0.9), true);
+  });
+}
+
+test("a stall does not stretch the next slide, and the old rate resumes", () => {
+  const p = new RowPacer();
+  let t = steady(p, 30);
+  // 600 ms with no row: more than three intervals, so not the row rate.
+  t += 600;
+  p.onRow(t);
+  close(p.interval, GAP, 0.01);
+  steady(p, 5, GAP, t + GAP);
+  close(p.interval, GAP, 0.01);
+});
+
+test("a source slowing to a new rate is followed within two rows", () => {
+  const p = new RowPacer();
+  let t = steady(p, 30);
+  const slow = 1000 / 3.8;
+  for (let i = 0; i < 3; i++) {
+    t += slow;
+    p.onRow(t);
+  }
+  close(p.interval, slow, 0.01);
+});
+
 test("clearing forgets the rows", () => {
   const p = new RowPacer();
   const last = steady(p, 10);

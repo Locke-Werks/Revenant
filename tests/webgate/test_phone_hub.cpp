@@ -233,6 +233,41 @@ TEST_CASE("a detached session without keep listening goes after 30 s", "[gpu][we
     CHECK_FALSE(rig.engine_has(vrx));
 }
 
+// Rejects a phone built from a config that missed the hub's cache: two
+// phones zoomed into the same frame must measure its whole-frame levels once
+// between them, and a new frame once more.
+TEST_CASE("two phones on one hub measure a zoomed frame once", "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    HubRig rig;
+    FakeSocket first;
+    FakeSocket second;
+    const auto a = rig.connect(first);
+    const auto b = rig.connect(second);
+    // A quarter of the frame's 4.096 MHz, at different widths: the share is
+    // the whole frame's and does not depend on either view.
+    rig.text(a, R"({"id":9,"op":"setView","args":{"centerHz":100000000,"spanHz":1000000,"widthPx":400}})");
+    rig.text(b, R"({"id":9,"op":"setView","args":{"centerHz":100200000,"spanHz":1000000,"widthPx":300}})");
+    const auto before = rig.hub->frame_levels().measured();
+
+    auto frame = synthetic_frame();
+    frame.sequence = 7;
+    frame.start = 7 * 16384;
+    rig.hub->streams(a)->deliver_spectrum(frame);
+    rig.hub->streams(b)->deliver_spectrum(frame);
+    rig.strand.run_pending();
+    REQUIRE(first.count(Kind::Spectrum) == 1);
+    REQUIRE(second.count(Kind::Spectrum) == 1);
+    CHECK(rig.hub->frame_levels().measured() - before == 1);
+
+    frame.sequence = 8;
+    frame.start = 8 * 16384;
+    rig.hub->streams(a)->deliver_spectrum(frame);
+    rig.hub->streams(b)->deliver_spectrum(frame);
+    rig.strand.run_pending();
+    CHECK(rig.hub->frame_levels().measured() - before == 2);
+}
+
 TEST_CASE("resume reattaches and the next frames go to the new socket", "[gpu][webgate][hub]")
 {
     REVENANT_NEEDS_GPU();

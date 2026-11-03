@@ -14,7 +14,7 @@ import { drawReceivers, type ReceiverMark } from "./overlay";
 import { RowPacer } from "./smooth";
 import { SpectrumTrace } from "./spectrum_trace";
 import { clampView, viewBand, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
-import { createWaterfall, RING_ROWS } from "./waterfall";
+import { boxCarryRows, createWaterfall, RING_ROWS } from "./waterfall";
 import type { SourceEvent } from "./protocol";
 import { captionFromEvent, CaptionLayer, CaptionStore, RowClock } from "./ui/captions";
 import { decodedEntry, FeedModel, FeedView, transcriptEntry } from "./ui/feed";
@@ -665,7 +665,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     detections = parseDetections(e);
     signals.update(detections);
     const boxes = detectionBoxes(detections);
-    waterfall.setDetections(boxes);
+    waterfall.setDetections(boxes, boxCarryRows(pacer.interval));
     trace.setDetections(boxes);
     requestDraw();
   });

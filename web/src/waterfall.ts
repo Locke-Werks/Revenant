@@ -22,9 +22,17 @@ import { MAX_WIDTH_PX, rowTransform, type RowTransform, type View } from "./view
 // the engine's 36.6 rows a second.
 export const RING_ROWS = 1024;
 
-// About two seconds of rows at 37 a second: four missed polls at 2 Hz before
-// boxes stop.
-export const BOX_CARRY_ROWS = 75;
+// Four missed polls at 2 Hz before boxes stop, whatever the row rate.
+export const BOX_CARRY_MS = 2000;
+
+// That time in rows at a row interval in ms, as the pacer measures it.
+export function boxCarryRows(intervalMs: number): number {
+  if (!(intervalMs > 0)) return 1;
+  return Math.min(RING_ROWS, Math.max(1, Math.round(BOX_CARRY_MS / intervalMs)));
+}
+
+// The carry at 2.4 MS/s, for a caller that has no measured interval.
+export const BOX_CARRY_ROWS = boxCarryRows(1000 / 36.6);
 
 // Where rows sit while the waterfall scrolls between them. shift is in rows,
 // 0 at rest and negative while the newest row is still coming in (smooth.ts:
@@ -72,9 +80,9 @@ export class RowRing {
   // Detections arrive a few times a second and rows dozens of times, so the rows
   // between two events carry the latest list; a list nobody refreshes stops
   // being drawn rather than painting a stale signal down the screen.
-  stamp(boxes: readonly DetectionBox[]): void {
+  stamp(boxes: readonly DetectionBox[], carryRows = BOX_CARRY_ROWS): void {
     this.carry = boxes;
-    this.carryLeft = BOX_CARRY_ROWS;
+    this.carryLeft = carryRows;
     if (this.head >= 0) this.boxes[this.head] = boxes;
   }
 
@@ -133,8 +141,9 @@ export interface Renderer {
   readonly scrolls: boolean;
   // shift: see rowTop.
   draw(shift?: number): void;
-  // Stamps the latest detections onto the row current now.
-  setDetections(boxes: readonly DetectionBox[]): void;
+  // Stamps the latest detections onto the row current now, carried over
+  // carryRows more (boxCarryRows).
+  setDetections(boxes: readonly DetectionBox[], carryRows?: number): void;
   // Paints history's detection boxes onto an overlay the size of the
   // waterfall, at the shift the waterfall was drawn at. A renderer that burns
   // them into its own pixels does nothing.
@@ -276,8 +285,8 @@ class GlRenderer implements Renderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  setDetections(boxes: readonly DetectionBox[]): void {
-    this.ring.stamp(boxes);
+  setDetections(boxes: readonly DetectionBox[], carryRows = BOX_CARRY_ROWS): void {
+    this.ring.stamp(boxes, carryRows);
   }
 
   drawBoxes(ctx: CanvasRenderingContext2D, accent: string, shift = 0): void {
@@ -447,9 +456,9 @@ class CanvasRenderer implements Renderer {
 
   draw(): void {}
 
-  setDetections(boxes: readonly DetectionBox[]): void {
+  setDetections(boxes: readonly DetectionBox[], carryRows = BOX_CARRY_ROWS): void {
     this.carry = boxes;
-    this.carryLeft = BOX_CARRY_ROWS;
+    this.carryLeft = carryRows;
   }
 
   drawBoxes(): void {}
@@ -533,8 +542,8 @@ export class WaterfallHost implements Renderer {
   draw(shift = 0): void {
     this.r?.draw(shift);
   }
-  setDetections(boxes: readonly DetectionBox[]): void {
-    this.r?.setDetections(boxes);
+  setDetections(boxes: readonly DetectionBox[], carryRows = BOX_CARRY_ROWS): void {
+    this.r?.setDetections(boxes, carryRows);
   }
   drawBoxes(ctx: CanvasRenderingContext2D, accent: string, shift = 0): void {
     this.r?.drawBoxes(ctx, accent, shift);

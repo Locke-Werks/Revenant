@@ -16,10 +16,15 @@ export const MAX_LAG_ROWS = 1;
 // How much faster than the row rate a lagging scroll runs until it is back.
 const CATCH_UP = 1.5;
 
-// Gaps outside this are not the row rate: two rows handed over in one task,
-// or a stall, a pause or a backgrounded page.
+// Gaps outside this are never the row rate: two rows handed over in one
+// task, or a pause or a backgrounded page. 2 s still admits a slow source,
+// 250 kS/s in 65,536-sample blocks is 3.8 rows/s, 263 ms apart.
 const MIN_GAP_MS = 4;
-const MAX_GAP_MS = 250;
+const MAX_GAP_MS = 2000;
+// A gap this many times the measured interval is a stall, not a new rate,
+// unless the next gap is the same length again.
+const STALL_FACTOR = 3;
+const SAME_GAP = 0.3;
 
 // Light enough that a rate change (a new source) settles in a second or so,
 // heavy enough that one Wi-Fi hiccup does not change the speed.
@@ -29,6 +34,9 @@ export class RowPacer {
   // The time between rows, in ms, as measured.
   interval = 1000 / 30;
   private measured = false;
+  // The last gap set aside as a stall, kept to tell a stall from a slower
+  // source: two alike in a row are the new rate.
+  private longGap: number | null = null;
   private lastAt: number | null = null;
   // Where the scroll was when the newest row landed. 0 is that row's start,
   // 1 is fully scrolled in; below 0 is the scroll still behind the rows.
@@ -47,8 +55,20 @@ export class RowPacer {
     this.from = Math.max(-MAX_LAG_ROWS, at - 1);
     const gap = now - this.lastAt;
     if (gap >= MIN_GAP_MS && gap <= MAX_GAP_MS) {
-      this.interval = this.measured ? this.interval + (gap - this.interval) * INTERVAL_WEIGHT : gap;
-      this.measured = true;
+      const stalled = this.measured && gap > this.interval * STALL_FACTOR;
+      const repeat = this.longGap !== null && Math.abs(gap - this.longGap) <= this.longGap * SAME_GAP;
+      if (!this.measured || (stalled && repeat)) {
+        // A first gap, or the second long one in a row: the source's rate
+        // itself changed, so take it whole rather than easing toward it.
+        this.interval = gap;
+        this.measured = true;
+        this.longGap = null;
+      } else if (stalled) {
+        this.longGap = gap;
+      } else {
+        this.interval += (gap - this.interval) * INTERVAL_WEIGHT;
+        this.longGap = null;
+      }
     }
     this.lastAt = now;
   }
@@ -76,6 +96,7 @@ export class RowPacer {
   clear(): void {
     this.lastAt = null;
     this.from = 1;
+    this.longGap = null;
   }
 }
 

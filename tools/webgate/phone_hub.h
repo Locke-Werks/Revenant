@@ -128,6 +128,8 @@ public:
     [[nodiscard]] PhoneStreams* streams(std::uint64_t connection) const;
     [[nodiscard]] std::string token(std::uint64_t connection) const;
     [[nodiscard]] bool holds(const std::string& token) const { return residents_.contains(token); }
+    // The cache every phone of this hub shares.
+    [[nodiscard]] const FrameLevelsCache& frame_levels() const { return *base_.frame_levels; }
 
 private:
     struct Resident {
