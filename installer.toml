@@ -131,7 +131,8 @@ fail  = "Revenant needs about 512 MB free on the install volume."
 #
 # The hook route needs a payload member that stops the product, depends on
 # nothing but the operating system and itself, and is signed before staging.
-# No such binary exists. The preflight route costs nothing to ship.
+# For the engine and the desktop no such binary exists, so the preflight route
+# it is. The phone gateway is the exception: it can stop itself, see Hooks.
 #
 # A RUNNING COPY IS A REFUSAL, NOT AN OFFER. restart_manager = true sets a
 # `recoverable` flag on the outcome and nothing in the stub reads it: there is
@@ -154,11 +155,10 @@ name            = "revenant-engine.exe"
 restart_manager = true
 fail            = "The Revenant engine is running. Close it and the install can continue."
 
-[[preflight]]
-type            = "process_not_running"
-name            = "revenant-webgate.exe"
-restart_manager = true
-fail            = "The Revenant phone gateway is running. Close it and the install can continue."
+# NO PREFLIGHT FOR THE PHONE GATEWAY: the pre_install hook below stops it.
+# It runs at every sign-in with no window, so a refusal would send everyone
+# upgrading to Task Manager. docs/config-schema.md says to pick one of the
+# preflight and the hook, because the preflight refuses before any hook runs.
 
 [[preflight]]
 type            = "process_not_running"
@@ -247,8 +247,54 @@ when       = "gateway_at_signin"
 # even additively through OpenWithProgids, puts Revenant in a list where nobody
 # asked for it.
 #
-# NO HOOKS. Nothing in this install needs code to run, and a hook can only run
-# a payload member, digest-pinned and signed before staging. The two candidates
-# are covered: stopping a running copy is the preflight above, and the RPC token
-# is created by the engine on first run under the invoking user's own
-# %LOCALAPPDATA%, which is the one place an elevated installer must not write.
+# ---------------------------------------------------------------------------
+# Hooks
+# ---------------------------------------------------------------------------
+#
+# ONE PROGRAM, TWO PHASES: STOPPING THE PHONE GATEWAY.
+#
+# `revenant-webgate.exe --stop` sets Global\Revenant-webgate-stop, which every
+# running gateway watches, and waits up to 10 s for each revenant-webgate.exe
+# on the machine to exit (tools/webgate/host.h). A gateway exiting ends any
+# engine it started, by its Job object, so the engine's files are released
+# too; an engine somebody else started is still the preflight's to refuse.
+#
+# pre_install, so it runs before any file is swapped. That phase places this
+# one binary first and runs it from the install directory, so it must load
+# nothing from the payload: dumpbin /dependents on revenant-webgate.exe, ci
+# preset, 2026-11-03, lists bcrypt, SHELL32, ADVAPI32, IPHLPAPI, WS2_32,
+# CRYPT32, MFPlat, ole32, KERNEL32 and USER32, all Windows, and the CRT and
+# OpenSSL are linked statically. On a fresh install there is nothing to stop
+# and it exits 0. On an upgrade the copy placed first is the new one, which is
+# what --stop needs: the signal is the same name in every version that has it.
+#
+# as = "installer", not "user". Gateways run in every signed-in user's
+# session, and only the elevated installer may wait on another account's
+# process. The event is Global\ with a DACL that lets Administrators set it,
+# which is what carries the signal across sessions and integrity levels.
+#
+# vital on install: a gateway still running when the files are replaced keeps
+# the old image, and its engine the old engine. Refusing is the better
+# failure; the hook's output says how many were left.
+[[hooks.pre_install]]
+id         = "stop-phone-gateway"
+run        = "payload:revenant-webgate.exe"
+args       = ["--stop"]
+sha256     = "auto"
+timeout_ms = 30000
+vital      = true
+
+# The uninstaller cannot delete an image that is running. Not vital in effect
+# (an uninstall never stops for a hook), but vital so a deployment tool sees
+# a dirty removal in the exit code.
+[[hooks.pre_uninstall]]
+id         = "stop-phone-gateway"
+run        = "payload:revenant-webgate.exe"
+args       = ["--stop"]
+sha256     = "auto"
+timeout_ms = 30000
+vital      = true
+
+# Nothing else needs code to run. The RPC token is created by the engine on
+# first run under the invoking user's own %LOCALAPPDATA%, which is the one
+# place an elevated installer must not write.
