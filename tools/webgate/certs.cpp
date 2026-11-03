@@ -5,11 +5,13 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <ctime>
 #include <format>
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <system_error>
@@ -255,6 +257,92 @@ struct CaMaterial {
     Cert crt;
 };
 
+// The private IPv4 ranges a CA may vouch for, as address and mask. The
+// gateway is IPv4 only, so no IPv6 range is permitted at all.
+struct PermittedRange {
+    std::array<unsigned char, 4> address;
+    std::array<unsigned char, 4> mask;
+};
+constexpr std::array<PermittedRange, 3> kPermittedRanges{{
+    {{10, 0, 0, 0}, {255, 0, 0, 0}},
+    {{172, 16, 0, 0}, {255, 240, 0, 0}},
+    {{192, 168, 0, 0}, {255, 255, 0, 0}},
+}};
+
+[[nodiscard]] std::string dotted(const std::array<unsigned char, 4>& bytes) {
+    return std::format("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3]);
+}
+
+// The permitted subtrees the CA carries, in the textual form constraint_set
+// reads back: "DNS:<name>" and "IP:<address>/<mask>".
+[[nodiscard]] std::vector<std::string> wanted_constraints(const std::string& hostname) {
+    std::vector<std::string> out;
+    if (!hostname.empty()) {
+        out.push_back("DNS:" + hostname);
+    }
+    out.emplace_back("DNS:local");
+    for (const auto& range : kPermittedRanges) {
+        out.push_back("IP:" + dotted(range.address) + "/" + dotted(range.mask));
+    }
+    std::ranges::sort(out);
+    return out;
+}
+
+// True for an IPv4 address inside one of the permitted ranges. Anything else
+// (a public address, CGNAT, link-local) would make the whole server
+// certificate fail the CA's name constraints, so it is left out of the SANs.
+[[nodiscard]] bool permitted_ip(const std::string& canonical) {
+    in_addr v4{};
+    if (inet_pton(AF_INET, canonical.c_str(), &v4) != 1) {
+        return false;
+    }
+    const auto* bytes = reinterpret_cast<const unsigned char*>(&v4);
+    return std::ranges::any_of(kPermittedRanges, [bytes](const PermittedRange& range) {
+        for (std::size_t i = 0; i < 4; ++i) {
+            if ((bytes[i] & range.mask[i]) != range.address[i]) {
+                return false;
+            }
+        }
+        return true;
+    });
+}
+
+// The CA's name constraints as wanted_constraints writes them, or nullopt
+// when the extension is missing, not critical, or excludes anything.
+[[nodiscard]] std::optional<std::vector<std::string>> constraint_set(X509* ca) {
+    const int index = X509_get_ext_by_NID(ca, NID_name_constraints, -1);
+    if (index < 0 || X509_EXTENSION_get_critical(X509_get_ext(ca, index)) == 0) {
+        return std::nullopt;
+    }
+    std::unique_ptr<NAME_CONSTRAINTS, decltype(&NAME_CONSTRAINTS_free)> nc(
+        static_cast<NAME_CONSTRAINTS*>(X509_get_ext_d2i(ca, NID_name_constraints, nullptr, nullptr)),
+        &NAME_CONSTRAINTS_free);
+    if (!nc || (nc->excludedSubtrees != nullptr && sk_GENERAL_SUBTREE_num(nc->excludedSubtrees) > 0)) {
+        return std::nullopt;
+    }
+    std::vector<std::string> out;
+    for (int i = 0; i < sk_GENERAL_SUBTREE_num(nc->permittedSubtrees); ++i) {
+        const GENERAL_NAME* gn = sk_GENERAL_SUBTREE_value(nc->permittedSubtrees, i)->base;
+        if (gn->type == GEN_DNS) {
+            const auto* data = ASN1_STRING_get0_data(gn->d.dNSName);
+            out.push_back("DNS:" + std::string(reinterpret_cast<const char*>(data),
+                                               static_cast<std::size_t>(
+                                                   ASN1_STRING_length(gn->d.dNSName))));
+        } else if (gn->type == GEN_IPADD && ASN1_STRING_length(gn->d.iPAddress) == 8) {
+            const auto* data = ASN1_STRING_get0_data(gn->d.iPAddress);
+            std::array<unsigned char, 4> address{};
+            std::array<unsigned char, 4> mask{};
+            std::copy_n(data, 4, address.begin());
+            std::copy_n(data + 4, 4, mask.begin());
+            out.push_back("IP:" + dotted(address) + "/" + dotted(mask));
+        } else {
+            out.emplace_back("other");
+        }
+    }
+    std::ranges::sort(out);
+    return out;
+}
+
 [[nodiscard]] Expected<CaMaterial> make_ca(const std::string& hostname) {
     auto key = new_key();
     if (!key) {
@@ -269,8 +357,15 @@ struct CaMaterial {
     if (X509_set_issuer_name(x, X509_get_subject_name(x)) != 1) {
         return ssl_fail("could not set the CA issuer");
     }
+    // Name constraints limit what a leaked ca.key can sign for: this machine,
+    // .local names and the private IPv4 ranges, nothing on the internet.
+    std::string constraints = "critical";
+    for (const std::string& subtree : wanted_constraints(hostname)) {
+        constraints += ",permitted;" + subtree;
+    }
     for (auto status : {add_extension(x, x, NID_basic_constraints, "critical,CA:TRUE"),
                         add_extension(x, x, NID_key_usage, "critical,keyCertSign,cRLSign"),
+                        add_extension(x, x, NID_name_constraints, constraints.c_str()),
                         add_extension(x, x, NID_subject_key_identifier, "hash"),
                         add_extension(x, x, NID_authority_key_identifier, "keyid:always")}) {
         if (!status) {
@@ -300,6 +395,11 @@ struct CaMaterial {
         // The gateway is IPv4 only, so an IPv6 name would be a name nothing
         // can reach, and a reissue each time the adapter's address rotates.
         if (canonical.find(':') != std::string::npos) {
+            continue;
+        }
+        // Outside the CA's name constraints the address would make a phone
+        // reject the certificate outright, not just that one name.
+        if (!permitted_ip(canonical)) {
             continue;
         }
         out.push_back(canonical);
@@ -488,7 +588,24 @@ Expected<bool> ensure_certificates(const CertPaths& paths, const HostNames& name
     // are replaced and the server certificate goes with them. Only reachable on
     // first run or after someone deleted a file by hand.
     bool ca_created = false;
-    if (!std::filesystem::exists(paths.ca_key()) || !std::filesystem::exists(paths.ca_crt())) {
+    bool replace_ca = !std::filesystem::exists(paths.ca_key()) ||
+                      !std::filesystem::exists(paths.ca_crt());
+    if (!replace_ca) {
+        // A CA from before name constraints, or constrained to another host
+        // name, is replaced. Phones that installed it have to install the
+        // new profile; that is the price of narrowing what its key can sign.
+        if (auto existing = read_cert(paths.ca_crt()); existing) {
+            if (constraint_set(existing->get()) != wanted_constraints(lower(names.hostname))) {
+                replace_ca = true;
+                std::fprintf(stderr,
+                             "revenant-webgate: replaced the local CA with one limited to this "
+                             "machine and the LAN; every phone must install the profile again "
+                             "from /ca\n");
+            }
+        }
+        ERR_clear_error();
+    }
+    if (replace_ca) {
         auto ca = make_ca(lower(names.hostname));
         if (!ca) {
             return std::unexpected(ca.error());

@@ -44,8 +44,13 @@ struct HostNames {
 // is none, when its names differ from `names`, or when it was not signed by
 // the CA now on disk. Returns true when a new server certificate was issued.
 //
-// The CA is never replaced while both its files are present: replacing it
-// would make every phone that installed the profile distrust the gateway.
+// The CA carries critical name constraints: DNS names under the host name and
+// under .local, and the private IPv4 ranges 10/8, 172.16/12 and 192.168/16.
+// Addresses outside those ranges are left out of the server certificate. The
+// CA is otherwise kept while both its files are present, since replacing it
+// makes every phone that installed the profile distrust the gateway; one
+// without those exact constraints (an older CA, or a renamed machine) is
+// replaced all the same, and the phones install the profile again.
 [[nodiscard]] Expected<bool> ensure_certificates(const CertPaths& paths, const HostNames& names);
 
 // The .mobileconfig an iPhone installs to trust ca.crt.
