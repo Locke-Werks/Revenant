@@ -495,6 +495,9 @@ void PhoneStreams::announce_state()
         sent_paced_by_ = paced_by_;
         queue_text(source_event());
     }
+    if (!sent_detections_.empty()) {
+        queue_text(sent_detections_);
+    }
     for (const auto& [vrx, poll] : rds_) {
         if (!poll.sent.empty()) {
             queue_text(poll.sent);
@@ -570,7 +573,12 @@ void PhoneStreams::refresh_detections()
         kept.resize(kMaxDetections);
         std::ranges::sort(kept, [](const auto* a, const auto* b) { return a->center_hz < b->center_hz; });
     }
-    queue_text(detections_event(kept));
+    // A quiet band repeats the same list every poll; up to 200 items of it.
+    std::string json = detections_event(kept);
+    if (json != sent_detections_) {
+        sent_detections_ = json;
+        queue_text(std::move(json));
+    }
 }
 
 void PhoneStreams::refresh_rds()
@@ -590,6 +598,20 @@ void PhoneStreams::refresh_rds()
         auto& poll = rds_[vrx];
         if (t < poll.next) {
             continue;
+        }
+        // RBDS: the owner is in North America, where PTY codes mean other
+        // genres and the call sign comes from the PI. Set before the first
+        // read, since setting it later clears what the decoder has. The
+        // receiver is this phone's, so no other client's decoder is reset.
+        if (!poll.region_set) {
+            const auto set = config_.set_rds_region
+                                 ? config_.set_rds_region(vrx, rpc::RdsRegion::Rbds)
+                                 : session_.client().set_rds_region(vrx, rpc::RdsRegion::Rbds);
+            if (!set) {
+                poll.next = t + config_.rds_retry;
+                continue;
+            }
+            poll.region_set = true;
         }
         const auto station = config_.rds_station ? config_.rds_station(vrx)
                                                  : session_.client().rds_station(vrx);

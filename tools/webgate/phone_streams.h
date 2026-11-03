@@ -146,6 +146,7 @@ struct StreamsConfig {
     // Where a WFM receiver's RDS is read. Empty reads the engine; tests
     // supply one, since a station's groups cannot be steered.
     std::function<Expected<rpc::RdsStation>(std::uint64_t)> rds_station;
+    std::function<Status(std::uint64_t, rpc::RdsRegion)> set_rds_region;
 
     // How often each WFM receiver's station is read, and how long a refusal
     // waits before the next try. The first read of a WFM receiver makes the
@@ -365,7 +366,10 @@ private:
     struct RdsPoll {
         std::chrono::steady_clock::time_point next{};
         std::string sent;
+        bool region_set = false;
     };
+    // The last detections event sent, so an unchanged list is not resent.
+    std::string sent_detections_;
     std::map<std::uint64_t, RdsPoll> rds_;
 
     // Spectrum subscription.

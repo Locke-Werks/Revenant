@@ -376,9 +376,11 @@ answer. At most 200 tracks within a view width either side of the view are
 sent, the strongest kept.
 
 In `rds`, `pi` is null until decoded, `ps` and `rt` are null until every
-segment has arrived, and `pty` is the programme type's long name. The engine's
-region is left at its default, RDS (EN 50067), so `pty` names and the call
-sign follow that table and not RBDS.
+segment has arrived, and `pty` is the programme type's long name. The gateway
+sets each phone WFM receiver to RBDS before its first read, and again when an
+engine restart recreates it, so `pty` names follow the North American table and
+`callSign` is derived from the PI. Phone receivers are not shared, so this
+resets no other client's decoder.
 
 ## Cost to the engine
 
