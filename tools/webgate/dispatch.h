@@ -33,10 +33,22 @@
 #include <string>
 #include <string_view>
 
+#include "core/rpc/types.h"
 #include "tools/webgate/protocol.h"
 #include "tools/webgate/session.h"
 
 namespace revenant::webgate {
+
+// The "transcriptionStatus" event for the engine's speech state. Its fields
+// are those of the setTranscription result.
+[[nodiscard]] std::string transcription_status_event(const rpc::TranscriptionStatus& status);
+
+// Whether now differs from sent enough to send another event: the switch, the
+// model state, its name, the detail sentence, or the download by a whole
+// percent. Receiver counts and the transcribed tally move constantly and do
+// not count.
+[[nodiscard]] bool transcription_report_due(const rpc::TranscriptionStatus& sent,
+                                            const rpc::TranscriptionStatus& now);
 
 // One reply line (ok_reply or error_reply) for a parsed command. Engine error
 // text goes back verbatim. Bad arguments are refused with a sentence naming

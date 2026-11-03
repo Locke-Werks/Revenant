@@ -221,6 +221,7 @@ void PhoneStreams::start()
     static_cast<void>(transcripts);
 
     refresh_source();
+    refresh_transcription();
 }
 
 void PhoneStreams::subscribe_vrx_events()
@@ -270,6 +271,10 @@ void PhoneStreams::on_text(std::string_view text)
     if (command->op == "openSource" || command->op == "setCenter") {
         refresh_source();
     }
+    if (command->op == "setTranscription") {
+        // After the reply, so the phone sees its own answer first.
+        refresh_transcription();
+    }
     reconcile();
 }
 
@@ -299,6 +304,7 @@ void PhoneStreams::tick()
     const auto t = now();
     if (!last_refresh_ || t - *last_refresh_ >= kSourcePollInterval) {
         refresh_source();
+        refresh_transcription();
     }
 
     bool dropped = false;
@@ -343,6 +349,10 @@ void PhoneStreams::announce_state()
         sent_paced_by_ = paced_by_;
         queue_text(source_event());
     }
+    if (transcription_) {
+        sent_transcription_ = transcription_;
+        queue_text(transcription_status_event(*transcription_));
+    }
     if (announced_hls_) {
         if (const auto it = hls_.find(*announced_hls_);
             it != hls_.end() && it->second.segmenter && !it->second.ends_at) {
@@ -351,6 +361,22 @@ void PhoneStreams::announce_state()
                                         .add_string("url", hls_url(*announced_hls_))));
         }
     }
+}
+
+void PhoneStreams::refresh_transcription()
+{
+    const auto status = config_.transcription_status ? config_.transcription_status()
+                                                     : session_.client().transcription_status();
+    if (!status) {
+        // An engine without a recogniser refuses, and says nothing is the answer.
+        return;
+    }
+    transcription_ = *status;
+    if (sent_transcription_ && !transcription_report_due(*sent_transcription_, *status)) {
+        return;
+    }
+    sent_transcription_ = *status;
+    queue_text(transcription_status_event(*status));
 }
 
 void PhoneStreams::refresh_source()

@@ -399,6 +399,34 @@ TEST_CASE("openSource switches from an open source", "[gpu][webgate][dispatch]")
     CHECK(info->source_rate == 1'200'000);
 }
 
+TEST_CASE("a speech status is worth an event for the switch, the model, the sentence and whole percents",
+          "[webgate][dispatch]")
+{
+    revenant::rpc::TranscriptionStatus a;
+    a.enabled = true;
+    a.model_state = revenant::rpc::TranscriptionModelState::Downloading;
+    a.bytes_total = 200;
+    a.bytes_done = 20;
+    auto b = a;
+    CHECK_FALSE(revenant::webgate::transcription_report_due(a, b));
+    b.bytes_done = 21;  // 10.5%, still 10
+    b.transcribed = 9;
+    b.queued = 2;
+    CHECK_FALSE(revenant::webgate::transcription_report_due(a, b));
+    b.bytes_done = 22;  // 11%
+    CHECK(revenant::webgate::transcription_report_due(a, b));
+    b = a;
+    b.enabled = false;
+    CHECK(revenant::webgate::transcription_report_due(a, b));
+    b = a;
+    b.model_state = revenant::rpc::TranscriptionModelState::Verifying;
+    CHECK(revenant::webgate::transcription_report_due(a, b));
+    b = a;
+    b.detail = "why";
+    CHECK(revenant::webgate::transcription_report_due(a, b));
+    CHECK(revenant::webgate::transcription_status_event(a).rfind(R"({"event":"transcriptionStatus",)", 0) == 0);
+}
+
 TEST_CASE("setTranscription flips the engine's switch", "[gpu][webgate][dispatch]")
 {
     REVENANT_NEEDS_GPU();

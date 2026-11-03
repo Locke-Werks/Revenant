@@ -58,6 +58,8 @@ struct Rig {
     Clock::time_point fake_now = Clock::now();
     bool use_fake_clock = false;
     std::size_t max_queued_text = 2000;
+    // Stands in for the engine's speech status when set.
+    std::function<revenant::Expected<revenant::rpc::TranscriptionStatus>()> speech;
     std::unique_ptr<PhoneSession> session;
     std::unique_ptr<PhoneStreams> streams;
 
@@ -80,6 +82,7 @@ struct Rig {
             config.clock = [this] { return fake_now; };
         }
         config.max_queued_text = max_queued_text;
+        config.transcription_status = speech;
         streams = std::make_unique<PhoneStreams>(*session, &socket, strand, config);
         streams->start();
         strand.run_pending();
@@ -357,6 +360,93 @@ TEST_CASE("the source event carries the engine's realtime factor", "[gpu][webgat
     CHECK(last != first);
     CHECK(contains(last, R"("realtimeFactor":)"));
     CHECK_FALSE(contains(last, R"("realtimeFactor":0,)"));
+}
+
+[[nodiscard]] std::size_t count_events(const FakeSocket& socket, std::string_view name)
+{
+    const std::string needle = "\"event\":\"" + std::string(name) + "\"";
+    return static_cast<std::size_t>(std::count_if(socket.sent.begin(), socket.sent.end(), [&](const auto& m) {
+        return m.kind == Kind::Text && contains(m.text, needle);
+    }));
+}
+
+TEST_CASE("transcriptionStatus goes out on connect, on change, and not otherwise",
+          "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.use_fake_clock = true;
+    revenant::rpc::TranscriptionStatus speech;
+    speech.enabled = true;
+    speech.model_state = revenant::rpc::TranscriptionModelState::Downloading;
+    speech.model_name = "base.en";
+    speech.bytes_total = 1000;
+    speech.bytes_done = 100;
+    rig.speech = [&speech] { return revenant::Expected<revenant::rpc::TranscriptionStatus>(speech); };
+    rig.open(still_engine());
+    rig.attach();
+
+    // Connecting sends the state once, with the download at 10%.
+    REQUIRE(count_events(rig.socket, "transcriptionStatus") == 1);
+    const auto first = std::find_if(rig.socket.sent.begin(), rig.socket.sent.end(), [](const auto& m) {
+        return m.kind == Kind::Text && contains(m.text, R"("event":"transcriptionStatus")");
+    });
+    REQUIRE(first != rig.socket.sent.end());
+    CHECK(contains(first->text, R"("modelState":"downloading")"));
+    CHECK(contains(first->text, R"("bytesDone":100)"));
+
+    auto poll = [&] {
+        rig.fake_now += std::chrono::seconds(2);
+        rig.streams->tick();
+        rig.strand.run_pending();
+    };
+
+    SECTION("nothing changed sends nothing")
+    {
+        poll();
+        poll();
+        CHECK(count_events(rig.socket, "transcriptionStatus") == 1);
+    }
+    SECTION("counters and a sub-percent download move send nothing")
+    {
+        speech.bytes_done = 105;
+        speech.transcribed = 40;
+        speech.queued = 3;
+        poll();
+        CHECK(count_events(rig.socket, "transcriptionStatus") == 1);
+    }
+    SECTION("a whole percent, the state or a detail sentence sends one")
+    {
+        speech.bytes_done = 300;
+        poll();
+        CHECK(count_events(rig.socket, "transcriptionStatus") == 2);
+        speech.model_state = revenant::rpc::TranscriptionModelState::Failed;
+        speech.detail = "checksum did not match";
+        poll();
+        CHECK(count_events(rig.socket, "transcriptionStatus") == 3);
+        poll();
+        CHECK(count_events(rig.socket, "transcriptionStatus") == 3);
+        CHECK(contains(rig.socket.sent.back().text, "checksum did not match"));
+    }
+    SECTION("a resumed socket is told the current state again")
+    {
+        rig.streams->announce_state();
+        rig.strand.run_pending();
+        CHECK(count_events(rig.socket, "transcriptionStatus") == 2);
+    }
+    SECTION("an engine that cannot transcribe sends nothing")
+    {
+        rig.speech = nullptr;
+        rig.streams.reset();
+        rig.session.reset();
+        rig.socket.sent.clear();
+        speech.enabled = false;
+        rig.speech = [] {
+            return revenant::Expected<revenant::rpc::TranscriptionStatus>(revenant::fail("no recogniser"));
+        };
+        rig.attach();
+        CHECK(count_events(rig.socket, "transcriptionStatus") == 0);
+    }
 }
 
 TEST_CASE("slow socket drops oldest Opus", "[gpu][webgate][streams]")

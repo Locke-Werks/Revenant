@@ -129,6 +129,10 @@ struct StreamsConfig {
     // with their own.
     std::function<std::chrono::steady_clock::time_point()> clock;
 
+    // Where the speech status is read each poll. Empty reads the engine; tests
+    // supply one, since a real engine's model state cannot be steered.
+    std::function<Expected<rpc::TranscriptionStatus>()> transcription_status;
+
     // How long a segmenter outlives keepListening going off, so a quick lock
     // and unlock does not rebuild the stream.
     std::chrono::milliseconds hls_linger{30'000};
@@ -251,6 +255,9 @@ private:
         const rpc::SpectrumFrame& frame) const;
 
     void refresh_source();
+    // Sends a transcriptionStatus event when the engine's speech state has
+    // changed since the last one, and the first time it is read.
+    void refresh_transcription();
     [[nodiscard]] std::string source_event() const;
     void subscribe_spectrum(std::uint32_t every_nth);
     void settle_every_nth(const rpc::SpectrumFrame& frame);
@@ -294,6 +301,9 @@ private:
     double sent_paced_by_ = 0.0;
     bool spectrum_enabled_ = false;
     std::optional<std::chrono::steady_clock::time_point> last_refresh_;
+    // The speech state at the last read, and at the last event sent.
+    std::optional<rpc::TranscriptionStatus> transcription_;
+    std::optional<rpc::TranscriptionStatus> sent_transcription_;
 
     // Spectrum subscription.
     bool spectrum_subscribed_ = false;

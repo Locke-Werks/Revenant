@@ -194,7 +194,7 @@ constexpr ModeName kModes[] = {
     return out.str();
 }
 
-[[nodiscard]] std::string transcription_json(const rpc::TranscriptionStatus& status)
+[[nodiscard]] JsonObject transcription_fields(const rpc::TranscriptionStatus& status)
 {
     JsonObject out;
     out.add_bool("enabled", status.enabled)
@@ -208,7 +208,12 @@ constexpr ModeName kModes[] = {
         .add_u64("queued", status.queued)
         .add_u64("transcribed", status.transcribed)
         .add_u64("dropped", status.dropped);
-    return out.str();
+    return out;
+}
+
+[[nodiscard]] std::string transcription_json(const rpc::TranscriptionStatus& status)
+{
+    return transcription_fields(status).str();
 }
 
 // The receiver as the engine reports it, or, when that read fails after the
@@ -706,6 +711,21 @@ template <class Edit>
 }
 
 }  // namespace
+
+std::string transcription_status_event(const rpc::TranscriptionStatus& status)
+{
+    return event("transcriptionStatus", transcription_fields(status));
+}
+
+bool transcription_report_due(const rpc::TranscriptionStatus& sent, const rpc::TranscriptionStatus& now)
+{
+    const auto percent = [](const rpc::TranscriptionStatus& s) -> std::uint64_t {
+        return s.bytes_total == 0 ? 0 : std::min<std::uint64_t>(100, s.bytes_done * 100 / s.bytes_total);
+    };
+    return sent.enabled != now.enabled || sent.model_state != now.model_state ||
+           sent.model_name != now.model_name || sent.detail != now.detail ||
+           percent(sent) != percent(now);
+}
 
 std::string dispatch(PhoneSession& session, const Command& command)
 {

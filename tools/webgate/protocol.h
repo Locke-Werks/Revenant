@@ -80,6 +80,14 @@ inline constexpr std::string_view kOps[] = {
 // kRealtimeReportStep or more changes, so a source falling behind real time
 // reaches the phone within the one second poll. SourceEvent in
 // web/src/protocol.ts is the phone's copy.
+//
+// "transcriptionStatus" is the engine's speech state, the fields of the
+// setTranscription result: {enabled, modelState, modelName, bytesDone,
+// bytesTotal, detail, backend, receivers, queued, transcribed, dropped}. It is
+// sent on connect and on resume, and when the switch, the model state, its
+// name or the detail change or the download moves a whole percent (the one
+// second poll, transcription_report_due in dispatch.h). Counters alone do not
+// send one.
 inline constexpr std::string_view kEvents[] = {
     "vrxStatus", "decoded", "transcript", "transcriptionStatus",
     "source",    "link",    "vrxRemoved", "hls",
