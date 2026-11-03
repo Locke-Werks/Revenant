@@ -242,6 +242,33 @@ try {
     Get-Content -LiteralPath $clientOut -ErrorAction SilentlyContinue
     "client exited $clientExit; stats in $stats"
 
+    # A phone that dropped part way through measured nothing for the rest of
+    # the run, so a -Phone run without one connected throughout is a failure.
+    $phoneFailed = $false
+    if ($Phone) {
+        $simProcess.WaitForExit(15000) | Out-Null
+        $sim = if (Test-Path -LiteralPath $simJson) {
+            Get-Content -LiteralPath $simJson -Raw | ConvertFrom-Json
+        }
+        if (-not $sim) {
+            Write-Warning "the simulated phone wrote no results to $simJson; see $(Join-Path $Work 'phone-sim.err')"
+            $phoneFailed = $true
+        }
+        else {
+            ('phone: {0} spectrum rows ({1:N0} bytes), {2} Opus packets ({3:N0} bytes), {4} pings, vrx {5}' -f
+                $sim.spectrumFrames, $sim.spectrumBytes, $sim.opusPackets, $sim.opusBytes, $sim.pings, $sim.vrx)
+            if ($sim.errors.Count -gt 0 -or -not $simProcess.HasExited -or $simProcess.ExitCode -ne 0) {
+                Write-Warning ("the simulated phone disconnected or failed, so this run does not measure " +
+                    "a connected phone: $($sim.errors -join '; ')")
+                $phoneFailed = $true
+            }
+            elseif ($sim.spectrumFrames -eq 0 -or $sim.opusPackets -eq 0) {
+                Write-Warning 'the simulated phone received no spectrum rows or no Opus audio'
+                $phoneFailed = $true
+            }
+        }
+    }
+
     # A window DWM is not composing is not paced by the display at all, and
     # Windows 11 then serves the client's timers at the 15.6 ms tick, so it
     # runs at about 64 frames a second whatever the client does. Seen on
@@ -259,6 +286,9 @@ try {
     }
     if ($clientExit -ne 0) {
         exit $clientExit
+    }
+    if ($phoneFailed) {
+        exit 1
     }
 }
 finally {
