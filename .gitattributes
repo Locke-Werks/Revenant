@@ -26,3 +26,6 @@
 *.cs8  binary
 *.cu8  binary
 *.sigmf-data binary
+*.opus binary
+# Vendored as published and pinned by SHA-256 in web/vendor/README.md.
+web/static/vendor/** binary

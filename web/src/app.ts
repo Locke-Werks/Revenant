@@ -1,6 +1,7 @@
 // The running app: the link to the gateway, the view, and the waterfall it
 // drives. Receivers (Task 16) hang off the handle this returns.
 
+import { browserLiveAudioDeps, LiveAudio } from "./audio/live";
 import { attachGestures } from "./gestures";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
 import { SpectrumTrace } from "./spectrum_trace";
@@ -17,6 +18,7 @@ export function appScreenHtml(): string {
 
 export interface AppHandle {
   link: Link;
+  audio: LiveAudio;
   view(): View | null;
   // Replaced by the receiver UI; logging until then.
   onTap: (hz: number) => void;
@@ -118,10 +120,33 @@ export function mountApp(root: HTMLElement): AppHandle {
   };
   watchDpr();
 
+  const audio = new LiveAudio(browserLiveAudioDeps(link));
+
+  // Temporary until the receiver UI (Task 16): a tap listens there in NFM,
+  // adding one receiver the first time and retuning it after. The context is
+  // unlocked in the tap itself, since iOS refuses it once addVrx has awaited.
+  let listenVrx: number | null = null;
+  const listenAt = (hz: number) => {
+    void audio.unlock();
+    const hzInt = Math.round(hz);
+    const go = async () => {
+      if (listenVrx !== null && audio.vrx === listenVrx) {
+        await link.request("tune", { vrx: listenVrx, hz: hzInt });
+        return;
+      }
+      const r = (await link.request("addVrx", { hz: hzInt, mode: "nfm" })) as { vrx?: unknown };
+      if (typeof r.vrx !== "number") throw new Error("addVrx: no vrx in the reply");
+      listenVrx = r.vrx;
+      await audio.start(r.vrx);
+    };
+    go().catch((e: unknown) => console.warn("listen", e));
+  };
+
   const handle: AppHandle = {
     link,
+    audio,
     view: () => view,
-    onTap: (hz) => console.log("tap", Math.round(hz)),
+    onTap: listenAt,
     onLongPress: (hz) => console.log("long press", Math.round(hz)),
   };
 

@@ -4,6 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <numbers>
@@ -171,4 +175,68 @@ TEST_CASE("Opus caps an undrained queue at 250 packets", "[webgate][opus]") {
     CHECK((*enc)->take_packets().empty());
     // Overflow is loss, not an encoder fault.
     CHECK((*enc)->ok());
+}
+
+// ---- Web decoder fixture ----------------------------------------------------
+//
+// web/test/fixtures/tone1k.opus holds packets from LiveOpusEncoder for a 1 kHz
+// tone, each as a little-endian u16 length then the packet. The phone's
+// vendored WASM decoder is tested against it under node, which is how the web
+// side proves it understands what this encoder sends. Opus output is not
+// guaranteed bit-identical across builds, so the file is checked for what the
+// web test relies on rather than compared byte for byte.
+
+namespace {
+
+const std::filesystem::path kWebFixture =
+    std::filesystem::path(REVENANT_SOURCE_DIR) / "web" / "test" / "fixtures" / "tone1k.opus";
+
+std::vector<std::vector<std::uint8_t>> read_fixture(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    REQUIRE(f.good());
+    const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(f),
+                                          std::istreambuf_iterator<char>()};
+    std::vector<std::vector<std::uint8_t>> packets;
+    std::size_t at = 0;
+    while (at + 2 <= bytes.size()) {
+        const std::size_t len = bytes[at] | (static_cast<std::size_t>(bytes[at + 1]) << 8);
+        at += 2;
+        REQUIRE(at + len <= bytes.size());
+        packets.emplace_back(bytes.begin() + static_cast<std::ptrdiff_t>(at),
+                             bytes.begin() + static_cast<std::ptrdiff_t>(at + len));
+        at += len;
+    }
+    CHECK(at == bytes.size());
+    return packets;
+}
+
+}  // namespace
+
+// Hidden: run by hand (test_webgate "[write-fixture]") to regenerate the file.
+TEST_CASE("Opus writes the web decoder fixture", "[.][write-fixture]") {
+    auto enc = wg::LiveOpusEncoder::create(48000);
+    REQUIRE(enc.has_value());
+    // 400 ms: twenty packets.
+    (*enc)->push(tone(20 * 960));
+    const auto packets = (*enc)->take_packets();
+    REQUIRE(packets.size() == 20);
+    std::ofstream f(kWebFixture, std::ios::binary | std::ios::trunc);
+    REQUIRE(f.good());
+    for (const auto& p : packets) {
+        const char len[2] = {static_cast<char>(p.size() & 0xff),
+                             static_cast<char>((p.size() >> 8) & 0xff)};
+        f.write(len, 2);
+        f.write(reinterpret_cast<const char*>(p.data()), static_cast<std::streamsize>(p.size()));
+    }
+    REQUIRE(f.good());
+}
+
+TEST_CASE("Opus web decoder fixture decodes with libopus", "[webgate][opus]") {
+    const auto packets = read_fixture(kWebFixture);
+    REQUIRE(packets.size() == 20);
+    const auto out = decode_all(packets);
+    // 0.5 amplitude sine is 0.354 RMS; skip the codec's start-up packets.
+    const double r = rms(out, 4 * 960, out.size());
+    CHECK(r > 0.25);
+    CHECK(r < 0.45);
 }

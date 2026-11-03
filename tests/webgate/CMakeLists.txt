@@ -22,6 +22,8 @@ target_link_libraries(test_webgate PRIVATE
 )
 
 target_include_directories(test_webgate PRIVATE "${CMAKE_SOURCE_DIR}")
+# The Opus fixture the web app's decoder test reads lives in the source tree.
+target_compile_definitions(test_webgate PRIVATE REVENANT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 revenant_apply_warnings(test_webgate)
 
 # Plain discovery, not revenant_discover_tests: nothing here opens the dongle,

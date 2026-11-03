@@ -14,7 +14,9 @@ mkdirSync(dist, { recursive: true });
 cpSync("static", dist, { recursive: true });
 
 await build({
-  entryPoints: { app: "src/main.ts" },
+  // The worklet is loaded by URL into the audio thread's own scope, so it is
+  // a bundle of its own rather than part of app.js.
+  entryPoints: { app: "src/main.ts", worklet: "src/audio/worklet.ts" },
   outdir: dist,
   bundle: true,
   format: "iife",
