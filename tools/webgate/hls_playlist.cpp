@@ -13,6 +13,7 @@ namespace {
 
 constexpr std::uint32_t kFrameSamples = 1024;
 constexpr std::uint32_t kBitrate = 64000;
+constexpr std::size_t kMinPlaylistSegments = 3;
 
 using Bytes = std::vector<std::uint8_t>;
 
@@ -249,12 +250,16 @@ HlsSegmenter::HlsSegmenter(std::uint32_t sample_rate, double segment_seconds, st
 HlsSegmenter::~HlsSegmenter() = default;
 
 void HlsSegmenter::push(std::span<const float> samples) {
-    if (!encoder_) {
+    if (!encoder_ || failed_) {
         return;
     }
-    if (!encoder_->push(samples)) {
-        // The encoder failing mid-stream is a codec fault with no recovery; the
-        // stream stalls and the client's player gives up on its own.
+    auto status = push_override_ ? push_override_(samples) : encoder_->push(samples);
+    if (!status) {
+        // A codec fault has no recovery. Record why, flip ok(), and stop
+        // feeding it; segments already cut stay readable until the owner
+        // notices and drops the stream.
+        failed_ = true;
+        error_ = status.error().message;
         return;
     }
     for (auto& unit : encoder_->take_access_units()) {
@@ -336,7 +341,10 @@ std::optional<std::span<const std::uint8_t>> HlsSegmenter::segment(std::uint64_t
 }
 
 std::string HlsSegmenter::playlist() const {
-    if (segments_.empty()) {
+    // Safari starts about three target durations behind the live edge, so a
+    // shorter playlist makes it stall or start at the wrong point. Never ask
+    // for more than the window can hold.
+    if (segments_.size() < std::min<std::size_t>(kMinPlaylistSegments, window_)) {
         return {};
     }
     // The target duration is the longest segment rounded to a whole second,

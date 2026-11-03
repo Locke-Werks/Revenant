@@ -108,7 +108,6 @@ TEST_CASE("AAC encoder accepts the engine's chunk sizes", "[webgate][hls]") {
     // 93.75 frames of input. The MFT holds back about two frames of lookahead
     // and the last 0.75 of a frame is incomplete, so the steady-state count is
     // 91; the brief's tolerance of 2 is one frame too tight for that.
-    CHECK(units >= 91);
     CHECK(std::abs(static_cast<double>(units) - expected) <= 3.0);
 }
 
@@ -275,4 +274,34 @@ TEST_CASE("write HLS output to disk", "[.hls_dump]") {
             write(root / (std::to_string(seq) + ".m4s"), *media);
         }
     }
+}
+
+TEST_CASE("the playlist is withheld until three segments exist", "[webgate][hls]") {
+    HlsSegmenter segmenter(kRate);
+    REQUIRE(segmenter.ok());
+    push_seconds(segmenter, 2.0);
+    CHECK(segmenter.playlist().empty());
+    // The segments themselves are already fetchable by number.
+    CHECK(segmenter.segment(0).has_value());
+    push_seconds(segmenter, 2.0);
+    CHECK_FALSE(segmenter.playlist().empty());
+}
+
+TEST_CASE("a push failure mid-stream marks the segmenter failed", "[webgate][hls]") {
+    HlsSegmenter segmenter(kRate);
+    REQUIRE(segmenter.ok());
+    push_seconds(segmenter, 4.0);
+    REQUIRE_FALSE(segmenter.playlist().empty());
+    const std::string before = segmenter.playlist();
+
+    int calls = 0;
+    segmenter.set_push_override_for_test([&](std::span<const float>) -> revenant::Status {
+        ++calls;
+        return revenant::fail("encoder fell over");
+    });
+    push_seconds(segmenter, 1.0);
+    CHECK_FALSE(segmenter.ok());
+    CHECK(segmenter.error() == "encoder fell over");
+    CHECK(calls == 1);  // nothing is fed after the first failure
+    CHECK(segmenter.playlist() == before);
 }

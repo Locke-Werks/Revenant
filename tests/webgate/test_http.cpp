@@ -223,7 +223,7 @@ TEST_CASE("destroying the server with connections open is safe", "[webgate][http
     SUCCEED("server destroyed with a keep-alive connection and a pending handshake");
 }
 
-TEST_CASE("/ws refuses a foreign Origin", "[webgate][http]") {
+TEST_CASE("the ws endpoint refuses a foreign Origin", "[webgate][http]") {
     Fixture fixture;
     kj::AsyncIoContext io = kj::setupAsyncIo();
     HttpServer server(io, fixture.config());

@@ -61,7 +61,7 @@ private:
 
 }  // namespace
 
-TEST_CASE(".. cannot escape the root", "[webgate][static]") {
+TEST_CASE("dot-dot cannot escape the root", "[webgate][static]") {
     WebRoot web;
     CHECK(serve_static(web.root(), "/../secret").status == 404);
     CHECK(serve_static(web.root(), "/%2e%2e/secret").status == 404);

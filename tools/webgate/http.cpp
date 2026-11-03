@@ -177,7 +177,7 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
                                std::move(text), "no-cache");
             }
             if (name == "init.mp4") {
-                if (!segmenter->ok()) {
+                if (segmenter->init_segment().empty()) {
                     return not_found();
                 }
                 const auto init = segmenter->init_segment();
