@@ -85,3 +85,35 @@ button {
   margin-top: 8px;
   -webkit-tap-highlight-color: transparent;
 }
+
+/* TEMPORARY keep-listening controls for the Task 15 phone check; Task 16
+   replaces them. Overlaid at the bottom so the waterfall keeps its size. */
+.kl {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  pointer-events: none;
+}
+.kl > * { pointer-events: auto; }
+.kl-toggle, .kl-golive {
+  font: inherit;
+  color: var(--fg);
+  background: #2a2a30;
+  border: 1px solid var(--muted);
+  border-radius: 16px;
+  padding: 6px 12px;
+}
+.kl-toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); }
+.kl-golive { background: var(--accent); border-color: var(--accent); }
+.kl-behind, .kl-msg {
+  font-size: 0.85rem;
+  background: rgba(20, 20, 24, 0.85);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.kl-msg { color: #fff0a0; }

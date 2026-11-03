@@ -1,24 +1,37 @@
 // The running app: the link to the gateway, the view, and the waterfall it
 // drives. Receivers (Task 16) hang off the handle this returns.
 
+import { HlsPlayer, silentWavUrl } from "./audio/hls_player";
+import { browserMediaSession, KeepListening } from "./audio/keep_listening";
 import { browserLiveAudioDeps, LiveAudio } from "./audio/live";
 import { attachGestures } from "./gestures";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
 import { SpectrumTrace } from "./spectrum_trace";
 import { clampView, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
 import { createWaterfall } from "./waterfall";
+import type { JsonValue } from "./protocol";
 
 export function appScreenHtml(): string {
   return `
 <main class="wf">
   <canvas id="trace" class="wf-trace"></canvas>
   <div id="wf-body" class="wf-body"><canvas id="waterfall" class="wf-canvas"></canvas></div>
+  <!-- TEMPORARY, replaced by Task 16's controls: keep listening, its banner,
+       the Go live pill and a message line, for the phone check. -->
+  <div class="kl">
+    <button id="kl-toggle" class="kl-toggle" type="button" aria-pressed="false">Keep listening</button>
+    <div id="kl-behind" class="kl-behind" hidden>Background audio, about 3 s behind</div>
+    <button id="kl-golive" class="kl-golive" type="button" hidden>Go live</button>
+    <div id="kl-msg" class="kl-msg" role="status" hidden></div>
+  </div>
+  <audio id="kl-audio" playsinline preload="none"></audio>
 </main>`;
 }
 
 export interface AppHandle {
   link: Link;
   audio: LiveAudio;
+  keep: KeepListening;
   view(): View | null;
   // Replaced by the receiver UI; logging until then.
   onTap: (hz: number) => void;
@@ -122,22 +135,67 @@ export function mountApp(root: HTMLElement): AppHandle {
 
   const audio = new LiveAudio(browserLiveAudioDeps(link));
 
+  const hlsMedia = root.querySelector<HTMLAudioElement>("#kl-audio")!;
+  const hls = new HlsPlayer({
+    media: hlsMedia,
+    probe: (url) => fetch(url, { cache: "no-store" }).then((r) => r.ok),
+    setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+    clearTimeout: (h) => window.clearTimeout(h as number),
+    silence: silentWavUrl(),
+  });
+  // TEMPORARY elements, see appScreenHtml.
+  const klToggle = root.querySelector<HTMLButtonElement>("#kl-toggle")!;
+  const klBehind = root.querySelector<HTMLElement>("#kl-behind")!;
+  const klGoLive = root.querySelector<HTMLButtonElement>("#kl-golive")!;
+  const klMsg = root.querySelector<HTMLElement>("#kl-msg")!;
+  const keep = new KeepListening({
+    link,
+    live: audio,
+    hls,
+    ui: {
+      behind: (show) => void (klBehind.hidden = !show),
+      goLive: (show) => void (klGoLive.hidden = !show),
+      message: (text) => {
+        klMsg.hidden = text === null;
+        klMsg.textContent = text ?? "";
+      },
+      keep: (on) => klToggle.setAttribute("aria-pressed", String(on)),
+    },
+    media: browserMediaSession(),
+    hidden: () => document.hidden,
+    setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+    clearTimeout: (h) => window.clearTimeout(h as number),
+  });
+  // Both are user gestures iOS needs: the toggle plays the HLS element, the
+  // pill resumes the AudioContext.
+  klToggle.addEventListener("click", () => {
+    if (keep.handoff.keepListening) keep.off();
+    else keep.on();
+  });
+  klGoLive.addEventListener("click", () => keep.goLive());
+  document.addEventListener("visibilitychange", () => keep.visibility(document.hidden));
+
   // TEMPORARY, removed by Task 16's receiver UI: a tap listens there in NFM,
   // adding one receiver the first time and retuning it after. It tunes
   // whatever audio.vrx is now, so a receiver the gateway recreated under a
   // new id is followed rather than leaked by adding another. The context is
   // unlocked in the tap itself, since iOS refuses it once addVrx has awaited.
+  const nowPlaying = (reply: JsonValue) => {
+    const r = reply as { hz?: unknown; mode?: unknown } | null;
+    if (r && typeof r.hz === "number" && typeof r.mode === "string") keep.setNowPlaying({ hz: r.hz, mode: r.mode });
+  };
   const listenAt = (hz: number) => {
     void audio.unlock();
     const hzInt = Math.round(hz);
     const go = async () => {
       const playing = audio.vrx;
       if (playing !== null) {
-        await link.request("tune", { vrx: playing, hz: hzInt });
+        nowPlaying(await link.request("tune", { vrx: playing, hz: hzInt }));
         return;
       }
       const r = (await link.request("addVrx", { hz: hzInt, mode: "nfm" })) as { vrx?: unknown };
       if (typeof r.vrx !== "number") throw new Error("addVrx: no vrx in the reply");
+      nowPlaying(r as JsonValue);
       await audio.start(r.vrx);
     };
     go().catch((e: unknown) => console.warn("listen", e));
@@ -146,6 +204,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   const handle: AppHandle = {
     link,
     audio,
+    keep,
     view: () => view,
     onTap: listenAt,
     onLongPress: (hz) => console.log("long press", Math.round(hz)),

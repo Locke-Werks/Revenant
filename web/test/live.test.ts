@@ -57,6 +57,10 @@ class FakeSink implements AudioSink {
   reset(): void {
     this.resets++;
   }
+  gains: [number, number][] = [];
+  gain(value: number, rampMs: number): void {
+    this.gains.push([value, rampMs]);
+  }
   onState(fn: (s: WorkletState) => void): void {
     this.fn = fn;
   }
@@ -275,4 +279,37 @@ test("live: retarget flushes the buffer and resets the decoder", async () => {
   assert.equal(decoderResets(), 1);
   link.emit("opus", frame(12, 0));
   assert.deepEqual(sink.pushed, [900, 0]);
+});
+
+test("live: hold drops frames and keeps the gateway's audio selection", async () => {
+  const { audio, link, sink, frame } = setup();
+  await audio.start(7);
+  const resets = sink.resets;
+  audio.hold();
+  assert.ok(sink.resets > resets, "held audio starts from an empty buffer later");
+  link.emit("opus", frame(7, 1));
+  assert.deepEqual(sink.pushed, []);
+  // HLS is encoded from this selection: an audio off would end it.
+  assert.deepEqual(link.requests.map((r) => r.args), [{ vrx: 7, on: true }]);
+  assert.equal(audio.vrx, 7);
+});
+
+test("live: release fills muted and fadeIn ramps it up", async () => {
+  const { audio, link, sink, frame } = setup();
+  await audio.start(7);
+  audio.hold();
+  audio.release();
+  assert.deepEqual(sink.gains, [[0, 0]]);
+  link.emit("opus", frame(7, 1));
+  assert.deepEqual(sink.pushed, [1]);
+  audio.fadeIn(40);
+  assert.deepEqual(sink.gains, [[0, 0], [1, 40]]);
+});
+
+test("live: a level set before the sink exists is applied when it arrives", async () => {
+  const { audio, sink } = setup();
+  audio.hold();
+  audio.release();
+  await audio.start(7);
+  assert.deepEqual(sink.gains, [[0, 0]]);
 });

@@ -35,6 +35,8 @@ export interface AudioSink {
   push(seq: number, pcm: Float32Array): void;
   reset(): void;
   onState(fn: (s: WorkletState) => void): void;
+  // Output level, ramped linearly over rampMs from wherever it is now.
+  gain(value: number, rampMs: number): void;
 }
 
 export interface LiveAudioDeps {
@@ -70,6 +72,11 @@ export class LiveAudio {
   private decodedVrx: number | null = null;
   // What the caller last asked for: start's vrx, or null after stop.
   private wanted: number | null = null;
+  // Keep listening has HLS playing instead: frames are dropped, but the
+  // gateway's audio selection stays, because HLS follows it.
+  private held = false;
+  // Output level wanted, applied when the sink exists.
+  private level = 1;
 
   constructor(private readonly deps: LiveAudioDeps) {
     deps.link.on("opus", (f) => this.onOpus(f));
@@ -111,6 +118,7 @@ export class LiveAudio {
     }
     this.sinkP ??= this.deps.sink(ctx).then((s) => {
       s.onState((st) => (this.worklet = st));
+      if (this.level !== 1) s.gain(this.level, 0);
       return (this.sink = s);
     });
     this.decoderP ??= this.deps.decoder().then((d) => (this.decoder = d));
@@ -171,6 +179,28 @@ export class LiveAudio {
     return ctx.state === "running";
   }
 
+  // Stops playing live without giving up the receiver: keep listening's HLS
+  // is encoded from the same selection, so an audio off would end it.
+  hold(): void {
+    this.held = true;
+    this.flush();
+  }
+
+  // Takes frames again after hold(), muted, so the buffer can fill while HLS
+  // is still the one heard. fadeIn() makes it audible.
+  release(): void {
+    this.held = false;
+    this.setLevel(0, 0);
+  }
+
+  get holding(): boolean {
+    return this.held;
+  }
+
+  fadeIn(ms: number): void {
+    this.setLevel(1, ms);
+  }
+
   // The gateway moved the audio selection to a new id (setMode, setBandwidth,
   // or an engine restart); the stream carries on under it.
   // The new receiver's stream starts again from seq 0 and is a separate
@@ -197,6 +227,11 @@ export class LiveAudio {
     return this.ctx;
   }
 
+  private setLevel(value: number, rampMs: number): void {
+    this.level = value;
+    this.sink?.gain(value, rampMs);
+  }
+
   private clear(): void {
     this.active = null;
     this.flush();
@@ -208,6 +243,7 @@ export class LiveAudio {
   }
 
   private onOpus(f: OpusFrame): void {
+    if (this.held) return;
     if (this.active === null || f.vrx !== BigInt(this.active)) {
       this.stats.ignored++;
       return;
@@ -252,7 +288,9 @@ export function browserLiveAudioDeps(link: LiveLink): LiveAudioDeps {
       const c = real!;
       await c.audioWorklet.addModule(WORKLET_URL);
       const node = new AudioWorkletNode(c, PROCESSOR_NAME, { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
-      node.connect(c.destination);
+      // A gain stage so the HLS to live cut can fade in rather than step.
+      const level = new GainNode(c, { gain: 1 });
+      node.connect(level).connect(c.destination);
       const post = (m: ToWorklet, transfer: Transferable[] = []) => node.port.postMessage(m, transfer);
       return {
         // The frame is a fresh copy from the decoder, so its buffer can move.
@@ -260,6 +298,14 @@ export function browserLiveAudioDeps(link: LiveLink): LiveAudioDeps {
         reset: () => post({ t: "reset" }),
         onState: (fn) => {
           node.port.onmessage = (e: MessageEvent<WorkletState>) => fn(e.data);
+        },
+        gain: (value, rampMs) => {
+          const p = level.gain;
+          const t = c.currentTime;
+          p.cancelScheduledValues(t);
+          p.setValueAtTime(p.value, t);
+          if (rampMs <= 0) p.setValueAtTime(value, t);
+          else p.linearRampToValueAtTime(value, t + rampMs / 1000);
         },
       };
     },
