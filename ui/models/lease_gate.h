@@ -168,6 +168,14 @@ private:
     bool take_over_asked_ = false;
 };
 
+// Whether an application-wide shortcut may fire. Not under a lease notice:
+// those shortcuts fire whatever has focus, so the notice alone would leave
+// tune, mode and the rest working behind it.
+[[nodiscard]] inline bool shortcut_live(bool enabled, std::string_view lease_notice)
+{
+    return enabled && lease_notice.empty();
+}
+
 enum class LoginOutcome : std::uint8_t { Skipped, Connected, Refused, Failed };
 
 // One login through the gate. connect(mode, holder) logs in and answers the

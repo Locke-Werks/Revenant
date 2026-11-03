@@ -35,6 +35,7 @@
 #include "models/frame_stats.h"
 #include "models/frequency_dial.h"
 #include "models/gain_control.h"
+#include "models/lease_gate.h"
 #include "models/level_meter.h"
 #include "models/mode_choice.h"
 #include "models/receiver_palette.h"
@@ -56,6 +57,12 @@ class UiRules : public QObject {
 
 public:
     explicit UiRules(QObject* parent = nullptr) : QObject(parent) {}
+
+    // Application shortcuts under the lease notice. See models/lease_gate.h.
+    [[nodiscard]] Q_INVOKABLE bool shortcutLive(bool enabled, const QString& lease_notice) const
+    {
+        return shortcut_live(enabled, lease_notice.toStdString());
+    }
 
     // ---------------------------------------------------------------------
     // Frequency dials. See models/frequency_dial.h.

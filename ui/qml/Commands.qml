@@ -246,7 +246,8 @@ Item {
 
             sequences: modelData.keys
             context: Qt.ApplicationShortcut
-            enabled: KeyMap.enabled(modelData.id, commands.have)
+            enabled: UiRules.shortcutLive(KeyMap.enabled(modelData.id, commands.have),
+                                          engineLink.leaseNotice)
             onActivated: commands.run(modelData.handler, modelData.argument)
         }
     }

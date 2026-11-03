@@ -186,6 +186,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+Shift+B"
         context: Qt.ApplicationShortcut
+        enabled: UiRules.shortcutLive(true, engineLink.leaseNotice)
         onActivated: burstWindow.toggle()
     }
 
@@ -330,13 +331,24 @@ ApplicationWindow {
     // The single-user lease. Opaque and on top, and it takes every click and
     // key, because the controls under it belong to a session the engine has
     // refused.
+    // In the overlay layer, above any popup or menu, so one open when the
+    // notice appears is covered rather than left usable; the named ones are
+    // closed outright.
     Rectangle {
         id: leaseNotice
+        parent: Overlay.overlay
         anchors.fill: parent
-        z: 1000
+        z: 1000000
         visible: engineLink.leaseNotice !== ""
         color: Theme.background
         focus: visible
+        onVisibleChanged: {
+            if (!visible)
+                return
+            commandPalette.close()
+            burstWindow.hide()
+            forceActiveFocus()
+        }
 
         MouseArea {
             anchors.fill: parent

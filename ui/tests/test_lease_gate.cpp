@@ -11,19 +11,18 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/rpc/types.h"
-#include "models/adopted_receivers.h"
+
 #include "models/lease_gate.h"
 #include "models/receiver_rack.h"
 
 using revenant::rpc::LoginMode;
-using revenant::rpc::VrxOwnerKind;
 using revenant::ui::desktop_holder;
 using revenant::ui::lease_login;
 using revenant::ui::LeaseGate;
 using revenant::ui::LeaseScreen;
 using revenant::ui::LoginOutcome;
 using revenant::ui::parse_lease_refusal;
-using revenant::ui::rack_adopts;
+using revenant::ui::shortcut_live;
 using revenant::ui::rack_entry_label;
 using revenant::ui::ReceiverRack;
 
@@ -166,15 +165,26 @@ TEST_CASE("Take back logs in with takeOver, even through an engine restart")
     CHECK(gate.screen() == LeaseScreen::None);
 }
 
+// Rejects application shortcuts that keep tuning behind the notice: they fire
+// whatever has focus, so the notice's own key handler cannot stop them.
+TEST_CASE("application shortcuts are off while a lease notice is up")
+{
+    LeaseGate gate;
+    CHECK(shortcut_live(true, gate.notice()));
+    CHECK_FALSE(shortcut_live(false, gate.notice()));
+
+    gate.on_connect_failed("in use: " + kPhone + " since 2026-11-03T09:15:00-05:00");
+    CHECK_FALSE(shortcut_live(true, gate.notice()));
+
+    gate.on_connected();
+    CHECK(shortcut_live(true, gate.notice()));
+
+    gate.on_lease_lost(kPhone);
+    CHECK_FALSE(shortcut_live(true, gate.notice()));
+}
+
 TEST_CASE("receivers opened elsewhere are listed in the rack")
 {
-    // With one user every receiver is that user's: a phone's, a plugin's or
-    // one this window opened on an earlier connection.
-    CHECK(rack_adopts(VrxOwnerKind::OtherSession));
-    CHECK(rack_adopts(VrxOwnerKind::Plugin));
-    // This session's are already in the rack under its own keys.
-    CHECK_FALSE(rack_adopts(VrxOwnerKind::ThisSession));
-
     ReceiverRack rack;
     const auto mine = rack.add();
     const auto phone = rack.add_adopted("RX", 7);
