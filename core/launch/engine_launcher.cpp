@@ -185,7 +185,15 @@ void EngineLauncher::stop()
     // cancelled and the reader stops waiting.
     if (reader_.joinable()) {
         if (abandon_.load()) {
-            CancelSynchronousIo(reader_.native_handle());
+            // A cancel only reaches a read already in progress, so one issued
+            // just before the reader enters ReadFile would be lost and the
+            // join would hang. Repeated until the reader says it is out,
+            // which it does within one wait slice of seeing abandon_.
+            const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!reader_done_.load() && std::chrono::steady_clock::now() < until) {
+                CancelSynchronousIo(reader_.native_handle());
+                Sleep(10);
+            }
         }
         reader_.join();
     }
@@ -346,7 +354,11 @@ std::string EngineLauncher::start(const std::filesystem::path& exe, std::uint16_
     pid_ = process.dwProcessId;
     stderr_read_ = read;
 
-    reader_ = std::thread([this] { drain(); });
+    reader_done_ = false;
+    reader_ = std::thread([this] {
+        drain();
+        reader_done_ = true;
+    });
     return {};
 }
 
@@ -380,6 +392,9 @@ void EngineLauncher::drain()
     std::string partial;
     char buffer[4096];
     for (;;) {
+        if (abandon_.load()) {
+            break;
+        }
         DWORD got = 0;
         if (ReadFile(static_cast<HANDLE>(stderr_read_), buffer, sizeof buffer, &got, nullptr) ==
                 0 ||

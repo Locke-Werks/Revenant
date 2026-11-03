@@ -100,6 +100,7 @@ private:
     // Set by stop() when it gave up waiting on a process stuck in a driver,
     // so the reader stops waiting on it too.
     std::atomic<bool> abandon_{false};
+    std::atomic<bool> reader_done_{false};  // set as the reader returns
 
     mutable std::mutex mutex_;
     std::vector<std::string> tail_;  // guarded by mutex_
