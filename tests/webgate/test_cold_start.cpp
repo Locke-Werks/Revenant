@@ -16,7 +16,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -113,11 +115,9 @@ public:
 
     [[nodiscard]] std::optional<revenant::launch::EngineLauncher::Exit> exited() const override
     {
-        const std::lock_guard lock(mutex_);
-        if (harness_) {
-            return std::nullopt;
-        }
-        return revenant::launch::EngineLauncher::Exit{};
+        // As EngineLauncher: empty while it runs and after stop(), which
+        // clears what the last engine left. This engine never dies of itself.
+        return std::nullopt;
     }
 
 private:
@@ -364,6 +364,28 @@ TEST_CASE("an engine the gateway did not start is never stopped", "[gpu][webgate
     CHECK(still.has_value());
 }
 
+TEST_CASE("the hub's rebuild path asks for the engine without waiting for it",
+          "[gpu][webgate][coldstart]")
+{
+    REVENANT_NEEDS_GPU();
+    ColdRig rig(10s);
+    // The loop calls this to rebuild sessions. With no engine it must come
+    // back with the connect's failure, not wait the start out; a refused
+    // loopback connect costs Windows about two seconds of that.
+    const auto asked = Clock::now();
+    auto now = rig.link->phone_session_now(rpc::LoginMode::Claim, "phone 10.1.10.57 via webgate");
+    CHECK(Clock::now() - asked < 5s);
+    if (!now) {
+        // It did ask: the engine comes up for the next tick to find.
+        CHECK(wait_until([&] { return rig.process.starts == 1; }));
+        CHECK(wait_until([&] {
+            return rig.link->phone_session_now(rpc::LoginMode::Claim, "phone 10.1.10.57 via webgate")
+                .has_value();
+        }));
+    }
+    CHECK(rig.process.starts == 1);
+}
+
 TEST_CASE("a claim at the end of the grace either cancels the stop or follows it",
           "[gpu][webgate][coldstart]")
 {
@@ -389,36 +411,113 @@ TEST_CASE("a claim at the end of the grace either cancels the stop or follows it
     CHECK(rig.process.starts - rig.process.stops == 1);
 }
 
-TEST_CASE("--stop signals every watcher and waits for no process", "[webgate][coldstart]")
-{
-    const std::string name =
-        "Global\\Revenant-webgate-stop-test-" + std::to_string(GetCurrentProcessId());
-    std::atomic<int> stopped{0};
-    {
-        revenant::webgate::StopWatch first([&] { ++stopped; }, name);
-        revenant::webgate::StopWatch second([&] { ++stopped; }, name);
-        REQUIRE(first.watching());
-        REQUIRE(second.watching());
-        // An image name nothing runs as, so the case never waits on (or
-        // stops) a real gateway on this machine.
-        CHECK(revenant::webgate::stop_running_gateways(1s, name, L"no-such-gateway.exe") == 0);
-        CHECK(wait_until([&] { return stopped == 2; }, 5s));
-    }
+namespace {
 
-    // Cleared afterwards: a watcher that starts later is not stopped by it.
-    std::atomic<bool> late{false};
-    revenant::webgate::StopWatch later([&] { late = true; }, name);
-    std::this_thread::sleep_for(200ms);
-    CHECK_FALSE(late);
+// A prefix of the case's own, so nothing here reaches a real gateway's event.
+[[nodiscard]] std::string test_prefix(std::string_view which)
+{
+    return "Revenant-webgate-stop-test-" + std::string(which) + "-" +
+           std::to_string(GetCurrentProcessId()) + "-";
+}
+
+}  // namespace
+
+TEST_CASE("each gateway's stop event is named for its process", "[webgate][coldstart]")
+{
+    CHECK(revenant::webgate::stop_event_name(revenant::webgate::kStopEventPrefix, 4242) ==
+          "Revenant-webgate-stop-4242");
+    CHECK(revenant::webgate::stop_event_name("p-", 1) != revenant::webgate::stop_event_name("p-", 2));
+}
+
+TEST_CASE("the stop event reaches its gateway through the session namespace",
+          "[webgate][coldstart]")
+{
+    const std::string prefix = test_prefix("session");
+    std::atomic<bool> stopped{false};
+    revenant::webgate::StopWatch watch([&] { stopped = true; }, prefix);
+    REQUIRE(watch.watching());
+    // Opened as --stop opens another session's: Session\<n>\..., owner checked.
+    CHECK(revenant::webgate::signal_gateway(GetCurrentProcessId(), prefix) ==
+          revenant::webgate::StopSignal::Set);
+    CHECK(wait_until([&] { return stopped.load(); }, 5s));
+}
+
+TEST_CASE("a stop event that already exists is not watched", "[webgate][coldstart]")
+{
+    const std::string prefix = test_prefix("squat");
+    // Somebody created this gateway's name first.
+    const std::wstring name = L"Local\\" + [&] {
+        const std::string n = revenant::webgate::stop_event_name(prefix, GetCurrentProcessId());
+        return std::wstring(n.begin(), n.end());
+    }();
+    HANDLE squatter = CreateEventW(nullptr, TRUE, TRUE, name.c_str());
+    REQUIRE(squatter != nullptr);
+    std::atomic<bool> stopped{false};
+    {
+        revenant::webgate::StopWatch watch([&] { stopped = true; }, prefix);
+        CHECK_FALSE(watch.watching());
+    }
+    CHECK_FALSE(stopped);
+    CloseHandle(squatter);
+}
+
+TEST_CASE("the stop event's owner must be the gateway's account or an administrator",
+          "[webgate][coldstart]")
+{
+    const auto sid = [](WELL_KNOWN_SID_TYPE type) {
+        std::vector<std::uint8_t> out(SECURITY_MAX_SID_SIZE);
+        DWORD size = static_cast<DWORD>(out.size());
+        REQUIRE(CreateWellKnownSid(type, nullptr, out.data(), &size) != 0);
+        return out;
+    };
+    auto everyone = sid(WinWorldSid);
+    auto admins = sid(WinBuiltinAdministratorsSid);
+    auto system = sid(WinLocalSystemSid);
+    auto user = sid(WinLocalServiceSid);  // stands in for the gateway's account
+    auto other = sid(WinNetworkServiceSid);
+
+    using revenant::webgate::stop_event_owner_acceptable;
+    CHECK(stop_event_owner_acceptable(user.data(), user.data()));
+    CHECK(stop_event_owner_acceptable(admins.data(), user.data()));
+    CHECK(stop_event_owner_acceptable(system.data(), user.data()));
+    CHECK_FALSE(stop_event_owner_acceptable(other.data(), user.data()));
+    CHECK_FALSE(stop_event_owner_acceptable(everyone.data(), user.data()));
+    CHECK_FALSE(stop_event_owner_acceptable(nullptr, user.data()));
+    CHECK_FALSE(stop_event_owner_acceptable(other.data(), nullptr));
+}
+
+TEST_CASE("--stop terminates a gateway that does not answer its event", "[webgate][coldstart]")
+{
+    // A stand-in with an image name of its own, so the case can never touch
+    // a real gateway: ping, copied, run long, with no stop event at all.
+    const std::wstring image = L"revenant-stop-fake-" + std::to_wstring(GetCurrentProcessId()) +
+                               L".exe";
+    const auto path = std::filesystem::temp_directory_path() / image;
+    std::filesystem::copy_file("C:\\Windows\\System32\\PING.EXE", path,
+                               std::filesystem::copy_options::overwrite_existing);
+    std::wstring command = L"\"" + path.wstring() + L"\" -n 120 127.0.0.1";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION child{};
+    REQUIRE(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                           nullptr, nullptr, &startup, &child) != 0);
+    CloseHandle(child.hThread);
+
+    CHECK(revenant::webgate::stop_running_gateways(300ms, test_prefix("fallback"), image) == 0);
+    CHECK(WaitForSingleObject(child.hProcess, 0) == WAIT_OBJECT_0);
+    if (WaitForSingleObject(child.hProcess, 0) != WAIT_OBJECT_0) {
+        TerminateProcess(child.hProcess, 1);
+    }
+    CloseHandle(child.hProcess);
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
 }
 
 TEST_CASE("a watcher ended normally does not report a stop", "[webgate][coldstart]")
 {
-    const std::string name =
-        "Global\\Revenant-webgate-stop-test2-" + std::to_string(GetCurrentProcessId());
     std::atomic<bool> fired{false};
     {
-        revenant::webgate::StopWatch watch([&] { fired = true; }, name);
+        revenant::webgate::StopWatch watch([&] { fired = true; }, test_prefix("quiet"));
         REQUIRE(watch.watching());
     }
     CHECK_FALSE(fired);
