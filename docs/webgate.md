@@ -133,6 +133,18 @@ one radio, so changing the centre frequency from any of them moves the others,
 and a receiver that falls outside the new span is removed with the reason shown.
 Each phone owns its own receivers and they end with its session.
 
+### Display follows the desktop
+
+The phone has no display settings. Its spectrum and waterfall use the desktop
+client's: the scale pins, range fit, smoothing, waterfall contrast and pivot,
+colour theme and OLED black. The gateway reads them from this Windows
+account's registry, `HKCU\Software\Locke Werks\Revenant\display`, every two
+seconds and applies the desktop's own scale rules to each phone's rows, so a
+change on the desktop reaches the phone within a couple of seconds. With no
+desktop settings stored the phone draws the desktop's defaults. A desktop
+client running on another PC is not followed; only the one on the machine
+running the gateway is.
+
 ### Keep listening
 
 Live audio plays through the page and stops when iOS suspends it. Keep
