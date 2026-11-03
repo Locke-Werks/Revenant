@@ -74,7 +74,15 @@ prompt comes back at once, because it is a Windows (not console) program.
 
 One gateway runs per sign-in session and HTTPS port. A second start on the
 same port, from the Start menu or a terminal, writes "already running" to the
-log and exits. To stop it, end `revenant-webgate.exe` in Task Manager.
+log and exits.
+
+`revenant-webgate.exe --stop` asks every running gateway on the machine to
+exit and waits up to 10 s; each one stops an engine it started on the way out.
+Exit code 0 means none remain. The installer runs it before an upgrade and an
+uninstall, so a running gateway does not block either. Run elevated it reaches
+every user's gateway; run as a user it can signal only if that user's gateway
+created the signal, and it reports gateways of other accounts as not
+reachable. Ending `revenant-webgate.exe` in Task Manager also works.
 
 ### Cold start: the engine only while a phone wants it
 
@@ -84,8 +92,12 @@ starts as usual. An engine the desktop or anyone else started is found and
 used as it is.
 
 When a phone connects and no engine answers on `--engine`, the gateway starts
-`revenant-engine.exe` (from the folder it is in) with `--no-source`, waits for
-it (up to 20 s), and then opens the desktop's last radio on it, the way the
+`revenant-engine.exe` (from the folder it is in) with `--no-source`. The phone
+is sent `{"event":"engine","state":"starting"}` and shows "Starting the
+engine..." over the waterfall; the claim waits for the engine (up to 20 s) on
+a thread of its own, so other phones, pings and HTTP are served meanwhile, and
+a phone that leaves during the start has its claim dropped when it lands. The
+gateway then opens the desktop's last radio on it, the way the
 desktop does on an engine it started: `engine/lastSource` with that radio's
 remembered centre, rate and gain written over it. A desktop that has never
 opened a radio leaves the engine with none, and the phone opens one from the
@@ -99,7 +111,10 @@ the 30 s linger after its connection drops, and through Keep listening while
 it fetches audio. So the lease coming free is the phone gone, not a phone
 locked in a pocket. A desktop on that engine claims the lease too, and an
 engine with its lease held is never stopped. A phone that connects during the
-10 s keeps it running.
+10 s keeps it running. The stop is decided under the same lock a phone's
+claim takes, so a claim either lands first and cancels it, or waits for the
+stopped engine to be gone and then gets a new one; never an engine being
+ended under it.
 
 The stop ends the engine's Job object, so the engine and anything it started
 exit together, and the gateway waits for the process to be gone before it
@@ -389,8 +404,10 @@ is on the same network, and the firewall. The gateway's log is
 the engine for it (see Cold start). Later phones within the engine's life do
 not wait.
 
-**The installer says the phone gateway is running.** It starts at sign-in.
-End `revenant-webgate.exe` in Task Manager and run the installer again.
+**The install fails at "stop-phone-gateway".** A gateway did not exit within
+10 s of `--stop`, or is a version from before `--stop` existed (0.3.14 and
+earlier). End `revenant-webgate.exe` in Task Manager and run the installer
+again.
 
 **Certificate warning in Safari or the app will not install.** The profile is
 not installed or not trusted. Redo steps 2 and 3; step 3 is the one that is
@@ -537,6 +554,7 @@ bar are not sent.
 | `hello` | `resume`, the token | on connect, after `lease` held |
 | `vrx` | a receiver reply plus `openedBy` (`this phone`, `another client`, a plugin's name, `the engine`) | for every receiver the engine has on connect and resume, and when one is added or changed |
 | `link` | `state`, `detail`; after a restart `recreated` (the receivers this phone opened) and `lost` (those it could not, and those opened elsewhere) | on connect and when the engine link changes |
+| `engine` | `state` ("starting") | before `lease` and `hello`, when the phone's claim is waiting for the gateway to start an engine |
 | `source` | `open`; open: `rateHz`, `centerHz`, `epoch`, `realtimeFactor`, `pacedBy`; with the spectrum on, `dataLowHz`, `dataHighHz` | when the stream, centre or pace changes |
 | `display` | `waterfall`, `spectrum`, `trace`, `background` | on connect, on resume, when the desktop's settings change |
 | `desktop` | `confidenceBar`, `radio`: `{uri, backend, device, params}`; each absent when the desktop has not saved it | on connect, on resume, when the desktop's settings change |
