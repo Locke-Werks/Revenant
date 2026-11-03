@@ -10,6 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -103,7 +104,7 @@ public:
         }
         auto body = response.body->readAllText();
         return body.then([reply = kj::mv(reply)](kj::String text) mutable {
-            reply.body = text.cStr();
+            reply.body.assign(text.begin(), text.size());
             return kj::mv(reply);
         }).attach(kj::mv(response.body));
     });
@@ -293,4 +294,56 @@ TEST_CASE("/ws refuses a foreign Origin", "[webgate][http]") {
     CHECK(open(("https://radio:" + std::to_string(server.https_port() + 1)).c_str()).status ==
           403);
     CHECK(open("null").status == 403);
+}
+
+TEST_CASE("serves HLS from the registry", "[webgate][http][hls]") {
+    Fixture fixture;
+    kj::AsyncIoContext io = kj::setupAsyncIo();
+    HttpServer server(io, fixture.config());
+    revenant::webgate::HlsSegmenter segmenter(48000);
+    REQUIRE(segmenter.ok());
+    for (int i = 0; i < 4 * 48; ++i) {
+        segmenter.push(std::vector<float>(1000, 0.1F));
+    }
+    server.hls.set(7, &segmenter);
+    REQUIRE(server.listen().has_value());
+    auto running = server.run().eagerlyEvaluate([](kj::Exception&&) {});
+
+    const std::string ca_pem = slurp(fixture.certs().ca_crt());
+    kj::TlsContext::Options options;
+    options.useSystemTrustStore = false;
+    auto builder = kj::heapArrayBuilder<kj::TlsCertificate>(1);
+    builder.add(kj::StringPtr(ca_pem.c_str()));
+    kj::Array<kj::TlsCertificate> trusted = builder.finish();
+    options.trustedCertificates = trusted;
+    kj::TlsContext tls(kj::mv(options));
+
+    kj::HttpHeaderTable table;
+    auto address =
+        io.provider->getNetwork().parseAddress("127.0.0.1", server.https_port()).wait(io.waitScope);
+    auto stream = address->connect().wait(io.waitScope);
+    auto secure = tls.wrapClient(kj::mv(stream), "radio").wait(io.waitScope);
+    auto client = kj::newHttpClient(table, *secure);
+    const auto get = [&](kj::StringPtr path) { return fetch(*client, table, path).wait(io.waitScope); };
+
+    const Reply playlist = get("/hls/7/live.m3u8");
+    CHECK(playlist.status == 200);
+    CHECK(playlist.content_type == "application/vnd.apple.mpegurl");
+    CHECK(playlist.body.rfind("#EXTM3U", 0) == 0);
+
+    const Reply init = get("/hls/7/init.mp4");
+    CHECK(init.status == 200);
+    CHECK(init.content_type == "video/mp4");
+    CHECK(init.body.find("ftyp") == 4);
+
+    const Reply media = get("/hls/7/0.m4s");
+    CHECK(media.status == 200);
+    CHECK(media.content_type == "video/mp4");
+    CHECK(media.body.find("moof") == 4);
+
+    CHECK(get("/hls/8/live.m3u8").status == 404);
+    CHECK(get("/hls/7/999.m4s").status == 404);
+    CHECK(get("/hls/7/-1.m4s").status == 404);
+    CHECK(get("/hls/7/../x").status == 404);
+    CHECK(get("/hls/7/live.m3u8x").status == 404);
 }

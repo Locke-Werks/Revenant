@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <format>
 #include <fstream>
 #include <iterator>
@@ -133,11 +134,9 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
                 return respond(response, impl.table, 405, "text/plain; charset=utf-8",
                                "method not allowed\n");
             }
-            // Reserved for the audio stream; nothing serves it yet and it must
-            // not fall through to the file server.
+            // Never falls through to the file server, found or not.
             if (path.rfind("/hls/", 0) == 0) {
-                return respond(response, impl.table, 404, "text/plain; charset=utf-8",
-                               "not found\n");
+                return serve_hls(path.substr(5), response);
             }
             StaticResponse file = serve_static(impl.config.web_root, path);
             return respond(response, impl.table, static_cast<unsigned>(file.status),
@@ -145,6 +144,75 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
         }
 
     private:
+        // `rest` is what follows "/hls/": "<vrx>/live.m3u8", "<vrx>/init.mp4"
+        // or "<vrx>/<seq>.m4s". The numbers are parsed strictly so nothing
+        // else, a "..", a sign, a stray suffix, reaches the lookup.
+        kj::Promise<void> serve_hls(std::string_view rest, Response& response) {
+            const auto not_found = [&] {
+                return respond(response, impl.table, 404, "text/plain; charset=utf-8",
+                               "not found\n", "no-cache");
+            };
+            const std::size_t slash = rest.find('/');
+            if (slash == std::string_view::npos) {
+                return not_found();
+            }
+            const auto vrx = parse_number(rest.substr(0, slash));
+            const std::string_view name = rest.substr(slash + 1);
+            if (!vrx) {
+                return not_found();
+            }
+            HlsSegmenter* segmenter = impl.owner.hls.find(*vrx);
+            if (segmenter == nullptr) {
+                return not_found();
+            }
+
+            // Playlist and segments change under the player's feet in a live
+            // stream, so none of it may be cached.
+            if (name == "live.m3u8") {
+                std::string text = segmenter->playlist();
+                if (text.empty()) {
+                    return not_found();
+                }
+                return respond(response, impl.table, 200, "application/vnd.apple.mpegurl",
+                               std::move(text), "no-cache");
+            }
+            if (name == "init.mp4") {
+                if (!segmenter->ok()) {
+                    return not_found();
+                }
+                const auto init = segmenter->init_segment();
+                return respond(response, impl.table, 200, "video/mp4",
+                               std::string(reinterpret_cast<const char*>(init.data()), init.size()),
+                               "no-cache");
+            }
+            constexpr std::string_view suffix = ".m4s";
+            if (name.size() > suffix.size() && name.ends_with(suffix)) {
+                const auto sequence = parse_number(name.substr(0, name.size() - suffix.size()));
+                if (sequence) {
+                    if (const auto segment = segmenter->segment(*sequence)) {
+                        return respond(
+                            response, impl.table, 200, "video/mp4",
+                            std::string(reinterpret_cast<const char*>(segment->data()),
+                                        segment->size()),
+                            "no-cache");
+                    }
+                }
+            }
+            return not_found();
+        }
+
+        [[nodiscard]] static std::optional<std::uint64_t> parse_number(std::string_view text) {
+            std::uint64_t value = 0;
+            if (text.empty() || text.size() > 19) {
+                return std::nullopt;
+            }
+            const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+            if (ec != std::errc{} || end != text.data() + text.size()) {
+                return std::nullopt;
+            }
+            return value;
+        }
+
         Impl& impl;
     };
 

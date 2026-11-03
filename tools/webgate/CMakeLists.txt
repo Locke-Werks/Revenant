@@ -18,6 +18,8 @@ add_library(revenant_webgate_lib STATIC
     "${CMAKE_SOURCE_DIR}/core/rpc/listen.cpp"
     certs.cpp
     static_files.cpp
+    audio_hls.cpp
+    hls_playlist.cpp
     http.cpp
 )
 
@@ -37,7 +39,9 @@ target_link_libraries(revenant_webgate_lib
 # Windows SDK import libraries: GetAdaptersAddresses, inet_pton, and the
 # CryptoAPI calls the static OpenSSL build pulls in.
 if(WIN32)
-    target_link_libraries(revenant_webgate_lib PUBLIC iphlpapi ws2_32 crypt32)
+    # mfplat/mfuuid/wmcodecdspuuid: the AAC encoder MFT used by the HLS path.
+    target_link_libraries(revenant_webgate_lib PUBLIC iphlpapi ws2_32 crypt32
+                          mfplat mfuuid wmcodecdspuuid ole32)
 endif()
 
 revenant_apply_warnings(revenant_webgate_lib)

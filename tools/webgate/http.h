@@ -23,6 +23,7 @@
 
 #include "core/error.h"
 #include "tools/webgate/certs.h"
+#include "tools/webgate/hls_playlist.h"
 
 namespace revenant::webgate {
 
@@ -60,6 +61,12 @@ public:
     // Handles one accepted WebSocket on /ws; the connection lives until the
     // returned promise settles. Set before run(). Without it /ws answers 503.
     std::function<kj::Promise<void>(kj::Own<kj::WebSocket>)> on_websocket;
+
+    // Which segmenter answers /hls/<vrx>/live.m3u8, init.mp4 and <seq>.m4s.
+    // Register a receiver's segmenter here and remove it before destroying
+    // it; an unregistered vrx answers 404. Touch it only from the event loop
+    // thread, the same one that serves the requests.
+    HlsRegistry hls;
 
 private:
     struct Impl;
