@@ -2,6 +2,7 @@
 // receiver, keep listening, and the radio panel.
 
 import { BANDWIDTHS_HZ, MODES, TRANSCRIBE_CHOICES, type Receiver, type TranscribeChoice } from "./receivers";
+import { tabAfterDvChange } from "../dv";
 import { decodersFor, modeLabel, toggled, type DecoderInfo } from "../decoders";
 
 export const SQUELCH_MIN_DBFS = -140;
@@ -18,9 +19,9 @@ export interface SheetDeps {
   toggleKeepListening(): void;
 }
 
-export const SHEET_TABS = ["tune", "signals", "radio"] as const;
+export const SHEET_TABS = ["tune", "signals", "dv", "radio"] as const;
 export type SheetTab = (typeof SHEET_TABS)[number];
-export const TAB_LABELS: Record<SheetTab, string> = { tune: "Tune", signals: "Signals", radio: "Radio" };
+export const TAB_LABELS: Record<SheetTab, string> = { tune: "Tune", signals: "Signals", dv: "DV", radio: "Radio" };
 
 export const TAB_KEY = "revenant.tab";
 
@@ -43,6 +44,8 @@ export class Sheet {
   readonly extra: HTMLElement;
   readonly signalsHost: HTMLElement;
   readonly radioHost: HTMLElement;
+  readonly dvHost: HTMLElement;
+  private dvShown = false;
   private readonly panels: Record<SheetTab, HTMLElement>;
   private tab: SheetTab = "tune";
   private tabListeners = new Set<(tab: SheetTab) => void>();
@@ -99,6 +102,7 @@ export class Sheet {
   <div id="sh-extra"></div>
   </div>
   <div id="sh-tab-signals" role="tabpanel" aria-label="Signals" hidden></div>
+  <div id="sh-tab-dv" role="tabpanel" aria-label="DV" hidden></div>
   <div id="sh-tab-radio" role="tabpanel" aria-label="Radio" hidden></div>
 </div>`;
     this.tuning = this.el.querySelector("#sh-tuning")!;
@@ -116,9 +120,11 @@ export class Sheet {
     this.extra = this.el.querySelector("#sh-extra")!;
     this.signalsHost = this.el.querySelector("#sh-tab-signals")!;
     this.radioHost = this.el.querySelector("#sh-tab-radio")!;
+    this.dvHost = this.el.querySelector("#sh-tab-dv")!;
     const panels: Record<SheetTab, HTMLElement> = {
       tune: this.el.querySelector("#sh-tab-tune")!,
       signals: this.signalsHost,
+      dv: this.dvHost,
       radio: this.radioHost,
     };
     const tabs = this.el.querySelector("#sh-tabs")!;
@@ -134,6 +140,7 @@ export class Sheet {
     }
     this.panels = panels;
     this.selectTab("tune");
+    this.setDvShown(false);
 
     for (const m of MODES) {
       const b = document.createElement("button");
@@ -171,7 +178,22 @@ export class Sheet {
     this.show(null);
   }
 
+  // The DV tab exists only while a digital voice receiver does. Hiding it
+  // while it is open falls back to Tune.
+  setDvShown(shown: boolean): void {
+    this.dvShown = shown;
+    const b = this.el.querySelector<HTMLButtonElement>('#sh-tabs button[data-tab="dv"]');
+    if (b) b.hidden = !shown;
+    const next = tabAfterDvChange(this.tab, shown);
+    if (next !== this.tab) this.selectTab(next);
+  }
+
+  get currentTab(): SheetTab {
+    return this.tab;
+  }
+
   selectTab(tab: SheetTab): void {
+    if (tab === "dv" && !this.dvShown) tab = "tune";
     this.tab = tab;
     for (const t of SHEET_TABS) this.panels[t].hidden = t !== tab;
     for (const b of Array.from(this.el.querySelectorAll<HTMLButtonElement>("#sh-tabs button"))) {

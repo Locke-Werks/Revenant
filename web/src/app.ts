@@ -35,6 +35,8 @@ import { levelInBand, TopBar } from "./ui/top_bar";
 import { CentreTuner } from "./centre_tuner";
 import { clampToRanges } from "./band_edge";
 import { LeaseScreen, leaseScreenHtml } from "./ui/lease_screen";
+import { DvPanel } from "./ui/dv_panel";
+import { hasDvReceiver, NO_DV, parseDv, parseRows, parseTrunk, type DvState } from "./dv";
 
 export function appScreenHtml(): string {
   return `
@@ -374,6 +376,50 @@ export function mountApp(root: HTMLElement): AppHandle {
   // resume, which can disagree with what this relaunched page shows. The
   // slider is the phone's record, so it is sent on every connect.
   link.on("ready", () => sendConfidence(signals.value()));
+
+  // ---- DV tab ----------------------------------------------------------------
+  // Shown while a digital voice receiver exists. Auto DV, trunk following and
+  // the call log all run in the gateway (tools/webgate/dv_feed.h); this draws
+  // them and sends the switches.
+  const report = (e: unknown) => toast(e instanceof Error ? e.message : String(e));
+  let dvState: DvState = NO_DV;
+  const dvPanel = new DvPanel({
+    setAutoDv: (on) => {
+      link.request("autoDv", { on }).catch(report);
+    },
+    setFollow: (vrx, on, maxFollowers) => {
+      link.request("trunkFollow", { vrx, on, maxFollowers }).catch(report);
+    },
+    receivers: () => receivers.list.list(),
+    select: (vrx) => receivers.select(vrx),
+  });
+  sheet.dvHost.append(dvPanel.el);
+  const syncDv = () => {
+    const list = receivers.list.list();
+    // Auto DV on with nothing found yet still shows the tab, so it can be
+    // turned off where it was turned on.
+    sheet!.setDvShown(hasDvReceiver(list) || dvState.autoDv);
+    const id = receivers.list.active;
+    const r = id === null ? undefined : receivers.list.get(id);
+    dvPanel.setActive(r ? { vrx: r.vrx, mode: r.mode } : null);
+  };
+  receivers.list.onChange(syncDv);
+  link.on("dv", (e) => {
+    dvState = parseDv(e);
+    dvPanel.setDv(dvState);
+    syncDv();
+  });
+  link.on("calls", (e) => dvPanel.setCalls(parseRows(e)));
+  link.on("talkgroups", (e) => dvPanel.setGroups(parseRows(e)));
+  link.on("trunk", (e) => dvPanel.setTrunk(parseTrunk(e)));
+  const sendDvTab = (visible: boolean) => {
+    link.request("dvTab", { visible }).catch(() => {});
+  };
+  sheet.onTab((tab) => {
+    dvPanel.setVisible(tab === "dv");
+    sendDvTab(tab === "dv");
+  });
+  link.on("ready", () => sendDvTab(sheetTab === "dv"));
 
   // ---- Speech, transcripts and the feed -------------------------------------
   const speechModel = new SpeechModel({ link: gate });
