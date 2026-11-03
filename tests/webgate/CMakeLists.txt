@@ -4,6 +4,7 @@ add_executable(test_webgate
     test_static_files.cpp
     test_hls.cpp
     test_http.cpp
+    test_spectrum_reducer.cpp
     ../reference/gpu_fixture.cpp
     test_engine_link.cpp
 )
