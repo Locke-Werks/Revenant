@@ -26,6 +26,7 @@ const det = (over: Partial<Detection> = {}): Detection => ({
   confidence: 0.9,
   state: "live",
   label: "",
+  labelKind: "",
   labelConfidence: 0,
   lastSeen: 0,
   ...over,

@@ -1,6 +1,6 @@
 // The Signals tab: the engine's detections as a list, and the confidence bar.
 
-import { fitBandwidth, sortForList, type Detection } from "../detections";
+import { fitBandwidth, labelText, sortForList, type Detection } from "../detections";
 import { BANDWIDTHS_HZ, formatMHz } from "./receivers";
 
 // The gateway refuses a negative bar or one at 1.0 or above.
@@ -225,7 +225,7 @@ export class SignalsPanel {
   render(): void {
     const clock = this.deps.clock();
     const textOf = (d: Detection) => {
-      const name = d.label !== "" ? d.label.toUpperCase() : "Signal";
+      const name = labelText(d);
       const ago = heardAgo(d.lastSeen, clock ? clock.index : null, clock ? clock.rateHz : 0);
       const bw = d.bandwidthHz >= 1000 ? `${(d.bandwidthHz / 1000).toFixed(1)} kHz` : `${Math.round(d.bandwidthHz)} Hz`;
       const parts = [`${formatMHz(d.centerHz)} MHz`, name, bw, `${Math.round(d.snrDb)} dB`];

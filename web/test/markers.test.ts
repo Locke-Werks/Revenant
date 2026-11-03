@@ -51,7 +51,7 @@ test("accent colours parse from hex, anything else is the default", () => {
 
 test("detection boxes: alpha rises with confidence, held draws dimmer", () => {
   const d = (confidence: number, state: "live" | "held") => ({
-    id: "1", centerHz: 1000, bandwidthHz: 200, snrDb: 10, confidence, state, label: "AM", labelConfidence: 1, lastSeen: 0,
+    id: "1", centerHz: 1000, bandwidthHz: 200, snrDb: 10, confidence, state, label: "AM", labelKind: "modulation", labelConfidence: 1, lastSeen: 0,
   });
   const [lo, hi, held] = detectionBoxes([d(0.1, "live"), d(0.9, "live"), d(0.9, "held")]);
   assert.equal(lo!.lowHz, 900);

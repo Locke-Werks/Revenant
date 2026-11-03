@@ -11,6 +11,8 @@ export interface Detection {
   confidence: number;
   state: "live" | "held";
   label: string;
+  // "modulation", "protocol", or "" for none.
+  labelKind: string;
   labelConfidence: number;
   lastSeen: number;
 }
@@ -40,6 +42,7 @@ function parseOne(v: unknown): Detection | null {
     confidence: o.confidence,
     state: o.state,
     label: typeof o.label === "string" ? o.label : "",
+    labelKind: typeof o.labelKind === "string" ? o.labelKind : "",
     labelConfidence: o.labelConfidence,
     lastSeen: o.lastSeen,
   };
@@ -83,6 +86,24 @@ export function snapTap(hz: number, d: Detection[]): number {
     if (!best || x.bandwidthHz < best.bandwidthHz) best = x;
   }
   return best ? best.centerHz : hz;
+}
+
+// The labelled detection a receiver at hz sits on, narrowest first as in
+// snapTap; null when none covers it or the one that does has no label.
+export function labelAt(hz: number, d: readonly Detection[]): Detection | null {
+  let best: Detection | null = null;
+  for (const x of d) {
+    if (x.label === "" || Math.abs(hz - x.centerHz) > x.bandwidthHz / 2) continue;
+    if (!best || x.bandwidthHz < best.bandwidthHz) best = x;
+  }
+  return best;
+}
+
+// A label with its confidence, "?" when the classifier has not settled.
+export function labelText(d: Pick<Detection, "label" | "labelConfidence">): string {
+  if (d.label === "") return "?";
+  const pct = Math.round(Math.min(1, Math.max(0, d.labelConfidence)) * 100);
+  return pct > 0 ? `${d.label.toUpperCase()} ${pct}%` : d.label.toUpperCase();
 }
 
 export function fitBandwidth(widthHz: number, choices: number[]): number {

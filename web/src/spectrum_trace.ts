@@ -9,6 +9,7 @@
 
 import { DEFAULT_DISPLAY, fillStops, type DisplayColours } from "./display";
 import { DETECTION_COLOR, type DetectionBox } from "./markers";
+import { placeLabels } from "./label_placement";
 import { drawReceivers, type ReceiverMark } from "./overlay";
 import type { SpectrumFrame } from "./protocol";
 import { TraceEaser } from "./smooth";
@@ -157,9 +158,15 @@ export class SpectrumTrace {
     ctx.font = `${fontPx}px -apple-system, system-ui, sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    for (const b of this.boxes) {
+    const spans = this.boxes.map((b) => {
       const x0 = Math.max(0, hzToPx(v, b.lowHz));
       const x1 = Math.min(w, hzToPx(v, b.highHz));
+      return { x0, x1, width: x1 > x0 && b.label ? ctx.measureText(b.label).width : 0 };
+    });
+    const at = placeLabels(spans, w, Math.round(4 * dpr));
+    for (let i = 0; i < this.boxes.length; i++) {
+      const b = this.boxes[i]!;
+      const { x0, x1 } = spans[i]!;
       if (!(x1 > x0)) continue;
       ctx.fillStyle = DETECTION_COLOR;
       // The label's line is kept clear so text never sits on the trace fill.
@@ -169,10 +176,11 @@ export class SpectrumTrace {
       ctx.globalAlpha = b.held ? 0.35 : 0.7;
       ctx.fillRect(Math.floor(x0), top, 1, h - top);
       ctx.fillRect(Math.max(Math.floor(x0) + 1, Math.ceil(x1) - 1), top, 1, h - top);
-      if (b.label && ctx.measureText(b.label).width < x1 - x0) {
+      const lx = at[i];
+      if (b.label && lx !== null && lx !== undefined) {
         ctx.globalAlpha = b.held ? 0.5 : 0.85;
         ctx.fillStyle = "#b8c4d0";
-        ctx.fillText(b.label, (x0 + x1) / 2, 1);
+        ctx.fillText(b.label, lx, 1);
       }
     }
     ctx.globalAlpha = 1;
