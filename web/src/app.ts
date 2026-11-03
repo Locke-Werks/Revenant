@@ -136,7 +136,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     waterfall.draw();
     trace.draw();
     ruler.draw();
-    top.viewCentre(centrePreviewHz ?? (view ? view.centerHz : null));
+    top.viewCentre(centrePreviewHz ?? band?.centerHz ?? (view ? view.centerHz : null));
     drawMarks();
     layoutCaptions();
   };
@@ -421,7 +421,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   });
   const showCentre = (hz: number | null) => {
     centrePreviewHz = hz;
-    top.viewCentre(hz ?? (view ? view.centerHz : null));
+    top.viewCentre(hz ?? band?.centerHz ?? (view ? view.centerHz : null));
   };
   const centreLimiter = new TuneLimiter(
     (hz) => centre.set(hz),

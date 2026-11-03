@@ -135,7 +135,8 @@ export class DialStrip {
       g.textAlign = "center";
       g.textBaseline = "middle";
       g.fillStyle = "#8e8e97";
-      g.fillText(EMPTY_HINT, w / 2, r ? HEIGHT_PX - 12 : HEIGHT_PX / 2);
+      // Over the ribbon it takes the labels' row, which it replaces.
+      g.fillText(EMPTY_HINT, w / 2, r ? 16 : HEIGHT_PX / 2);
     };
     if (!r) {
       hint();
@@ -163,7 +164,7 @@ export class DialStrip {
       g.moveTo(Math.round(x) + 0.5, HEIGHT_PX);
       g.lineTo(Math.round(x) + 0.5, HEIGHT_PX - (major ? 22 : 10));
       g.stroke();
-      if (major) g.fillText((k * step / 1e6).toFixed(decimals), x, 16);
+      if (major && !idle) g.fillText((k * step / 1e6).toFixed(decimals), x, 16);
     }
     g.strokeStyle = ACCENT;
     g.lineWidth = 2;
