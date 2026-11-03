@@ -169,8 +169,44 @@ TEST_CASE("the server certificate is valid for at most 825 days", "[webgate][cer
     REQUIRE(ASN1_TIME_diff(&days, &seconds, X509_get0_notBefore(server),
                            X509_get0_notAfter(server)) == 1);
     X509_free(server);
-    CHECK((days < 825 || (days == 825 && seconds == 0)));
-    CHECK(days >= 824);
+    CHECK(days == 825);
+    CHECK(seconds == 0);
+}
+
+TEST_CASE("a server key that does not match the certificate is reissued", "[webgate][certs]") {
+    TempDir dir;
+    const CertPaths paths = dir.paths();
+    const HostNames names{"radio", {"192.168.1.20"}};
+    REQUIRE(revenant::webgate::ensure_certificates(paths, names).value());
+
+    // The state a crash between writing server.key and server.crt leaves.
+    EVP_PKEY* stray = EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "P-256");
+    REQUIRE(stray != nullptr);
+    BIO* bio = BIO_new(BIO_s_mem());
+    REQUIRE(PEM_write_bio_PrivateKey(bio, stray, nullptr, nullptr, 0, nullptr, nullptr) == 1);
+    char* data = nullptr;
+    const long length = BIO_get_mem_data(bio, &data);
+    {
+        std::ofstream out(paths.server_key(), std::ios::binary | std::ios::trunc);
+        out.write(data, length);
+    }
+    BIO_free(bio);
+    EVP_PKEY_free(stray);
+
+    const auto again = revenant::webgate::ensure_certificates(paths, names);
+    REQUIRE(again.has_value());
+    CHECK(*again);
+
+    X509* server = load_cert(paths.server_crt());
+    REQUIRE(server != nullptr);
+    const std::string key_text = slurp(paths.server_key());
+    BIO* key_bio = BIO_new_mem_buf(key_text.data(), static_cast<int>(key_text.size()));
+    EVP_PKEY* key = PEM_read_bio_PrivateKey(key_bio, nullptr, nullptr, nullptr);
+    BIO_free(key_bio);
+    REQUIRE(key != nullptr);
+    CHECK(X509_check_private_key(server, key) == 1);
+    EVP_PKEY_free(key);
+    X509_free(server);
 }
 
 TEST_CASE("key files are readable only by owner and SYSTEM", "[webgate][certs]") {

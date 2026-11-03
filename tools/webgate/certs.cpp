@@ -237,8 +237,11 @@ using Names = std::unique_ptr<GENERAL_NAMES, NamesDeleter>;
         return ssl_fail("could not set the certificate subject");
     }
 
-    if (X509_gmtime_adj(X509_getm_notBefore(cert.get()), not_before_offset) == nullptr ||
-        X509_gmtime_adj(X509_getm_notAfter(cert.get()), not_after_offset) == nullptr) {
+    // One clock read for both ends. Two reads can straddle a second boundary
+    // and stretch the span by a second, which is over iOS's 825 day limit.
+    std::time_t now = std::time(nullptr);
+    if (X509_time_adj(X509_getm_notBefore(cert.get()), not_before_offset, &now) == nullptr ||
+        X509_time_adj(X509_getm_notAfter(cert.get()), not_after_offset, &now) == nullptr) {
         return ssl_fail("could not set the certificate validity");
     }
     if (X509_set_pubkey(cert.get(), pub) != 1) {
@@ -519,7 +522,8 @@ Expected<bool> ensure_certificates(const CertPaths& paths, const HostNames& name
     if (!ca_created && std::filesystem::exists(paths.server_crt()) &&
         std::filesystem::exists(paths.server_key())) {
         auto existing = read_cert(paths.server_crt());
-        if (existing) {
+        auto server_key_on_disk = read_key(paths.server_key());
+        if (existing && server_key_on_disk) {
             std::vector<std::string> have = certificate_sans(paths.server_crt());
             std::ranges::sort(have);
             have.erase(std::ranges::unique(have).begin(), have.end());
@@ -527,8 +531,11 @@ Expected<bool> ensure_certificates(const CertPaths& paths, const HostNames& name
             const bool signed_by_ca = X509_verify(existing->get(), X509_get0_pubkey(ca_crt->get())) == 1;
             std::time_t horizon = std::time(nullptr) + (kRenewWithinDays * kSecondsPerDay);
             const bool fresh = X509_cmp_time(X509_get0_notAfter(existing->get()), &horizon) > 0;
+            // A crash between writing server.key and server.crt leaves a pair
+            // that names the same hosts but does not belong together.
+            const bool key_matches = X509_check_private_key(existing->get(), server_key_on_disk->get()) == 1;
             ERR_clear_error();
-            if (have == *wanted && signed_by_ca && fresh) {
+            if (have == *wanted && signed_by_ca && fresh && key_matches) {
                 return false;
             }
         } else {
