@@ -76,13 +76,19 @@ One gateway runs per sign-in session and HTTPS port. A second start on the
 same port, from the Start menu or a terminal, writes "already running" to the
 log and exits.
 
+Two people signed in at once: the first one's gateway holds the ports, and
+the second one's fails to bind them and exits with that in its log. Phones
+reach the first person's gateway, whether that session is in front or not.
+
 `revenant-webgate.exe --stop` asks every running gateway on the machine to
-exit and waits up to 10 s; each one stops an engine it started on the way out.
-Exit code 0 means none remain. The installer runs it before an upgrade and an
-uninstall, so a running gateway does not block either. Run elevated it reaches
-every user's gateway; run as a user it can signal only if that user's gateway
-created the signal, and it reports gateways of other accounts as not
-reachable. Ending `revenant-webgate.exe` in Task Manager also works.
+exit, waits up to 10 s, then terminates any still running; each one ends an
+engine it started either way. Exit code 0 means none remain. The installer
+runs it before an upgrade and an uninstall, so a running gateway does not
+block either. Each gateway has its own stop event, which only its own
+account, Administrators and SYSTEM can set, so run elevated it reaches every
+user's gateway and run as a user it reaches only that user's own, reporting
+the rest as not reachable. Ending `revenant-webgate.exe` in Task Manager also
+works.
 
 ### Cold start: the engine only while a phone wants it
 
@@ -410,10 +416,10 @@ editions do not include. Install the Media Feature Pack from Optional
 features. The gateway delay-loads Media Foundation, so everything else,
 including live audio, works without it.
 
-**The install fails at "stop-phone-gateway".** A gateway did not exit within
-10 s of `--stop`, or is a version from before `--stop` existed (0.3.14 and
-earlier). End `revenant-webgate.exe` in Task Manager and run the installer
-again.
+**The install fails at "stop-phone-gateway".** A gateway could not be
+stopped even by terminating it, which in practice means a process stuck in a
+driver. Restart the machine and run the installer again. Gateways from before
+`--stop` existed (0.3.14 and earlier) are terminated rather than asked.
 
 **Certificate warning in Safari or the app will not install.** The profile is
 not installed or not trusted. Redo steps 2 and 3; step 3 is the one that is
