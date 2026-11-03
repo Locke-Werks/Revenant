@@ -115,7 +115,11 @@ ApplicationWindow {
     function placeReceiverWindow() {
         if (!receiverPlacement.ready)
             return
+        // Hidden behind a lease notice too, so no receiver control is usable
+        // while the engine is someone else's. The placement itself is kept,
+        // so the window comes back where it was.
         const wanted = receiverPlacement.poppedOut && receiverPlacement.shown
+                       && engineLink.leaseNotice === ""
         if (wanted && !receiverWindow.visible) {
             receiverWindow.show()
             receiverWindow.raise()
@@ -129,6 +133,11 @@ ApplicationWindow {
         function onPoppedOutChanged() { window.placeReceiverWindow() }
         function onShownChanged() { window.placeReceiverWindow() }
         function onReadyChanged() { window.placeReceiverWindow() }
+    }
+
+    Connections {
+        target: engineLink
+        function onLeaseChanged() { window.placeReceiverWindow() }
     }
 
     VrxWindow {
