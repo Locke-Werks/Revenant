@@ -625,7 +625,7 @@ export class ReceiverController {
     this.applyDecoders(vrx, names);
   }
 
-  private applyDecoders(vrx: number, names: string[]): void {
+  private applyDecoders(vrx: number, names: string[], quiet = false): void {
     this.deps.link.request("setDecoders", { vrx, names }).then(
       (reply) => {
         const o = reply !== null && typeof reply === "object" && !Array.isArray(reply) ? reply : {};
@@ -634,7 +634,9 @@ export class ReceiverController {
         const decoders = o.decoders.filter((n): n is string => typeof n === "string");
         this.list.upsert({ vrx, decoders, statusUnavailable: was.statusUnavailable });
       },
-      (e: unknown) => this.deps.toast(`Decoder refused: ${shortRefusal(errorText(e))}`, "decoder"),
+      (e: unknown) => {
+        if (!quiet) this.deps.toast(`Decoder refused: ${shortRefusal(errorText(e))}`, "decoder");
+      },
     );
   }
 
@@ -664,12 +666,25 @@ export class ReceiverController {
     this.placed(hz, { mode, bandwidthHz: null }, (to) => this.addAt(to, mode));
   }
 
-  private addAt(hz: number, mode: string): void {
-    void this.call("addVrx", { hz: Math.round(hz), mode, bandwidthHz: 0 }).then((r) => {
+  // A new receiver opened on a detected signal, already in its mode and
+  // width: one addVrx, so there is no replace racing the add.
+  // bandwidthHz 0 is the mode's own default passband. decoder, when given,
+  // is attached once the engine has named the receiver.
+  spawn(hz: number, mode: string, bandwidthHz: number, decoder = ""): void {
+    void this.deps.audio.unlock();
+    this.placed(hz, { mode, bandwidthHz: bandwidthHz > 0 ? bandwidthHz : null }, (to) => this.addAt(to, mode, bandwidthHz, decoder));
+  }
+
+  private addAt(hz: number, mode: string, bandwidthHz = 0, decoder = ""): void {
+    void this.call("addVrx", { hz: Math.round(hz), mode, bandwidthHz: Math.round(bandwidthHz) }).then((r) => {
       if (!r) return;
       this.list.select(r.vrx);
       this.nowPlaying(r);
       this.listen(r.vrx);
+      if (decoder !== "" && !r.decoders.includes(decoder)) {
+        // The label's guess, not the operator's ask: a refusal says nothing.
+        this.applyDecoders(r.vrx, [...r.decoders, decoder], true);
+      }
     });
   }
 

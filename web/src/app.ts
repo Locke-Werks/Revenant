@@ -22,7 +22,7 @@ import { captionFromEvent, CaptionLayer, CaptionStore, RowClock } from "./ui/cap
 import { decodedEntry, FeedModel, FeedView, transcriptEntry } from "./ui/feed";
 import { RadioPanel } from "./ui/radio_panel";
 import { formatMHz, ReceiverController, ReplaceGate } from "./ui/receivers";
-import { Sheet, SHEET_TABS, TAB_LABELS, type SheetTab } from "./ui/sheet";
+import { readTab, Sheet, TAB_KEY, type SheetTab } from "./ui/sheet";
 import { readConfidence, SignalsPanel } from "./ui/signals";
 import { SpeechModel, speechLine, SpeechSwitch } from "./ui/speech_switch";
 import { StatusModel } from "./ui/status";
@@ -37,7 +37,11 @@ import { clampToRanges } from "./band_edge";
 export function appScreenHtml(): string {
   return `
 <main class="app">
+  <div class="pane pane-top">
   <div class="top" id="top-slot"></div>
+  <nav class="rail" id="rail" aria-label="Receivers" hidden>
+    <div class="chips" id="chips"></div>
+  </nav>
   <div class="stage" id="stage">
     <canvas id="trace" class="wf-trace"></canvas>
     <canvas id="ruler" class="wf-ruler" aria-hidden="true"></canvas>
@@ -50,15 +54,11 @@ export function appScreenHtml(): string {
       <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
     </div>
   </div>
-  <nav class="rail" id="rail" aria-label="Receivers" hidden>
-    <div class="chips" id="chips"></div>
-  </nav>
-  <div class="dial" id="dial-slot"></div>
-  <nav class="grabber" aria-label="Controls">
-    <span class="handle" aria-hidden="true"></span>
-    <div class="grab-tabs" id="grab-tabs"></div>
-  </nav>
-  <div id="sheet-slot"></div>
+  </div>
+  <div class="pane pane-bottom">
+    <div class="dial" id="dial-slot"></div>
+    <div id="sheet-slot"></div>
+  </div>
   <audio id="kl-audio" playsinline preload="none"></audio>
 </main>`;
 }
@@ -319,16 +319,16 @@ export function mountApp(root: HTMLElement): AppHandle {
     link.request("setDetection", { minConfidence: v }).catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)));
   };
   const signals = new SignalsPanel({
-    hasActiveReceiver: () => receivers.list.active !== null,
+    receivers: () => receivers.list.list(),
+    select: (vrx) => receivers.select(vrx),
+    spawn: (hz, mode, bw, dec) => receivers.spawn(hz, mode, bw, dec),
     stopDial: () => dial.stop(),
-    tuneFit: (hz, bw) => receivers.tuneFit(hz, bw),
     reveal: (hz) => {
       if (!view) return;
       const lo = view.centerHz - view.spanHz / 2;
       const hi = view.centerHz + view.spanHz / 2;
       if (hz < lo || hz > hi) apply(panBy(view, hz - view.centerHz));
     },
-    toast,
     setMinConfidence: sendConfidence,
     initialConfidence: readConfidence(prefs.getItem(CONFIDENCE_KEY)),
     saveConfidence: (v) => {
@@ -341,12 +341,15 @@ export function mountApp(root: HTMLElement): AppHandle {
     clock: () => (newestIndex !== null && band ? { index: newestIndex, rateHz: band.rateHz } : null),
   });
   sheet.signalsHost.append(signals.el);
-  const syncSignalsVisible = () => signals.setVisible(sheet!.open && sheetTab === "signals");
   sheet.onTab((tab) => {
     sheetTab = tab;
-    syncSignalsVisible();
+    signals.setVisible(tab === "signals");
+    try {
+      prefs.setItem(TAB_KEY, tab);
+    } catch {
+      // A full disk costs the preference, not the session.
+    }
   });
-  sheet.onOpen(syncSignalsVisible);
   // The gateway keeps the bar per session and re-applies its own copy on a
   // resume, which can disagree with what this relaunched page shows. The
   // slider is the phone's record, so it is sent on every connect.
@@ -366,7 +369,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   const feedView = new FeedView(feedHost, feedModel, () => document.createElement("div"));
   let feedQueued = false;
   const queueFeed = () => {
-    if (!sheet!.open || feedQueued) return;
+    if (sheetTab !== "tune" || feedQueued) return;
     feedQueued = true;
     requestAnimationFrame(() => {
       feedQueued = false;
@@ -375,8 +378,8 @@ export function mountApp(root: HTMLElement): AppHandle {
   };
   feedModel.onChange(queueFeed);
   receivers.list.onChange(queueFeed);
-  sheet.onOpen((open) => {
-    if (open) feedView.render(receivers.list.active);
+  sheet.onTab((tab) => {
+    if (tab === "tune") feedView.render(receivers.list.active);
   });
   receivers.onRemap((pairs) => {
     captionStore.remap(pairs);
@@ -437,33 +440,6 @@ export function mountApp(root: HTMLElement): AppHandle {
       () => undefined,
     );
   });
-  // The grabber names the sheet's tabs: a tap opens that tab, and a tap on
-  // the tab already showing closes the sheet.
-  const grabTabs = root.querySelector<HTMLElement>("#grab-tabs")!;
-  const grabButtons = SHEET_TABS.map((t) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "grab-tab";
-    b.textContent = TAB_LABELS[t];
-    b.setAttribute("aria-controls", "sheet");
-    b.addEventListener("click", () => {
-      if (sheet!.open && sheetTab === t) {
-        sheet!.setOpen(false);
-        return;
-      }
-      sheet!.selectTab(t);
-      sheet!.setOpen(true);
-    });
-    grabTabs.append(b);
-    return { t, b };
-  });
-  const syncGrabber = () => {
-    for (const { t, b } of grabButtons) b.setAttribute("aria-expanded", String(sheet!.open && sheetTab === t));
-  };
-  sheet.onOpen(syncGrabber);
-  sheet.onTab(syncGrabber);
-  syncGrabber();
-
   // The dial shares the waterfall drag's preview-and-hold path, so the chip
   // and readout follow it and a stale reply cannot pull it back.
   // With no receiver the dial moves the radio's centre: a pseudo receiver
@@ -565,7 +541,7 @@ export function mountApp(root: HTMLElement): AppHandle {
       digitLimiter.flush();
       receivers.endDrag();
     },
-    openSheet: () => sheet!.setOpen(true),
+    openSheet: () => sheet!.selectTab("tune"),
     toast,
   });
   top.el.append(new SpeechSwitch(speechModel, toast).el);
@@ -899,5 +875,9 @@ export function mountApp(root: HTMLElement): AppHandle {
 
   wireLifecycle(link, document, window);
   link.start();
+  // Last, so every tab listener is attached and everything a panel reads
+  // while rendering already exists.
+  sheet.selectTab(readTab(prefs.getItem(TAB_KEY)));
+
   return { link, audio, keep, receivers, view: () => view };
 }

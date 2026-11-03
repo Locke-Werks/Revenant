@@ -1,7 +1,7 @@
 // The bottom sheet (a side panel in landscape): tuning for the active
 // receiver, keep listening, and the radio panel.
 
-import { BANDWIDTHS_HZ, formatMHz, MODES, TRANSCRIBE_CHOICES, type Receiver, type TranscribeChoice } from "./receivers";
+import { BANDWIDTHS_HZ, MODES, TRANSCRIBE_CHOICES, type Receiver, type TranscribeChoice } from "./receivers";
 import { decodersFor, modeLabel, toggled, type DecoderInfo } from "../decoders";
 
 export const SQUELCH_MIN_DBFS = -140;
@@ -22,6 +22,13 @@ export const SHEET_TABS = ["tune", "signals", "radio"] as const;
 export type SheetTab = (typeof SHEET_TABS)[number];
 export const TAB_LABELS: Record<SheetTab, string> = { tune: "Tune", signals: "Signals", radio: "Radio" };
 
+export const TAB_KEY = "revenant.tab";
+
+// The tab the bottom pane opens on: the last one shown, else Tune.
+export function readTab(stored: string | null): SheetTab {
+  return SHEET_TABS.find((t) => t === stored) ?? "tune";
+}
+
 export function sheetHint(others: boolean): string {
   return others ? "Tap a receiver to listen" : "Tap the waterfall to listen there; press and hold to add another receiver.";
 }
@@ -39,7 +46,6 @@ export class Sheet {
   private readonly panels: Record<SheetTab, HTMLElement>;
   private tab: SheetTab = "tune";
   private tabListeners = new Set<(tab: SheetTab) => void>();
-  private readonly title: HTMLElement;
   private readonly tuning: HTMLElement;
   private readonly modes: HTMLElement;
   private readonly bandwidth: HTMLSelectElement;
@@ -54,19 +60,13 @@ export class Sheet {
   private catalogue: readonly DecoderInfo[] = [];
   private readonly setDecoders: (names: string[]) => void;
   private active: Receiver | null = null;
-  private openListeners = new Set<(open: boolean) => void>();
 
   constructor(deps: SheetDeps) {
     this.el = document.createElement("section");
     this.el.className = "sheet";
     this.el.id = "sheet";
-    this.el.hidden = true;
     this.el.setAttribute("aria-label", "Controls");
     this.el.innerHTML = `
-<div class="sheet-head">
-  <h2 id="sh-title">No receiver</h2>
-  <button type="button" class="icon-btn" id="sh-close" aria-label="Close controls">×</button>
-</div>
 <div class="tabs" role="tablist" aria-label="Controls" id="sh-tabs"></div>
 <div class="sheet-body">
   <div id="sh-tab-tune" role="tabpanel" aria-label="Tune">
@@ -101,7 +101,6 @@ export class Sheet {
   <div id="sh-tab-signals" role="tabpanel" aria-label="Signals" hidden></div>
   <div id="sh-tab-radio" role="tabpanel" aria-label="Radio" hidden></div>
 </div>`;
-    this.title = this.el.querySelector("#sh-title")!;
     this.tuning = this.el.querySelector("#sh-tuning")!;
     this.modes = this.el.querySelector("#sh-modes")!;
     this.bandwidth = this.el.querySelector("#sh-bw")!;
@@ -169,7 +168,6 @@ export class Sheet {
     this.removeBtn.addEventListener("click", () => {
       if (this.active) deps.remove(this.active.vrx);
     });
-    this.el.querySelector("#sh-close")!.addEventListener("click", () => this.setOpen(false));
     this.show(null);
   }
 
@@ -184,19 +182,6 @@ export class Sheet {
 
   onTab(fn: (tab: SheetTab) => void): void {
     this.tabListeners.add(fn);
-  }
-
-  get open(): boolean {
-    return !this.el.hidden;
-  }
-
-  setOpen(open: boolean): void {
-    this.el.hidden = !open;
-    for (const fn of this.openListeners) fn(open);
-  }
-
-  onOpen(fn: (open: boolean) => void): void {
-    this.openListeners.add(fn);
   }
 
   // The engine-wide speech state, as a sentence.
@@ -216,7 +201,6 @@ export class Sheet {
     const hint = this.el.querySelector<HTMLElement>("#sh-hint")!;
     hint.hidden = r !== null;
     hint.textContent = sheetHint(others);
-    this.title.textContent = r ? `${formatMHz(r.hz)} MHz ${modeLabel(r.mode)}` : "No receiver";
     if (!r) return;
     for (const b of Array.from(this.modes.querySelectorAll<HTMLButtonElement>("button"))) {
       b.setAttribute("aria-pressed", String(b.dataset.mode === r.mode));

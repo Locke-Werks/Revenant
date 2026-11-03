@@ -158,7 +158,7 @@ export function showInsets(doc: Document, win: Window): void {
       lines.append(l);
     }
     place(appBox, "app", doc.querySelector(".app"));
-    place(grabBox, "grab", doc.querySelector(".sheet:not([hidden])") ?? doc.querySelector(".grabber"));
+    place(grabBox, "grab", doc.querySelector(".pane-bottom"));
     const cs = win.getComputedStyle(probe);
     const vv = win.visualViewport;
     const nav = win.navigator as Navigator & { standalone?: boolean };
