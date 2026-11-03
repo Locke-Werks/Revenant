@@ -40,6 +40,7 @@ export const OPS = [
   "keepListening",
   "setTranscription",
   "setVrxTranscribe",
+  "setDetection",
   "resume",
   "pong",
 ] as const;
@@ -57,6 +58,7 @@ export const EVENTS = [
   "hello",
   "ping",
   "vrxEventsEnded",
+  "detections",
 ] as const;
 export type EventName = (typeof EVENTS)[number];
 
@@ -216,6 +218,13 @@ export interface SourceEvent {
   epoch?: number;
   realtimeFactor?: number;
   pacedBy?: number;
+}
+
+// "detections" is {items: [...]}, each item shaped like Detection in
+// detections.ts. The setDetection reply is {minConfidence}.
+export interface DetectionEvent {
+  event: "detections";
+  items: JsonValue[];
 }
 
 export function encodeCommand(cmd: Command): string {

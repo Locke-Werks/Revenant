@@ -81,6 +81,7 @@ export interface LinkEvents {
   hello: GatewayEvent;
   ping: GatewayEvent;
   vrxEventsEnded: GatewayEvent;
+  detections: GatewayEvent;
 }
 export type LinkEventName = keyof LinkEvents;
 
