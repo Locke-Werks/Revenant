@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { colormap } from "../src/colormap";
-import { RESTORE_WAIT_MS, RING_ROWS, RowRing, WaterfallHost, type Renderer } from "../src/waterfall";
+import { BOX_CARRY_ROWS, RESTORE_WAIT_MS, RING_ROWS, RowRing, WaterfallHost, type Renderer } from "../src/waterfall";
 import { panBy, type View } from "../src/view";
 
 const v: View = { centerHz: 100_000_000, spanHz: 2_000_000, widthPx: 1000 };
@@ -25,6 +25,50 @@ test("placing rows: a fresh slot follows the view, an empty slot draws nothing",
   assert.equal(r.meta[slot * 4], 0.25);
 });
 
+const box = { lowHz: v.centerHz - 50_000, highHz: v.centerHz + 50_000, alpha: 0.3, held: false, label: "NFM" };
+
+test("detection boxes are stamped on the row current when they arrive", () => {
+  const r = new RowRing(2000);
+  r.push(v.centerHz, v.spanHz, 1000);
+  const before = r.push(v.centerHz, v.spanHz, 1000);
+  r.stamp([box]);
+  assert.deepEqual(r.boxes[before], [box]);
+  assert.deepEqual(r.boxes[before - 1], []);
+  // Rows between two events carry the latest list, then stop once it is stale.
+  const next = r.push(v.centerHz, v.spanHz, 1000);
+  assert.deepEqual(r.boxes[next], [box]);
+  let last = next;
+  for (let i = 0; i < BOX_CARRY_ROWS; i++) last = r.push(v.centerHz, v.spanHz, 1000);
+  assert.deepEqual(r.boxes[last], []);
+});
+
+test("a later retune moves boxes with their rows", () => {
+  const r = new RowRing(2000);
+  const slot = r.push(v.centerHz, v.spanHz, 1000);
+  r.stamp([box]);
+  const px = (view: View) => r.boxesPx(slot, view, 1000).map((p) => [Math.round(p.x0), Math.round(p.x1), p.box]);
+  assert.deepEqual(px(v), [[475, 525, box]]);
+  assert.deepEqual(px(panBy(v, v.spanHz / 4)), [[225, 275, box]]);
+  // Off the old row's edge the box is clipped to what that row covered.
+  const edge = { ...box, lowHz: v.centerHz + 950_000, highHz: v.centerHz + 1_100_000 };
+  r.stamp([edge]);
+  assert.deepEqual(px(panBy(v, v.spanHz / 2)), [[475, 500, edge]]);
+});
+
+test("boxes leave with their rows when the ring wraps", () => {
+  const r = new RowRing(2000);
+  const slot = r.push(v.centerHz, v.spanHz, 1000);
+  r.stamp([box]);
+  for (let i = 0; i < RING_ROWS - 1; i++) r.push(v.centerHz, v.spanHz, 1000);
+  assert.deepEqual(r.boxes[slot], [box]);
+  r.push(v.centerHz, v.spanHz, 1000);
+  assert.equal(r.head, slot);
+  assert.deepEqual(r.boxes[slot], []);
+  r.stamp([box]);
+  r.clear();
+  assert.deepEqual(r.boxes[slot], []);
+});
+
 test("rows wider than the texture are clipped to it", () => {
   const r = new RowRing(512);
   const slot = r.push(1, 1, 8192);
@@ -46,6 +90,8 @@ function fakeRenderer(kind: string, log: string[]): Renderer {
     pushRow: () => log.push(`${kind} row`),
     clear: () => log.push(`${kind} clear`),
     draw: () => log.push(`${kind} draw`),
+    setDetections: () => log.push(`${kind} detections`),
+    drawBoxes: () => log.push(`${kind} boxes`),
   };
 }
 

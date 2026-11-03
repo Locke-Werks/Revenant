@@ -187,6 +187,8 @@ button {
   height: 100%;
   display: block;
 }
+/* Markers only; touches belong to the waterfall's gestures underneath. */
+.wf-body .wf-marks { pointer-events: none; }
 /* No engine: the rows on screen are old, and look it. */
 .stage.frozen canvas { opacity: 0.35; filter: grayscale(0.7); }
 

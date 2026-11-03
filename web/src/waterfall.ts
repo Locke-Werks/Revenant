@@ -8,11 +8,16 @@
 // scrolls its own pixels and cannot re-place history.
 
 import { colormap } from "./colormap";
+import { boxPx, parseHexColor, type DetectionBox } from "./markers";
 import type { SpectrumFrame } from "./protocol";
 import { MAX_WIDTH_PX, rowTransform, type RowTransform, type View } from "./view";
 
 // About 50 s of history at the gateway's 20 rows/s.
 export const RING_ROWS = 1024;
+
+// Two seconds of rows: four missed polls at 2 Hz before boxes stop.
+export const BOX_CARRY_ROWS = 40;
+const NO_BOXES: readonly DetectionBox[] = [];
 
 // Where each slot's row came from, and the per-slot transform for the view on
 // screen. Pure bookkeeping, shared by both renderers and tested on its own.
@@ -22,8 +27,13 @@ export class RowRing {
   readonly width = new Uint32Array(RING_ROWS);
   // RGBA per slot: a, b, limit, unused. Uploaded as a float texture.
   readonly meta = new Float32Array(RING_ROWS * 4);
+  // Detection boxes per slot, in hertz. Overwritten with the slot, so a box
+  // leaves the screen with the row it was stamped on.
+  readonly boxes: (readonly DetectionBox[])[] = new Array<readonly DetectionBox[]>(RING_ROWS).fill(NO_BOXES);
   head = -1;
   private scratch: RowTransform = { a: 0, b: 0, limit: 0 };
+  private carry: readonly DetectionBox[] = NO_BOXES;
+  private carryLeft = 0;
 
   constructor(readonly texWidth: number) {}
 
@@ -33,7 +43,31 @@ export class RowRing {
     this.center[this.head] = centerHz;
     this.span[this.head] = spanHz;
     this.width[this.head] = Math.min(widthPx, this.texWidth);
+    this.boxes[this.head] = this.carryLeft > 0 ? this.carry : NO_BOXES;
+    if (this.carryLeft > 0) this.carryLeft--;
     return this.head;
+  }
+
+  // Detections arrive a few times a second and rows twenty times, so the rows
+  // between two events carry the latest list; a list nobody refreshes stops
+  // being drawn rather than painting a stale signal down the screen.
+  stamp(boxes: readonly DetectionBox[]): void {
+    this.carry = boxes;
+    this.carryLeft = BOX_CARRY_ROWS;
+    if (this.head >= 0) this.boxes[this.head] = boxes;
+  }
+
+  // Boxes on one slot in pixels across a canvas showing `view`, clipped to
+  // what that row covered.
+  boxesPx(slot: number, view: View, widthPx: number): { x0: number; x1: number; box: DetectionBox }[] {
+    const out: { x0: number; x1: number; box: DetectionBox }[] = [];
+    if (this.width[slot] === 0) return out;
+    const row = { centerHz: this.center[slot]!, spanHz: this.span[slot]! };
+    for (const box of this.boxes[slot]!) {
+      const p = boxPx(view, widthPx, row, box);
+      if (p) out.push({ x0: p.x0, x1: p.x1, box });
+    }
+    return out;
   }
 
   // Recomputes one slot's transform, or all of them when the view moved.
@@ -62,6 +96,7 @@ export class RowRing {
   clear(): void {
     this.width.fill(0);
     this.meta.fill(0);
+    this.boxes.fill(NO_BOXES);
     this.head = -1;
   }
 }
@@ -72,6 +107,11 @@ export interface Renderer {
   pushRow(f: SpectrumFrame): void;
   clear(): void;
   draw(): void;
+  // Stamps the latest detections onto the row current now.
+  setDetections(boxes: readonly DetectionBox[]): void;
+  // Paints history's detection boxes onto an overlay the size of the
+  // waterfall. A renderer that burns them into its own pixels does nothing.
+  drawBoxes(ctx: CanvasRenderingContext2D, accent: string): void;
 }
 
 const VS = `#version 300 es
@@ -195,6 +235,40 @@ class GlRenderer implements Renderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
+  setDetections(boxes: readonly DetectionBox[]): void {
+    this.ring.stamp(boxes);
+  }
+
+  drawBoxes(ctx: CanvasRenderingContext2D, accent: string): void {
+    const ring = this.ring;
+    const view = this.view;
+    if (!view || ring.head < 0) return;
+    const w = ctx.canvas.width;
+    const rowH = ctx.canvas.height / RING_ROWS;
+    ctx.fillStyle = accent;
+    // Neighbouring rows usually share one list and one view, so each run of
+    // them is one rectangle per box instead of one per row.
+    let k = 0;
+    while (k < RING_ROWS) {
+      const slot = (ring.head - k + RING_ROWS) % RING_ROWS;
+      const boxes = ring.boxes[slot]!;
+      let end = k + 1;
+      while (end < RING_ROWS) {
+        const s = (ring.head - end + RING_ROWS) % RING_ROWS;
+        if (ring.boxes[s] !== boxes || ring.center[s] !== ring.center[slot] || ring.span[s] !== ring.span[slot]) break;
+        end++;
+      }
+      if (boxes.length > 0) {
+        for (const p of ring.boxesPx(slot, view, w)) {
+          ctx.globalAlpha = p.box.alpha;
+          ctx.fillRect(p.x0, k * rowH, p.x1 - p.x0, (end - k) * rowH);
+        }
+      }
+      k = end;
+    }
+    ctx.globalAlpha = 1;
+  }
+
   private uploadMeta(slot?: number): void {
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE1);
@@ -248,8 +322,13 @@ class CanvasRenderer implements Renderer {
   private pal = colormap();
   private view: View | null = null;
   private t: RowTransform = { a: 0, b: 0, limit: 0 };
+  private carry: readonly DetectionBox[] = NO_BOXES;
+  private carryLeft = 0;
 
-  constructor(private readonly canvas: HTMLCanvasElement) {
+  constructor(
+    private readonly canvas: HTMLCanvasElement,
+    private readonly accent: readonly [number, number, number],
+  ) {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2D context");
     this.ctx = ctx;
@@ -282,6 +361,22 @@ class CanvasRenderer implements Renderer {
       d[x * 4 + 2] = this.pal[v * 4 + 2]!;
       d[x * 4 + 3] = 255;
     }
+    // History here is pixels that never move again, so boxes are burnt into
+    // the row as it is drawn and scroll off with it.
+    const boxes = this.carryLeft > 0 ? this.carry : NO_BOXES;
+    if (this.carryLeft > 0) this.carryLeft--;
+    const [ar, ag, ab] = this.accent;
+    for (const box of boxes) {
+      const p = boxPx(view, w, f, box);
+      if (!p) continue;
+      const k = box.alpha;
+      for (let x = Math.floor(p.x0); x < Math.ceil(p.x1); x++) {
+        const o = x * 4;
+        d[o] = d[o]! + (ar - d[o]!) * k;
+        d[o + 1] = d[o + 1]! + (ag - d[o + 1]!) * k;
+        d[o + 2] = d[o + 2]! + (ab - d[o + 2]!) * k;
+      }
+    }
     this.ctx.drawImage(this.canvas, 0, ROW_PX);
     for (let y = 0; y < ROW_PX; y++) this.ctx.putImageData(line, 0, y);
   }
@@ -292,6 +387,13 @@ class CanvasRenderer implements Renderer {
   }
 
   draw(): void {}
+
+  setDetections(boxes: readonly DetectionBox[]): void {
+    this.carry = boxes;
+    this.carryLeft = BOX_CARRY_ROWS;
+  }
+
+  drawBoxes(): void {}
 }
 
 // How long a lost WebGL context gets to come back before the 2D renderer
@@ -364,6 +466,12 @@ export class WaterfallHost implements Renderer {
   draw(): void {
     this.r?.draw();
   }
+  setDetections(boxes: readonly DetectionBox[]): void {
+    this.r?.setDetections(boxes);
+  }
+  drawBoxes(ctx: CanvasRenderingContext2D, accent: string): void {
+    this.r?.drawBoxes(ctx, accent);
+  }
 
   private become2d(): void {
     this.state = "2d";
@@ -386,7 +494,8 @@ export class WaterfallHost implements Renderer {
   }
 }
 
-export function createWaterfall(first: HTMLCanvasElement): WaterfallHost {
+export function createWaterfall(first: HTMLCanvasElement, accent: string): WaterfallHost {
+  const accentRgb = parseHexColor(accent);
   let canvas = first;
   let used = false;
   // A canvas that has handed out a webgl2 context cannot give a 2d one, so
@@ -408,7 +517,7 @@ export function createWaterfall(first: HTMLCanvasElement): WaterfallHost {
         if (!gl || gl.isContextLost()) return null;
         return new GlRenderer(c, gl);
       },
-      canvas2d: () => new CanvasRenderer(fresh()),
+      canvas2d: () => new CanvasRenderer(fresh(), accentRgb),
     },
     { setTimeout: (fn, ms) => window.setTimeout(fn, ms), clearTimeout: (h) => window.clearTimeout(h as number) },
   );

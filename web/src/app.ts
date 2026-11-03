@@ -8,6 +8,8 @@ import { parseDetections, snapTap, type Detection } from "./detections";
 import { attachGestures } from "./gestures";
 import { TuneLimiter } from "./tune_limiter";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
+import { DEFAULT_ACCENT, detectionBoxes } from "./markers";
+import { drawReceivers, type ReceiverMark } from "./overlay";
 import { SpectrumTrace } from "./spectrum_trace";
 import { clampView, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
 import { createWaterfall, RING_ROWS } from "./waterfall";
@@ -29,7 +31,7 @@ export function appScreenHtml(): string {
   <div class="top" id="top-slot"></div>
   <div class="stage" id="stage">
     <canvas id="trace" class="wf-trace"></canvas>
-    <div id="wf-body" class="wf-body"><canvas id="waterfall" class="wf-canvas"></canvas><div id="captions" class="captions" aria-hidden="true"></div></div>
+    <div id="wf-body" class="wf-body"><canvas id="waterfall" class="wf-canvas"></canvas><canvas id="wf-marks" class="wf-marks" aria-hidden="true"></canvas><div id="captions" class="captions" aria-hidden="true"></div></div>
     <div class="overlay">
       <div class="status-chips" id="status-chips"></div>
       <div class="pill" id="status-pill" role="status" hidden></div>
@@ -87,8 +89,13 @@ export function mountApp(root: HTMLElement): AppHandle {
     store: keyStore(),
     now: () => performance.now(),
   });
-  const waterfall = createWaterfall(wfCanvas);
-  const trace = new SpectrumTrace(traceCanvas);
+  // One accent for every marker, read once from the stylesheet so the visual
+  // pass can change it in CSS alone.
+  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || DEFAULT_ACCENT;
+  const waterfall = createWaterfall(wfCanvas, accent);
+  const trace = new SpectrumTrace(traceCanvas, accent);
+  const marksCanvas = root.querySelector<HTMLCanvasElement>("#wf-marks")!;
+  const marks = marksCanvas.getContext("2d");
 
   // Captions ride on the same rows as the waterfall: the clock keeps each
   // row's source_start in the waterfall's own ring order.
@@ -110,8 +117,19 @@ export function mountApp(root: HTMLElement): AppHandle {
     drawQueued = false;
     waterfall.draw();
     trace.draw();
+    drawMarks();
     layoutCaptions();
   };
+  const drawMarks = () => {
+    if (!marks) return;
+    marks.clearRect(0, 0, marksCanvas.width, marksCanvas.height);
+    if (!view) return;
+    waterfall.drawBoxes(marks, accent);
+    drawReceivers(marks, view, receiverMarks, activeMark, accent);
+  };
+  // Filled in once the receiver controller exists; drawn on the current view.
+  let receiverMarks: ReceiverMark[] = [];
+  let activeMark: number | null = null;
   const layoutCaptions = () => {
     if (!view) return;
     const heightCss = body.clientHeight;
@@ -157,6 +175,8 @@ export function mountApp(root: HTMLElement): AppHandle {
     widthDev = Math.max(1, Math.min(MAX_WIDTH_PX, Math.round(wCss * dpr)));
     waterfall.resize(Math.max(1, Math.round(wCss * dpr)), Math.max(1, Math.round(hCss * dpr)));
     trace.resize(Math.max(1, Math.round(traceCanvas.clientWidth * dpr)), Math.max(1, Math.round(traceCanvas.clientHeight * dpr)));
+    marksCanvas.width = Math.max(1, Math.round(wCss * dpr));
+    marksCanvas.height = Math.max(1, Math.round(hCss * dpr));
     if (view) apply({ ...view, widthPx: widthDev });
     requestDraw();
   };
@@ -392,6 +412,16 @@ export function mountApp(root: HTMLElement): AppHandle {
   };
   receivers.list.onChange(renderReceivers);
   renderReceivers();
+  // A drag, dial or digit swipe previews through the list, so the passband
+  // follows the finger on the next frame without waiting for the gateway.
+  const updateMarks = () => {
+    receiverMarks = receivers.list.list();
+    activeMark = receivers.list.active;
+    trace.setReceivers(receiverMarks, activeMark);
+    requestDraw();
+  };
+  receivers.list.onChange(updateMarks);
+  updateMarks();
 
   // ---- Status --------------------------------------------------------------
   const status = new StatusModel();
@@ -436,6 +466,10 @@ export function mountApp(root: HTMLElement): AppHandle {
   let detections: Detection[] = [];
   link.on("detections", (e) => {
     detections = parseDetections(e);
+    const boxes = detectionBoxes(detections);
+    waterfall.setDetections(boxes);
+    trace.setDetections(boxes);
+    requestDraw();
   });
 
   const tuneLimiter = new TuneLimiter(
