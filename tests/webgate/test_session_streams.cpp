@@ -970,6 +970,28 @@ TEST_CASE("detections poll only with a view, at their own interval, with the ses
     CHECK(t.last_bar == 0.4);
 }
 
+TEST_CASE("detections go out only when the list changed, and again on resume",
+          "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    DetectionRig t;
+    t.list.detections = {track(1, kCentre, 10.0)};
+    t.view();
+    t.poll();
+    t.poll();
+    t.poll();
+    CHECK(t.polls == 3);
+    CHECK(count_events(t.rig.socket, "detections") == 1);
+
+    t.list.detections = {track(1, kCentre, 11.0)};
+    t.poll();
+    CHECK(count_events(t.rig.socket, "detections") == 2);
+
+    t.rig.streams->announce_state();
+    t.rig.strand.run_pending();
+    CHECK(count_events(t.rig.socket, "detections") == 3);
+}
+
 TEST_CASE("a failed detections poll sends nothing", "[gpu][webgate][streams]")
 {
     REVENANT_NEEDS_GPU();
