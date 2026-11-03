@@ -103,7 +103,7 @@ esbuild, plus a WASM Opus decoder. CMake runs the build and copies the
 output beside `revenant-webgate.exe`. Node is a build-time tool only; the
 payload carries no runtime.
 
-New vcpkg dependencies: `libopus`, and the `openssl` feature of
+New vcpkg dependencies: `opus` (the libopus port), and the `openssl` feature of
 `capnproto`.
 
 ## Wire protocol
