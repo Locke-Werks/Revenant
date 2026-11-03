@@ -1,6 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fitBandwidth, parseDetections, snapTap, sortForList, type Detection } from "../src/detections";
+import {
+  fitBandwidth,
+  LingerTracker,
+  LOST_LINGER_MS,
+  LOST_MIN_OPACITY,
+  lostClock,
+  lostOpacity,
+  parseDetections,
+  snapTap,
+  sortForList,
+  type Detection,
+} from "../src/detections";
 import type { GatewayEvent } from "../src/protocol";
 
 const item = (over: Record<string, unknown> = {}) => ({
@@ -63,16 +74,24 @@ test("parseDetections returns nothing when items is not an array", () => {
   assert.deepEqual(parseDetections({ event: "detections", items: 3 } as unknown as GatewayEvent), []);
 });
 
-test("sortForList orders by SNR descending, then id, without mutating", () => {
+test("sortForList orders by centre frequency ascending, ties by id, without mutating", () => {
   const input = [
-    det({ id: "9", snrDb: 10 }),
-    det({ id: "2", snrDb: 30 }),
-    det({ id: "1", snrDb: 10 }),
-    det({ id: "10", snrDb: 10 }),
+    det({ id: "9", centerHz: 150_000_000, snrDb: 10 }),
+    det({ id: "2", centerHz: 90_000_000, snrDb: 5 }),
+    det({ id: "1", centerHz: 150_000_000, snrDb: 40 }),
+    det({ id: "10", centerHz: 150_000_000, snrDb: 10 }),
   ];
   const out = sortForList(input);
   assert.deepEqual(out.map((d) => d.id), ["2", "1", "9", "10"]);
   assert.equal(input[0]?.id, "9");
+});
+
+test("a level change does not move a row", () => {
+  const a = det({ id: "1", centerHz: 100_000_000, snrDb: 10 });
+  const b = det({ id: "2", centerHz: 101_000_000, snrDb: 20 });
+  const before = sortForList([a, b]).map((d) => d.id);
+  const after = sortForList([{ ...a, snrDb: 50 }, b]).map((d) => d.id);
+  assert.deepEqual(after, before);
 });
 
 test("sortForList compares ids numerically past 2^53", () => {
@@ -81,6 +100,83 @@ test("sortForList compares ids numerically past 2^53", () => {
     det({ id: "18446744073709551614" }),
   ]);
   assert.deepEqual(out.map((d) => d.id), ["18446744073709551614", "18446744073709551615"]);
+});
+
+// ---- Lost signals linger -----------------------------------------------------
+
+const ids = (l: { id: string }[]) => l.map((d) => d.id);
+
+test("a detection that leaves the list lingers as lost, then is removed", () => {
+  const t = new LingerTracker();
+  const a = det({ id: "1", centerHz: 100_000_000, bandwidthHz: 10_000 });
+  t.update([a], 1000);
+  t.update([], 1500);
+  const [lost] = t.view(1500 + 42_000);
+  assert.equal(lost?.id, "1");
+  // Time since last listed: the last update that held it was at 1000.
+  assert.equal(lost?.lostForMs, 42_500);
+  assert.equal(t.hasLost(), true);
+  assert.deepEqual(t.view(1000 + LOST_LINGER_MS - 1).length, 1);
+  assert.deepEqual(t.view(1000 + LOST_LINGER_MS), []);
+  assert.equal(t.hasLost(), false);
+});
+
+test("the fade runs from 1 to the floor over the linger", () => {
+  assert.equal(lostOpacity(undefined), 1);
+  assert.equal(lostOpacity(0), 1);
+  assert.ok(Math.abs(lostOpacity(LOST_LINGER_MS / 2) - (1 + LOST_MIN_OPACITY) / 2) < 1e-9);
+  assert.ok(Math.abs(lostOpacity(LOST_LINGER_MS) - LOST_MIN_OPACITY) < 1e-9);
+  assert.ok(Math.abs(lostOpacity(LOST_LINGER_MS * 5) - LOST_MIN_OPACITY) < 1e-9);
+  assert.ok(lostOpacity(30_000) > lostOpacity(60_000));
+});
+
+test("lost age reads as minutes and seconds", () => {
+  assert.equal(lostClock(0), "0:00");
+  assert.equal(lostClock(42_900), "0:42");
+  assert.equal(lostClock(75_000), "1:15");
+});
+
+test("the same id coming back revives the row", () => {
+  const t = new LingerTracker();
+  const a = det({ id: "1" });
+  t.update([a], 0);
+  t.update([], 1000);
+  assert.equal(t.view(2000)[0]?.lostForMs, 2000);
+  t.update([a], 3000);
+  const [back] = t.view(3000);
+  assert.equal(back?.lostForMs, undefined);
+  assert.equal(t.hasLost(), false);
+});
+
+test("a new id inside the lost band revives it, one outside does not", () => {
+  const t = new LingerTracker();
+  const a = det({ id: "1", centerHz: 100_000_000, bandwidthHz: 20_000 });
+  t.update([a], 0);
+  t.update([], 1000);
+  t.update([det({ id: "2", centerHz: 100_030_000 })], 2000);
+  assert.deepEqual(ids(t.view(2000)), ["2", "1"]);
+  t.update([det({ id: "3", centerHz: 100_009_000 })], 3000);
+  assert.deepEqual(ids(t.view(3000)), ["3"]);
+});
+
+test("a signal already listed does not revive a lost one under it", () => {
+  const t = new LingerTracker();
+  const wide = det({ id: "w", centerHz: 100_000_000, bandwidthHz: 200_000 });
+  const narrow = det({ id: "n", centerHz: 100_010_000, bandwidthHz: 5_000 });
+  t.update([wide, narrow], 0);
+  t.update([wide], 1000);
+  assert.deepEqual(ids(t.view(1000)), ["w", "n"]);
+});
+
+test("lost entries keep their last centre, label and width", () => {
+  const t = new LingerTracker();
+  const a = det({ id: "1", centerHz: 162_550_000, bandwidthHz: 9_000, label: "NFM", labelKind: "modulation" });
+  t.update([a], 0);
+  t.update([], 1000);
+  const [lost] = t.view(1000);
+  assert.equal(lost?.centerHz, 162_550_000);
+  assert.equal(lost?.bandwidthHz, 9_000);
+  assert.equal(lost?.label, "NFM");
 });
 
 test("snapTap snaps to the centre of the band holding the tap", () => {

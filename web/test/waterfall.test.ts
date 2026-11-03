@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BOX_CARRY_MS, BOX_CARRY_ROWS, boxCarryRows, RESTORE_WAIT_MS, RING_ROWS, RowRing, rowAt, rowTop, WaterfallHost, type Renderer } from "../src/waterfall";
+import { BOX_CARRY_MS, BOX_CARRY_ROWS, boxCarryRows, RESTORE_WAIT_MS, RING_ROWS, RowRing, rowAt, rowTop, slotAtY, WaterfallHost, type Renderer } from "../src/waterfall";
+import type { Detection } from "../src/detections";
+import { BOX_TAP_SLACK_PX, detectionBoxes, pickBox } from "../src/markers";
 import { panBy, type View } from "../src/view";
 
 const v: View = { centerHz: 100_000_000, spanHz: 2_000_000, widthPx: 1000 };
@@ -71,6 +73,97 @@ test("a later retune moves boxes with their rows", () => {
   assert.deepEqual(px(panBy(v, v.spanHz / 2)), [[475, 500, edge]]);
 });
 
+// ---- Tapping a stamped detection box -------------------------------------------
+
+const detAt = (id: string, centerHz: number, bandwidthHz: number, snrDb = 10): Detection => ({
+  id,
+  centerHz,
+  bandwidthHz,
+  snrDb,
+  confidence: 0.9,
+  state: "live",
+  label: "NFM",
+  labelKind: "modulation",
+  labelConfidence: 0.8,
+  lastSeen: 0,
+});
+
+test("a tap inside a live box finds its detection, a miss finds none", () => {
+  const r = new RowRing(2000);
+  const slot = r.push(v.centerHz, v.spanHz, 1000);
+  r.stamp(detectionBoxes([detAt("1", v.centerHz, 100_000)]));
+  assert.equal(r.boxAt(slot, v, 1000, 500, BOX_TAP_SLACK_PX)?.detection?.id, "1");
+  assert.equal(r.boxAt(slot, v, 1000, 478, BOX_TAP_SLACK_PX)?.detection?.id, "1");
+  assert.equal(r.boxAt(slot, v, 1000, 600, BOX_TAP_SLACK_PX), null);
+});
+
+test("a sliver of a box is still tappable within the slack", () => {
+  const r = new RowRing(2000);
+  const slot = r.push(v.centerHz, v.spanHz, 1000);
+  r.stamp(detectionBoxes([detAt("1", v.centerHz, 1_000)]));
+  assert.equal(r.boxAt(slot, v, 1000, 505, BOX_TAP_SLACK_PX)?.detection?.id, "1");
+  assert.equal(r.boxAt(slot, v, 1000, 507, BOX_TAP_SLACK_PX), null);
+});
+
+test("a box on an old row from a signal that has gone is still tappable", () => {
+  const r = new RowRing(2000);
+  const old = r.push(v.centerHz, v.spanHz, 1000);
+  r.stamp(detectionBoxes([detAt("1", v.centerHz, 100_000)]), 2);
+  let last = old;
+  for (let i = 0; i < 6; i++) last = r.push(v.centerHz, v.spanHz, 1000);
+  assert.equal(r.boxAt(old, v, 1000, 500, BOX_TAP_SLACK_PX)?.detection?.id, "1");
+  assert.equal(r.boxAt(last, v, 1000, 500, BOX_TAP_SLACK_PX), null);
+});
+
+test("the hit follows the row's own view after a retune", () => {
+  const r = new RowRing(2000);
+  const slot = r.push(v.centerHz, v.spanHz, 1000);
+  r.stamp(detectionBoxes([detAt("1", v.centerHz, 100_000)]));
+  const moved = panBy(v, v.spanHz / 4);
+  assert.equal(r.boxAt(slot, moved, 1000, 250, BOX_TAP_SLACK_PX)?.detection?.id, "1");
+  assert.equal(r.boxAt(slot, moved, 1000, 500, BOX_TAP_SLACK_PX), null);
+  // A different row centre puts the same hertz elsewhere on screen.
+  const other = r.push(v.centerHz + 500_000, v.spanHz, 1000);
+  r.stamp(detectionBoxes([detAt("2", v.centerHz + 500_000, 100_000)]));
+  assert.equal(r.boxAt(other, v, 1000, 750, BOX_TAP_SLACK_PX)?.detection?.id, "2");
+});
+
+test("an empty slot and a row with no boxes give nothing", () => {
+  const r = new RowRing(2000);
+  assert.equal(r.boxAt(5, v, 1000, 500, BOX_TAP_SLACK_PX), null);
+  const slot = r.push(v.centerHz, v.spanHz, 1000);
+  assert.equal(r.boxAt(slot, v, 1000, 500, BOX_TAP_SLACK_PX), null);
+});
+
+test("a tap between two boxes goes to the one it is nearer the middle of", () => {
+  const r = new RowRing(2000);
+  const slot = r.push(v.centerHz, v.spanHz, 1000);
+  // 400 to 600 px wide box over a narrow one at 520 px; the tap at 515 is
+  // 5 px from the narrow centre (depth 5/6) and 15 px from the wide (0.15).
+  r.stamp(detectionBoxes([detAt("w", v.centerHz + 30_000, 200_000, 30), detAt("n", v.centerHz + 40_000, 1_000, 10)]));
+  assert.equal(r.boxAt(slot, v, 1000, 515, BOX_TAP_SLACK_PX)?.detection?.id, "w");
+  assert.equal(r.boxAt(slot, v, 1000, 520, BOX_TAP_SLACK_PX)?.detection?.id, "n");
+});
+
+test("equal depth goes to the louder box, then the lower id", () => {
+  const hits = [
+    { x0: 90, x1: 110, box: detectionBoxes([detAt("5", 1, 1, 10)])[0]! },
+    { x0: 90, x1: 110, box: detectionBoxes([detAt("4", 1, 1, 20)])[0]! },
+    { x0: 90, x1: 110, box: detectionBoxes([detAt("3", 1, 1, 20)])[0]! },
+  ];
+  assert.equal(pickBox(hits, 100, 6)?.detection?.id, "3");
+});
+
+test("the tap's height maps to the ring slot the row was drawn in", () => {
+  assert.equal(slotAtY(10, 0, 0), 10);
+  assert.equal(slotAtY(10, 3.5 / RING_ROWS, 0), 7);
+  // History scrolled down by a row: the row under the finger is one newer.
+  assert.equal(slotAtY(10, 3.5 / RING_ROWS, 1), 8);
+  assert.equal(slotAtY(2, 5.5 / RING_ROWS, 0), RING_ROWS - 3);
+  assert.equal(slotAtY(10, 1, 0), null);
+  assert.equal(slotAtY(-1, 0.5, 0), null);
+});
+
 test("boxes leave with their rows when the ring wraps", () => {
   const r = new RowRing(2000);
   const slot = r.push(v.centerHz, v.spanHz, 1000);
@@ -102,6 +195,7 @@ function fakeRenderer(kind: string, log: string[], scrolls = kind === "gl"): Ren
     draw: (shift = 0) => log.push(shift === 0 ? `${kind} draw` : `${kind} draw ${shift}`),
     setDetections: () => log.push(`${kind} detections`),
     drawBoxes: () => log.push(`${kind} boxes`),
+    boxAt: () => null,
   };
 }
 

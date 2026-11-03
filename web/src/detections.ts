@@ -63,7 +63,7 @@ export function parseDetections(e: GatewayEvent): Detection[] {
 // Ids compare as BigInt because they can exceed 2^53 and a string compare
 // would put "10" before "9". Digits-only is guaranteed by the gateway; a
 // non-numeric id falls back to a string compare rather than throwing.
-function compareId(a: string, b: string): number {
+export function compareId(a: string, b: string): number {
   try {
     const x = BigInt(a);
     const y = BigInt(b);
@@ -73,8 +73,82 @@ function compareId(a: string, b: string): number {
   }
 }
 
-export function sortForList(d: Detection[]): Detection[] {
-  return [...d].sort((a, b) => b.snrDb - a.snrDb || compareId(a.id, b.id));
+// Lowest frequency first: a row keeps its place as signals come and go,
+// where an SNR order shuffles the whole list every time a level wobbles.
+export function sortForList<T extends Detection>(d: readonly T[]): T[] {
+  return [...d].sort((a, b) => a.centerHz - b.centerHz || compareId(a.id, b.id));
+}
+
+// How long a signal the gateway has stopped reporting stays in the phone's
+// list and on its spectrum, so the user can park a receiver on it while
+// waiting for it to come back.
+export const LOST_LINGER_MS = 120_000;
+// Where the fade ends up just before the entry is removed.
+export const LOST_MIN_OPACITY = 0.35;
+
+// A detection as the phone shows it. lostForMs is the time since the gateway
+// last listed it, absent while it is still listed.
+export interface Listed extends Detection {
+  lostForMs?: number;
+}
+
+// 1 while listed, falling linearly to LOST_MIN_OPACITY at the end of the
+// linger.
+export function lostOpacity(lostForMs: number | undefined): number {
+  if (lostForMs === undefined) return 1;
+  const k = Math.min(1, Math.max(0, lostForMs / LOST_LINGER_MS));
+  return 1 - (1 - LOST_MIN_OPACITY) * k;
+}
+
+// "0:42", for the lost rows' age.
+export function lostClock(lostForMs: number): string {
+  const s = Math.max(0, Math.floor(lostForMs / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// Remembers detections that dropped out of the gateway's list. A lost entry
+// is revived by the same id coming back, or by a new id appearing with its
+// centre inside the lost band: the tracker re-issues ids when a signal
+// returns after its track expired.
+export class LingerTracker {
+  private live = new Map<string, Detection>();
+  private lost = new Map<string, { det: Detection; heardMs: number }>();
+  private lastUpdateMs = 0;
+
+  update(items: readonly Detection[], nowMs: number): void {
+    const next = new Map<string, Detection>();
+    for (const d of items) next.set(d.id, d);
+    // The last update that listed it is when it was last heard.
+    for (const [id, det] of this.live) {
+      if (!next.has(id)) this.lost.set(id, { det, heardMs: this.lastUpdateMs });
+    }
+    for (const id of next.keys()) this.lost.delete(id);
+    const fresh = items.filter((d) => !this.live.has(d.id));
+    for (const [id, l] of this.lost) {
+      const half = Math.max(0, l.det.bandwidthHz) / 2;
+      if (fresh.some((d) => Math.abs(d.centerHz - l.det.centerHz) <= half)) this.lost.delete(id);
+    }
+    this.live = next;
+    this.lastUpdateMs = nowMs;
+  }
+
+  // Listed detections followed by the lost ones still within the linger.
+  view(nowMs: number): Listed[] {
+    const out: Listed[] = [...this.live.values()];
+    for (const [id, l] of this.lost) {
+      const gone = nowMs - l.heardMs;
+      if (gone >= LOST_LINGER_MS) {
+        this.lost.delete(id);
+        continue;
+      }
+      out.push({ ...l.det, lostForMs: Math.max(0, gone) });
+    }
+    return out;
+  }
+
+  hasLost(): boolean {
+    return this.lost.size > 0;
+  }
 }
 
 // Narrowest wins where bands overlap: the tap is more likely aimed at the

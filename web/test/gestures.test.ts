@@ -8,6 +8,7 @@ import { hzToPx, panBy, pxToHz, zoomAt, type View } from "../src/view";
 function rig() {
   let view: View = { centerHz: 1_000_000, spanHz: 400_000, widthPx: 400 };
   const log: string[] = [];
+  const taps: (readonly [number, number])[] = [];
   const timers = new Map<number, () => void>();
   let seq = 0;
   const g = new GestureClassifier(
@@ -22,7 +23,10 @@ function rig() {
       },
       dragTune: (d) => log.push(`drag ${d}`),
       dragEnd: () => log.push("dragEnd"),
-      tap: (hz) => log.push(`tap ${hz}`),
+      tap: (hz, x, y) => {
+        log.push(`tap ${hz}`);
+        taps.push([x, y]);
+      },
       longPress: (hz) => log.push(`long ${hz}`),
     },
     (x) => pxToHz(view, x),
@@ -39,8 +43,16 @@ function rig() {
     timers.clear();
     for (const f of fns) f();
   };
-  return { g, log, fire, view: () => view, pending: () => timers.size };
+  return { g, log, taps, fire, view: () => view, pending: () => timers.size };
 }
+
+test("a tap reports where the finger went down, for a hit on a drawn box", () => {
+  const { g, taps } = rig();
+  g.down(1, 100, 50);
+  g.move(1, 103, 52);
+  g.up(1);
+  assert.deepEqual(taps, [[100, 50]]);
+});
 
 test("a tap tunes at the frequency under the finger", () => {
   const { g, log } = rig();
