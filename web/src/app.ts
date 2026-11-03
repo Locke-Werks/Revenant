@@ -20,6 +20,7 @@ import { Sheet } from "./ui/sheet";
 import { SpeechModel, speechLine, SpeechSwitch } from "./ui/speech_switch";
 import { StatusModel } from "./ui/status";
 import { Notes, Toasts } from "./ui/toast";
+import { DialStrip } from "./ui/dial_strip";
 import { levelInBand, TopBar } from "./ui/top_bar";
 
 export function appScreenHtml(): string {
@@ -42,6 +43,7 @@ export function appScreenHtml(): string {
     <div class="chips" id="chips"></div>
     <button type="button" class="btn controls" id="open-sheet" aria-expanded="false" aria-controls="sheet">Controls</button>
   </nav>
+  <div class="dial" id="dial-slot"></div>
   <div id="sheet-slot"></div>
   <audio id="kl-audio" playsinline preload="none"></audio>
 </main>`;
@@ -295,8 +297,34 @@ export function mountApp(root: HTMLElement): AppHandle {
   sheet.onOpen((open) => openSheetBtn.setAttribute("aria-expanded", String(open)));
   openSheetBtn.addEventListener("click", () => sheet!.setOpen(!sheet!.open));
 
+  // The dial shares the waterfall drag's preview-and-hold path, so the chip
+  // and readout follow it and a stale reply cannot pull it back.
+  const dial = new DialStrip({
+    active: () => {
+      const id = receivers.list.active;
+      const r = id === null ? undefined : receivers.list.get(id);
+      return r ? { hz: r.hz, mode: r.mode } : null;
+    },
+    preview: (hz) => receivers.preview(hz) !== null,
+    tune: (hz) => receivers.tuneDragged(hz),
+    end: () => receivers.endDrag(),
+    now: () => performance.now(),
+    schedule: (fn, ms) => {
+      const h = window.setTimeout(fn, ms);
+      return () => window.clearTimeout(h);
+    },
+    frame: (fn) => {
+      const h = requestAnimationFrame(fn);
+      return () => cancelAnimationFrame(h);
+    },
+  });
+  root.querySelector("#dial-slot")!.append(dial.el);
+
   const top = new TopBar({
-    tune: (hz) => receivers.tap(hz),
+    tune: (hz) => {
+      dial.stop();
+      receivers.tap(hz);
+    },
     openSheet: () => sheet!.setOpen(true),
     toast,
   });
@@ -319,12 +347,16 @@ export function mountApp(root: HTMLElement): AppHandle {
       b.setAttribute("aria-label", `Receiver ${formatMHz(r.hz)} MHz ${r.mode.toUpperCase()}${note ? `, ${note}` : ""}`);
       if (note) b.title = note;
       // A tap in its own handler, so live audio may start from it.
-      b.addEventListener("click", () => receivers.select(r.vrx));
+      b.addEventListener("click", () => {
+        dial.stop();
+        receivers.select(r.vrx);
+      });
       chipsEl.append(b);
     }
     const current = active === null ? null : receivers.list.get(active) ?? null;
     top.show(current);
     sheet!.show(current, list.length > 0);
+    dial.draw();
   };
   receivers.list.onChange(renderReceivers);
   renderReceivers();
@@ -395,6 +427,7 @@ export function mountApp(root: HTMLElement): AppHandle {
         if (!Number.isFinite(dHz)) return;
         let next = dragHz;
         if (next === null) {
+          dial.stop();
           const id = receivers.list.active;
           const r = id === null ? undefined : receivers.list.get(id);
           if (!r) return;
@@ -427,10 +460,14 @@ export function mountApp(root: HTMLElement): AppHandle {
         if (view && Number.isFinite(anchorHz)) apply(zoomAt(view, factor, anchorHz));
       },
       tap: (hz) => {
-        if (Number.isFinite(hz)) receivers.tap(snapTap(hz, detections));
+        if (!Number.isFinite(hz)) return;
+        dial.stop();
+        receivers.tap(snapTap(hz, detections));
       },
       longPress: (hz) => {
-        if (Number.isFinite(hz)) receivers.longPress(hz);
+        if (!Number.isFinite(hz)) return;
+        dial.stop();
+        receivers.longPress(hz);
       },
     },
     hzAt,
