@@ -62,6 +62,8 @@ import {
   CONFIDENCE_SEND_MS,
   heardAgo,
   pickSignal,
+  readConfidence,
+  RowSet,
   RateLimitedSender,
   signalRows,
   type PickDeps,
@@ -865,4 +867,62 @@ test("the confidence slider sends once per 250 ms and ends on the last value", (
 test("the slider range stays inside what the gateway accepts", () => {
   assert.equal(CONFIDENCE_MIN, 0);
   assert.equal(CONFIDENCE_MAX, 0.99);
+});
+
+test("a stored confidence is clamped and a bad one reads as zero", () => {
+  assert.equal(readConfidence("0.35"), 0.35);
+  assert.equal(readConfidence("5"), CONFIDENCE_MAX);
+  assert.equal(readConfidence("-1"), 0);
+  assert.equal(readConfidence("abc"), 0);
+  assert.equal(readConfidence(null), 0);
+});
+
+// ---- Row reconciliation --------------------------------------------------------
+
+const text = (d: Detection) => `${d.id}:${d.snrDb}`;
+
+test("first apply adds every row in list order", () => {
+  const s = new RowSet();
+  const p = s.apply([det("1", 5), det("2", 20)], text);
+  assert.deepEqual(p.added, ["2", "1"]);
+  assert.deepEqual(p.order, ["2", "1"]);
+  assert.deepEqual(p.removed, []);
+  assert.deepEqual(p.updated, []);
+});
+
+test("a later apply reports added, removed and text-changed rows only", () => {
+  const s = new RowSet();
+  s.apply([det("1", 5), det("2", 20), det("3", 1)], text);
+  const p = s.apply([det("1", 6), det("2", 20), det("4", 3)], text);
+  assert.deepEqual(p.added, ["4"]);
+  assert.deepEqual(p.removed, ["3"]);
+  assert.deepEqual(p.updated, ["1"]);
+  assert.deepEqual(p.order, ["2", "1", "4"]);
+});
+
+test("order is held while a pointer is down and applied on release", () => {
+  const s = new RowSet();
+  s.apply([det("1", 20), det("2", 10)], text);
+  s.hold(true);
+  const p = s.apply([det("1", 5), det("2", 10), det("3", 30)], text);
+  assert.deepEqual(p.order, ["1", "2", "3"]);
+  assert.deepEqual(p.added, ["3"]);
+  assert.deepEqual(p.updated, ["1"]);
+  assert.deepEqual(s.hold(false), ["3", "2", "1"]);
+});
+
+test("releasing with nothing pending reports no reorder", () => {
+  const s = new RowSet();
+  s.apply([det("1", 20)], text);
+  s.hold(true);
+  assert.equal(s.hold(false), null);
+});
+
+test("a row removed during a hold leaves at once", () => {
+  const s = new RowSet();
+  s.apply([det("1", 20), det("2", 10)], text);
+  s.hold(true);
+  const p = s.apply([det("2", 10)], text);
+  assert.deepEqual(p.removed, ["1"]);
+  assert.deepEqual(p.order, ["2"]);
 });

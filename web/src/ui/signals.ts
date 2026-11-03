@@ -24,6 +24,62 @@ export function heardAgo(lastSeen: number, nowIndex: number | null, rateHz: numb
   return `${Math.floor(s / 3600)} h ago`;
 }
 
+export function readConfidence(stored: string | null): number {
+  const v = stored === null ? Number.NaN : Number(stored);
+  if (!Number.isFinite(v)) return CONFIDENCE_MIN;
+  return Math.min(CONFIDENCE_MAX, Math.max(CONFIDENCE_MIN, v));
+}
+
+export interface RowPlan {
+  added: string[];
+  removed: string[];
+  // Present before and after, with different text.
+  updated: string[];
+  // Ids top to bottom as they should sit now.
+  order: string[];
+}
+
+// Keyed diff of the list between events, free of the DOM. The list refreshes
+// at about 2 Hz; rebuilding buttons under a finger swallows the tap and
+// reordering moves the wrong row under it, so rows are reused by id and the
+// order holds still while a pointer is down.
+export class RowSet {
+  private texts = new Map<string, string>();
+  private order: string[] = [];
+  private held = false;
+  private pending: string[] | null = null;
+
+  apply(rows: Detection[], textOf: (d: Detection) => string): RowPlan {
+    const sorted = signalRows(rows);
+    const next = new Map<string, string>();
+    for (const d of sorted) next.set(d.id, textOf(d));
+    const removed = this.order.filter((id) => !next.has(id));
+    const added = sorted.filter((d) => !this.texts.has(d.id)).map((d) => d.id);
+    const updated = sorted.filter((d) => this.texts.has(d.id) && this.texts.get(d.id) !== next.get(d.id)).map((d) => d.id);
+    const sortedIds = sorted.map((d) => d.id);
+    if (this.held) {
+      const kept = this.order.filter((id) => next.has(id));
+      this.order = [...kept, ...added];
+      this.pending = this.order.some((id, i) => id !== sortedIds[i]) ? sortedIds : null;
+    } else {
+      this.order = sortedIds;
+      this.pending = null;
+    }
+    this.texts = next;
+    return { added, removed, updated, order: [...this.order] };
+  }
+
+  // Returns the order to apply on release, or null when none is waiting.
+  hold(on: boolean): string[] | null {
+    this.held = on;
+    if (on) return null;
+    const p = this.pending;
+    this.pending = null;
+    if (p) this.order = p;
+    return p ? [...p] : null;
+  }
+}
+
 export interface PickDeps {
   hasActiveReceiver(): boolean;
   stopDial(): void;
@@ -83,8 +139,16 @@ export class RateLimitedSender {
 
 export interface SignalsDeps extends PickDeps {
   setMinConfidence(v: number): void;
+  // Where the slider starts, and told whenever the user moves it.
+  initialConfidence: number;
+  saveConfidence(v: number): void;
   // Newest source sample index and the source rate, for the age column.
   clock(): { index: number; rateHz: number } | null;
+}
+
+interface RowEls {
+  li: HTMLLIElement;
+  btn: HTMLButtonElement;
 }
 
 export class SignalsPanel {
@@ -92,7 +156,14 @@ export class SignalsPanel {
   private readonly list: HTMLElement;
   private readonly empty: HTMLElement;
   private readonly out: HTMLOutputElement;
+  private readonly slider: HTMLInputElement;
   private latest: Detection[] = [];
+  private visible = false;
+  private readonly set = new RowSet();
+  private readonly rows = new Map<string, RowEls>();
+  // Latest detection per id, read at tap time so a row that moved still
+  // tunes the signal it shows.
+  private readonly byId = new Map<string, Detection>();
 
   constructor(private readonly deps: SignalsDeps) {
     this.el = document.createElement("section");
@@ -100,15 +171,15 @@ export class SignalsPanel {
     this.el.innerHTML = `
 <div class="row">
   <label for="sg-conf">Confidence</label>
-  <input type="range" id="sg-conf" min="${CONFIDENCE_MIN}" max="${CONFIDENCE_MAX}" step="0.01" value="${CONFIDENCE_MIN}">
-  <output id="sg-conf-out" for="sg-conf">0.00</output>
+  <input type="range" id="sg-conf" min="${CONFIDENCE_MIN}" max="${CONFIDENCE_MAX}" step="0.01" value="${deps.initialConfidence}">
+  <output id="sg-conf-out" for="sg-conf">${deps.initialConfidence.toFixed(2)}</output>
 </div>
 <p class="hint" id="sg-empty">No signals yet.</p>
 <ul class="signal-list" id="sg-list"></ul>`;
     this.list = this.el.querySelector("#sg-list")!;
     this.empty = this.el.querySelector("#sg-empty")!;
     this.out = this.el.querySelector("#sg-conf-out")!;
-    const slider = this.el.querySelector<HTMLInputElement>("#sg-conf")!;
+    this.slider = this.el.querySelector<HTMLInputElement>("#sg-conf")!;
     const limiter = new RateLimitedSender(
       (v) => deps.setMinConfidence(v),
       () => performance.now(),
@@ -117,39 +188,91 @@ export class SignalsPanel {
         return () => window.clearTimeout(h);
       },
     );
-    slider.addEventListener("input", () => {
-      const v = Math.min(CONFIDENCE_MAX, Math.max(CONFIDENCE_MIN, Number(slider.value)));
+    this.slider.addEventListener("input", () => {
+      const v = readConfidence(this.slider.value);
       this.out.textContent = v.toFixed(2);
+      deps.saveConfidence(v);
       limiter.set(v);
     });
+    // A press on the list freezes the order; the release comes after the
+    // click has been delivered, so the moved row still receives it.
+    this.list.addEventListener("pointerdown", () => this.set.hold(true));
+    const release = () => {
+      window.setTimeout(() => {
+        const order = this.set.hold(false);
+        if (order) this.place(order);
+      }, 0);
+    };
+    document.addEventListener("pointerup", release);
+    document.addEventListener("pointercancel", release);
+  }
+
+  value(): number {
+    return readConfidence(this.slider.value);
   }
 
   update(d: Detection[]): void {
     this.latest = d;
-    this.render();
+    if (this.visible) this.render();
+  }
+
+  // Rows are only built while the tab can be seen; showing it catches up.
+  setVisible(visible: boolean): void {
+    this.visible = visible;
+    if (visible) this.render();
   }
 
   render(): void {
-    const rows = signalRows(this.latest);
-    this.empty.hidden = rows.length > 0;
-    this.list.textContent = "";
     const clock = this.deps.clock();
-    for (const d of rows) {
-      const li = document.createElement("li");
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "signal";
-      b.classList.toggle("held", d.state === "held");
+    const textOf = (d: Detection) => {
       const name = d.label !== "" ? d.label.toUpperCase() : "Signal";
       const ago = heardAgo(d.lastSeen, clock ? clock.index : null, clock ? clock.rateHz : 0);
       const bw = d.bandwidthHz >= 1000 ? `${(d.bandwidthHz / 1000).toFixed(1)} kHz` : `${Math.round(d.bandwidthHz)} Hz`;
       const parts = [`${formatMHz(d.centerHz)} MHz`, name, bw, `${Math.round(d.snrDb)} dB`];
       if (d.state === "held") parts.push("held");
       if (ago !== "") parts.push(ago);
-      b.textContent = parts.join("  ");
-      b.addEventListener("click", () => pickSignal(d, this.deps));
-      li.append(b);
-      this.list.append(li);
+      return parts.join("  ");
+    };
+    const plan = this.set.apply(this.latest, textOf);
+    this.byId.clear();
+    for (const d of this.latest) this.byId.set(d.id, d);
+    for (const id of plan.removed) {
+      this.rows.get(id)?.li.remove();
+      this.rows.delete(id);
+    }
+    for (const id of plan.added) {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "signal";
+      btn.addEventListener("click", () => {
+        const cur = this.byId.get(id);
+        if (cur) pickSignal(cur, this.deps);
+      });
+      li.append(btn);
+      this.rows.set(id, { li, btn });
+    }
+    for (const d of this.latest) {
+      const r = this.rows.get(d.id);
+      if (!r) continue;
+      const t = textOf(d);
+      if (r.btn.textContent !== t) r.btn.textContent = t;
+      r.btn.classList.toggle("held", d.state === "held");
+    }
+    this.place(plan.order);
+    this.empty.hidden = this.rows.size > 0;
+  }
+
+  // Touches the DOM only where the order differs from what is there.
+  private place(order: string[]): void {
+    const have = Array.from(this.list.children);
+    let same = have.length === order.length;
+    for (let i = 0; same && i < order.length; i++) same = have[i] === this.rows.get(order[i]!)?.li;
+    if (same) return;
+    for (const id of order) {
+      const r = this.rows.get(id);
+      if (r) this.list.append(r.li);
     }
   }
 }
+

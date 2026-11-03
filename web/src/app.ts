@@ -18,8 +18,8 @@ import { captionFromEvent, CaptionLayer, CaptionStore, RowClock } from "./ui/cap
 import { decodedEntry, FeedModel, FeedView, transcriptEntry } from "./ui/feed";
 import { RadioPanel } from "./ui/radio_panel";
 import { formatMHz, ReceiverController, ReplaceGate } from "./ui/receivers";
-import { Sheet } from "./ui/sheet";
-import { SignalsPanel } from "./ui/signals";
+import { Sheet, type SheetTab } from "./ui/sheet";
+import { readConfidence, SignalsPanel } from "./ui/signals";
 import { SpeechModel, speechLine, SpeechSwitch } from "./ui/speech_switch";
 import { StatusModel } from "./ui/status";
 import { Notes, Toasts } from "./ui/toast";
@@ -266,6 +266,12 @@ export function mountApp(root: HTMLElement): AppHandle {
   // Newest source sample index from the spectrum rows: lastSeen is an index
   // in the same count, so this is "now" for the age column.
   let newestIndex: number | null = null;
+  let sheetTab: SheetTab = "tune";
+  const prefs = keyStore();
+  const CONFIDENCE_KEY = "revenant.minConfidence";
+  const sendConfidence = (v: number) => {
+    link.request("setDetection", { minConfidence: v }).catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)));
+  };
   const signals = new SignalsPanel({
     hasActiveReceiver: () => receivers.list.active !== null,
     stopDial: () => dial.stop(),
@@ -277,15 +283,28 @@ export function mountApp(root: HTMLElement): AppHandle {
       if (hz < lo || hz > hi) apply(panBy(view, hz - view.centerHz));
     },
     toast,
-    setMinConfidence: (v) => {
-      link.request("setDetection", { minConfidence: v }).catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)));
+    setMinConfidence: sendConfidence,
+    initialConfidence: readConfidence(prefs.getItem(CONFIDENCE_KEY)),
+    saveConfidence: (v) => {
+      try {
+        prefs.setItem(CONFIDENCE_KEY, String(v));
+      } catch {
+        // A full disk costs the preference, not the session.
+      }
     },
     clock: () => (newestIndex !== null && band ? { index: newestIndex, rateHz: band.rateHz } : null),
   });
   sheet.signalsHost.append(signals.el);
+  const syncSignalsVisible = () => signals.setVisible(sheet!.open && sheetTab === "signals");
   sheet.onTab((tab) => {
-    if (tab === "signals") signals.render();
+    sheetTab = tab;
+    syncSignalsVisible();
   });
+  sheet.onOpen(syncSignalsVisible);
+  // The gateway keeps the bar per session and re-applies its own copy on a
+  // resume, which can disagree with what this relaunched page shows. The
+  // slider is the phone's record, so it is sent on every connect.
+  link.on("ready", () => sendConfidence(signals.value()));
 
   // ---- Speech, transcripts and the feed -------------------------------------
   const speechModel = new SpeechModel({ link: gate });
