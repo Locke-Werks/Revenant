@@ -10,6 +10,7 @@
 
 find_package(OpenSSL REQUIRED)
 find_package(CapnProto CONFIG REQUIRED)
+find_package(Opus CONFIG REQUIRED)
 
 # listen.cpp is compiled in directly rather than linking revenant_rpc_server,
 # which would pull the whole engine (core, transcribe) into a web gateway for
@@ -23,6 +24,7 @@ add_library(revenant_webgate_lib STATIC
     http.cpp
     engine_link.cpp
     spectrum_reducer.cpp
+    audio_opus.cpp
 )
 
 target_include_directories(revenant_webgate_lib PUBLIC "${CMAKE_SOURCE_DIR}")
@@ -35,6 +37,7 @@ target_link_libraries(revenant_webgate_lib
         revenant_launch
         OpenSSL::SSL
         OpenSSL::Crypto
+        Opus::opus
         CapnProto::kj-http
         CapnProto::kj-tls
 )
