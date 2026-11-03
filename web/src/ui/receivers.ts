@@ -14,7 +14,7 @@ import type { GatewayEvent, JsonValue, LinkEvent, Op } from "../protocol";
 import type { LinkEvents, RequestOptions } from "../link";
 import { clampInto, fits, recentreFor, shift, usableSpan, type Offsets, type Span, type TuneRange } from "../band_edge";
 import { passbandHz } from "../markers";
-import { shortRefusal, suggestDecoders, type DecoderInfo } from "../decoders";
+import { shortRefusal } from "../decoders";
 
 // Analog first, then the digital voice modes, whose voice the engine plays in
 // place of the discriminator once a call is up.
@@ -270,8 +270,6 @@ export interface ControllerDeps {
   // A sentence about live audio that stays until it no longer holds; null
   // clears it.
   audioNote(text: string | null): void;
-  // The engine's decoders, null until listDecoders has answered.
-  decoders?(): readonly DecoderInfo[] | null;
 }
 
 const NOT_STARTED = "The phone has not started sound yet. Tap the waterfall or a receiver to allow it.";
@@ -640,13 +638,6 @@ export class ReceiverController {
     );
   }
 
-  // A broadcast FM receiver starts with RDS on when the engine has it.
-  private suggest(r: Receiver): void {
-    const all = this.deps.decoders?.() ?? null;
-    if (!all) return;
-    const names = suggestDecoders(r.mode, r.hz, all);
-    if (names && names.some((n) => !r.decoders.includes(n))) this.applyDecoders(r.vrx, names);
-  }
 
   remove(vrx: number): void {
     this.removing.add(vrx);
@@ -678,7 +669,6 @@ export class ReceiverController {
       if (!r) return;
       this.list.select(r.vrx);
       this.nowPlaying(r);
-      this.suggest(r);
       this.listen(r.vrx);
     });
   }
@@ -712,7 +702,6 @@ export class ReceiverController {
           if (active) this.list.select(r.vrx);
           this.nowPlaying(r);
         }
-        if (r && op === "setMode") this.suggest(this.list.get(r.vrx) ?? r);
         gate.release(vrx);
       },
       (e: unknown) => {

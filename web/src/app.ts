@@ -12,6 +12,7 @@ import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "
 import { parseDisplay } from "./display";
 import { DEFAULT_ACCENT, DETECTION_COLOR, detectionBoxes, passbandHz } from "./markers";
 import { drawReceivers, type ReceiverMark } from "./overlay";
+import { RdsModel } from "./rds";
 import { RowPacer } from "./smooth";
 import { SpectrumTrace } from "./spectrum_trace";
 import { clampView, viewBand, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
@@ -279,6 +280,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   const encryptedAt = new Map<number, number>();
   // Detections as the receiver chips read them; the full list lives below.
   let chipDetections: Detection[] = [];
+  const rds = new RdsModel();
 
   const receivers = new ReceiverController({
     link: gate,
@@ -287,7 +289,6 @@ export function mountApp(root: HTMLElement): AppHandle {
     toast,
     audioNote: (text) => notes.set("audio", text),
     tuneRanges: () => radio.tuneRanges(),
-    decoders: () => catalogue?.decoders ?? null,
   });
 
   sheet = new Sheet({
@@ -380,10 +381,18 @@ export function mountApp(root: HTMLElement): AppHandle {
   receivers.onRemap((pairs) => {
     captionStore.remap(pairs);
     feedModel.remap(pairs);
+    for (const p of pairs) rds.drop(p.old);
   });
   receivers.onGone((vrx) => {
     captionStore.dropReceiver(vrx);
     feedModel.dropReceiver(vrx);
+    rds.drop(vrx);
+  });
+  link.on("rds", (e) => {
+    const r = rds.apply(e);
+    if (!r) return;
+    if (r.newRt !== null) feedModel.add({ kind: "decoded", vrx: r.vrx, label: "RDS", text: r.newRt });
+    renderReceivers();
   });
   speechModel.onChange(() => {
     sheet!.speechLine(speechLine(speechModel.status));
@@ -606,6 +615,8 @@ export function mountApp(root: HTMLElement): AppHandle {
       const mode = modeLabel(r.mode);
       b.textContent = `${formatMHz(r.hz)} ${mode}${flag}`;
       const tags: { text: string; warn: boolean }[] = [];
+      const station = rds.name(r.vrx);
+      if (station !== null) tags.push({ text: station, warn: false });
       if (r.vrx === active) {
         const on = labelAt(r.hz, chipDetections);
         if (on) tags.push({ text: labelText(on), warn: false });
@@ -649,6 +660,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     if (confirmFor !== null && !list.some((r) => r.vrx === confirmFor)) closeConfirm();
     const current = active === null ? null : receivers.list.get(active) ?? null;
     top.show(current);
+    top.station(current ? rds.name(current.vrx) : null);
     sheet!.show(current, list.length > 0);
     // Replacement, removal, resume and a restart's remap all end up here.
     dial.check();

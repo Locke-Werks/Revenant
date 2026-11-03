@@ -196,6 +196,16 @@ html:has(.app), html:has(.app) body {
   -webkit-user-select: none;
 }
 .app .freq.dim { color: var(--dim); }
+.topbar .station {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  color: var(--dim);
+}
+.topbar .station[hidden] { display: none; }
 .meter[hidden] { display: none; }
 .app .freq .digit { display: inline-block; min-width: 0.6em; text-align: center; }
 .app .chip.mode {

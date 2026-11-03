@@ -151,6 +151,7 @@ export class TopBar {
 <form class="freq-entry" id="tb-entry" hidden>
   <input id="tb-input" inputmode="decimal" enterkeyhint="go" autocomplete="off" aria-label="Frequency, MHz or with k, M or G">
 </form>
+<span class="station" id="tb-station" aria-label="Station name" hidden></span>
 <button type="button" class="chip mode" id="tb-mode" aria-label="Mode, opens the controls">NFM</button>
 <div class="meter" role="meter" aria-label="Signal, peak in view" aria-valuemin="${METER_FLOOR_DB}" aria-valuemax="${METER_TOP_DB}">
   <div class="meter-fill" id="tb-meter"></div>
@@ -227,6 +228,13 @@ export class TopBar {
     this.mode.hidden = r === null;
     this.el.querySelector<HTMLElement>(".meter")!.hidden = r === null;
     if (!r) this.level(null);
+  }
+
+  // The active receiver's RDS station name, or null to hide it.
+  station(name: string | null): void {
+    const el = this.el.querySelector<HTMLElement>("#tb-station")!;
+    el.textContent = name ?? "";
+    el.hidden = name === null || this.active === null;
   }
 
   // The display's centre, shown while no receiver is active.

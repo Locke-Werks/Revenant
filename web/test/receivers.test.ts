@@ -56,7 +56,6 @@ test("a device that cannot run 2.4 MS/s gets no rate", () => {
 });
 import { sheetHint } from "../src/ui/sheet";
 import type { Detection } from "../src/detections";
-import type { DecoderInfo } from "../src/decoders";
 import {
   CONFIDENCE_MAX,
   CONFIDENCE_MIN,
@@ -181,7 +180,7 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-function rig(ranges: { lowHz: number; highHz: number }[] | null = null, catalogue: DecoderInfo[] | null = null) {
+function rig(ranges: { lowHz: number; highHz: number }[] | null = null) {
   const link = new FakeLink();
   const gate = new ReplaceGate(link);
   const audio = new FakeAudio(gate);
@@ -195,7 +194,6 @@ function rig(ranges: { lowHz: number; highHz: number }[] | null = null, catalogu
     toast: (t) => toasts.push(t),
     tuneRanges: () => ranges,
     audioNote: (t) => notes.push(t),
-    decoders: () => catalogue,
   });
   return { link, gate, audio, keep, ctl, toasts, notes, chips: () => ctl.list.list().map((r) => `${r.vrx}:${r.hz}:${r.mode}`) };
 }
@@ -1052,34 +1050,8 @@ test("a receiver added at the mode's default width reads back as that default", 
 
 // ---- Decoders ------------------------------------------------------------------
 
-const RDS: DecoderInfo[] = [{ name: "rds", description: "", input: "realAudio", modes: ["wfm"] }];
-
-test("switching to wfm in the FM broadcast band turns RDS on", async () => {
-  const r = rig(null, RDS);
-  await listening(r, 1);
-  r.ctl.setMode("wfm");
-  r.link.reply(status(2, 146_520_000, "wfm", { replaced: 1, decoders: [] }));
-  await flush();
-  // 146.52 MHz is not broadcast FM: nothing is asked for.
-  assert.ok(r.link.last().op !== "setDecoders");
-
-  r.ctl.tap(98_100_000);
-  r.link.reply(status(2, 98_100_000, "wfm", { decoders: [] }));
-  await flush();
-  r.ctl.setMode("nfm");
-  r.link.reply(status(3, 98_100_000, "nfm", { replaced: 2, decoders: [] }));
-  await flush();
-  r.ctl.setMode("wfm");
-  r.link.reply(status(4, 98_100_000, "wfm", { replaced: 3, decoders: [] }));
-  await flush();
-  assert.deepEqual(r.link.last(), { op: "setDecoders", args: { vrx: 4, names: ["rds"] }, timeoutMs: undefined });
-  r.link.reply({ vrx: 4, decoders: ["rds"] });
-  await flush();
-  assert.deepEqual(r.ctl.list.get(4)!.decoders, ["rds"]);
-});
-
-test("no RDS is asked for when the engine has no rds decoder", async () => {
-  const r = rig(null, []);
+test("a broadcast FM receiver asks for no decoder: the gateway reads its RDS", async () => {
+  const r = rig();
   await listening(r, 1);
   r.ctl.setMode("wfm");
   r.link.reply(status(2, 98_100_000, "wfm", { replaced: 1, decoders: [] }));

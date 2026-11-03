@@ -6,7 +6,6 @@ import {
   modeLabel,
   parseCatalogue,
   shortRefusal,
-  suggestDecoders,
   toggled,
   voiceStatus,
   type DecoderInfo,
@@ -48,16 +47,6 @@ test("decodersFor offers only the decoders that read the receiver's mode", () =>
 test("toggled adds a name that is off and removes one that is on", () => {
   assert.deepEqual(toggled([], "pocsag"), ["pocsag"]);
   assert.deepEqual(toggled(["pocsag", "ax25"], "pocsag"), ["ax25"]);
-});
-
-test("a wfm receiver in the FM broadcast band is offered RDS when the engine has it", () => {
-  assert.deepEqual(suggestDecoders("wfm", 98_100_000, CATALOGUE), ["rds"]);
-  assert.deepEqual(suggestDecoders("wfm", 87_500_000, CATALOGUE), ["rds"]);
-  assert.deepEqual(suggestDecoders("wfm", 108_000_000, CATALOGUE), ["rds"]);
-  assert.equal(suggestDecoders("wfm", 87_400_000, CATALOGUE), null);
-  assert.equal(suggestDecoders("wfm", 162_550_000, CATALOGUE), null);
-  assert.equal(suggestDecoders("nfm", 98_100_000, CATALOGUE), null);
-  assert.equal(suggestDecoders("wfm", 98_100_000, CATALOGUE.filter((d) => d.name !== "rds")), null);
 });
 
 test("parseCatalogue keeps good entries and reads an absent voice report as unknown", () => {

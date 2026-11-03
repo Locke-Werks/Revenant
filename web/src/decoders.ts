@@ -53,16 +53,6 @@ export function decodersFor(mode: string, all: readonly DecoderInfo[]): DecoderI
   return all.filter((d) => d.modes.length === 0 || d.modes.includes(mode)).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export const FM_BROADCAST_LOW_HZ = 87_500_000;
-export const FM_BROADCAST_HIGH_HZ = 108_000_000;
-
-// The set to pick for a receiver just made, or null to leave the gateway's
-// default. A broadcast FM station nearly always carries RDS.
-export function suggestDecoders(mode: string, hz: number, all: readonly DecoderInfo[]): string[] | null {
-  if (mode !== "wfm" || hz < FM_BROADCAST_LOW_HZ || hz > FM_BROADCAST_HIGH_HZ) return null;
-  return all.some((d) => d.name === "rds" && (d.modes.length === 0 || d.modes.includes("wfm"))) ? ["rds"] : null;
-}
-
 // The set after one toggle, in the catalogue's order so the reply compares
 // cleanly with what is shown.
 export function toggled(current: readonly string[], name: string): string[] {
