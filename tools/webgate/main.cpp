@@ -71,7 +71,7 @@ void usage() {
         "  --token-file  the engine's token (default: the engine's own default path)\n"
         "  --session-linger-ms N\n"
         "                how long a phone's session outlives its dropped socket\n"
-        "                without keep listening (default 30000); tests shorten it");
+        "                (default 600000, 10 min); tests shorten it");
 }
 
 [[nodiscard]] bool parse_port(std::string_view text, int& out) {

@@ -53,6 +53,10 @@ inline constexpr std::size_t kOpusHeaderSize = 1 + 8 + 4;
 // messages; anything bigger is a bug or an attack.
 inline constexpr std::size_t kMaxCommandBytes = 64 * 1024;
 
+// The gateway sends a "ping" event this often; the app treats a socket silent
+// for two of these as dead. web/src/protocol.ts carries the same number.
+inline constexpr std::int64_t kPingIntervalMs = 15'000;
+
 // The operations a phone may request, exactly these.
 inline constexpr std::string_view kOps[] = {
     "addVrx",       "removeVrx",     "tune",        "setMode",

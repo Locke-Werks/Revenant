@@ -178,7 +178,8 @@ TEST_CASE("keep listening outlives a dropped socket while HLS is fetched",
     REQUIRE(rig.registry.find(vrx) != nullptr);
 
     rig.hub->disconnect(id);
-    for (int i = 0; i < 180; ++i) {
+    // Past the 10 min base linger, so only the fetches keep it.
+    for (int i = 0; i < 660; ++i) {
         rig.registry.fetched(vrx);
         rig.advance(seconds(1));
     }
@@ -194,7 +195,24 @@ TEST_CASE("keep listening outlives a dropped socket while HLS is fetched",
     CHECK_FALSE(rig.engine_has(vrx));
 }
 
-TEST_CASE("a detached session without keep listening goes after 30 s", "[gpu][webgate][hub]")
+TEST_CASE("keep listening never shortens the 10 min base linger", "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    HubRig rig;
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    const auto token = rig.hub->token(id);
+    rig.listen(id, socket, true);
+
+    // No HLS fetch at all: hls_idle passes long before the base linger does.
+    rig.hub->disconnect(id);
+    rig.advance(seconds(599));
+    CHECK(rig.hub->holds(token));
+    rig.advance(seconds(2));
+    CHECK_FALSE(rig.hub->holds(token));
+}
+
+TEST_CASE("a detached session without keep listening goes after 10 min", "[gpu][webgate][hub]")
 {
     REVENANT_NEEDS_GPU();
     HubRig rig;
@@ -204,7 +222,7 @@ TEST_CASE("a detached session without keep listening goes after 30 s", "[gpu][we
     const auto vrx = rig.listen(id, socket, false);
 
     rig.hub->disconnect(id);
-    rig.advance(seconds(29));
+    rig.advance(seconds(599));
     CHECK(rig.hub->holds(token));
     CHECK(rig.engine_has(vrx));
     rig.advance(seconds(2));
@@ -252,6 +270,36 @@ TEST_CASE("resume reattaches and the next frames go to the new socket", "[gpu][w
     CHECK(first.sent.size() == sent_before);
 }
 
+TEST_CASE("resume re-sends source, link and hls to the new socket", "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    HubRig rig;
+    FakeSocket first;
+    const auto id = rig.connect(first);
+    const auto token = rig.hub->token(id);
+    const auto vrx = rig.listen(id, first, true);
+    rig.advance(seconds(2));
+    const auto saw = [](const FakeSocket& socket, std::string_view needle) {
+        return std::ranges::any_of(socket.sent, [&](const auto& m) {
+            return m.kind == Kind::Text && contains(m.text, needle);
+        });
+    };
+    REQUIRE(saw(first, R"({"event":"source","open":true)"));
+    REQUIRE(saw(first, R"({"event":"hls")"));
+    rig.hub->disconnect(id);
+
+    // A page launched after those events went out: it has seen none of them.
+    FakeSocket second;
+    const auto again = rig.connect(second);
+    second.sent.clear();
+    rig.text(again, R"({"id":1,"op":"resume","args":{"token":")" + token + "\"}}");
+    REQUIRE(contains(reply_to(second, 1), R"("resumed":true)"));
+    CHECK(saw(second, R"({"event":"link")"));
+    CHECK(saw(second, R"({"event":"source","open":true,"rateHz":)"));
+    CHECK(saw(second, R"("centerHz":100000000)"));
+    CHECK(saw(second, R"({"event":"hls","vrx":)" + std::to_string(vrx)));
+}
+
 TEST_CASE("resume of an expired token fails cleanly", "[gpu][webgate][hub]")
 {
     REVENANT_NEEDS_GPU();
@@ -260,7 +308,7 @@ TEST_CASE("resume of an expired token fails cleanly", "[gpu][webgate][hub]")
     const auto id = rig.connect(first);
     const auto token = rig.hub->token(id);
     rig.hub->disconnect(id);
-    rig.advance(seconds(31));
+    rig.advance(seconds(601));
     REQUIRE_FALSE(rig.hub->holds(token));
 
     FakeSocket second;

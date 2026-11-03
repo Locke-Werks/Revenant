@@ -320,6 +320,35 @@ void PhoneStreams::tick()
 
 // ---- Source and spectrum ---------------------------------------------------
 
+std::string PhoneStreams::source_event() const
+{
+    JsonObject fields;
+    fields.add_bool("open", source_open_);
+    if (source_open_) {
+        fields.add_u64("rateHz", source_rate_)
+            .add_i64("centerHz", source_center_)
+            .add_u64("epoch", source_epoch_);
+    }
+    return event("source", fields);
+}
+
+void PhoneStreams::announce_state()
+{
+    // A resumed session may land in a page that was launched after these
+    // events went out, so it has seen none of them.
+    if (source_known_) {
+        queue_text(source_event());
+    }
+    if (announced_hls_) {
+        if (const auto it = hls_.find(*announced_hls_);
+            it != hls_.end() && it->second.segmenter && !it->second.ends_at) {
+            queue_text(event("hls", JsonObject()
+                                        .add_u64("vrx", *announced_hls_)
+                                        .add_string("url", hls_url(*announced_hls_))));
+        }
+    }
+}
+
 void PhoneStreams::refresh_source()
 {
     last_refresh_ = now();
@@ -353,14 +382,7 @@ void PhoneStreams::refresh_source()
         inbox_->spectrum.reset();
     }
 
-    JsonObject fields;
-    fields.add_bool("open", open);
-    if (open) {
-        fields.add_u64("rateHz", source_rate_)
-            .add_i64("centerHz", source_center_)
-            .add_u64("epoch", source_epoch_);
-    }
-    queue_text(event("source", fields));
+    queue_text(source_event());
 
     if (!stream_changed) {
         return;

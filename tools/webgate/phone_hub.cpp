@@ -177,6 +177,7 @@ void PhoneHub::resume(std::uint64_t id, Connection& connection, const Command& c
     old->streams->send_event(
         ok_reply(command.id, JsonObject().add_bool("resumed", true).str()));
     old->streams->send_event(link_event(link_state_, link_detail_));
+    old->streams->announce_state();
 }
 
 PhoneHub::Resident* PhoneHub::find_token(std::string_view token) const
@@ -247,12 +248,15 @@ void PhoneHub::tick()
         if (resident->connection) {
             continue;
         }
-        const bool listening = resident->session->keep_listening();
-        const auto since = listening ? std::max(resident->detached_at,
-                                                resident->last_hls.value_or(resident->detached_at))
-                                     : resident->detached_at;
-        const auto limit = listening ? timing_.hls_idle : timing_.detached_linger;
-        if (t - since > limit) {
+        // Keep listening extends the base linger while HLS is being fetched;
+        // it never shortens it.
+        bool expire = t - resident->detached_at > timing_.detached_linger;
+        if (expire && resident->session->keep_listening()) {
+            const auto since = std::max(resident->detached_at,
+                                        resident->last_hls.value_or(resident->detached_at));
+            expire = t - since > timing_.hls_idle;
+        }
+        if (expire) {
             expired.push_back(token);
         }
     }

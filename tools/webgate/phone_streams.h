@@ -211,6 +211,9 @@ public:
     // Brings subscriptions into line with receivers the session already owns
     // without a command having added them.
     void resync();
+    // Re-sends the current source and HLS events, for a socket that resumed
+    // this session and has seen neither.
+    void announce_state();
 
     [[nodiscard]] StreamCounters counters() const { return counters_; }
     [[nodiscard]] std::uint32_t every_nth() const { return every_nth_; }
@@ -248,6 +251,7 @@ private:
         const rpc::SpectrumFrame& frame) const;
 
     void refresh_source();
+    [[nodiscard]] std::string source_event() const;
     void subscribe_spectrum(std::uint32_t every_nth);
     void settle_every_nth(const rpc::SpectrumFrame& frame);
     void stop_spectrum();

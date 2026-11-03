@@ -8,9 +8,11 @@
 // in "hello".
 //
 // LIFETIME OF A DETACHED SESSION
-//   keep listening on:  until hls_idle after the last HLS request for one of
-//                        its receivers (or after the drop, if none came).
 //   otherwise:          detached_linger after the drop.
+//   keep listening on:  the same, and also until hls_idle after the last HLS
+//                        request for one of its receivers, whichever is later.
+// The base linger is long because an iPhone app sits backgrounded for minutes
+// between glances, and coming back to its receivers beats starting over.
 // On expiry it is destroyed exactly as a disconnect used to destroy it: its
 // streams unsubscribe and its receivers are removed.
 //
@@ -41,7 +43,7 @@ namespace revenant::webgate {
 [[nodiscard]] std::string link_event(LinkState state, const std::string& detail);
 
 struct HubTiming {
-    std::chrono::milliseconds detached_linger{30'000};
+    std::chrono::milliseconds detached_linger{600'000};
     std::chrono::milliseconds hls_idle{60'000};
 
     // Liveness. kj does not expose WebSocket protocol pings, so the gateway
@@ -49,7 +51,7 @@ struct HubTiming {
     // message from the phone counts as hearing from it. A socket silent for
     // silence_limit is closed, which detaches its session: an iOS lock can
     // leave a TCP connection open with nobody on the other end.
-    std::chrono::milliseconds ping_interval{15'000};
+    std::chrono::milliseconds ping_interval{kPingIntervalMs};
     std::chrono::milliseconds silence_limit{45'000};
 };
 
