@@ -10,6 +10,7 @@
 
 export const RELOAD_GUARD_MS = 10_000;
 export const IDLE_RETRY_MS = 1_000;
+// The same key the short-viewport reload in insets.ts stamps.
 const KEY = "revenant.swReloadAt";
 
 export interface ReloadDeps {

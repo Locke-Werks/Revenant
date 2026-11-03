@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { needsRepin, previousNormal, shortViewportFix, rulerMarks, widest, type LaunchCapture } from "../src/insets";
+import { launchAction, needsRepin, previousNormal, shortViewportFix, rulerMarks, widest, type LaunchCapture } from "../src/insets";
 
 test("ruler lines fall every 100 px below the height, none at 0", () => {
   assert.deepEqual(rulerMarks(450), [100, 200, 300, 400]);
@@ -25,7 +25,8 @@ test("layout code does not size anything from the screen's height", () => {
         // Compares the viewport with the screen to detect the short case; the
         // size it applies is the inset, not the screen.
         .replace(/export function shortViewportFix[\s\S]*?\n}\n/, "")
-        .replace(/export function trackShortViewport[\s\S]*?\n}\n/, "");
+        .replace(/export function trackShortViewport[\s\S]*?\n}\n/, "")
+        .replace(/export function currentDeficit[\s\S]*?\n}\n/, "");
     }
     assert.equal(/screen\.(height|availHeight)/.test(text), false, f);
   }
@@ -78,4 +79,12 @@ test("a short installed viewport is extended by its shortfall in CSS px, at any 
   assert.equal(shortViewportFix({ ...l, innerHeight: 420, scale: 1 }), 20);
   assert.equal(shortViewportFix({ ...l, innerHeight: 440, scale: 1 }), 0);
   assert.equal(shortViewportFix({ ...l, innerHeight: 440 / 0.85, scale: 0.85 }), 0);
+});
+
+test("a short cold launch reloads once, then falls back to extending", () => {
+  assert.equal(launchAction(72.7, false), "reload");
+  assert.equal(launchAction(72.7, true), "extend");
+  assert.equal(launchAction(0, false), "none");
+  assert.equal(launchAction(0, true), "none");
+  assert.equal(launchAction(300, false), "none");
 });

@@ -84,7 +84,9 @@ button {
 /* With the app up nothing scrolls: a scrolled document carries every fixed
    element with it, up under the status bar. */
 html:has(.app), html:has(.app) body {
-  overflow: hidden;
+  /* Horizontal only: the app box may extend past a short viewport
+     (--short-fix), and a vertical clip here would cut the tab bar off. */
+  overflow-x: hidden;
   /* Anything wider than the screen makes iOS shrink the whole page to fit,
      which also leaves the fixed layer short of the glass. */
   max-width: 100%;
@@ -406,6 +408,10 @@ html:has(.app), html:has(.app) body {
   background: #121215;
   border-radius: 14px 14px 0 0;
   padding-bottom: env(safe-area-inset-bottom);
+  /* Handle, its margin and the tab row, whatever the grid has left. */
+  height: auto;
+  min-height: calc(10px + var(--hit) + env(safe-area-inset-bottom));
+  flex-shrink: 0;
 }
 .grabber .handle {
   width: 36px;

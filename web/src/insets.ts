@@ -220,6 +220,7 @@ export function showInsets(doc: Document, win: Window): void {
       `wider than screen now: ${overWide(doc, win.screen.width).join("; ") || "none"}`,
       `widest during load: ${wideAtLoad(win)}`,
       `--short-fix ${doc.documentElement.style.getPropertyValue("--short-fix") || "unset"}  deficit ${((Math.max(win.screen.width, win.screen.height) / (vv?.scale || 1)) - win.innerHeight).toFixed(1)} (portrait)`,
+      `short-viewport reload: ${shortReloadText(win)}`,
       `last launch without ruler: ${previousLaunch(win)}`,
       `viewport re-pins: ${repins(win)}`,
       `scale ${vv ? vv.scale.toFixed(3) : "n/a"}  scrollWidth ${root.scrollWidth}  innerWidth ${win.innerWidth}`,
@@ -304,6 +305,70 @@ export function shortViewportFix(g: {
   const tall = g.landscape ? Math.min(g.screenWidth, g.screenHeight) : Math.max(g.screenWidth, g.screenHeight);
   const deficit = tall / scale - g.innerHeight;
   return deficit > 1 && deficit < 200 ? Math.round(deficit * 10) / 10 : 0;
+}
+
+// A cold launch can get the short viewport where a reload gets the full one,
+// so the cure is one reload before anything live has started. Once tried,
+// a viewport that is still short keeps the --short-fix extension instead.
+export type LaunchAction = "reload" | "extend" | "none";
+
+export function launchAction(deficit: number, reloadedAlready: boolean): LaunchAction {
+  if (!(deficit > 1 && deficit < 200)) return "none";
+  return reloadedAlready ? "extend" : "reload";
+}
+
+const SHORT_RELOAD_KEY = "revenant.shortReload";
+// Shared with sw_reload.ts so the two reload paths cannot both fire.
+export const RELOAD_AT_KEY = "revenant.swReloadAt";
+
+export function currentDeficit(win: Window): number {
+  if ((win.navigator as Navigator & { standalone?: boolean }).standalone !== true) return 0;
+  return shortViewportFix({
+    standalone: true,
+    innerHeight: win.innerHeight,
+    scale: win.visualViewport?.scale ?? null,
+    screenWidth: win.screen.width,
+    screenHeight: win.screen.height,
+    landscape: win.matchMedia("(orientation: landscape)").matches,
+  });
+}
+
+// Runs first thing at launch. True when the page is reloading and nothing
+// else should start. The outcome of each try is kept for the ruler.
+export function reloadIfShort(win: Window): boolean {
+  let session: Storage | null = null;
+  try {
+    session = win.sessionStorage;
+  } catch {
+    return false;
+  }
+  const deficit = currentDeficit(win);
+  const tried = session.getItem(SHORT_RELOAD_KEY);
+  const action = launchAction(deficit, tried !== null);
+  if (tried !== null && session.getItem("revenant.shortReloadLogged") === null) {
+    session.setItem("revenant.shortReloadLogged", "1");
+    try {
+      win.localStorage.setItem("revenant.shortReloadLog", JSON.stringify({ t: Date.now(), before: Number(tried), after: deficit }));
+    } catch {
+      // The ruler just has less to say.
+    }
+  }
+  if (action !== "reload") return false;
+  session.setItem(SHORT_RELOAD_KEY, String(deficit));
+  session.setItem(RELOAD_AT_KEY, String(Date.now()));
+  win.location.reload();
+  return true;
+}
+
+export function shortReloadText(win: Window): string {
+  try {
+    const raw = win.localStorage.getItem("revenant.shortReloadLog");
+    if (!raw) return "never";
+    const r = JSON.parse(raw) as { t: number; before: number; after: number };
+    return `${new Date(r.t).toLocaleString()}: deficit ${r.before} -> ${r.after}`;
+  } catch {
+    return "not stored";
+  }
 }
 
 // iOS may correct the viewport later, after which the fix measures 0 and

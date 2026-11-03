@@ -1,7 +1,7 @@
 import { chooseScreen, installScreenHtml, type StandaloneEnv } from "./install";
 import { gatewayReachable, offlineScreenHtml, type Probe } from "./offline";
 import { appScreenHtml, mountApp } from "./app";
-import { insetsToggle, isEditable, pinViewport, trackShortViewport, showInsets, wantsInsets } from "./insets";
+import { insetsToggle, isEditable, pinViewport, reloadIfShort, trackShortViewport, showInsets, wantsInsets } from "./insets";
 import { reloadOnUpdate } from "./sw_reload";
 
 export interface Host {
@@ -30,7 +30,9 @@ export async function render(host: Host): Promise<void> {
 }
 
 // Skipped under node, where the tests import this module without a page.
-if (typeof document !== "undefined") {
+// Before the socket, audio and the service worker: a reload here loses
+// nothing, and the shared guard keeps the worker from reloading as well.
+if (typeof document !== "undefined" && !reloadIfShort(window)) {
   if ("serviceWorker" in navigator) {
     let fingers = 0;
     const count = (ev: TouchEvent) => void (fingers = ev.touches.length);
