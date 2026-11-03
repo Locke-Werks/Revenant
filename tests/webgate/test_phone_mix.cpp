@@ -38,6 +38,17 @@ constexpr std::size_t kPrime = PhoneMixer::kPrimeBlocks;
     return std::vector<float>(n, level);
 }
 
+// The samples as the engine delivers a quick source's audio: a block at a time,
+// so a test that stages a stream does not also make its chunks long.
+void feed(PhoneMixer& mix, std::uint64_t vrx, bool digital, double db,
+          const std::vector<float>& samples, Clock::time_point now)
+{
+    for (std::size_t at = 0; at < samples.size(); at += kB) {
+        const std::size_t n = std::min(kB, samples.size() - at);
+        mix.push(vrx, digital, db, std::span<const float>(samples).subspan(at, n), now);
+    }
+}
+
 [[nodiscard]] std::vector<float> taken(PhoneMixer& mix, Clock::time_point now)
 {
     const auto out = mix.take(now);
@@ -64,8 +75,8 @@ TEST_CASE("two voice streams and an analogue lead sum with the boost", "[webgate
     const auto lead = tone(n, 0.10);
     const auto dv_a = tone(n, 0.05);
     const auto dv_b = tone(n, 0.02, 7);
-    mix.push(2, true, 12.0, dv_a, t);
-    mix.push(3, true, 12.0, dv_b, t);
+    feed(mix, 2, true, 12.0, dv_a, t);
+    feed(mix, 3, true, 12.0, dv_b, t);
     mix.push(1, false, 12.0, lead, t);
     const auto out = taken(mix, t);
     REQUIRE(out.size() == n);
@@ -84,8 +95,8 @@ TEST_CASE("the limiter holds the sum under full scale", "[webgate][mix]")
     mix.set_lead(1);
     const std::size_t n = (kPrime + 2) * kB;
     // Two voice streams at +30 dB are x31.6 each on 0.5: far over.
-    mix.push(2, true, 30.0, tone(n, 0.5), t);
-    mix.push(3, true, 30.0, tone(n, 0.5, 3), t);
+    feed(mix, 2, true, 30.0, tone(n, 0.5), t);
+    feed(mix, 3, true, 30.0, tone(n, 0.5, 3), t);
     mix.push(1, false, 30.0, tone(n, 0.8), t);
     const auto out = taken(mix, t);
     REQUIRE(out.size() == n);
@@ -122,7 +133,7 @@ TEST_CASE("a lead one sample short of a block is not skipped", "[webgate][mix]")
     mix.set_lead(1);
     // The voice stream is primed and full, which would tempt a mix that cuts
     // on whoever has a block.
-    mix.push(2, true, 0.0, dc(kPrime * 2 * kB, 0.05F), t);
+    feed(mix, 2, true, 0.0, dc(kPrime * 2 * kB, 0.05F), t);
     mix.push(1, false, 0.0, dc(kB - 1, 0.1F), t);
     CHECK(mix.take(t).empty());
     mix.push(1, false, 0.0, dc(1, 0.1F), t);
@@ -217,25 +228,117 @@ TEST_CASE("a stalled lead does not stall the voice, and the mix keeps real time"
     CHECK(heard >= 25);
 }
 
-TEST_CASE("a burst on a stalled mix is not played ahead of real time", "[webgate][mix]")
+TEST_CASE("a pile-up with nothing listened to is paced by the clock and then trimmed",
+          "[webgate][mix]")
 {
     const auto t = Clock::now();
     PhoneMixer mix;
-    // No lead at all: the clock paces.
-    mix.push(2, true, 0.0, dc(30 * kB, 0.2F), t);
-    CHECK(mix.take(t).size() <= 2 * kB);
+    // No lead at all: the clock paces. Nine blocks at a time, faster than the
+    // clock drains them.
+    std::size_t heard = 0;
+    for (int i = 0; i < 5; ++i) {
+        mix.push(2, true, 0.0, dc(9 * kB, 0.2F), t);
+        heard += mix.take(t).size();
+    }
+    CHECK(heard <= 2 * kB);
     CHECK(taken(mix, t + milliseconds(100)).size() <= 6 * kB);
     // Past the window the oldest went rather than be played late.
-    CHECK(mix.dropped() == 10 * kB);
+    CHECK(mix.dropped() > 0);
 }
 
+namespace {
+
+// A source that delivers one chunk every `samples` of 48 kHz audio: 683 ms is
+// a 96 kS/s recording on the engine's 65536-sample block, 262 ms a 250 kS/s
+// radio. The lead and one voice stream both arrive that way.
+struct SlowSource {
+    std::size_t samples;
+    [[nodiscard]] milliseconds interval() const
+    {
+        return milliseconds(static_cast<std::int64_t>(samples) * 1000 / 48000);
+    }
+};
+
+void check_slow_chunks_with_a_lead(const SlowSource& source)
+{
+    auto t = Clock::now();
+    PhoneMixer mix;
+    mix.set_lead(1);
+    std::vector<float> all;
+    std::size_t lead_pushed = 0;
+    std::size_t warm = 0;
+    for (int cycle = 0; cycle < 20; ++cycle) {
+        mix.push(2, true, 0.0, dc(source.samples, 0.05F), t);
+        auto out = taken(mix, t);
+        all.insert(all.end(), out.begin(), out.end());
+        mix.push(1, false, 0.0, dc(source.samples, 0.10F), t);
+        lead_pushed += source.samples;
+        out = taken(mix, t);
+        all.insert(all.end(), out.begin(), out.end());
+        if (cycle == 0) {
+            warm = all.size();
+        }
+        t += source.interval();
+    }
+    // Contiguous: every whole block of the lead came out, and the partial one
+    // it held between chunks was kept, not thrown away at each push.
+    CHECK(all.size() == (lead_pushed / kB) * kB);
+    // No hole in the lead, and once the voice has primed it is in every block.
+    CHECK(*std::ranges::min_element(all) >= 0.10F - 1e-6F);
+    REQUIRE(all.size() > warm);
+    for (std::size_t i = warm; i < all.size(); ++i) {
+        REQUIRE(all[i] == Catch::Approx(0.15F).margin(1e-6));
+    }
+    // Nothing lost: a chunk longer than the usual window was not cut to it.
+    CHECK(mix.dropped() == 0);
+    CHECK(mix.padded_blocks() == 0);
+}
+
+}  // namespace
+
+TEST_CASE("683 ms chunks on the lead and the voice leave no hole and lose nothing",
+          "[webgate][mix]")
+{
+    check_slow_chunks_with_a_lead(SlowSource{32'784});
+}
+
+TEST_CASE("262 ms chunks on the lead and the voice leave no hole and lose nothing",
+          "[webgate][mix]")
+{
+    check_slow_chunks_with_a_lead(SlowSource{12'576});
+}
+
+TEST_CASE("slow voice chunks with nothing listened to are paced and not cut",
+          "[webgate][mix]")
+{
+    for (const std::size_t samples : {std::size_t{32'784}, std::size_t{12'576}}) {
+        auto t = Clock::now();
+        const auto start = t;
+        const SlowSource source{samples};
+        PhoneMixer mix;
+        std::size_t heard = 0;
+        for (int cycle = 0; cycle < 12; ++cycle) {
+            mix.push(2, true, 0.0, dc(samples, 0.2F), t);
+            heard += mix.take(t).size() / kB;
+            // Never ahead of the clock by more than the chunk that has just
+            // arrived and the catch-up the pacing allows.
+            const auto elapsed = std::chrono::duration_cast<milliseconds>(t - start);
+            REQUIRE(milliseconds(static_cast<std::int64_t>(heard) * 20) <=
+                    elapsed + source.interval() + milliseconds(220));
+            t += source.interval();
+        }
+        CHECK(mix.dropped() == 0);
+        // Most of what arrived was played: only the jitter buffer is held back.
+        CHECK(heard * kB * 10 >= 12 * samples * 7);
+    }
+}
 TEST_CASE("a stalled voice stream does not stall the lead", "[webgate][mix]")
 {
     auto t = Clock::now();
     PhoneMixer mix;
     mix.set_lead(1);
     // The voice stream speaks for a while, then stops.
-    mix.push(2, true, 0.0, dc(kPrime * kB + 300, 0.05F), t);
+    feed(mix, 2, true, 0.0, dc(kPrime * kB + 300, 0.05F), t);
     std::size_t heard = 0;
     std::vector<float> all;
     for (int step = 0; step < 40; ++step) {
@@ -256,10 +359,10 @@ TEST_CASE("the end of a call is not played at the start of the next", "[webgate]
 {
     auto t = Clock::now();
     PhoneMixer mix;
-    mix.push(2, true, 0.0, dc(kPrime * kB + 500, 0.2F), t);
+    feed(mix, 2, true, 0.0, dc(kPrime * kB + 500, 0.2F), t);
     t += milliseconds(300);
     // A new call: its few blocks do not add to the old tail to reach the prime.
-    mix.push(2, true, 0.0, dc(5 * kB, 0.2F), t);
+    feed(mix, 2, true, 0.0, dc(5 * kB, 0.2F), t);
     CHECK(mix.take(t).empty());
 }
 
@@ -271,6 +374,6 @@ TEST_CASE("a removed stream holds nothing back", "[webgate][mix]")
     mix.push(5, false, 0.0, dc(10, 0.1F), t);
     mix.remove(5);
     mix.set_lead(std::nullopt);
-    mix.push(2, true, 0.0, dc(kPrime * kB, 0.2F), t);
+    feed(mix, 2, true, 0.0, dc(kPrime * kB, 0.2F), t);
     CHECK(mix.take(t).size() >= kB);
 }

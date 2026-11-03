@@ -221,3 +221,24 @@ TEST_CASE("the registry is re-read on an interval", "[webgate][desktop]")
     now += std::chrono::milliseconds(600);
     CHECK(source.current().confidence_bar == 0.7);
 }
+
+// Against this machine's real registry, so hidden: run it by name. QSettings
+// writes the per-radio centre and rate as REG_QWORD (checked with reg query on
+// 2026-11-03: centreHz REG_QWORD 0x1b7d5a80, sampleRate REG_QWORD 0x30d400),
+// and the reader has to hand a number back as decimal text for parse_int.
+TEST_CASE("numeric registry values read back as decimal text", "[.][registry][desktop]")
+{
+    const auto read = revenant::webgate::registry_desktop_reader();
+    const auto radio = read("source", "lastRadio");
+    if (!radio) {
+        SKIP("the desktop has never opened a radio on this account");
+    }
+    const auto rate = read("source/radios/" + *radio, "sampleRate");
+    if (!rate) {
+        SKIP("no sample rate remembered for the last radio");
+    }
+    CHECK(rate->find_first_not_of("0123456789") == std::string::npos);
+    CHECK(std::stoll(*rate) > 0);
+    const auto settings = read_desktop_settings(read);
+    CHECK(settings.last_source.has_value());
+}

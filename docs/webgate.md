@@ -243,15 +243,22 @@ live audio and Keep listening, so both play the same thing.
   (`core/rpc/voice_audio.h`). The mix is built to take a burst of an LDU
   (180 ms) as well. The receiver being listened to sets the pace: a 20 ms block
   is cut when it holds a whole one, and it is never skipped. Every other stream
-  is read through a 200 ms jitter buffer (it contributes once 200 ms is queued,
-  and holds up to 400 ms before the oldest is dropped), which is also the delay
-  voice has against the receiver being listened to.
-- A stream with no audio for 200 ms is stalled and starts again when it
-  returns, so the end of one call is not played at the start of the next. If
-  the receiver being listened to stalls, or there is none, the voice streams
-  are paced by the wall clock, one block per 20 ms, so the mix never runs ahead
-  of real time.
-- Live Opus packets are tagged with the receiver being listened to. Keep
+  is read through a jitter buffer: it contributes once it has queued 200 ms (or
+  its longest chunk plus two blocks, if more), which is also the delay voice
+  has against the receiver being listened to.
+- Chunks are as long as the source makes them: 27 ms from a 2.4 MS/s radio,
+  262 ms from 250 kS/s, 683 ms from a 96 kS/s recording. Each stream sizes its
+  own thresholds from the longest chunk it has pushed, so a slow source is not
+  mistaken for a stalled one: it is stalled after 200 ms or two and a half
+  chunks of silence, whichever is longer, and its window is 400 ms or the
+  jitter buffer plus two chunks. A voice stream from a slow source is
+  correspondingly later against the lead.
+- A stalled stream starts again when it returns, so the end of one call is not
+  played at the start of the next; the receiver being listened to is not judged
+  stalled by its own pushes, so the partial block it holds between chunks is
+  kept. If the receiver being listened to stalls, or there is none, the voice
+  streams are paced by the wall clock, one block per 20 ms, so the mix never
+  runs ahead of real time.- Live Opus packets are tagged with the receiver being listened to. Keep
   listening has one playlist per session, `/hls/<id>/live.m3u8`; the `hls`
   event gives the id, and the URL stays the same when the listener moves to
   another receiver, so the player is not reloaded. An engine restart builds a

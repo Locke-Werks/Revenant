@@ -18,27 +18,39 @@
 // receiver's audio is not an LDU at a time. core/rpc/voice_audio.h holds each
 // decoded LDU (9 frames, 180 ms) behind a pre-roll and hands out one chunk per
 // receiver chunk, covering exactly that chunk's time at 8000 S/s, zeros between
-// calls. So voice arrives continuously in the engine's own cadence, 7 to 27 ms
-// a chunk, which resampled to 48 kHz is not a whole number of 20 ms blocks.
-// The plugin voice of dmr and dstar travels the same route. The mixer is
-// nonetheless built to take a burst of an LDU at once, because a decode lane
-// that falls behind and catches up produces exactly that.
+// calls. So voice arrives continuously in the engine's own cadence, which
+// resampled to 48 kHz is not a whole number of 20 ms blocks. The plugin voice
+// of dmr and dstar travels the same route. The mixer is nonetheless built to
+// take a burst of an LDU at once, because a decode lane that falls behind and
+// catches up produces exactly that.
+//
+// A CHUNK IS AS LONG AS THE SOURCE MAKES IT. The engine cuts receiver chunks
+// by sample count, so on a 65536-sample block a 2.4 MS/s radio gives 27 ms and
+// a 96 kS/s recording gives 683 ms, one chunk a second and a half. Every
+// number that is a time here is therefore a floor, and each stream raises it
+// from the longest chunk it has pushed, the way core/rpc/voice_audio.h sizes
+// its pre-roll from the longest chunk: a chunk is due about its own length
+// after the last, so no gap shorter than that is a stall.
 //
 // TIMELINE. The lead stream, the receiver the phone is listening to, sets the
 // pace: a block is cut when the lead holds a whole one, and the lead is never
 // skipped. A lead that is one sample short waits for that sample. Every other
 // stream is read through a jitter buffer: it contributes nothing until it has
-// kPrimeBlocks (200 ms, one LDU) queued, then a whole block per cut, so its
-// own chunk sizes cannot put holes in it. It holds up to kMaxQueued (400 ms);
-// past that the oldest is dropped. If it does run dry it contributes what it
-// has, is counted, and primes again.
+// queued the longer of 200 ms (one LDU) and its longest chunk plus two blocks,
+// then a whole block per cut, so its own chunk sizes cannot put holes in it.
+// It holds up to the longer of 400 ms and that plus two chunks; past that the
+// oldest is dropped. If it does run dry it contributes what it has, is
+// counted, and primes again.
 //
-// STALLS ARE MEASURED IN TIME. A stream that has pushed nothing for kStall
-// (200 ms) is stalled: its queue is cleared (a few milliseconds of an old call
-// would otherwise play at the start of the next) and it must prime again. When
-// the lead is stalled, or there is none, the mix is paced by the wall clock
-// instead, one block per 20 ms, so the voice streams are heard and the output
-// never runs ahead of real time. The clock is passed in, so a test owns it.
+// STALLS ARE MEASURED IN TIME. A stream that has pushed nothing for the longer
+// of 200 ms and two and a half of its longest chunks is stalled: its queue is
+// cleared (a few milliseconds of an old call would otherwise play at the start
+// of the next) and it must prime again. The lead is never judged stalled by
+// its own push, so the partial block it holds between chunks is not thrown
+// away. When the lead is stalled, or there is none, the mix is paced by the
+// wall clock instead, one block per 20 ms, so the voice streams are heard and
+// the output never runs ahead of real time. The clock is passed in, so a test
+// owns it.
 //
 // SILENCE BETWEEN DIGITAL VOICE CALLS is a stream of zeros: it adds nothing,
 // and the sum is the lead alone, untouched by the limiter below its threshold.
@@ -72,7 +84,7 @@ public:
     static constexpr auto kBlockTime = std::chrono::milliseconds(20);
     // One LDU of P25 voice, 180 ms, rounded up to whole blocks.
     static constexpr std::size_t kPrimeBlocks = 10;
-    static constexpr std::size_t kMaxQueued = 20 * kBlock;
+    static constexpr std::size_t kWindowBlocks = 20;
     static constexpr auto kStall = std::chrono::milliseconds(200);
 
     PhoneMixer() { limiter_.configure(kPhoneAudioRate); }
@@ -90,7 +102,12 @@ public:
         if (created) {
             s.last_push = now;
         }
-        expire(s, now);
+        // The lead's own push is proof that it is alive, so its partial block
+        // is kept however long the chunk took to come.
+        if (lead_ != vrx) {
+            expire(s, now, mono.size());
+        }
+        s.longest = std::max(s.longest, mono.size());
         if (digital_voice) {
             const auto boosted = s.boost.process(voice_db, mono);
             s.queue.insert(s.queue.end(), boosted.begin(), boosted.end());
@@ -98,7 +115,7 @@ public:
             s.queue.insert(s.queue.end(), mono.begin(), mono.end());
         }
         s.last_push = now;
-        if (!s.primed && s.queue.size() >= kPrimeBlocks * kBlock) {
+        if (!s.primed && s.queue.size() >= prime_blocks(s) * kBlock) {
             s.primed = true;
         }
     }
@@ -112,11 +129,12 @@ public:
     {
         out_.clear();
         for (auto& [vrx, s] : streams_) {
-            expire(s, now);
+            expire(s, now, 0);
             // Never the lead: a long chunk of the lead is not late, it is
             // simply a lot, and is cut in full.
-            if (lead_ != vrx && s.queue.size() > kMaxQueued) {
-                const std::size_t excess = s.queue.size() - kMaxQueued;
+            const std::size_t window = window_blocks(s) * kBlock;
+            if (lead_ != vrx && s.queue.size() > window) {
+                const std::size_t excess = s.queue.size() - window;
                 s.queue.erase(s.queue.begin(),
                               s.queue.begin() + static_cast<std::ptrdiff_t>(excess));
                 dropped_ += excess;
@@ -124,7 +142,7 @@ public:
         }
         for (;;) {
             const auto lead = lead_ ? streams_.find(*lead_) : streams_.end();
-            if (lead != streams_.end() && now - lead->second.last_push <= kStall) {
+            if (lead != streams_.end() && now - lead->second.last_push <= stall(lead->second)) {
                 // The lead sets the pace. Short of a block it waits, however
                 // much the others hold.
                 if (lead->second.queue.size() < kBlock) {
@@ -139,7 +157,7 @@ public:
             if (!voice_ready()) {
                 break;
             }
-            if (!wall_mark_ || now - *wall_mark_ > kPrimeBlocks * kBlockTime) {
+            if (!wall_mark_ || now - *wall_mark_ > catch_up()) {
                 // At most the allowance of catching up, so a long silence does
                 // not become a long burst.
                 wall_mark_ = now - kBlockTime;
@@ -153,7 +171,7 @@ public:
         return out_;
     }
 
-    // Samples dropped for arriving more than kMaxQueued behind, and blocks in
+    // Samples dropped for arriving more than the window behind, and blocks in
     // which a primed stream ran dry.
     [[nodiscard]] std::uint64_t dropped() const { return dropped_; }
     [[nodiscard]] std::uint64_t padded_blocks() const { return padded_; }
@@ -164,17 +182,61 @@ private:
         std::deque<float> queue;
         VoiceGainStage boost;
         Clock::time_point last_push{};
+        // The longest chunk pushed since the stream last started, in samples.
+        std::size_t longest = 0;
         bool primed = false;
     };
 
-    // A stalled stream starts again: what it still holds is the tail of
-    // something that ended.
-    static void expire(Stream& s, Clock::time_point now)
+    [[nodiscard]] static std::size_t chunk_blocks(std::size_t samples)
     {
-        if (now - s.last_push > kStall && (!s.queue.empty() || s.primed)) {
+        return (samples + kBlock - 1) / kBlock;
+    }
+
+    [[nodiscard]] static std::chrono::microseconds duration_of(std::size_t samples)
+    {
+        return std::chrono::microseconds(static_cast<std::int64_t>(samples) * 1'000'000 /
+                                         static_cast<std::int64_t>(kPhoneAudioRate));
+    }
+
+    // How long without a push before a stream is stalled: a chunk is due about
+    // its own length after the last, so two and a half of the longest is a
+    // missed one.
+    [[nodiscard]] static Clock::duration stall(const Stream& s, std::size_t incoming = 0)
+    {
+        const auto longest = duration_of(std::max(s.longest, incoming));
+        return std::max<Clock::duration>(kStall, longest * 5 / 2);
+    }
+
+    [[nodiscard]] static std::size_t prime_blocks(const Stream& s)
+    {
+        return std::max(kPrimeBlocks, chunk_blocks(s.longest) + 2);
+    }
+
+    [[nodiscard]] static std::size_t window_blocks(const Stream& s)
+    {
+        return std::max(kWindowBlocks, prime_blocks(s) + 2 * chunk_blocks(s.longest));
+    }
+
+    // A stalled stream starts again: what it still holds is the tail of
+    // something that ended, and the chunk size it had is of that something.
+    static void expire(Stream& s, Clock::time_point now, std::size_t incoming)
+    {
+        if (now - s.last_push > stall(s, incoming) && (!s.queue.empty() || s.primed)) {
             s.queue.clear();
             s.primed = false;
+            s.longest = 0;
         }
+    }
+
+    // How far behind the clock the wall pacing may run to catch up: a chunk of
+    // the longest stream, since output is only cut when one arrives.
+    [[nodiscard]] Clock::duration catch_up() const
+    {
+        std::size_t longest = 0;
+        for (const auto& [vrx, s] : streams_) {
+            longest = std::max(longest, s.longest);
+        }
+        return duration_of(longest) + kPrimeBlocks * kBlockTime;
     }
 
     [[nodiscard]] bool voice_ready() const
