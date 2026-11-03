@@ -200,7 +200,10 @@ export class Handoff {
   private cut(): void {
     if (this.st === "NeedsTap") this.emit("hideGoLive");
     this.emit("fadeCut");
-    this.emit("pauseHls");
+    // Kept on, the paused element is reused at the next hide. Turned off, the
+    // stream is going away, so the element is emptied and a later re-enable
+    // loads fresh instead of seeking a stale URL.
+    this.emit(this.keep ? "pauseHls" : "stopHls");
     this.emit("hideBehindBanner");
     if (!this.keep) this.emit("hlsOff");
     this.st = "Live";

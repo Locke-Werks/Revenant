@@ -144,7 +144,9 @@ test("keep listening off in the foreground cuts to live before HLS stops", () =>
   assert.deepEqual(m.take(), ["startLive"]);
   m.h.resumeResult(true);
   m.h.liveReady();
-  assert.deepEqual(m.take(), ["fadeCut", "pauseHls", "hideBehindBanner", "hlsOff"]);
+  // Stopped rather than paused: HLS is going off, so a later re-enable must
+  // load fresh instead of seeking the old element.
+  assert.deepEqual(m.take(), ["fadeCut", "stopHls", "hideBehindBanner", "hlsOff"]);
 });
 
 test("keep listening off from the lock screen stops HLS", () => {
@@ -276,7 +278,11 @@ test("no sequence of six inputs pauses HLS before live is ready, or goes quiet b
             break;
           case "stopHls":
             assert.ok(
-              input === "receiverGone" || input === "hlsFailed" || (input === "keepListeningOff" && !h.isVisible),
+              input === "receiverGone" ||
+                input === "hlsFailed" ||
+                (input === "keepListeningOff" && !h.isVisible) ||
+                // A cut with keep listening off: live is already playing.
+                (!h.keepListening && filled && resumed && liveOn),
               `HLS stopped with no reason the user can see: ${where}`,
             );
             hls = false;
