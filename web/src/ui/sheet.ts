@@ -18,7 +18,7 @@ export interface SheetDeps {
 
 export const SHEET_TABS = ["tune", "signals", "radio"] as const;
 export type SheetTab = (typeof SHEET_TABS)[number];
-const TAB_LABELS: Record<SheetTab, string> = { tune: "Tune", signals: "Signals", radio: "Radio" };
+export const TAB_LABELS: Record<SheetTab, string> = { tune: "Tune", signals: "Signals", radio: "Radio" };
 
 export function sheetHint(others: boolean): string {
   return others ? "Tap a receiver to listen" : "Tap the waterfall to listen there; press and hold to add another receiver.";

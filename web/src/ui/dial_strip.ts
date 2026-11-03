@@ -15,6 +15,7 @@ const SLOP_PX = 4;
 const HEIGHT_PX = 56;
 const MAJOR_EVERY = 10;
 const ACCENT = "#d6262a";
+export const EMPTY_HINT = "Long-press the waterfall to add a receiver";
 
 export class DialStrip {
   readonly el: HTMLElement;
@@ -125,7 +126,16 @@ export class DialStrip {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, w, HEIGHT_PX);
     const r = this.deps.active();
-    if (!r) return;
+    // With nothing to tune the strip stays, dimmed, and says how to begin.
+    this.el.classList.toggle("idle", !r);
+    if (!r) {
+      g.font = "13px -apple-system, system-ui, sans-serif";
+      g.textAlign = "center";
+      g.textBaseline = "middle";
+      g.fillStyle = "#8e8e97";
+      g.fillText(EMPTY_HINT, w / 2, HEIGHT_PX / 2);
+      return;
+    }
     const step = fineStep(r.mode);
     // The unrounded dial value while a session runs, so the ribbon is smooth
     // between the whole Hz the receiver is told.

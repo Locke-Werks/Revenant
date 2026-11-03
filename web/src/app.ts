@@ -9,17 +9,17 @@ import { attachGestures } from "./gestures";
 import { TuneLimiter } from "./tune_limiter";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
 import { AutoScale, remapRow, rowExtentsDb } from "./autoscale";
-import { DEFAULT_ACCENT, detectionBoxes, passbandHz } from "./markers";
+import { DEFAULT_ACCENT, DETECTION_COLOR, detectionBoxes, passbandHz } from "./markers";
 import { drawReceivers, type ReceiverMark } from "./overlay";
 import { SpectrumTrace } from "./spectrum_trace";
-import { clampView, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
+import { clampView, coveredBand, rowCoverage, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
 import { createWaterfall, RING_ROWS } from "./waterfall";
 import type { SourceEvent } from "./protocol";
 import { captionFromEvent, CaptionLayer, CaptionStore, RowClock } from "./ui/captions";
 import { decodedEntry, FeedModel, FeedView, transcriptEntry } from "./ui/feed";
 import { RadioPanel } from "./ui/radio_panel";
 import { formatMHz, ReceiverController, ReplaceGate } from "./ui/receivers";
-import { Sheet, type SheetTab } from "./ui/sheet";
+import { Sheet, SHEET_TABS, TAB_LABELS, type SheetTab } from "./ui/sheet";
 import { readConfidence, SignalsPanel } from "./ui/signals";
 import { SpeechModel, speechLine, SpeechSwitch } from "./ui/speech_switch";
 import { StatusModel } from "./ui/status";
@@ -44,11 +44,14 @@ export function appScreenHtml(): string {
       <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
     </div>
   </div>
-  <nav class="rail" aria-label="Receivers">
+  <nav class="rail" id="rail" aria-label="Receivers" hidden>
     <div class="chips" id="chips"></div>
-    <button type="button" class="btn controls" id="open-sheet" aria-expanded="false" aria-controls="sheet">Controls</button>
   </nav>
   <div class="dial" id="dial-slot"></div>
+  <nav class="grabber" aria-label="Controls">
+    <span class="handle" aria-hidden="true"></span>
+    <div class="grab-tabs" id="grab-tabs"></div>
+  </nav>
   <div id="sheet-slot"></div>
   <audio id="kl-audio" playsinline preload="none"></audio>
 </main>`;
@@ -95,7 +98,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   // One accent for every marker, read once from the stylesheet so the visual
   // pass can change it in CSS alone.
   const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || DEFAULT_ACCENT;
-  const waterfall = createWaterfall(wfCanvas, accent);
+  const waterfall = createWaterfall(wfCanvas, DETECTION_COLOR);
   const trace = new SpectrumTrace(traceCanvas, accent);
   const rulerCanvas = root.querySelector<HTMLCanvasElement>("#ruler")!;
   const ruler = new Ruler(rulerCanvas);
@@ -115,6 +118,10 @@ export function mountApp(root: HTMLElement): AppHandle {
   };
 
   let band: Band | null = null;
+  // Where the spectrum's data really ends inside the band; null until a row
+  // that reaches that edge has shown it.
+  let coverLo: number | null = null;
+  let coverHi: number | null = null;
   let view: View | null = null;
   let widthDev = 1;
   let drawQueued = false;
@@ -124,6 +131,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     waterfall.draw();
     trace.draw();
     ruler.draw();
+    top.viewCentre(view ? view.centerHz : null);
     drawMarks();
     layoutCaptions();
   };
@@ -131,7 +139,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     if (!marks) return;
     marks.clearRect(0, 0, marksCanvas.width, marksCanvas.height);
     if (!view) return;
-    waterfall.drawBoxes(marks, accent);
+    waterfall.drawBoxes(marks, DETECTION_COLOR);
     drawReceivers(marks, view, receiverMarks, activeMark, accent);
   };
   // Filled in once the receiver controller exists; drawn on the current view.
@@ -166,7 +174,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   );
 
   const apply = (next: View) => {
-    const v = band ? clampView(next, band) : next;
+    const v = band ? clampView(next, coveredBand(band, coverLo, coverHi)) : next;
     if (sameView(v, view)) return;
     view = v;
     waterfall.setView(v);
@@ -253,7 +261,6 @@ export function mountApp(root: HTMLElement): AppHandle {
     audioNote: (text) => notes.set("audio", text),
   });
 
-  const openSheetBtn = root.querySelector<HTMLButtonElement>("#open-sheet")!;
   sheet = new Sheet({
     setMode: (m) => receivers.setMode(m),
     setBandwidth: (hz) => receivers.setBandwidth(hz),
@@ -367,8 +374,32 @@ export function mountApp(root: HTMLElement): AppHandle {
     const f = decodedEntry(e);
     if (f) feedModel.add(f);
   });
-  sheet.onOpen((open) => openSheetBtn.setAttribute("aria-expanded", String(open)));
-  openSheetBtn.addEventListener("click", () => sheet!.setOpen(!sheet!.open));
+  // The grabber names the sheet's tabs: a tap opens that tab, and a tap on
+  // the tab already showing closes the sheet.
+  const grabTabs = root.querySelector<HTMLElement>("#grab-tabs")!;
+  const grabButtons = SHEET_TABS.map((t) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "grab-tab";
+    b.textContent = TAB_LABELS[t];
+    b.setAttribute("aria-controls", "sheet");
+    b.addEventListener("click", () => {
+      if (sheet!.open && sheetTab === t) {
+        sheet!.setOpen(false);
+        return;
+      }
+      sheet!.selectTab(t);
+      sheet!.setOpen(true);
+    });
+    grabTabs.append(b);
+    return { t, b };
+  });
+  const syncGrabber = () => {
+    for (const { t, b } of grabButtons) b.setAttribute("aria-expanded", String(sheet!.open && sheetTab === t));
+  };
+  sheet.onOpen(syncGrabber);
+  sheet.onTab(syncGrabber);
+  syncGrabber();
 
   // The dial shares the waterfall drag's preview-and-hold path, so the chip
   // and readout follow it and a stale reply cannot pull it back.
@@ -435,6 +466,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   root.querySelector("#top-slot")!.append(top.el);
 
   const chipsEl = root.querySelector<HTMLElement>("#chips")!;
+  const railEl = root.querySelector<HTMLElement>("#rail")!;
   const renderReceivers = () => {
     const list = receivers.list.list();
     const active = receivers.list.active;
@@ -456,6 +488,7 @@ export function mountApp(root: HTMLElement): AppHandle {
       });
       chipsEl.append(b);
     }
+    railEl.hidden = list.length === 0;
     const current = active === null ? null : receivers.list.get(active) ?? null;
     top.show(current);
     sheet!.show(current, list.length > 0);
@@ -606,6 +639,8 @@ export function mountApp(root: HTMLElement): AppHandle {
     const changed = !band || band.centerHz !== e.centerHz || band.rateHz !== e.rateHz;
     band = { centerHz: e.centerHz, rateHz: e.rateHz };
     if (!changed && view) return;
+    coverLo = null;
+    coverHi = null;
     // A retuned or reopened source: history was cut for another band.
     waterfall.clear();
     forgetRows();
@@ -639,6 +674,20 @@ export function mountApp(root: HTMLElement): AppHandle {
     const shown = { ...f, px: remapRow(f, s, new Uint8Array(f.px.length)) };
     waterfall.pushRow(shown);
     trace.setRow(shown);
+    if (band) {
+      const c = rowCoverage(f, band);
+      const pxHz = f.spanHz / Math.max(1, f.px.length);
+      let narrowed = false;
+      if (c.highHz !== null && (coverHi === null || c.highHz < coverHi - pxHz)) {
+        coverHi = c.highHz;
+        narrowed = true;
+      }
+      if (c.lowHz !== null && (coverLo === null || c.lowHz > coverLo + pxHz)) {
+        coverLo = c.lowHz;
+        narrowed = true;
+      }
+      if (narrowed && view) apply(view);
+    }
     const active = receivers.list.active;
     const r = active === null ? undefined : receivers.list.get(active);
     if (r) {

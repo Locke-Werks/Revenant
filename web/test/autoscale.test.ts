@@ -3,8 +3,40 @@ import assert from "node:assert/strict";
 import { AutoScale, remapRow, rowExtentsDb } from "../src/autoscale";
 import { colormap } from "../src/colormap";
 import { rulerTicks, tickStepHz } from "../src/ui/ruler";
+import { isEditable } from "../src/insets";
+import { clampView, coveredBand, rowCoverage } from "../src/view";
 
 const TAU = 30_000;
+
+test("the viewport pin leaves the scroll alone while something takes typing", () => {
+  assert.equal(isEditable({ tagName: "INPUT" }), true);
+  assert.equal(isEditable({ tagName: "INPUT", type: "text" }), true);
+  assert.equal(isEditable({ tagName: "SELECT" }), true);
+  assert.equal(isEditable({ tagName: "DIV", isContentEditable: true }), true);
+  assert.equal(isEditable({ tagName: "INPUT", type: "range" }), false);
+  assert.equal(isEditable({ tagName: "BUTTON" }), false);
+  assert.equal(isEditable({ tagName: "BODY" }), false);
+  assert.equal(isEditable(null), false);
+});
+
+test("a row ending in a long floor run at the band edge trims the band to the data", () => {
+  const band = { centerHz: 98_100_000, rateHz: 2_400_000 };
+  const px = new Uint8Array(780).fill(40);
+  px.fill(0, 730);
+  const c = rowCoverage({ centerHz: band.centerHz, spanHz: band.rateHz, px }, band);
+  assert.equal(c.lowHz, null);
+  assert.ok(Math.abs(c.highHz! - (96_900_000 + (730 * 2_400_000) / 780)) < 1);
+  const b = coveredBand(band, c.lowHz, c.highHz);
+  const v = clampView({ centerHz: band.centerHz, spanHz: band.rateHz, widthPx: 780 }, b);
+  // The whole view now lies on data, so the row fills the width.
+  assert.ok(v.centerHz + v.spanHz / 2 <= c.highHz! + 1e-6);
+  assert.ok(v.centerHz - v.spanHz / 2 >= 96_900_000 - 1e-6);
+  // A few quiet pixels, or a row that stops short of the band edge, say nothing.
+  const quiet = new Uint8Array(780).fill(40);
+  quiet.fill(0, 777);
+  assert.equal(rowCoverage({ centerHz: band.centerHz, spanHz: band.rateHz, px: quiet }, band).highHz, null);
+  assert.equal(rowCoverage({ centerHz: band.centerHz - 500_000, spanHz: 1_000_000, px }, band).highHz, null);
+});
 
 test("autoscale snaps to the first row", () => {
   const a = new AutoScale(TAU);

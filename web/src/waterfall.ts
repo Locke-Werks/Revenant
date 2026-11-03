@@ -259,9 +259,16 @@ class GlRenderer implements Renderer {
         end++;
       }
       if (boxes.length > 0) {
+        const y = k * rowH;
+        const hh = (end - k) * rowH;
         for (const p of ring.boxesPx(slot, view, w)) {
           ctx.globalAlpha = p.box.alpha;
-          ctx.fillRect(p.x0, k * rowH, p.x1 - p.x0, (end - k) * rowH);
+          ctx.fillRect(p.x0, y, p.x1 - p.x0, hh);
+          // One device pixel at each band edge carries the box; the fill is
+          // only a tint.
+          ctx.globalAlpha = p.box.held ? 0.3 : 0.55;
+          ctx.fillRect(Math.floor(p.x0), y, 1, hh);
+          ctx.fillRect(Math.max(Math.floor(p.x0) + 1, Math.ceil(p.x1) - 1), y, 1, hh);
         }
       }
       k = end;
@@ -369,8 +376,11 @@ class CanvasRenderer implements Renderer {
     for (const box of boxes) {
       const p = boxPx(view, w, f, box);
       if (!p) continue;
-      const k = box.alpha;
-      for (let x = Math.floor(p.x0); x < Math.ceil(p.x1); x++) {
+      const x0 = Math.floor(p.x0);
+      const x1 = Math.ceil(p.x1);
+      for (let x = x0; x < x1; x++) {
+        // The edges carry the box; the inside is a tint.
+        const k = x === x0 || x === x1 - 1 ? (box.held ? 0.3 : 0.55) : box.alpha;
         const o = x * 4;
         d[o] = d[o]! + (ar - d[o]!) * k;
         d[o + 1] = d[o + 1]! + (ag - d[o + 1]!) * k;

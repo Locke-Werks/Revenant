@@ -202,12 +202,26 @@ export class TopBar {
       }
       this.freq.append(" MHz");
     } else {
-      this.freq.textContent = "--- MHz";
+      this.freq.textContent = this.viewHz === null ? "--- MHz" : `${formatMHz(this.viewHz)} MHz`;
     }
+    // No receiver: the readout names where the display is, dimmed, and there
+    // is no level to show.
+    this.freq.classList.toggle("dim", r === null);
     this.mode.textContent = (r?.mode ?? "nfm").toUpperCase();
     this.mode.hidden = r === null;
+    this.el.querySelector<HTMLElement>(".meter")!.hidden = r === null;
     if (!r) this.level(null);
   }
+
+  // The display's centre, shown while no receiver is active.
+  viewCentre(hz: number | null): void {
+    // To the kHz: a pan lands anywhere, and the last digits would only flicker.
+    const next = hz === null ? null : Math.round(hz / 1000) * 1000;
+    if (next === this.viewHz) return;
+    this.viewHz = next;
+    if (!this.active) this.show(null);
+  }
+  private viewHz: number | null = null;
 
   level(db: number | null): void {
     const meter = this.el.querySelector<HTMLElement>(".meter")!;

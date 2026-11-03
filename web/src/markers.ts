@@ -25,10 +25,14 @@ export interface DetectionBox {
   label: string;
 }
 
-// A box at zero confidence still has to be visible to be tapped, and one at
-// full confidence must not hide the waterfall under it.
-const MIN_ALPHA = 0.12;
-const MAX_ALPHA = 0.45;
+// Detections are drawn in a cool grey, apart from the accent (receivers) and
+// the warm colour map (signal), so the three never read as one thing.
+export const DETECTION_COLOR = "#8fa6bd";
+
+// A box's fill is a tint only: the edge lines mark it, and the signal under
+// it has to stay readable even at full confidence.
+const MIN_ALPHA = 0.06;
+const MAX_ALPHA = 0.12;
 // Held tracks are the engine's memory of a signal that has gone quiet.
 const HELD_FACTOR = 0.5;
 

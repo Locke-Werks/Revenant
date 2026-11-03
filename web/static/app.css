@@ -88,8 +88,8 @@ html:has(.app), html:has(.app) body {
   padding-right: env(safe-area-inset-right);
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-  grid-template-areas: "top" "rail" "stage" "dial";
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "top" "rail" "stage" "dial" "grab";
   background: var(--bg);
   overscroll-behavior: none;
 }
@@ -135,6 +135,8 @@ html:has(.app), html:has(.app) body {
   user-select: none;
   -webkit-user-select: none;
 }
+.app .freq.dim { color: var(--dim); }
+.meter[hidden] { display: none; }
 .app .freq .digit { display: inline-block; min-width: 0.6em; text-align: center; }
 .app .chip.mode {
   font-family: var(--mono);
@@ -198,17 +200,35 @@ html:has(.app), html:has(.app) body {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.app .chip.rx {
-  min-height: 32px;
+/* Small to the eye, full size to the thumb: the button is the 44 px hit
+   area and the pill drawn inside it is 32 px. */
+.app .chip.rx, .app .chip.speech {
+  position: relative;
+  isolation: isolate;
+  min-height: var(--hit);
   padding: 0 10px;
-  font-family: var(--mono);
   font-size: 0.78rem;
   color: var(--muted);
+  background: transparent;
+  border-color: transparent;
 }
-.app .chip.rx[aria-pressed="true"] { color: var(--fg); }
-.app .controls { flex: 0 0 auto; font-size: 0.85rem; color: var(--muted); background: transparent; }
-.app .chip.speech { flex: 0 0 auto; font-size: 0.78rem; min-height: 32px; color: var(--muted); }
-.app .chip.speech.failed { border-color: var(--accent); color: var(--accent); }
+.app .chip.rx::before, .app .chip.speech::before {
+  content: "";
+  position: absolute;
+  inset: 6px 0;
+  z-index: -1;
+  border-radius: 999px;
+  background: var(--chip);
+  border: 1px solid transparent;
+  transition: border-color var(--quick) ease-out;
+}
+.app .chip.rx { font-family: var(--mono); }
+.app .chip.rx[aria-pressed="true"] { color: var(--fg); border-color: transparent; }
+.app .chip.rx[aria-pressed="true"]::before { border-color: var(--accent); }
+.app .chip.speech { flex: 0 0 auto; }
+.app .chip.speech.failed { color: var(--accent); border-color: transparent; }
+.app .chip.speech.failed::before { border-color: var(--accent); }
+.rail[hidden] { display: none; }
 
 /* The display: trace, ruler, waterfall, full width, no frame. */
 .stage {
@@ -299,14 +319,41 @@ html:has(.app), html:has(.app) body {
 }
 .note { display: flex; align-items: center; gap: 8px; color: var(--warn); }
 .note-text { flex: 1 1 auto; }
-.app .note-close { background: transparent; border-color: transparent; min-height: 28px; min-width: 28px; }
+/* A 44 px target that does not fatten the note: the margin hands the extra
+   back to the layout. */
+.app .note-close { background: transparent; border-color: transparent; margin: -10px -8px -10px 0; }
 
-/* Last row, on the edge the home indicator sits over; its own padding keeps
-   the strip above the indicator while its background runs to the glass. */
-.dial {
-  grid-area: dial;
+.dial { grid-area: dial; }
+.dial-strip.idle canvas { opacity: 0.8; }
+
+/* The sheet's handle, last row, on the edge the home indicator sits over:
+   its padding keeps the tabs above the indicator while its background runs
+   to the glass. */
+.grabber {
+  grid-area: grab;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #121215;
+  border-radius: 14px 14px 0 0;
   padding-bottom: env(safe-area-inset-bottom);
 }
+.grabber .handle {
+  width: 36px;
+  height: 4px;
+  margin-top: 6px;
+  border-radius: 2px;
+  background: var(--dim);
+}
+.grab-tabs { display: flex; width: 100%; }
+.app .grab-tab {
+  flex: 1 1 0;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.app .grab-tab[aria-expanded="true"] { color: var(--fg); }
 .dial-strip canvas {
   display: block;
   width: 100%;
@@ -379,8 +426,8 @@ html:has(.app), html:has(.app) body {
 @media (orientation: landscape) {
   .app {
     grid-template-columns: minmax(0, 1fr) 176px;
-    grid-template-rows: auto minmax(0, 1fr) auto;
-    grid-template-areas: "stage top" "stage rail" "dial dial";
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "stage top" "stage rail" "dial dial" "grab grab";
   }
   .stage { padding-top: env(safe-area-inset-top); }
   .topbar { flex-wrap: wrap; }
