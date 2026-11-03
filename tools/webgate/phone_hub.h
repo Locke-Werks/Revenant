@@ -212,6 +212,11 @@ private:
         // When tick() last asked this session's client whether its engine
         // connection still works.
         std::chrono::steady_clock::time_point last_probe{};
+        // A rebuild's connect is out on the claim runner.
+        bool rebuilding = false;
+        // The link event of a change that went to the rebuild instead, sent
+        // plain if the rebuild fails.
+        bool link_owed = false;
     };
     struct Connection {
         PhoneSocket* socket = nullptr;
@@ -257,6 +262,11 @@ private:
     // or no new connection could be had, in which case the session keeps
     // its receivers' params and tick() tries again.
     bool recreate(Resident& resident, JsonObject& fields);
+    // The rebuild's connect landed, on the strand. The resident may be gone.
+    void rebuilt(const std::string& token, Expected<std::unique_ptr<rpc::Client>> client);
+    // The rest of recreate, on a connect's result. True when rebuilt.
+    bool rebuild_on(Resident& resident, JsonObject& fields,
+                    Expected<std::unique_ptr<rpc::Client>> client);
 
     // Up and new_session set: each session's client is probed about once a
     // second, and one whose engine connection is gone is rebuilt. Catches a

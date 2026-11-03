@@ -635,6 +635,8 @@ void PhoneHub::link_state(LinkState state, std::string detail)
         fields.add_string("state", state_name(link_state_)).add_string("detail", link_detail_);
         if (!(rising && new_session_ && recreate(*resident, fields))) {
             resident->streams->send_event(text);
+        } else if (resident->rebuilding) {
+            resident->link_owed = true;
         }
         resident->last_probe = now();
     }
@@ -654,7 +656,54 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
     // The same holder, so the rebuilt session takes the lease back for the
     // phone that had it. A claim refused here means someone else took the
     // engine while it was down, and the phone hears that it lost it.
-    auto client = new_session_(rpc::LoginMode::Claim, resident.holder);
+    if (claim_runner_) {
+        // The connect may wait for an engine being started, and even a
+        // refused loopback connect costs Windows two seconds, so it runs on
+        // the claim runner. One rebuild in flight per session; a tick that
+        // finds one under way leaves it be.
+        // True either way: the rebuild's own link event, with recreated and
+        // lost, is the Up this phone gets, so the caller sends no plain one.
+        if (resident.rebuilding) {
+            return true;
+        }
+        resident.rebuilding = true;
+        resident.streams->send_event(engine_starting_event());
+        claim_runner_(rpc::LoginMode::Claim, resident.holder,
+                      [this, token = resident.token](
+                          Expected<std::unique_ptr<rpc::Client>> client) {
+                          rebuilt(token, std::move(client));
+                      });
+        return true;
+    }
+    return rebuild_on(resident, fields, new_session_(rpc::LoginMode::Claim, resident.holder));
+}
+
+void PhoneHub::rebuilt(const std::string& token, Expected<std::unique_ptr<rpc::Client>> client)
+{
+    Resident* resident = find_token(token);
+    if (resident == nullptr) {
+        // Expired or taken over while the connect ran. Dropping the Client
+        // ends the lease it claimed.
+        return;
+    }
+    resident->rebuilding = false;
+    JsonObject fields;
+    fields.add_string("state", state_name(link_state_)).add_string("detail", link_detail_);
+    const bool owed = std::exchange(resident->link_owed, false);
+    if (rebuild_on(*resident, fields, std::move(client))) {
+        resident->last_probe = now();
+    } else if (owed) {
+        // Not rebuilt, so the link change the rebuild would have carried
+        // goes out plain; a later tick tries the rebuild again.
+        resident->streams->send_event(link_event(link_state_, link_detail_));
+    }
+    settle_losses();
+}
+
+bool PhoneHub::rebuild_on(Resident& resident, JsonObject& fields,
+                          Expected<std::unique_ptr<rpc::Client>> client)
+{
+    auto& old_session = *resident.session;
     if (!client) {
         if (const auto refusal = parse_lease_refusal(client.error().message)) {
             pending_losses_.emplace_back(resident.token, refusal->holder);
