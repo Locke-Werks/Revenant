@@ -373,17 +373,17 @@ TEST_CASE("listSources lists what the engine lists", "[gpu][webgate][dispatch]")
     }
 }
 
-TEST_CASE("openSource opens the source", "[gpu][webgate][dispatch]")
+TEST_CASE("openSource switches from an open source", "[gpu][webgate][dispatch]")
 {
     REVENANT_NEEDS_GPU();
     revenant::test::Harness harness;
     REQUIRE(harness.open(options()).has_value());
     auto session = phone(harness);
 
-    // The engine will not replace a source in one call, so the phone's
-    // openSource follows a close; that is the engine's rule, not ours.
-    REQUIRE(harness.client().close_source().has_value());
-    const auto uri = revenant::test::scene_uri(400'000);
+    // A source is already open: the phone switches radios in one command,
+    // which closes the old one first.
+    const std::string uri =
+        "synthetic:wideband?rate=1200000&emitters=1&modes=am&seed=77&samples=400000";
     const auto reply =
         send(*session, R"({"id":1,"op":"openSource","args":{"uri":")" + uri + R"("}})");
     INFO(reply);
@@ -394,6 +394,9 @@ TEST_CASE("openSource opens the source", "[gpu][webgate][dispatch]")
     REQUIRE(descriptor->has_value());
     CHECK((*descriptor)->uri == uri);
     CHECK(contains(reply, revenant::webgate::json_string(uri)));
+    const auto info = harness.client().info();
+    REQUIRE(info.has_value());
+    CHECK(info->source_rate == 1'200'000);
 }
 
 TEST_CASE("setTranscription flips the engine's switch", "[gpu][webgate][dispatch]")

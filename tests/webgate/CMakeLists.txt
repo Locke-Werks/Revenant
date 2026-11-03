@@ -9,6 +9,7 @@ add_executable(test_webgate
     test_protocol.cpp
     test_dispatch.cpp
     test_session_streams.cpp
+    test_phone_hub.cpp
     ../reference/gpu_fixture.cpp
     test_engine_link.cpp
 )

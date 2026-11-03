@@ -537,6 +537,13 @@ template <class Edit>
     if (!uri) {
         return std::unexpected(uri.error());
     }
+    // The engine refuses an open over an open source so that a failed open
+    // cannot destroy a working one. A phone switching radios has asked for
+    // exactly that trade, and has no other way to close, so close first. A
+    // close with nothing open succeeds.
+    if (auto closed = session.client().close_source(); !closed) {
+        return std::unexpected(closed.error());
+    }
     if (auto opened = session.client().open_source(*uri); !opened) {
         return std::unexpected(opened.error());
     }

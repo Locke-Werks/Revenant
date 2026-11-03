@@ -5,24 +5,12 @@
 #include <utility>
 
 #include "tools/webgate/protocol.h"
-#include "tools/webgate/session.h"
 
 namespace revenant::webgate {
 
 namespace {
 
 constexpr auto kTickInterval = 250 * kj::MILLISECONDS;
-
-[[nodiscard]] std::string_view state_name(LinkState state)
-{
-    switch (state) {
-        case LinkState::Starting: return "starting";
-        case LinkState::Waiting: return "waiting";
-        case LinkState::Up: return "up";
-        case LinkState::Refused: return "refused";
-    }
-    return "waiting";
-}
 
 // Hands one message at a time to the kj WebSocket. The bytes are owned by the
 // promise until the send completes, because kj sends from the caller's buffer.
@@ -47,15 +35,23 @@ public:
             sending = socket_.send(
                 kj::ArrayPtr<const kj::byte>(held->binary.data(), held->binary.size()));
         }
-        // A failed send means the phone is gone. The receive side ends the
-        // connection; calling done here would only start the next doomed send.
+        // A failed send means the phone is gone or the socket is wedged.
+        // Aborting ends the receive side too, which detaches the session.
         tasks_.add(sending.attach(kj::mv(held))
                        .then([done = std::move(done)] { done(); },
-                             [this](kj::Exception&&) { broken_ = true; }));
+                             [this](kj::Exception&&) { close(); }));
+    }
+
+    void close() override
+    {
+        if (!broken_) {
+            broken_ = true;
+            socket_.abort();
+        }
     }
 
 private:
-    void taskFailed(kj::Exception&&) override { broken_ = true; }
+    void taskFailed(kj::Exception&&) override { close(); }
 
     kj::WebSocket& socket_;
     kj::TaskSet tasks_;
@@ -113,59 +109,66 @@ kj::Promise<void> KjStrand::run()
 
 // ---- Gateway ---------------------------------------------------------------
 
-std::string link_event(LinkState state, const std::string& detail)
-{
-    return event("link",
-                 JsonObject().add_string("state", state_name(state)).add_string("detail", detail));
-}
-
-// Member order is teardown order, reversed: the streams unsubscribe through
-// the session's client, the socket adapter cancels its sends before the
-// streams it calls back into are gone, and the session removes the phone's
-// receivers last.
-struct Gateway::Phone {
-    Phone(Gateway& owner, kj::Own<kj::WebSocket> ws, std::unique_ptr<rpc::Client> client)
-        : gateway(owner),
-          socket(kj::mv(ws)),
-          session(std::move(client)),
-          adapter(*socket)
+// The socket half of a phone. Its destructor detaches the session before the
+// adapter the session's streams point at is destroyed.
+struct Gateway::Connection {
+    Connection(Gateway& owner, kj::Own<kj::WebSocket> ws)
+        : gateway(owner), socket(kj::mv(ws)), adapter(*socket)
     {
-        StreamsConfig config;
-        config.hls = &gateway.hls_;
-        streams = std::make_unique<PhoneStreams>(session, adapter, gateway.strand_, config);
-        gateway.phones_.insert(this);
     }
-
-    ~Phone()
+    ~Connection()
     {
-        gateway.phones_.erase(this);
-        streams.reset();
+        if (id != 0) {
+            gateway.hub_.disconnect(id);
+        }
     }
-
-    Phone(const Phone&) = delete;
-    Phone& operator=(const Phone&) = delete;
+    Connection(const Connection&) = delete;
+    Connection& operator=(const Connection&) = delete;
 
     Gateway& gateway;
     kj::Own<kj::WebSocket> socket;
-    PhoneSession session;
     KjPhoneSocket adapter;
-    std::unique_ptr<PhoneStreams> streams;
+    std::uint64_t id = 0;
 };
 
-Gateway::Gateway(kj::AsyncIoContext& io, EngineLink& link, HlsRegistry& hls)
-    : io_(io), link_(link), hls_(hls)
+namespace {
+
+[[nodiscard]] StreamsConfig streams_config(HlsRegistry& hls)
 {
+    StreamsConfig config;
+    config.hls = &hls;
+    return config;
 }
 
-Gateway::~Gateway() = default;
+}  // namespace
+
+Gateway::Gateway(kj::AsyncIoContext& io, NewSession new_session, HlsRegistry& hls)
+    : io_(io), new_session_(std::move(new_session)), hls_(&hls), hub_(strand_, streams_config(hls))
+{
+    hls.on_fetch = [this](std::uint64_t vrx) { hub_.hls_fetched(vrx); };
+}
+
+Gateway::~Gateway()
+{
+    shutdown();
+}
+
+void Gateway::shutdown()
+{
+    hub_.clear();
+    if (hls_ != nullptr) {
+        hls_->on_fetch = nullptr;
+        hls_ = nullptr;
+    }
+}
 
 kj::Promise<void> Gateway::accept(kj::Own<kj::WebSocket> socket)
 {
     // Blocks the loop for one loopback connect. A phone's session is its own
     // engine Session, so it cannot share the link's connection.
-    auto client = link_.new_session();
+    auto client = new_session_();
     if (!client) {
-        auto text = kj::heap<std::string>(link_event(link_.state(), client.error().message));
+        auto text = kj::heap<std::string>(link_event(last_state_, client.error().message));
         auto sending = socket->send(kj::ArrayPtr<const char>(text->data(), text->size()));
         auto& ws = *socket;
         return sending.attach(kj::mv(text))
@@ -174,27 +177,26 @@ kj::Promise<void> Gateway::accept(kj::Own<kj::WebSocket> socket)
             .catch_([](kj::Exception&&) {});
     }
 
-    auto phone = kj::heap<Phone>(*this, kj::mv(socket), std::move(*client));
-    phone->streams->start();
-    phone->streams->send_event(link_event(last_state_, last_detail_));
-    auto& ref = *phone;
-    return receive(ref).catch_([](kj::Exception&&) {}).attach(kj::mv(phone));
+    auto connection = kj::heap<Connection>(*this, kj::mv(socket));
+    connection->id = hub_.connect(connection->adapter, std::move(*client));
+    auto& ref = *connection;
+    return receive(ref).catch_([](kj::Exception&&) {}).attach(kj::mv(connection));
 }
 
-kj::Promise<void> Gateway::receive(Phone& phone)
+kj::Promise<void> Gateway::receive(Connection& connection)
 {
-    return phone.socket->receive(kMaxCommandBytes)
-        .then([this, &phone](kj::WebSocket::Message&& message) -> kj::Promise<void> {
+    return connection.socket->receive(kMaxCommandBytes)
+        .then([this, &connection](kj::WebSocket::Message&& message) -> kj::Promise<void> {
             if (message.is<kj::WebSocket::Close>()) {
                 return kj::READY_NOW;
             }
             if (message.is<kj::String>()) {
                 const auto& text = message.get<kj::String>();
-                phone.streams->on_text(std::string_view(text.cStr(), text.size()));
+                hub_.text(connection.id, std::string_view(text.cStr(), text.size()));
             }
             // Binary frames: the phone sends none, and one is ignored rather
             // than dropping the connection over it.
-            return receive(phone);
+            return receive(connection);
         });
 }
 
@@ -203,19 +205,14 @@ void Gateway::on_link_state(LinkState state, std::string detail)
     strand_.post([this, state, detail = std::move(detail)] {
         last_state_ = state;
         last_detail_ = detail;
-        const auto text = link_event(state, detail);
-        for (Phone* phone : phones_) {
-            phone->streams->send_event(text);
-        }
+        hub_.link_state(state, detail);
     });
 }
 
 kj::Promise<void> Gateway::tick_loop()
 {
     return io_.provider->getTimer().afterDelay(kTickInterval).then([this] {
-        for (Phone* phone : phones_) {
-            phone->streams->tick();
-        }
+        hub_.tick();
         return tick_loop();
     });
 }

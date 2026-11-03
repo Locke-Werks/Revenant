@@ -1,0 +1,117 @@
+// Every phone session the gateway holds, attached to a socket or not.
+//
+// A session outlives its WebSocket on purpose. iOS suspends a locked page and
+// its socket goes with it, while the HLS <audio> element keeps playing; if
+// the session died with the socket, its receiver and its HLS stream would
+// die too and the phone would go silent. So a dropped socket detaches the
+// session, and a new socket can take it back with the token the gateway sent
+// in "hello".
+//
+// LIFETIME OF A DETACHED SESSION
+//   keep listening on:  until hls_idle after the last HLS request for one of
+//                        its receivers (or after the drop, if none came).
+//   otherwise:          detached_linger after the drop.
+// On expiry it is destroyed exactly as a disconnect used to destroy it: its
+// streams unsubscribe and its receivers are removed.
+//
+// No kj here, so tests drive it with a fake socket, a manual strand and a
+// fake clock. Strand thread only, like PhoneStreams.
+
+#pragma once
+
+#include <chrono>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+
+#include "core/rpc/client.h"
+#include "tools/webgate/engine_link.h"
+#include "tools/webgate/phone_streams.h"
+#include "tools/webgate/protocol.h"
+#include "tools/webgate/session.h"
+
+namespace revenant::webgate {
+
+// The text of a "link" event, shared so the one a phone gets on connect reads
+// the same as later ones.
+[[nodiscard]] std::string link_event(LinkState state, const std::string& detail);
+
+struct HubTiming {
+    std::chrono::milliseconds detached_linger{30'000};
+    std::chrono::milliseconds hls_idle{60'000};
+};
+
+class PhoneHub {
+public:
+    // base.clock also times detached sessions.
+    PhoneHub(Strand& strand, StreamsConfig base, HubTiming timing = {});
+    ~PhoneHub();
+    PhoneHub(const PhoneHub&) = delete;
+    PhoneHub& operator=(const PhoneHub&) = delete;
+
+    // A new connection with a fresh session on client. Sends "hello" with the
+    // session's resume token, then the current link state. Returns the
+    // connection id the other calls take.
+    std::uint64_t connect(PhoneSocket& socket, std::unique_ptr<rpc::Client> client);
+
+    // One text frame. "resume" is handled here: allowed only as a
+    // connection's first command, it swaps the fresh session for the detached
+    // one holding the token. Everything else goes to the session's streams.
+    void text(std::uint64_t connection, std::string_view text);
+
+    // The socket is gone. Its session detaches and starts expiring.
+    void disconnect(std::uint64_t connection);
+
+    // An HLS request was answered for this receiver.
+    void hls_fetched(std::uint64_t vrx);
+
+    // Ticks every session's streams and destroys expired detached sessions.
+    void tick();
+
+    void link_state(LinkState state, std::string detail);
+
+    // Destroys every session. For shutdown, while the HLS registry they
+    // borrow still exists.
+    void clear();
+
+    // For tests and the gateway.
+    [[nodiscard]] std::size_t sessions() const { return residents_.size(); }
+    [[nodiscard]] PhoneSession* session(std::uint64_t connection) const;
+    [[nodiscard]] PhoneStreams* streams(std::uint64_t connection) const;
+    [[nodiscard]] std::string token(std::uint64_t connection) const;
+    [[nodiscard]] bool holds(const std::string& token) const { return residents_.contains(token); }
+
+private:
+    struct Resident {
+        std::string token;
+        // Declared before streams so the streams go first: they unsubscribe
+        // through the session's client.
+        std::unique_ptr<PhoneSession> session;
+        std::unique_ptr<PhoneStreams> streams;
+        std::optional<std::uint64_t> connection;
+        std::chrono::steady_clock::time_point detached_at{};
+        std::optional<std::chrono::steady_clock::time_point> last_hls;
+    };
+    struct Connection {
+        PhoneSocket* socket = nullptr;
+        Resident* resident = nullptr;
+        bool commanded = false;
+    };
+
+    [[nodiscard]] std::chrono::steady_clock::time_point now() const;
+    void resume(std::uint64_t id, Connection& connection, const Command& command);
+
+    Strand& strand_;
+    StreamsConfig base_;
+    HubTiming timing_;
+    std::map<std::string, std::unique_ptr<Resident>> residents_;
+    std::map<std::uint64_t, Connection> connections_;
+    std::uint64_t next_connection_ = 1;
+    LinkState link_state_ = LinkState::Starting;
+    std::string link_detail_;
+};
+
+}  // namespace revenant::webgate

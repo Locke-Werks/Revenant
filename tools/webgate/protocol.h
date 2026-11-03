@@ -59,12 +59,14 @@ inline constexpr std::string_view kOps[] = {
     "setBandwidth", "setSquelch",    "setCenter",   "setGain",
     "setGainAuto",  "listSources",   "openSource",  "setView",
     "audio",        "keepListening", "setTranscription", "setVrxTranscribe",
+    "resume",
 };
 
 // The events the gateway sends, exactly these.
 inline constexpr std::string_view kEvents[] = {
     "vrxStatus", "decoded", "transcript", "transcriptionStatus",
     "source",    "link",    "vrxRemoved", "hls",
+    "hello",
 };
 
 [[nodiscard]] bool is_known_op(std::string_view op);

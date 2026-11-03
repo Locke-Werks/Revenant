@@ -29,6 +29,7 @@ add_library(revenant_webgate_lib STATIC
     session.cpp
     dispatch.cpp
     phone_streams.cpp
+    phone_hub.cpp
     gateway.cpp
 )
 

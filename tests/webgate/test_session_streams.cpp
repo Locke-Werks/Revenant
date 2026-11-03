@@ -32,6 +32,7 @@
 #include "tools/webgate/phone_streams.h"
 #include "tools/webgate/protocol.h"
 #include "tools/webgate/session.h"
+#include "tests/webgate/stream_fakes.h"
 
 namespace {
 
@@ -46,75 +47,8 @@ using revenant::webgate::StreamsConfig;
 using Kind = OutgoingMessage::Kind;
 using Clock = std::chrono::steady_clock;
 
-class ManualStrand final : public Strand {
-public:
-    void post(std::function<void()> task) override
-    {
-        const std::lock_guard lock(mutex_);
-        tasks_.push_back(std::move(task));
-    }
-
-    void run_pending()
-    {
-        for (;;) {
-            std::deque<std::function<void()>> batch;
-            {
-                const std::lock_guard lock(mutex_);
-                batch.swap(tasks_);
-            }
-            if (batch.empty()) {
-                return;
-            }
-            for (auto& task : batch) {
-                task();
-            }
-        }
-    }
-
-private:
-    std::mutex mutex_;
-    std::deque<std::function<void()>> tasks_;
-};
-
-// Records every message. While held, the message handed over stays "in
-// flight": its done is kept until release().
-class FakeSocket final : public PhoneSocket {
-public:
-    void send(OutgoingMessage message, std::function<void()> done) override
-    {
-        sent.push_back(std::move(message));
-        if (held) {
-            waiting = std::move(done);
-        } else {
-            done();
-        }
-    }
-
-    void hold() { held = true; }
-
-    void release()
-    {
-        held = false;
-        if (waiting) {
-            auto done = std::move(waiting);
-            waiting = nullptr;
-            done();
-        }
-    }
-
-    [[nodiscard]] std::size_t count(Kind kind, std::size_t from = 0) const
-    {
-        std::size_t n = 0;
-        for (std::size_t i = from; i < sent.size(); ++i) {
-            n += sent[i].kind == kind ? 1U : 0U;
-        }
-        return n;
-    }
-
-    std::vector<OutgoingMessage> sent;
-    bool held = false;
-    std::function<void()> waiting;
-};
+using revenant::webgate::test::FakeSocket;
+using revenant::webgate::test::ManualStrand;
 
 struct Rig {
     revenant::test::Harness harness;
@@ -123,6 +57,7 @@ struct Rig {
     HlsRegistry registry;
     Clock::time_point fake_now = Clock::now();
     bool use_fake_clock = false;
+    std::size_t max_queued_text = 2000;
     std::unique_ptr<PhoneSession> session;
     std::unique_ptr<PhoneStreams> streams;
 
@@ -144,7 +79,8 @@ struct Rig {
         if (use_fake_clock) {
             config.clock = [this] { return fake_now; };
         }
-        streams = std::make_unique<PhoneStreams>(*session, socket, strand, config);
+        config.max_queued_text = max_queued_text;
+        streams = std::make_unique<PhoneStreams>(*session, &socket, strand, config);
         streams->start();
         strand.run_pending();
     }
@@ -280,13 +216,15 @@ TEST_CASE("rotation: next frame is cut for the new view", "[gpu][webgate][stream
     rig.open(still_engine());
     rig.attach();
 
+    // The only frame arrives while the view is 800 px wide and the socket is
+    // busy. The view then changes and no other frame comes, so the frame sent
+    // after the second reply is that one: it must have been cut when sent,
+    // not when it arrived.
     rig.socket.hold();
     rig.command(R"({"id":1,"op":"setView","args":{"centerHz":100000000,"spanHz":2000000,"widthPx":800}})");
     rig.streams->deliver_spectrum(synthetic_frame(0));
     rig.strand.run_pending();
     rig.command(R"({"id":2,"op":"setView","args":{"centerHz":100000000,"spanHz":2000000,"widthPx":1500}})");
-    rig.streams->deliver_spectrum(synthetic_frame(16384));
-    rig.strand.run_pending();
     rig.socket.release();
     rig.strand.run_pending();
 
@@ -305,7 +243,8 @@ TEST_CASE("rotation: next frame is cut for the new view", "[gpu][webgate][stream
             CHECK(width_of(rig.socket.sent[i]) == 1500);
         }
     }
-    CHECK(after >= 1);
+    CHECK(after == 1);
+    CHECK(rig.socket.count(Kind::Spectrum) == 1);
 }
 
 TEST_CASE("no source open", "[gpu][webgate][streams]")
@@ -328,6 +267,7 @@ TEST_CASE("no source open", "[gpu][webgate][streams]")
     }
     CHECK(said_closed);
     CHECK(rig.socket.count(Kind::Spectrum) == 0);
+    CHECK_FALSE(rig.streams->spectrum_subscribed());
 }
 
 TEST_CASE("openSource at a new rate recomputes everyNth", "[gpu][webgate][streams]")
@@ -591,4 +531,23 @@ TEST_CASE("KjStrand runs a task posted from another thread on the loop thread",
     CHECK_FALSE(timed_out);
     CHECK(ran);
     CHECK(ran_on == std::this_thread::get_id());
+}
+
+TEST_CASE("a socket that stops reading is closed rather than queued without bound",
+          "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.max_queued_text = 5;
+    rig.open(still_engine());
+    rig.attach();
+
+    rig.socket.hold();
+    for (int i = 0; i < 20; ++i) {
+        rig.streams->send_event(revenant::webgate::event(
+            "link", revenant::webgate::JsonObject().add_u64("n", static_cast<std::uint64_t>(i))));
+    }
+    CHECK(rig.socket.closed);
+    CHECK_FALSE(rig.streams->attached());
+    CHECK(rig.streams->counters().text_dropped > 0);
 }

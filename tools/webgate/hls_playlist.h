@@ -100,6 +100,16 @@ public:
         return it == map_.end() ? nullptr : it->second;
     }
 
+    // Called by the HTTP side for every playlist or segment request it
+    // answers, so a session whose phone is locked knows its stream is still
+    // being listened to.
+    std::function<void(std::uint64_t)> on_fetch;
+    void fetched(std::uint64_t vrx) const {
+        if (on_fetch) {
+            on_fetch(vrx);
+        }
+    }
+
 private:
     std::map<std::uint64_t, HlsSegmenter*> map_;
 };

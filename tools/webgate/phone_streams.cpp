@@ -1,6 +1,7 @@
 #include "tools/webgate/phone_streams.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <span>
 #include <utility>
 #include <variant>
@@ -61,6 +62,9 @@ struct PhoneStreams::Inbox {
     std::optional<rpc::SpectrumFrame> spectrum;
     std::uint64_t spectrum_skipped = 0;
     std::deque<std::pair<std::uint64_t, rpc::AudioChunk>> audio;
+    // Chunks dropped here; each is about one packet's worth of audio lost, so
+    // it is reported with the Opus drops.
+    std::uint64_t audio_overflow = 0;
     std::deque<std::function<void(PhoneStreams&)>> items;
 
     // Strand only. Null once the streams are gone, so a wake-up already
@@ -106,6 +110,7 @@ void PhoneStreams::put_audio(const std::shared_ptr<Inbox>& inbox, std::uint64_t 
     inbox->audio.emplace_back(vrx, chunk);
     while (inbox->audio.size() > kMaxInboxChunks) {
         inbox->audio.pop_front();
+        ++inbox->audio_overflow;
     }
     wake_locked(inbox);
 }
@@ -121,7 +126,7 @@ void PhoneStreams::put_item(const std::shared_ptr<Inbox>& inbox,
     wake_locked(inbox);
 }
 
-PhoneStreams::PhoneStreams(PhoneSession& session, PhoneSocket& socket, Strand& strand,
+PhoneStreams::PhoneStreams(PhoneSession& session, PhoneSocket* socket, Strand& strand,
                            StreamsConfig config)
     : session_(session),
       socket_(socket),
@@ -225,17 +230,24 @@ void PhoneStreams::subscribe_vrx_events()
         [inbox](const rpc::VrxEvent& e) {
             put_item(inbox, [e](PhoneStreams& self) { self.handle_vrx_event(e); });
         },
-        [inbox](const std::string&) {
+        [inbox](const std::string& reason) {
             // The engine ends a subscriber that fell behind rather than drop
             // an event. Subscribing again replays every receiver as Added,
             // which this ignores, and resumes the removals that matter. Once
             // only: an engine that keeps ending it is going away, and the
             // link events say so.
-            put_item(inbox, [](PhoneStreams& self) {
+            put_item(inbox, [reason](PhoneStreams& self) {
                 if (!self.vrx_events_resubscribed_) {
                     self.vrx_events_resubscribed_ = true;
                     self.subscribe_vrx_events();
+                    return;
                 }
+                // A removal elsewhere will now go unreported to this phone;
+                // say so where an operator and the phone can both see it.
+                std::fprintf(stderr, "revenant-webgate: receiver events ended again: %s\n",
+                             reason.c_str());
+                self.queue_text(event("vrxStatus",
+                                      JsonObject().add_string("eventsEnded", reason)));
             });
         });
     static_cast<void>(subscribed);
@@ -320,6 +332,10 @@ void PhoneStreams::refresh_source()
     // the old centre; sending it under the new one would draw it in the wrong
     // place.
     pending_spectrum_.reset();
+    {
+        const std::lock_guard lock(inbox_->mutex);
+        inbox_->spectrum.reset();
+    }
 
     JsonObject fields;
     fields.add_bool("open", open);
@@ -406,6 +422,8 @@ void PhoneStreams::drain_inbox()
         items.swap(inbox_->items);
         counters_.spectrum_skipped += inbox_->spectrum_skipped;
         inbox_->spectrum_skipped = 0;
+        counters_.opus_dropped += inbox_->audio_overflow;
+        inbox_->audio_overflow = 0;
     }
 
     for (auto& item : items) {
@@ -414,7 +432,9 @@ void PhoneStreams::drain_inbox()
     for (const auto& [vrx, chunk] : audio) {
         handle_audio(vrx, chunk);
     }
-    if (frame && source_open_) {
+    if (frame && !attached()) {
+        ++counters_.spectrum_skipped;
+    } else if (frame && source_open_) {
         settle_every_nth(*frame);
         if (pending_spectrum_) {
             ++counters_.spectrum_skipped;
@@ -455,22 +475,56 @@ void PhoneStreams::queue_text(std::string json)
     if (json.empty()) {
         return;
     }
+    queued_text_bytes_ += json.size();
     texts_.push_back(std::move(json));
+    const auto over = [this] {
+        return texts_.size() > config_.max_queued_text ||
+               queued_text_bytes_ > config_.max_queued_text_bytes;
+    };
+    if (over() && socket_ != nullptr) {
+        // The phone is not reading. Closing hands it to the resume path,
+        // which keeps the session; queueing without bound would not.
+        socket_->close();
+        detach();
+    }
+    while (over() && !texts_.empty()) {
+        queued_text_bytes_ -= texts_.front().size();
+        texts_.pop_front();
+        ++counters_.text_dropped;
+    }
     pump();
+}
+
+void PhoneStreams::attach(PhoneSocket& socket)
+{
+    socket_ = &socket;
+    ++socket_generation_;
+    in_flight_ = false;
+    pump();
+}
+
+void PhoneStreams::detach()
+{
+    socket_ = nullptr;
+    ++socket_generation_;
+    in_flight_ = false;
+    opus_.clear();
+    pending_spectrum_.reset();
 }
 
 void PhoneStreams::pump()
 {
-    if (in_flight_ || pumping_) {
+    if (in_flight_ || pumping_ || socket_ == nullptr) {
         return;
     }
     pumping_ = true;
-    while (!in_flight_) {
+    while (!in_flight_ && socket_ != nullptr) {
         OutgoingMessage message;
         if (!texts_.empty()) {
             message.kind = OutgoingMessage::Kind::Text;
             message.text = std::move(texts_.front());
             texts_.pop_front();
+            queued_text_bytes_ -= message.text.size();
         } else if (!opus_.empty()) {
             message.kind = OutgoingMessage::Kind::Opus;
             message.binary = std::move(opus_.front());
@@ -489,8 +543,8 @@ void PhoneStreams::pump()
             break;
         }
         in_flight_ = true;
-        socket_.send(std::move(message), [this, alive = alive_] {
-            if (!*alive) {
+        socket_->send(std::move(message), [this, alive = alive_, gen = socket_generation_] {
+            if (!*alive || gen != socket_generation_) {
                 return;
             }
             in_flight_ = false;
@@ -690,7 +744,7 @@ void PhoneStreams::handle_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk)
         mono = downmixed;
     }
 
-    if (session_.audio_vrx() == vrx) {
+    if (session_.audio_vrx() == vrx && attached()) {
         if (!path.opus) {
             auto created = LiveOpusEncoder::create(kPhoneAudioRate);
             if (!created) {

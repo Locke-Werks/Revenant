@@ -78,12 +78,16 @@ struct OutgoingMessage {
 
 // The phone's WebSocket, as the stream layer sees it. send() is only called
 // again after the previous message's done has run. done runs on the strand,
-// possibly before send() returns; it also runs when the send failed, since the
-// socket being gone is reported by the receive side, not here.
+// possibly before send() returns. A failed send never runs done; the socket
+// closes itself and the receive side reports the end.
 class PhoneSocket {
 public:
     virtual ~PhoneSocket() = default;
     virtual void send(OutgoingMessage message, std::function<void()> done) = 0;
+
+    // Ends the connection. The receive side then sees it end and detaches the
+    // session, which is how an overflowing or broken socket is handled.
+    virtual void close() = 0;
 };
 
 struct StreamsConfig {
@@ -104,6 +108,12 @@ struct StreamsConfig {
     std::size_t max_queued_opus = 25;
 
     double target_fps = 20.0;
+
+    // JSON queued for a socket that is not taking it. Past either limit an
+    // attached socket is closed (the phone reconnects and resumes); a
+    // detached session drops its oldest events instead.
+    std::size_t max_queued_text = 2000;
+    std::size_t max_queued_text_bytes = 1024 * 1024;
 };
 
 struct StreamCounters {
@@ -111,11 +121,13 @@ struct StreamCounters {
     std::uint64_t spectrum_skipped = 0;
     std::uint64_t opus_sent = 0;
     std::uint64_t opus_dropped = 0;
+    std::uint64_t text_dropped = 0;
 };
 
 class PhoneStreams {
 public:
-    PhoneStreams(PhoneSession& session, PhoneSocket& socket, Strand& strand,
+    // socket may be null: a session can exist without a connection.
+    PhoneStreams(PhoneSession& session, PhoneSocket* socket, Strand& strand,
                  StreamsConfig config = {});
 
     // Ends every subscription and removes this phone's segmenters from the
@@ -142,6 +154,15 @@ public:
 
     // A finished JSON event from outside, such as the engine link's state.
     void send_event(std::string json);
+
+    // Moves the stream to another socket, or to none. While detached,
+    // spectrum and Opus are skipped (a phone that is not there has no use for
+    // stale ones), JSON is kept up to the cap, and HLS keeps encoding. A send
+    // in flight on the old socket is forgotten: its done is ignored.
+    void attach(PhoneSocket& socket);
+    void detach();
+    [[nodiscard]] bool attached() const { return socket_ != nullptr; }
+    [[nodiscard]] bool spectrum_subscribed() const { return spectrum_subscribed_; }
 
     // Any thread. The rpc callbacks call these; tests call them directly to
     // feed synthetic frames through the same path.
@@ -197,7 +218,9 @@ private:
     void subscribe_vrx_events();
 
     PhoneSession& session_;
-    PhoneSocket& socket_;
+    PhoneSocket* socket_;
+    std::uint64_t socket_generation_ = 0;
+    std::size_t queued_text_bytes_ = 0;
     Strand& strand_;
     StreamsConfig config_;
     std::shared_ptr<Inbox> inbox_;

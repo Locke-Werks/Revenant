@@ -91,6 +91,30 @@ void usage() {
     return true;
 }
 
+// Owns the three long-lived parts and tears them down in the one safe order,
+// on every path out of main including an exception: the link first, so no
+// state callback lands on a gateway being destroyed; then the gateway's
+// sessions, while the server's HLS registry they borrow still exists; then
+// the server, whose connections call back into the gateway as they go; then
+// the gateway itself.
+struct Runtime {
+    std::unique_ptr<revenant::webgate::HttpServer> server;
+    std::unique_ptr<revenant::webgate::EngineLink> link;
+    std::unique_ptr<revenant::webgate::Gateway> gateway;
+
+    Runtime() = default;
+    Runtime(const Runtime&) = delete;
+    Runtime& operator=(const Runtime&) = delete;
+    ~Runtime() {
+        link.reset();
+        if (gateway) {
+            gateway->shutdown();
+        }
+        server.reset();
+        gateway.reset();
+    }
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -165,36 +189,33 @@ int main(int argc, char** argv) {
         server_config.http_port = static_cast<std::uint16_t>(options.http_port);
         server_config.web_root = options.web_root;
         server_config.certs = paths;
-        auto server = std::make_unique<revenant::webgate::HttpServer>(io, server_config);
-        if (const auto listening = server->listen(); !listening) {
+        Runtime rt;
+        rt.server = std::make_unique<revenant::webgate::HttpServer>(io, server_config);
+        if (const auto listening = rt.server->listen(); !listening) {
             std::fprintf(stderr, "revenant-webgate: %s\n", listening.error().message.c_str());
             return 1;
         }
 
-        auto link = std::make_unique<revenant::webgate::EngineLink>(link_config);
-        auto gateway = std::make_unique<revenant::webgate::Gateway>(io, *link, server->hls);
-        link->on_state([&gateway](revenant::webgate::LinkState state, std::string detail) {
+        rt.link = std::make_unique<revenant::webgate::EngineLink>(link_config);
+        auto* link = rt.link.get();
+        rt.gateway = std::make_unique<revenant::webgate::Gateway>(
+            io, [link] { return link->new_session(); }, rt.server->hls);
+        auto* gateway = rt.gateway.get();
+        link->on_state([gateway](revenant::webgate::LinkState state, std::string detail) {
             gateway->on_link_state(state, std::move(detail));
         });
-        server->on_websocket = [&gateway](kj::Own<kj::WebSocket> socket) {
+        rt.server->on_websocket = [gateway](kj::Own<kj::WebSocket> socket) {
             return gateway->accept(kj::mv(socket));
         };
         link->start();
 
         std::printf("https port %u, http port %u, engine %s, web root %s\n",
-                    static_cast<unsigned>(server->https_port()),
-                    static_cast<unsigned>(server->http_port()), options.engine.c_str(),
+                    static_cast<unsigned>(rt.server->https_port()),
+                    static_cast<unsigned>(rt.server->http_port()), options.engine.c_str(),
                     options.web_root.string().c_str());
         std::fflush(stdout);
 
-        server->run().exclusiveJoin(gateway->run()).wait(io.waitScope);
-
-        // Link first so no state callback lands on a gateway being torn down;
-        // then the server, whose connections own the phones, while the
-        // gateway and the HLS registry they use still exist.
-        link.reset();
-        server.reset();
-        gateway.reset();
+        rt.server->run().exclusiveJoin(gateway->run()).wait(io.waitScope);
     } catch (const kj::Exception& e) {
         std::fprintf(stderr, "revenant-webgate: %s\n", e.getDescription().cStr());
         return 1;

@@ -37,6 +37,7 @@ export const OPS = [
   "keepListening",
   "setTranscription",
   "setVrxTranscribe",
+  "resume",
 ] as const;
 export type Op = (typeof OPS)[number];
 
@@ -49,6 +50,7 @@ export const EVENTS = [
   "link",
   "vrxRemoved",
   "hls",
+  "hello",
 ] as const;
 export type EventName = (typeof EVENTS)[number];
 

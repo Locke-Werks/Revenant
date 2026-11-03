@@ -165,6 +165,7 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
             if (segmenter == nullptr) {
                 return not_found();
             }
+            impl.owner.hls.fetched(*vrx);
 
             // Playlist and segments change under the player's feet in a live
             // stream, so none of it may be cached.
