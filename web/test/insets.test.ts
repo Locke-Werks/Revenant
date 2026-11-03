@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { rulerMarks, widest } from "../src/insets";
+import { needsRepin, rulerMarks, widest } from "../src/insets";
 
 test("ruler lines fall every 100 px below the height, none at 0", () => {
   assert.deepEqual(rulerMarks(450), [100, 200, 300, 400]);
@@ -18,7 +18,11 @@ test("layout code does not size anything from the screen's height", () => {
   ];
   for (const f of files) {
     let text = readFileSync(f, "utf8");
-    if (f === "src/insets.ts") text = text.replace(/export function showInsets[\s\S]*?\n}\n/, "");
+    // The overlay prints the screen; the re-pin reads its width along the
+    // orientation, never to size anything.
+    if (f === "src/insets.ts") {
+      text = text.replace(/export function showInsets[\s\S]*?\n}\n/, "").replace(/export function pinViewportWidth[\s\S]*?\n}\n/, "");
+    }
     assert.equal(/screen\.(height|availHeight)/.test(text), false, f);
   }
   const css = readFileSync("static/app.css", "utf8");
@@ -36,4 +40,12 @@ test("no canvas is given a pixel width taken from the page", () => {
   for (const f of ["src/ui/dial_strip.ts", "src/app.ts"]) {
     assert.equal(readFileSync(f, "utf8").includes("style.width = `${"), false, f);
   }
+});
+
+test("a zoomed-out page or a root wider than the device asks for a re-pin", () => {
+  const g = { scale: 1, clientWidth: 440, screenWidth: 440, screenHeight: 956, landscape: false };
+  assert.equal(needsRepin(g), false);
+  assert.equal(needsRepin({ ...g, scale: 0.85 }), true);
+  assert.equal(needsRepin({ ...g, clientWidth: 518, scale: null }), true);
+  assert.equal(needsRepin({ ...g, clientWidth: 956, landscape: true }), false);
 });

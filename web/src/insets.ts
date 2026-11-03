@@ -61,6 +61,18 @@ function overWide(doc: Document, limit: number): string[] {
   return widest(items, limit);
 }
 
+function wideAtLoad(win: Window): string {
+  const w = (win as unknown as { __wideAtLoad?: { maxScrollWidth: number; at: number; items: { label: string; width: number; css: string }[] } }).__wideAtLoad;
+  if (!w) return "not recorded";
+  const items = w.items.map((x) => `${x.label} ${x.width.toFixed(1)} (${x.css})`).join("; ");
+  return `scrollWidth ${w.maxScrollWidth} at ${w.at} ms: ${items || "nothing past the screen"}`;
+}
+
+function repins(win: Window): string {
+  const log = (win as unknown as { __repins?: Repin[] }).__repins ?? [];
+  return log.map((r) => `${r.at} ms ${r.before?.toFixed(3) ?? "n/a"} -> ${r.after?.toFixed(3) ?? "n/a"}`).join("; ") || "none";
+}
+
 function rectText(name: string, r: { top: number; bottom: number; height: number }): string {
   return `${name} top ${r.top.toFixed(1)} bottom ${r.bottom.toFixed(1)} h ${r.height.toFixed(1)}`;
 }
@@ -162,6 +174,8 @@ export function showInsets(doc: Document, win: Window): void {
       `standalone ${nav.standalone === true}`,
       `wider than screen at open: ${wideBefore.join("; ") || "none"}`,
       `wider than screen now: ${overWide(doc, win.screen.width).join("; ") || "none"}`,
+      `widest during load: ${wideAtLoad(win)}`,
+      `viewport re-pins: ${repins(win)}`,
       `scale ${vv ? vv.scale.toFixed(3) : "n/a"}  scrollWidth ${root.scrollWidth}  innerWidth ${win.innerWidth}`,
     ].join("\n");
   };
@@ -171,6 +185,58 @@ export function showInsets(doc: Document, win: Window): void {
   win.visualViewport?.addEventListener("scroll", render);
   // The app and its sheet mount after this runs and move when the sheet opens.
   win.setInterval(render, 1000);
+}
+
+// The layout viewport is wider than the device when the page is zoomed out or
+// the root is wider than the screen's width along the current orientation.
+export function needsRepin(g: { scale: number | null; clientWidth: number; screenWidth: number; screenHeight: number; landscape: boolean }): boolean {
+  const deviceWidth = g.landscape ? Math.max(g.screenWidth, g.screenHeight) : Math.min(g.screenWidth, g.screenHeight);
+  if (g.scale !== null && g.scale < 0.99) return true;
+  return deviceWidth > 0 && g.clientWidth > deviceWidth + 0.5;
+}
+
+export interface Repin {
+  at: number;
+  before: number | null;
+  after: number | null;
+}
+
+// iOS settles the layout viewport's width early and keeps it; changing the
+// viewport meta makes it work the width out again. Checked after mount and
+// after every size change, settled first so a rotation is not caught halfway.
+export function pinViewportWidth(win: Window): () => void {
+  const doc = win.document;
+  const log: Repin[] = [];
+  (win as unknown as { __repins: Repin[] }).__repins = log;
+  let timer = 0;
+  const check = () => {
+    const meta = doc.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+    if (!meta) return;
+    const landscape = win.matchMedia("(orientation: landscape)").matches;
+    const scale = win.visualViewport?.scale ?? null;
+    const wide = needsRepin({
+      scale,
+      clientWidth: doc.documentElement.clientWidth,
+      screenWidth: win.screen.width,
+      screenHeight: win.screen.height,
+      landscape,
+    });
+    if (!wide || log.length >= 10) return;
+    const content = meta.getAttribute("content") ?? "";
+    meta.setAttribute("content", "");
+    win.requestAnimationFrame(() => {
+      meta.setAttribute("content", content);
+      win.requestAnimationFrame(() => log.push({ at: Math.round(win.performance.now()), before: scale, after: win.visualViewport?.scale ?? null }));
+    });
+  };
+  const later = () => {
+    win.clearTimeout(timer);
+    timer = win.setTimeout(check, 250);
+  };
+  win.addEventListener("resize", later);
+  win.addEventListener("orientationchange", later);
+  win.visualViewport?.addEventListener("resize", later);
+  return later;
 }
 
 // The page itself never scrolls, but iOS scrolls the layout viewport to keep

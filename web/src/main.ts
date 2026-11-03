@@ -1,7 +1,7 @@
 import { chooseScreen, installScreenHtml, type StandaloneEnv } from "./install";
 import { gatewayReachable, offlineScreenHtml, type Probe } from "./offline";
 import { appScreenHtml, mountApp } from "./app";
-import { insetsToggle, isEditable, pinViewport, showInsets, wantsInsets } from "./insets";
+import { insetsToggle, isEditable, pinViewport, pinViewportWidth, showInsets, wantsInsets } from "./insets";
 import { reloadOnUpdate } from "./sw_reload";
 
 export interface Host {
@@ -63,6 +63,7 @@ if (typeof document !== "undefined") {
     });
   }
   pinViewport(window);
+  const repin = pinViewportWidth(window);
   insetsToggle(document, window);
   let store: Storage | null = null;
   try {
@@ -78,7 +79,10 @@ if (typeof document !== "undefined") {
       env: { navigator: navigator as { standalone?: boolean }, matchMedia: (q) => window.matchMedia(q) },
       search: location.search,
       probe: (input, init) => fetch(input, init),
-      mount: () => void mountApp(root),
+      mount: () => {
+        void mountApp(root);
+        repin();
+      },
     });
   }
 }

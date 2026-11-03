@@ -3,7 +3,49 @@
 <head>
 <meta charset="utf-8">
 <title>Revenant</title>
-<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, shrink-to-fit=no, viewport-fit=cover">
+<script>
+// iOS fixes the layout viewport's width from the first layouts and does not
+// narrow it again, so whatever is wide must be caught while it is. Records
+// the widest page seen in the first 3 s and what stuck out at that moment,
+// for the ?insets ruler.
+(function () {
+  var w = { maxScrollWidth: 0, at: 0, items: [] };
+  window.__wideAtLoad = w;
+  var t0 = Date.now();
+  function label(el) {
+    var c = typeof el.className === "string" && el.className ? "." + el.className.trim().split(" ").join(".") : "";
+    return el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + c;
+  }
+  function look() {
+    var root = document.documentElement;
+    if (!root) return;
+    var sw = root.scrollWidth;
+    if (sw <= w.maxScrollWidth) return;
+    w.maxScrollWidth = sw;
+    w.at = Date.now() - t0;
+    var limit = window.innerHeight >= window.innerWidth ? Math.min(screen.width, screen.height) : Math.max(screen.width, screen.height);
+    var out = [];
+    var all = document.querySelectorAll("body *");
+    for (var i = 0; i < all.length; i++) {
+      var r = all[i].getBoundingClientRect();
+      if (r.right > limit + 0.5) {
+        var cs = getComputedStyle(all[i]);
+        out.push({ label: label(all[i]), width: r.width, right: r.right, css: cs.width + " min " + cs.minWidth });
+      }
+    }
+    out.sort(function (a, b) { return b.right - a.right; });
+    w.items = out.slice(0, 8);
+  }
+  function frame() {
+    look();
+    if (Date.now() - t0 < 3000) requestAnimationFrame(frame);
+  }
+  document.addEventListener("DOMContentLoaded", look);
+  window.addEventListener("load", look);
+  requestAnimationFrame(frame);
+})();
+</script>
 <meta name="theme-color" content="#0a0a0c">
 <meta name="color-scheme" content="dark">
 <link rel="manifest" href="/manifest.webmanifest">
