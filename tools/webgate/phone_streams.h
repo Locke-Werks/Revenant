@@ -441,6 +441,8 @@ private:
     // The encoder and its sequence start again when the receiver the phone
     // listens to changes, which is a new stream to the phone.
     PhoneMixer mixer_;
+    // The desktop's boost as of the last start() or tick().
+    double voice_gain_db_ = 0.0;
     std::unique_ptr<LiveOpusEncoder> mix_opus_;
     std::uint32_t mix_opus_seq_ = 0;
     std::optional<std::uint64_t> mix_opus_for_;

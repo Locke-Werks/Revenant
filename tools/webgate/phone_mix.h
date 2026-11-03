@@ -14,31 +14,41 @@
 // (mix_members). A change in who a phone may hear touches that function and
 // leaves this file alone.
 //
-// ALIGNMENT, and why it is simpler than the desktop's. Each stream is a queue
-// of 48 kHz samples. Output is cut in 20 ms blocks, and a block is cut when
-// the lead stream (the receiver the phone is listening to) holds a whole one.
-// Every other stream contributes a whole block when it holds one and silence
-// when it does not, and keeps what it has for the next block, so a stream
-// running a little behind is delayed rather than chopped into pieces with
-// holes. The engine delivers every receiver's audio from one pass, so in
-// practice the streams arrive together and the delay is one block.
+// HOW THE ENGINE DELIVERS VOICE, which decides every number below. A p25p1
+// receiver's audio is not an LDU at a time. core/rpc/voice_audio.h holds each
+// decoded LDU (9 frames, 180 ms) behind a pre-roll and hands out one chunk per
+// receiver chunk, covering exactly that chunk's time at 8000 S/s, zeros between
+// calls. So voice arrives continuously in the engine's own cadence, 7 to 27 ms
+// a chunk, which resampled to 48 kHz is not a whole number of 20 ms blocks.
+// The plugin voice of dmr and dstar travels the same route. The mixer is
+// nonetheless built to take a burst of an LDU at once, because a decode lane
+// that falls behind and catches up produces exactly that.
 //
-// A STALLED STREAM DOES NOT STALL THE MIX. When the lead has less than a block
-// and another stream has kStallBlocks of them waiting, the block is cut anyway
-// with the lead as silence. With no lead at all the first stream with a block
-// paces it. A stream that falls more than kMaxQueued behind (its audio arrived
-// late, in a burst) has the oldest of it dropped rather than played behind the
-// others.
+// TIMELINE. The lead stream, the receiver the phone is listening to, sets the
+// pace: a block is cut when the lead holds a whole one, and the lead is never
+// skipped. A lead that is one sample short waits for that sample. Every other
+// stream is read through a jitter buffer: it contributes nothing until it has
+// kPrimeBlocks (200 ms, one LDU) queued, then a whole block per cut, so its
+// own chunk sizes cannot put holes in it. It holds up to kMaxQueued (400 ms);
+// past that the oldest is dropped. If it does run dry it contributes what it
+// has, is counted, and primes again.
 //
-// SILENCE BETWEEN DIGITAL VOICE CALLS is a stream that sends nothing: it adds
-// nothing, and the sum is the lead alone, untouched by the limiter below its
-// threshold.
+// STALLS ARE MEASURED IN TIME. A stream that has pushed nothing for kStall
+// (200 ms) is stalled: its queue is cleared (a few milliseconds of an old call
+// would otherwise play at the start of the next) and it must prime again. When
+// the lead is stalled, or there is none, the mix is paced by the wall clock
+// instead, one block per 20 ms, so the voice streams are heard and the output
+// never runs ahead of real time. The clock is passed in, so a test owns it.
+//
+// SILENCE BETWEEN DIGITAL VOICE CALLS is a stream of zeros: it adds nothing,
+// and the sum is the lead alone, untouched by the limiter below its threshold.
 //
 // Not thread safe; it lives on the phone's strand.
 
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -55,11 +65,15 @@ namespace revenant::webgate {
 
 class PhoneMixer {
 public:
+    using Clock = std::chrono::steady_clock;
+
     // 20 ms at 48 kHz, one Opus frame.
     static constexpr std::size_t kBlock = kPhoneAudioRate / 50;
-    static constexpr std::size_t kStallBlocks = 3;
-    // 120 ms.
-    static constexpr std::size_t kMaxQueued = 6 * kBlock;
+    static constexpr auto kBlockTime = std::chrono::milliseconds(20);
+    // One LDU of P25 voice, 180 ms, rounded up to whole blocks.
+    static constexpr std::size_t kPrimeBlocks = 10;
+    static constexpr std::size_t kMaxQueued = 20 * kBlock;
+    static constexpr auto kStall = std::chrono::milliseconds(200);
 
     PhoneMixer() { limiter_.configure(kPhoneAudioRate); }
 
@@ -69,45 +83,78 @@ public:
     // Adds mono 48 kHz samples to a receiver's stream. A digital voice stream
     // is boosted by `voice_db` on the way in; any other is added as it is.
     void push(std::uint64_t vrx, bool digital_voice, double voice_db,
-              std::span<const float> mono)
+              std::span<const float> mono, Clock::time_point now)
     {
-        Stream& s = streams_[vrx];
+        const auto [it, created] = streams_.try_emplace(vrx);
+        Stream& s = it->second;
+        if (created) {
+            s.last_push = now;
+        }
+        expire(s, now);
         if (digital_voice) {
             const auto boosted = s.boost.process(voice_db, mono);
             s.queue.insert(s.queue.end(), boosted.begin(), boosted.end());
         } else {
             s.queue.insert(s.queue.end(), mono.begin(), mono.end());
         }
+        s.last_push = now;
+        if (!s.primed && s.queue.size() >= kPrimeBlocks * kBlock) {
+            s.primed = true;
+        }
     }
 
     // A receiver that is gone, or no longer mixed.
     void remove(std::uint64_t vrx) { streams_.erase(vrx); }
 
-    // Every block that can be cut now, summed and limited. The span is good
-    // until the next call.
-    [[nodiscard]] std::span<const float> take()
+    // Every block that can be cut by `now`, summed and limited. The span is
+    // good until the next call.
+    [[nodiscard]] std::span<const float> take(Clock::time_point now)
     {
         out_.clear();
-        // Before the cuts, and never the lead: a long chunk of the lead is not
-        // late, it is simply a lot, and is cut in full. Any other stream that
-        // has piled up past the window is a burst that would otherwise be
-        // played ahead of real time by the stall rule below.
         for (auto& [vrx, s] : streams_) {
-            if (lead_ == vrx || s.queue.size() <= kMaxQueued) {
+            expire(s, now);
+            // Never the lead: a long chunk of the lead is not late, it is
+            // simply a lot, and is cut in full.
+            if (lead_ != vrx && s.queue.size() > kMaxQueued) {
+                const std::size_t excess = s.queue.size() - kMaxQueued;
+                s.queue.erase(s.queue.begin(),
+                              s.queue.begin() + static_cast<std::ptrdiff_t>(excess));
+                dropped_ += excess;
+            }
+        }
+        for (;;) {
+            const auto lead = lead_ ? streams_.find(*lead_) : streams_.end();
+            if (lead != streams_.end() && now - lead->second.last_push <= kStall) {
+                // The lead sets the pace. Short of a block it waits, however
+                // much the others hold.
+                if (lead->second.queue.size() < kBlock) {
+                    break;
+                }
+                cut();
+                wall_mark_ = now;
                 continue;
             }
-            const std::size_t excess = s.queue.size() - kMaxQueued;
-            s.queue.erase(s.queue.begin(), s.queue.begin() + static_cast<std::ptrdiff_t>(excess));
-            dropped_ += excess;
-        }
-        while (ready()) {
+            // No lead audio: the wall clock sets the pace, one block per
+            // kBlockTime, from where the lead last left it.
+            if (!voice_ready()) {
+                break;
+            }
+            if (!wall_mark_ || now - *wall_mark_ > kPrimeBlocks * kBlockTime) {
+                // At most the allowance of catching up, so a long silence does
+                // not become a long burst.
+                wall_mark_ = now - kBlockTime;
+            }
+            if (now - *wall_mark_ < kBlockTime) {
+                break;
+            }
             cut();
+            *wall_mark_ += kBlockTime;
         }
         return out_;
     }
 
     // Samples dropped for arriving more than kMaxQueued behind, and blocks in
-    // which a stream held something but less than a whole block.
+    // which a primed stream ran dry.
     [[nodiscard]] std::uint64_t dropped() const { return dropped_; }
     [[nodiscard]] std::uint64_t padded_blocks() const { return padded_; }
     [[nodiscard]] std::size_t streams() const { return streams_.size(); }
@@ -116,38 +163,46 @@ private:
     struct Stream {
         std::deque<float> queue;
         VoiceGainStage boost;
+        Clock::time_point last_push{};
+        bool primed = false;
     };
 
-    [[nodiscard]] bool ready() const
+    // A stalled stream starts again: what it still holds is the tail of
+    // something that ended.
+    static void expire(Stream& s, Clock::time_point now)
     {
-        std::size_t most = 0;
-        for (const auto& [vrx, s] : streams_) {
-            most = std::max(most, s.queue.size());
+        if (now - s.last_push > kStall && (!s.queue.empty() || s.primed)) {
+            s.queue.clear();
+            s.primed = false;
         }
-        const auto lead = lead_ ? streams_.find(*lead_) : streams_.end();
-        if (lead != streams_.end()) {
-            return lead->second.queue.size() >= kBlock || most >= kStallBlocks * kBlock;
-        }
-        return most >= kBlock;
+    }
+
+    [[nodiscard]] bool voice_ready() const
+    {
+        return std::ranges::any_of(streams_, [this](const auto& entry) {
+            const Stream& s = entry.second;
+            return lead_ != entry.first && s.primed && s.queue.size() >= kBlock;
+        });
     }
 
     void cut()
     {
         float block[kBlock] = {};
         for (auto& [vrx, s] : streams_) {
-            if (s.queue.size() < kBlock) {
-                // Something waiting but not a whole block is a stream that is
-                // late; nothing waiting is one that is idle, which is not worth
-                // counting.
-                if (!s.queue.empty()) {
-                    ++padded_;
-                }
+            const bool lead = lead_ == vrx;
+            if (!lead && !s.primed) {
                 continue;
             }
-            for (std::size_t i = 0; i < kBlock; ++i) {
+            const std::size_t have = std::min(s.queue.size(), kBlock);
+            for (std::size_t i = 0; i < have; ++i) {
                 block[i] += s.queue[i];
             }
-            s.queue.erase(s.queue.begin(), s.queue.begin() + static_cast<std::ptrdiff_t>(kBlock));
+            s.queue.erase(s.queue.begin(), s.queue.begin() + static_cast<std::ptrdiff_t>(have));
+            if (have < kBlock && !lead) {
+                // Ran dry: what it had is played, padded, and it fills again.
+                ++padded_;
+                s.primed = false;
+            }
         }
         limiter_.process(block, kBlock, 1);
         out_.insert(out_.end(), block, block + kBlock);
@@ -155,6 +210,7 @@ private:
 
     std::map<std::uint64_t, Stream> streams_;
     std::optional<std::uint64_t> lead_;
+    std::optional<Clock::time_point> wall_mark_;
     ui::SoftLimiter limiter_;
     std::vector<float> out_;
     std::uint64_t dropped_ = 0;

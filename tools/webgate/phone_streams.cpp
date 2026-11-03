@@ -297,6 +297,7 @@ void PhoneStreams::deliver_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk
 
 void PhoneStreams::start()
 {
+    voice_gain_db_ = config_.voice_gain_db ? config_.voice_gain_db() : 0.0;
     subscribe_vrx_events();
 
     auto inbox = inbox_;
@@ -341,21 +342,34 @@ void PhoneStreams::apply_desktop_switches()
     const DesktopSettings saved = config_.desktop_settings();
     auto& client = session_.client();
     // A refusal comes from an engine older than the call, which has nothing to
-    // switch; the desktop discards it the same way.
+    // switch, so it is not an error for the phone. The desktop discards it
+    // too; it is logged here because the gateway has no checkbox to show the
+    // mismatch on.
+    const auto note = [](const char* what, const Status& status) {
+        if (!status) {
+            std::fprintf(stderr, "revenant-webgate: the engine refused %s: %s\n", what,
+                         status.error().message.c_str());
+        }
+    };
     if (saved.detection_threshold_db) {
-        static_cast<void>(client.set_detection_threshold(*saved.detection_threshold_db));
+        note("the desktop's detection threshold",
+             client.set_detection_threshold(*saved.detection_threshold_db));
     }
     if (saved.impulse_excision) {
-        static_cast<void>(client.set_impulse_excision(*saved.impulse_excision));
+        note("impulse excision", client.set_impulse_excision(*saved.impulse_excision));
     }
     if (saved.comb_cancel) {
-        static_cast<void>(client.set_comb_cancel(*saved.comb_cancel));
+        note("comb cancellation", client.set_comb_cancel(*saved.comb_cancel));
     }
     if (saved.spur_cancel) {
-        static_cast<void>(client.set_spur_cancel(*saved.spur_cancel));
+        note("spur cancelling", client.set_spur_cancel(*saved.spur_cancel));
     }
     if (saved.transcribe) {
-        static_cast<void>(client.set_transcription(*saved.transcribe));
+        const auto status = client.set_transcription(*saved.transcribe);
+        if (!status) {
+            std::fprintf(stderr, "revenant-webgate: the engine refused speech to text: %s\n",
+                         status.error().message.c_str());
+        }
     }
 }
 
@@ -465,6 +479,9 @@ void PhoneStreams::send_event(std::string json)
 void PhoneStreams::tick()
 {
     const auto t = now();
+    // Read here and not per chunk: the source takes a lock and, every two
+    // seconds, reads the registry.
+    voice_gain_db_ = config_.voice_gain_db ? config_.voice_gain_db() : 0.0;
     if (!last_refresh_ || t - *last_refresh_ >= kSourcePollInterval) {
         refresh_source();
         refresh_transcription();
@@ -1055,8 +1072,10 @@ std::vector<PhoneStreams::MixMember> PhoneStreams::mix_members() const
         members.push_back({*active, params != nullptr && is_digital_voice(params->demod)});
     }
     // Digital voice receivers join only while audio is on: the active receiver
-    // is being heard, or keep listening still has its stream up.
-    if (listening || hls_) {
+    // is being heard, or keep listening has its stream up. Not through the
+    // linger after either ends, which exists so a quick lock and unlock does
+    // not rebuild the stream and has no listener.
+    if (listening || (hls_ && !hls_->ends_at)) {
         for (const auto vrx : session_.owned_ids()) {
             if (listening && vrx == *active) {
                 continue;
@@ -1275,9 +1294,9 @@ void PhoneStreams::handle_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk)
     const auto* params = session_.last_params(vrx);
     const bool digital = params != nullptr && is_digital_voice(params->demod);
     mixer_.set_lead(session_.audio_vrx());
-    mixer_.push(vrx, digital, digital && config_.voice_gain_db ? config_.voice_gain_db() : 0.0,
-                mono);
-    emit_mix(mixer_.take(), report);
+    const auto t = now();
+    mixer_.push(vrx, digital, voice_gain_db_, mono, t);
+    emit_mix(mixer_.take(t), report);
     pump();
 }
 

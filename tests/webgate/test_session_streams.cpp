@@ -837,6 +837,40 @@ TEST_CASE("audio subscriptions follow the digital voice receivers", "[gpu][webga
     rig.command(R"({"id":7,"op":"audio","args":{"vrx":)" + std::to_string(analogue) +
                 R"(,"on":false}})");
     CHECK(rig.streams->audio_subscriptions().empty());
+
+    // A mode change recreates the receiver under a new id: the one being
+    // listened to becomes digital voice and is the lead, not a second stream.
+    rig.command(R"({"id":8,"op":"audio","args":{"vrx":)" + std::to_string(analogue) + "}}");
+    rig.command(R"({"id":9,"op":"setMode","args":{"vrx":)" + std::to_string(analogue) +
+                R"(,"mode":"p25p1"}})");
+    const auto replaced = vrx_of(reply_to(rig.socket, 9));
+    REQUIRE(replaced != analogue);
+    CHECK(rig.streams->audio_subscriptions() == std::set<std::uint64_t>{replaced, second});
+}
+
+TEST_CASE("voice subscriptions end with the audio, not with the HLS linger",
+          "[gpu][webgate][streams][mix]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.use_fake_clock = true;
+    rig.open(still_engine());
+    rig.attach();
+
+    rig.command(R"({"id":1,"op":"addVrx","args":{"hz":100100000,"mode":"am"}})");
+    const auto analogue = vrx_of(reply_to(rig.socket, 1));
+    rig.command(R"({"id":2,"op":"addVrx","args":{"hz":100200000,"mode":"p25p1"}})");
+    const auto voice = vrx_of(reply_to(rig.socket, 2));
+    rig.command(R"({"id":3,"op":"audio","args":{"vrx":)" + std::to_string(analogue) + "}}");
+    rig.command(R"({"id":4,"op":"keepListening","args":{"on":true}})");
+    CHECK(rig.streams->audio_subscriptions() == std::set<std::uint64_t>{analogue, voice});
+
+    // Audio off with keep listening still on: the stream lingers for a quick
+    // return, but nothing is listening to the voice receiver.
+    rig.command(R"({"id":5,"op":"audio","args":{"vrx":)" + std::to_string(analogue) +
+                R"(,"on":false}})");
+    CHECK(rig.streams->segmenter(rig.streams->hls_id()) != nullptr);
+    CHECK(rig.streams->audio_subscriptions().empty());
 }
 
 TEST_CASE("one HLS stream carries the mix and keeps its URL across receivers",
@@ -844,6 +878,8 @@ TEST_CASE("one HLS stream carries the mix and keeps its URL across receivers",
 {
     REVENANT_NEEDS_GPU();
     Rig rig;
+    // The mix is paced by the clock while the receiver listened to is silent.
+    rig.use_fake_clock = true;
     rig.open(still_engine());
     rig.attach();
 
@@ -879,6 +915,7 @@ TEST_CASE("one HLS stream carries the mix and keeps its URL across receivers",
             s = 0.1F * static_cast<float>(std::sin(phase));
             phase += 2.0 * 3.14159265358979323846 * 1000.0 / 8000.0;
         }
+        rig.fake_now += std::chrono::milliseconds(20);
         rig.streams->deliver_audio(voice, chunk);
         rig.strand.run_pending();
     }

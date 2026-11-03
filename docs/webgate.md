@@ -180,7 +180,7 @@ written is absent and nothing is sent for it.
 
 - **Radio front end.** `engine/lastSource` is the URI the desktop last opened,
   for example `rtlsdr://0?agc=1&bw=3000000&direct=auto&freq=903536000&rate=3200000&gain=auto`.
-  The gateway sends it parsed in a `desktop` event (below). When the phone
+  What that radio was left at is laid over it first, by the desktop's own `restore_radio_uri`: `source/lastRadio` names the radio and `source/radios/<radio>/{sampleRate,centreHz,gain,directSampling}` replace the rate, centre, gain and direct sampling, so a gain changed after opening is the gain the phone opens with. The gateway sends the result parsed in a `desktop` event (below). When the phone
   opens a radio on that same device (same backend, and the same index as the
   listed URI or the same serial) it opens it with every parameter the desktop
   carries, in the desktop's order: rate, bw, gain, agc, direct, ppm, bias,
@@ -233,19 +233,29 @@ nothing, so the sound is the receiver being listened to. The same mix feeds
 live audio and Keep listening, so both play the same thing.
 
 - The gateway subscribes audio for each digital voice receiver while the phone
-  has audio on, and unsubscribes when the receiver is removed or audio is
-  turned off. Analogue receivers other than the one listened to are not mixed.
-  Which receivers are mixed is decided in one function,
-  `PhoneStreams::mix_members`.
-- Streams are aligned in 20 ms blocks paced by the receiver being listened to.
-  A stream that has nothing for a block is silent in it, and the mix does not
-  wait: if the receiver being listened to stalls, the voice streams carry on
-  after 60 ms. A voice stream more than 120 ms behind loses its oldest audio.
+  is listening to a receiver, or Keep listening has its stream up, and
+  unsubscribes when the receiver is removed or either ends. The 30 second
+  linger after Keep listening ends does not hold them. Analogue receivers other
+  than the one listened to are not mixed. Which receivers are mixed is decided
+  in one function, `PhoneStreams::mix_members`.
+- The engine delivers voice continuously, not an LDU at a time: one chunk per
+  receiver chunk covering the same time, zeros between calls
+  (`core/rpc/voice_audio.h`). The mix is built to take a burst of an LDU
+  (180 ms) as well. The receiver being listened to sets the pace: a 20 ms block
+  is cut when it holds a whole one, and it is never skipped. Every other stream
+  is read through a 200 ms jitter buffer (it contributes once 200 ms is queued,
+  and holds up to 400 ms before the oldest is dropped), which is also the delay
+  voice has against the receiver being listened to.
+- A stream with no audio for 200 ms is stalled and starts again when it
+  returns, so the end of one call is not played at the start of the next. If
+  the receiver being listened to stalls, or there is none, the voice streams
+  are paced by the wall clock, one block per 20 ms, so the mix never runs ahead
+  of real time.
 - Live Opus packets are tagged with the receiver being listened to. Keep
   listening has one playlist per session, `/hls/<id>/live.m3u8`; the `hls`
   event gives the id, and the URL stays the same when the listener moves to
-  another receiver, so the player is not reloaded.
-
+  another receiver, so the player is not reloaded. An engine restart builds a
+  new session object and the phone is sent a new id and URL.
 ### Keep listening
 
 Live audio plays through the page and stops when iOS suspends it. Keep

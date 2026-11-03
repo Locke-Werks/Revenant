@@ -245,10 +245,10 @@ void PhoneHub::disconnect(std::uint64_t id)
     connections_.erase(it);
 }
 
-void PhoneHub::hls_fetched(std::uint64_t vrx)
+void PhoneHub::hls_fetched(std::uint64_t hls_id)
 {
     for (auto& [token, resident] : residents_) {
-        if (resident->streams->segmenter(vrx) != nullptr) {
+        if (resident->streams->segmenter(hls_id) != nullptr) {
             resident->last_hls = now();
         }
     }

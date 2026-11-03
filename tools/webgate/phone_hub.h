@@ -102,7 +102,7 @@ public:
     void disconnect(std::uint64_t connection);
 
     // An HLS request was answered for this receiver.
-    void hls_fetched(std::uint64_t vrx);
+    void hls_fetched(std::uint64_t hls_id);
 
     // Ticks every session's streams and destroys expired detached sessions.
     void tick();

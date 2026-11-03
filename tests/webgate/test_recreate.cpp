@@ -230,8 +230,8 @@ TEST_CASE("an engine restart recreates each phone's receivers", "[gpu][webgate][
     // was told the new URL. (A fresh engine numbers from 1 again, so the new
     // id may well equal the old one.)
     CHECK(rig.registry.find(rig.hub->streams(id)->hls_id()) != nullptr);
-    CHECK(texts_with(socket, "/hls/" + std::to_string(rig.hub->streams(id)->hls_id()) + "/live.m3u8", mark).size() ==
-          1);
+    const auto url = "/hls/" + std::to_string(rig.hub->streams(id)->hls_id()) + "/live.m3u8";
+    CHECK(texts_with(socket, url, mark).size() == 1);
 
     // Both phones' receivers exist, and nothing else.
     auto ids = rig.engine_ids();
