@@ -1019,6 +1019,11 @@ Status PhoneStreams::subscribe_decoder(std::uint64_t vrx, const std::string& nam
                 // fed, say). It is left out of the running set so the phone's
                 // next change of set can try it again, and the phone is told.
                 put_item(inbox, [vrx, name, reason](PhoneStreams& self) {
+                    // A receiver that went (a removal, or a mode change's
+                    // replacement) ends its decoders too; vrxRemoved says that.
+                    if (!self.session_.owns(vrx)) {
+                        return;
+                    }
                     if (const auto it = self.decoded_.find(vrx); it != self.decoded_.end()) {
                         it->second.erase(name);
                     }
