@@ -54,13 +54,62 @@ revenant-webgate.exe
 ```
 
 The installer puts `revenant-webgate.exe` and a `web` folder beside
-`revenant-engine.exe`. There is no Start Menu entry; start it from a terminal.
+`revenant-engine.exe`, adds a Start menu entry, "Revenant phone gateway", and
+with the "Start the Revenant phone gateway when anyone signs in" option (on by
+default; `/O:gateway_at_signin=off` unattended) starts it at every sign-in.
 The `web` folder has to stay beside the exe, or be named with `--web-root`.
 
-If no engine answers on `--engine`, the gateway starts `revenant-engine.exe`
-(from the folder it is in) with `--no-source`, so the radio is closed until a
-source is opened from the phone or the desktop client. The engine it started
-exits when the gateway does. An engine that is already running is used as it is.
+### At sign-in
+
+The sign-in start is an `HKLM\Software\Microsoft\Windows\CurrentVersion\Run`
+value named "Revenant phone gateway", so it runs as whoever signs in, in their
+session, reading their engine token and desktop settings. Uninstall removes it;
+so does unticking it in Task Manager's Startup apps.
+
+It has no window. Everything it prints goes to
+`%LOCALAPPDATA%\Revenant\webgate\webgate.log` (or `webgate.log` in
+`--state-dir`), which keeps the last 1 MB and one older file,
+`webgate.log.1`. Started from a terminal it prints there as well, though the
+prompt comes back at once, because it is a Windows (not console) program.
+
+One gateway runs per sign-in session and HTTPS port. A second start on the
+same port, from the Start menu or a terminal, writes "already running" to the
+log and exits. To stop it, end `revenant-webgate.exe` in Task Manager.
+
+### Cold start: the engine only while a phone wants it
+
+The gateway starts no engine of its own when it starts, and holds no lease:
+an idle gateway at sign-in costs no GPU context and no radio, and the desktop
+starts as usual. An engine the desktop or anyone else started is found and
+used as it is.
+
+When a phone connects and no engine answers on `--engine`, the gateway starts
+`revenant-engine.exe` (from the folder it is in) with `--no-source`, waits for
+it (up to 20 s), and then opens the desktop's last radio on it, the way the
+desktop does on an engine it started: `engine/lastSource` with that radio's
+remembered centre, rate and gain written over it. A desktop that has never
+opened a radio leaves the engine with none, and the phone opens one from the
+radio panel. Nothing is reopened on an engine the gateway did not start.
+
+### Engine stop: when the phone is known gone
+
+The gateway stops an engine it started once nobody holds the engine's lease
+for 10 s. The phone holds the lease for as long as its session lives: through
+the 30 s linger after its connection drops, and through Keep listening while
+it fetches audio. So the lease coming free is the phone gone, not a phone
+locked in a pocket. A desktop on that engine claims the lease too, and an
+engine with its lease held is never stopped. A phone that connects during the
+10 s keeps it running.
+
+The stop ends the engine's Job object, so the engine and anything it started
+exit together, and the gateway waits for the process to be gone before it
+logs "stopped the engine it started". A process that has exited has let go of
+the dongle and the GPU. The gateway then stays up, idle, and the next phone
+starts the engine again.
+
+An engine the gateway did not start, a desktop's or one started by hand, is
+never stopped by it. An engine the gateway started also ends when the gateway
+does, crash included.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -333,7 +382,15 @@ Manager if it does not come back.
 
 **"Revenant is not reachable".** The app opened but the gateway did not answer
 within 4 seconds. Check that `revenant-webgate.exe` is running, that the phone
-is on the same network, and the firewall.
+is on the same network, and the firewall. The gateway's log is
+`%LOCALAPPDATA%\Revenant\webgate\webgate.log`.
+
+**The phone waits a few seconds on first connect.** The gateway is starting
+the engine for it (see Cold start). Later phones within the engine's life do
+not wait.
+
+**The installer says the phone gateway is running.** It starts at sign-in.
+End `revenant-webgate.exe` in Task Manager and run the installer again.
 
 **Certificate warning in Safari or the app will not install.** The profile is
 not installed or not trusted. Redo steps 2 and 3; step 3 is the one that is
