@@ -156,6 +156,10 @@ struct HarnessOptions {
     // connecting.
     bool connect_client = true;
 
+    // Zero binds an ephemeral port. A fixed one is for a case standing this
+    // engine in for one that a client expects at a known address.
+    std::uint16_t port = 0;
+
     // A source URI instead of the scene above, and a grid to read it with.
     //
     // WHY THESE TWO EXIST AND WHY THEY ARE NOT THE DEFAULT

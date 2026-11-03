@@ -95,6 +95,7 @@ Status Harness::open(const HarnessOptions& options) {
     // design that would ship an engine anyone can drive.
     const rpc::Token token = test_token();
     server_options.token.assign(token.begin(), token.end());
+    server_options.port = options.port;
     server_options.vocoders = options.vocoders;
     server_options.engine_plugins = options.engine_plugins;
     server_options.plugin_log = options.plugin_log;
