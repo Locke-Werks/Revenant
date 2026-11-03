@@ -58,8 +58,22 @@ void PhoneSession::remember(std::uint64_t vrx, const rpc::VrxParams& params)
 void PhoneSession::forget(std::uint64_t vrx)
 {
     owned_.erase(vrx);
+    transcribe_.erase(vrx);
     if (audio_vrx_ == vrx) {
         audio_vrx_.reset();
+    }
+}
+
+rpc::TranscribeChoice PhoneSession::transcribe_choice(std::uint64_t vrx) const
+{
+    const auto it = transcribe_.find(vrx);
+    return it == transcribe_.end() ? rpc::TranscribeChoice::Auto : it->second;
+}
+
+void PhoneSession::set_transcribe_choice(std::uint64_t vrx, rpc::TranscribeChoice choice)
+{
+    if (owned_.contains(vrx)) {
+        transcribe_[vrx] = choice;
     }
 }
 

@@ -181,6 +181,19 @@ export interface GatewayEvent {
 
 export type ServerMessage = Reply | GatewayEvent;
 
+// "link". After an engine restart, the Up event of a session the gateway
+// rebuilt carries recreated and lost: each receiver the phone owned was added
+// again at the same frequency and mode under a new id, or could not be, with
+// the engine's reason (and a vrxRemoved for that id as well). Audio, keep
+// listening and the rest follow the new ids; the app swaps old for new.
+export interface LinkEvent {
+  event: "link";
+  state: "starting" | "waiting" | "up" | "refused";
+  detail: string;
+  recreated?: { old: number; new: number }[];
+  lost?: { vrx: number; reason: string }[];
+}
+
 export function encodeCommand(cmd: Command): string {
   const text = JSON.stringify(cmd);
   if (text.length > MAX_COMMAND_BYTES) {

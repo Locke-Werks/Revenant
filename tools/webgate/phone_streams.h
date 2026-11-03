@@ -199,6 +199,19 @@ public:
     void deliver_spectrum(const rpc::SpectrumFrame& frame);
     void deliver_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk);
 
+    // For recreating the session on a restarted engine (phone_hub.h).
+    // The centre the source had at the last read, when one was open: a
+    // receiver's params are relative to it, and the new engine's may differ.
+    [[nodiscard]] std::optional<std::int64_t> source_center() const
+    {
+        return source_known_ && source_open_ ? std::optional(source_center_) : std::nullopt;
+    }
+    // Takes the JSON not yet sent, so a replacement can send it first.
+    [[nodiscard]] std::deque<std::string> take_texts();
+    // Brings subscriptions into line with receivers the session already owns
+    // without a command having added them.
+    void resync();
+
     [[nodiscard]] StreamCounters counters() const { return counters_; }
     [[nodiscard]] std::uint32_t every_nth() const { return every_nth_; }
 

@@ -142,8 +142,12 @@ namespace {
 
 }  // namespace
 
-Gateway::Gateway(kj::AsyncIoContext& io, NewSession new_session, HlsRegistry& hls)
-    : io_(io), new_session_(std::move(new_session)), hls_(&hls), hub_(strand_, streams_config(hls))
+Gateway::Gateway(kj::AsyncIoContext& io, NewSession new_session, HlsRegistry& hls,
+                 HubTiming timing)
+    : io_(io),
+      new_session_(std::move(new_session)),
+      hls_(&hls),
+      hub_(strand_, streams_config(hls), timing, new_session_)
 {
     hls.on_fetch = [this](std::uint64_t vrx) { hub_.hls_fetched(vrx); };
 }

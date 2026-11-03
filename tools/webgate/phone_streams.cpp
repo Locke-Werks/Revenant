@@ -273,6 +273,22 @@ void PhoneStreams::on_text(std::string_view text)
     reconcile();
 }
 
+std::deque<std::string> PhoneStreams::take_texts()
+{
+    std::deque<std::string> out;
+    out.swap(texts_);
+    queued_text_bytes_ = 0;
+    return out;
+}
+
+void PhoneStreams::resync()
+{
+    for (const auto vrx : session_.owned_ids()) {
+        known_owned_.insert(vrx);
+    }
+    reconcile();
+}
+
 void PhoneStreams::send_event(std::string json)
 {
     queue_text(std::move(json));

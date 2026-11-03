@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <optional>
 #include <random>
 #include <utility>
 #include <vector>
@@ -49,8 +50,8 @@ std::string link_event(LinkState state, const std::string& detail)
                  JsonObject().add_string("state", state_name(state)).add_string("detail", detail));
 }
 
-PhoneHub::PhoneHub(Strand& strand, StreamsConfig base, HubTiming timing)
-    : strand_(strand), base_(std::move(base)), timing_(timing)
+PhoneHub::PhoneHub(Strand& strand, StreamsConfig base, HubTiming timing, NewSession new_session)
+    : strand_(strand), base_(std::move(base)), timing_(timing), new_session_(std::move(new_session))
 {
 }
 
@@ -234,12 +235,141 @@ void PhoneHub::tick()
 
 void PhoneHub::link_state(LinkState state, std::string detail)
 {
+    const bool rising = state == LinkState::Up && link_state_ != LinkState::Up;
     link_state_ = state;
     link_detail_ = std::move(detail);
     const auto text = link_event(link_state_, link_detail_);
     for (auto& [token, resident] : residents_) {
-        resident->streams->send_event(text);
+        JsonObject fields;
+        fields.add_string("state", state_name(link_state_)).add_string("detail", link_detail_);
+        if (!(rising && new_session_ && recreate(*resident, fields))) {
+            resident->streams->send_event(text);
+        }
     }
+}
+
+bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
+{
+    // A link that dropped and came back without the engine going away (a
+    // missed probe) leaves this session's connection working, and its
+    // receivers still exist: nothing to rebuild.
+    auto& old_session = *resident.session;
+    if (old_session.client().info()) {
+        return false;
+    }
+
+    auto lose_all = [&](const std::string& reason) {
+        std::string lost = "[";
+        for (const auto vrx : old_session.owned_ids()) {
+            if (lost.size() > 1) {
+                lost += ',';
+            }
+            lost += JsonObject().add_u64("vrx", vrx).add_string("reason", reason).str();
+        }
+        lost += ']';
+        fields.add_raw("recreated", "[]").add_raw("lost", lost);
+        resident.streams->send_event(event("link", fields));
+        for (const auto vrx : old_session.owned_ids()) {
+            resident.streams->send_event(event(
+                "vrxRemoved", JsonObject().add_u64("vrx", vrx).add_string("reason", reason)));
+            old_session.forget(vrx);
+        }
+        resident.streams->resync();
+    };
+
+    auto client = new_session_();
+    if (!client) {
+        // Nothing to rebuild on. The session stays as it is, dead, and the
+        // phone hears why; reconnecting its socket gives it a fresh one.
+        lose_all(client.error().message);
+        return true;
+    }
+
+    auto fresh = std::make_unique<PhoneSession>(std::move(*client));
+    if (old_session.view()) {
+        fresh->set_view(*old_session.view());
+    }
+    fresh->set_keep_listening(old_session.keep_listening());
+
+    // Params hold the receiver's offset from the source centre. The phone
+    // asked for an absolute frequency, so that is what is kept if the new
+    // engine's source sits somewhere else.
+    const auto old_center = resident.streams->source_center();
+    std::optional<std::int64_t> new_center;
+    if (const auto info = fresh->client().info(); info && info->source_rate != 0) {
+        new_center = info->source_center;
+    }
+
+    std::string recreated = "[";
+    std::string lost = "[";
+    std::vector<std::pair<std::uint64_t, std::string>> removed;
+    for (const auto old_id : old_session.owned_ids()) {
+        rpc::VrxParams params = *old_session.last_params(old_id);
+        if (old_center && new_center) {
+            params.center = *old_center + params.center - *new_center;
+        }
+        const auto choice = old_session.transcribe_choice(old_id);
+        auto added = fresh->client().add_vrx(params);
+        if (added && choice != rpc::TranscribeChoice::Auto) {
+            if (auto set = fresh->client().set_vrx_transcribe(*added, choice); !set) {
+                // A receiver without the choice the phone made is not the one
+                // it had; take it back out and report the engine's reason.
+                (void)fresh->client().remove_vrx(*added);
+                added = std::unexpected(set.error());
+            }
+        }
+        if (!added) {
+            if (lost.size() > 1) {
+                lost += ',';
+            }
+            lost += JsonObject()
+                        .add_u64("vrx", old_id)
+                        .add_string("reason", added.error().message)
+                        .str();
+            removed.emplace_back(old_id, added.error().message);
+            continue;
+        }
+        fresh->adopt(*added, params);
+        fresh->set_transcribe_choice(*added, choice);
+        if (old_session.audio_vrx() == old_id) {
+            fresh->set_audio_vrx(*added);
+        }
+        if (recreated.size() > 1) {
+            recreated += ',';
+        }
+        recreated += JsonObject().add_u64("old", old_id).add_u64("new", *added).str();
+    }
+    recreated += ']';
+    lost += ']';
+    fields.add_raw("recreated", recreated).add_raw("lost", lost);
+
+    // Unsent JSON (a "waiting" link event, say) goes out ahead of anything
+    // the new streams say. The old streams go before the old session: they
+    // unsubscribe through its client, which fails at once on a dead
+    // connection, as does the session's own removal of its old ids.
+    auto pending = resident.streams->take_texts();
+    auto streams = std::make_unique<PhoneStreams>(*fresh, nullptr, strand_, base_);
+    for (auto& text : pending) {
+        streams->send_event(std::move(text));
+    }
+    // The link event first, so the phone has the id map before the source,
+    // hls and status events of the new receivers.
+    streams->send_event(event("link", fields));
+    for (const auto& [vrx, reason] : removed) {
+        streams->send_event(
+            event("vrxRemoved", JsonObject().add_u64("vrx", vrx).add_string("reason", reason)));
+    }
+    resident.streams.reset();
+    resident.session = std::move(fresh);
+    resident.streams = std::move(streams);
+    if (resident.connection) {
+        if (const auto it = connections_.find(*resident.connection); it != connections_.end()) {
+            resident.streams->attach(*it->second.socket);
+        }
+    }
+    resident.streams->start();
+    resident.streams->resync();
+    return true;
 }
 
 void PhoneHub::clear()

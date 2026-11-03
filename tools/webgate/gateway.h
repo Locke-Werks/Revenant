@@ -53,11 +53,11 @@ private:
 
 class Gateway {
 public:
-    using NewSession = std::function<Expected<std::unique_ptr<rpc::Client>>()>;
-
     // hls is the HttpServer's registry; this gateway's sessions fill it and
     // hear about every request it answers.
-    Gateway(kj::AsyncIoContext& io, NewSession new_session, HlsRegistry& hls);
+    // new_session also rebuilds each phone's session after an engine restart.
+    Gateway(kj::AsyncIoContext& io, NewSession new_session, HlsRegistry& hls,
+            HubTiming timing = {});
 
     // Calls shutdown().
     ~Gateway();

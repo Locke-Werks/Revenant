@@ -411,6 +411,7 @@ template <class Edit>
     if (had_audio) {
         session.set_audio_vrx(*new_id);
     }
+    session.set_transcribe_choice(*new_id, before->transcribe);
     // The change is done, so a failed read must not turn it into an error that
     // hides the new id: answer from what was sent.
     std::string body = status_or_sent(session, *new_id, params, before->transcribe, *center);
@@ -670,6 +671,7 @@ template <class Edit>
     if (auto set = session.client().set_vrx_transcribe(*vrx, choice); !set) {
         return std::unexpected(set.error());
     }
+    session.set_transcribe_choice(*vrx, choice);
     const auto center = source_center(session);
     if (!center) {
         return std::unexpected(center.error());

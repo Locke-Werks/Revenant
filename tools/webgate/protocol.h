@@ -63,6 +63,11 @@ inline constexpr std::string_view kOps[] = {
 };
 
 // The events the gateway sends, exactly these.
+//
+// "link" is {state, detail}. After an engine restart, the Up event of each
+// session the gateway rebuilt also carries "recreated":[{"old":a,"new":b}]
+// and "lost":[{"vrx":a,"reason":"..."}] (phone_hub.h); a lost id also gets a
+// vrxRemoved. web/src/protocol.ts LinkEvent is the phone's copy.
 inline constexpr std::string_view kEvents[] = {
     "vrxStatus", "decoded", "transcript", "transcriptionStatus",
     "source",    "link",    "vrxRemoved", "hls",

@@ -21,6 +21,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -52,10 +53,15 @@ struct HubTiming {
     std::chrono::milliseconds silence_limit{45'000};
 };
 
+// Where a session gets a fresh engine connection when the engine restarted.
+using NewSession = std::function<Expected<std::unique_ptr<rpc::Client>>()>;
+
 class PhoneHub {
 public:
-    // base.clock also times detached sessions.
-    PhoneHub(Strand& strand, StreamsConfig base, HubTiming timing = {});
+    // base.clock also times detached sessions. new_session may be empty, in
+    // which case sessions are not recreated after an engine restart.
+    PhoneHub(Strand& strand, StreamsConfig base, HubTiming timing = {},
+             NewSession new_session = {});
     ~PhoneHub();
     PhoneHub(const PhoneHub&) = delete;
     PhoneHub& operator=(const PhoneHub&) = delete;
@@ -81,6 +87,14 @@ public:
     // Ticks every session's streams and destroys expired detached sessions.
     void tick();
 
+    // Broadcasts the link state. On Up, every session whose engine
+    // connection died (the engine restarted) is rebuilt on a new one: each
+    // receiver it owned is added again from its last params at the same
+    // absolute frequency, with its transcription choice, and its audio, HLS
+    // and other subscriptions follow. That session's link event then carries
+    //   "recreated": [{"old":id,"new":id}, ...]
+    //   "lost":      [{"vrx":id,"reason":"<the engine's words>"}, ...]
+    // and each lost id also gets a vrxRemoved with the same reason.
     void link_state(LinkState state, std::string detail);
 
     // Destroys every session. For shutdown, while the HLS registry they
@@ -116,10 +130,15 @@ private:
     [[nodiscard]] std::chrono::steady_clock::time_point now() const;
     void resume(std::uint64_t id, Connection& connection, const Command& command);
     [[nodiscard]] Resident* find_token(std::string_view token) const;
+    // Rebuilds a resident on a fresh engine connection when its own one is
+    // dead, adding "recreated" and "lost" to fields. False when its
+    // connection was still alive and nothing was done.
+    bool recreate(Resident& resident, JsonObject& fields);
 
     Strand& strand_;
     StreamsConfig base_;
     HubTiming timing_;
+    NewSession new_session_;
     std::map<std::string, std::unique_ptr<Resident>> residents_;
     std::map<std::uint64_t, Connection> connections_;
     std::uint64_t next_connection_ = 1;

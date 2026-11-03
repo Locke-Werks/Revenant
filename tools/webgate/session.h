@@ -76,6 +76,11 @@ public:
     void remember(std::uint64_t vrx, const rpc::VrxParams& params);
     void forget(std::uint64_t vrx);
 
+    // The phone's per-receiver transcription choice, Auto unless it set one.
+    // Kept beside the params so a recreated receiver gets it back.
+    [[nodiscard]] rpc::TranscribeChoice transcribe_choice(std::uint64_t vrx) const;
+    void set_transcribe_choice(std::uint64_t vrx, rpc::TranscribeChoice choice);
+
     // ---- Requested stream state ----
     // Recorded by dispatch. Task 10 wires the actual spectrum and audio
     // streams to these; until then they are only state.
@@ -91,6 +96,7 @@ public:
 private:
     std::unique_ptr<rpc::Client> client_;
     std::map<std::uint64_t, rpc::VrxParams> owned_;
+    std::map<std::uint64_t, rpc::TranscribeChoice> transcribe_;
     std::optional<View> view_;
     std::optional<std::uint64_t> audio_vrx_;
     bool keep_listening_ = false;
