@@ -57,6 +57,7 @@
 #include "core/rpc/types.h"
 #include "tools/webgate/audio_opus.h"
 #include "tools/webgate/hls_playlist.h"
+#include "tools/webgate/display_sync.h"
 #include "tools/webgate/session.h"
 
 namespace revenant::webgate {
@@ -150,6 +151,11 @@ struct StreamsConfig {
     std::size_t max_queued_opus = 25;
 
     double target_fps = 20.0;
+
+    // The desktop's display settings, read on every tick. Empty is the
+    // desktop's defaults; the gateway reads the registry through a
+    // DisplaySettingsSource, and tests supply their own.
+    std::function<ui::DisplaySettings()> display_settings;
 
     // JSON queued for a socket that is not taking it. Past either limit an
     // attached socket is closed (the phone reconnects and resumes); a
@@ -260,7 +266,7 @@ private:
     void pump();
     void queue_text(std::string json);
     [[nodiscard]] std::optional<std::vector<std::uint8_t>> cut_spectrum(
-        const rpc::SpectrumFrame& frame) const;
+        const rpc::SpectrumFrame& frame);
 
     void refresh_source();
     // Sends a transcriptionStatus event when the engine's speech state has
@@ -269,6 +275,10 @@ private:
     // Reads the detections and sends the ones near the view. Sends nothing on
     // a failed read, so a detector that is not ready does not reach the phone.
     void refresh_detections();
+    // Takes the desktop's settings in and sends a display event when the
+    // colours they give are not the ones last sent.
+    void refresh_display();
+    void send_display_if_changed();
     [[nodiscard]] std::string source_event() const;
     void subscribe_spectrum(std::uint32_t every_nth);
     void settle_every_nth(const rpc::SpectrumFrame& frame);
@@ -339,6 +349,12 @@ private:
     std::optional<std::uint64_t> announced_hls_;
     std::set<std::uint64_t> decoded_tried_;
     bool vrx_events_resubscribed_ = false;
+
+    // The desktop's scale state for this phone, and the display event it was
+    // last sent. The view is the one the last row was cut for.
+    PhoneDisplay display_;
+    std::string sent_display_;
+    std::optional<View> display_view_;
 };
 
 }  // namespace revenant::webgate

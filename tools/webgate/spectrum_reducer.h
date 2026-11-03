@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -20,12 +21,42 @@ struct View {
 };
 
 struct ReducedFrame {
+    // The waterfall row.
     std::vector<std::uint8_t> px;
     float offset_db = 0.0f;
     float scale_db = 1.0f;
+    // The trace row in its own window, the same width as px, or empty when
+    // the trace is the waterfall row (protocol.h).
+    std::vector<std::uint8_t> trace_px;
+    float trace_offset_db = 0.0f;
+    float trace_scale_db = 1.0f;
     std::uint64_t source_start = 0;
     View view;
 };
+
+// A view's pixels in dB, before quantising. A pixel over no bin, off the
+// spectrum's edge, is -infinity, as is one whose bins are all NaN. The pixels
+// over the spectrum are [first_valid, end_valid), which is contiguous because
+// the spectrum is; first_bin and bin_count are the bins the view covers, and
+// bins_per_px how many bins one pixel takes, at least 1.
+struct ReducedColumns {
+    std::vector<float> db;
+    std::uint32_t first_valid = 0;
+    std::uint32_t end_valid = 0;
+    std::size_t first_bin = 0;
+    std::size_t bin_count = 0;
+    std::size_t bins_per_px = 1;
+    View view;
+};
+
+// reduce() without the quantising, by the same rules.
+ReducedColumns reduce_columns(std::span<const float> power_db, double first_bin_hz, double bin_hz,
+                              const View& view);
+
+// Columns to bytes over [floor_db, ceiling_db], 256 steps, -infinity to 0.
+// offset_db and scale_db are set to the decode: db = offset_db + px * scale_db.
+std::vector<std::uint8_t> quantise(std::span<const float> db, float floor_db, float ceiling_db,
+                                   float& offset_db, float& scale_db);
 
 // Widest row reduce() will produce. View::width_px beyond this is capped, and
 // the returned view reports the capped value.

@@ -20,36 +20,31 @@ constexpr double kEdgeSlack = 1e-9;
 // with kEdgeSlack is stable there.
 constexpr double kTieFraction = 1e-6;
 
+constexpr float kNothing = -std::numeric_limits<float>::infinity();
+
 }  // namespace
 
-ReducedFrame reduce(std::span<const float> power_db, double first_bin_hz, double bin_hz,
-                    std::uint64_t source_start, const View& view_in, float floor_db,
-                    float ceiling_db) {
-    ReducedFrame out;
-    out.source_start = source_start;
+ReducedColumns reduce_columns(std::span<const float> power_db, double first_bin_hz, double bin_hz,
+                              const View& view_in) {
+    ReducedColumns out;
     out.view = view_in;
     // The phone chooses its own width. Nothing is allocated from it unbounded.
     out.view.width_px = std::min(view_in.width_px, kMaxWidthPx);
     const View& view = out.view;
-
-    const bool range_ok = std::isfinite(floor_db) && std::isfinite(ceiling_db) &&
-                          ceiling_db > floor_db;
-    out.offset_db = std::isfinite(floor_db) ? floor_db : 0.0f;
-    out.scale_db = range_ok ? (ceiling_db - floor_db) / 255.0f : 1.0f;
-    out.px.assign(view.width_px, 0);
+    out.db.assign(view.width_px, kNothing);
 
     // Everything below casts doubles to integers, which is undefined for NaN,
     // infinity and out-of-range values, so refuse them here once.
-    if (!range_ok || power_db.empty() || view.width_px == 0 ||
-        !std::isfinite(view.center_hz) || !std::isfinite(view.span_hz) ||
-        !(view.span_hz > 0.0) || !std::isfinite(first_bin_hz) || !std::isfinite(bin_hz) ||
-        !(bin_hz > 0.0)) {
+    if (power_db.empty() || view.width_px == 0 || !std::isfinite(view.center_hz) ||
+        !std::isfinite(view.span_hz) || !(view.span_hz > 0.0) || !std::isfinite(first_bin_hz) ||
+        !std::isfinite(bin_hz) || !(bin_hz > 0.0)) {
         return out;
     }
 
     const auto bins = static_cast<std::int64_t>(power_db.size());
     const double px_hz = view.span_hz / static_cast<double>(view.width_px);
     const double px_bins = px_hz / bin_hz;
+    out.bins_per_px = px_bins >= 2.0 && px_bins < 1e9 ? static_cast<std::size_t>(px_bins) : 1;
     // Subtract the large absolute frequencies (RF in the GHz) from each other
     // before adding the small per-pixel offset, so they cancel exactly.
     const double base_hz = (view.center_hz - first_bin_hz) - view.span_hz / 2.0;
@@ -57,12 +52,9 @@ ReducedFrame reduce(std::span<const float> power_db, double first_bin_hz, double
     const double hi_clamp = static_cast<double>(bins) + 1.0;
     const bool narrow = px_bins < 1.0 - kTieFraction;
 
-    const auto quantise = [&](float db) -> std::uint8_t {
-        const float c = std::clamp(db, floor_db, ceiling_db);
-        const float q = std::round((c - out.offset_db) / out.scale_db);
-        return static_cast<std::uint8_t>(std::clamp(q, 0.0f, 255.0f));
-    };
-
+    std::int64_t lowest_bin = bins;
+    std::int64_t highest_bin = -1;
+    bool any = false;
     for (std::uint32_t i = 0; i < view.width_px; ++i) {
         // Position in bin units where bin j spans [j, j + 1): bin_hz wide and
         // centred on first_bin_hz + j * bin_hz. Clamped before any integer
@@ -87,18 +79,57 @@ ReducedFrame reduce(std::span<const float> power_db, double first_bin_hz, double
             lo = static_cast<std::int64_t>(std::floor(u0 + kEdgeSlack));
             hi = static_cast<std::int64_t>(std::ceil(u1 - kEdgeSlack)) - 1;
         }
-        if (hi < 0 || lo >= bins) continue;  // outside the spectrum: floor
+        if (hi < 0 || lo >= bins) continue;  // outside the spectrum
         lo = std::max<std::int64_t>(lo, 0);
         hi = std::min<std::int64_t>(hi, bins - 1);
 
+        if (!any) out.first_valid = i;
+        any = true;
+        out.end_valid = i + 1;
+        lowest_bin = std::min(lowest_bin, lo);
+        highest_bin = std::max(highest_bin, hi);
+
         // NaN bins carry no signal; a pixel of nothing else stays at the floor.
-        float peak = -std::numeric_limits<float>::infinity();
+        float peak = kNothing;
         for (std::int64_t j = lo; j <= hi; ++j) {
             const float v = power_db[static_cast<std::size_t>(j)];
             if (v > peak) peak = v;  // false for NaN
         }
-        out.px[i] = quantise(peak);
+        out.db[i] = peak;
     }
+    if (any) {
+        out.first_bin = static_cast<std::size_t>(lowest_bin);
+        out.bin_count = static_cast<std::size_t>(highest_bin - lowest_bin + 1);
+    }
+    return out;
+}
+
+std::vector<std::uint8_t> quantise(std::span<const float> db, float floor_db, float ceiling_db,
+                                   float& offset_db, float& scale_db) {
+    const bool range_ok = std::isfinite(floor_db) && std::isfinite(ceiling_db) &&
+                          ceiling_db > floor_db;
+    offset_db = std::isfinite(floor_db) ? floor_db : 0.0f;
+    scale_db = range_ok ? (ceiling_db - floor_db) / 255.0f : 1.0f;
+    std::vector<std::uint8_t> px(db.size(), 0);
+    if (!range_ok) {
+        return px;
+    }
+    for (std::size_t i = 0; i < db.size(); ++i) {
+        const float c = std::clamp(db[i], floor_db, ceiling_db);
+        const float q = std::round((c - offset_db) / scale_db);
+        px[i] = static_cast<std::uint8_t>(std::clamp(q, 0.0f, 255.0f));
+    }
+    return px;
+}
+
+ReducedFrame reduce(std::span<const float> power_db, double first_bin_hz, double bin_hz,
+                    std::uint64_t source_start, const View& view_in, float floor_db,
+                    float ceiling_db) {
+    ReducedFrame out;
+    out.source_start = source_start;
+    const ReducedColumns columns = reduce_columns(power_db, first_bin_hz, bin_hz, view_in);
+    out.view = columns.view;
+    out.px = quantise(columns.db, floor_db, ceiling_db, out.offset_db, out.scale_db);
     return out;
 }
 

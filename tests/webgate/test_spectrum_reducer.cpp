@@ -289,6 +289,33 @@ TEST_CASE("width is capped", "[webgate][spectrum]") {
     CHECK(at_cap.px.size() == 8192);
 }
 
+// The display rules read the columns in dB before they are bytes, and must not
+// count the pixels a pan has moved off the spectrum as noise.
+TEST_CASE("columns in dB mark the pixels over the spectrum", "[webgate][spectrum]") {
+    std::vector<float> bins(64, -40.0f);
+    bins[40] = -10.0f;
+    // A view of 128 Hz centred on the spectrum's right edge, one bin a pixel.
+    const View view{.center_hz = 63.5, .span_hz = 128.0, .width_px = 128};
+    const auto cols = revenant::webgate::reduce_columns(bins, 0.0, 1.0, view);
+    REQUIRE(cols.db.size() == 128);
+    CHECK(cols.first_valid == 0);
+    CHECK(cols.end_valid == 64);
+    CHECK(cols.db[40] == -10.0f);
+    CHECK(std::isinf(cols.db[100]));
+    CHECK(cols.first_bin == 0);
+    CHECK(cols.bin_count == 64);
+    CHECK(cols.bins_per_px == 1);
+
+    // The same bytes reduce() gives, so the split changed nothing.
+    float offset = 0.0f;
+    float scale = 0.0f;
+    const auto px = revenant::webgate::quantise(cols.db, kFloor, kCeil, offset, scale);
+    const auto direct = reduce(bins, 0.0, 1.0, 0, view, kFloor, kCeil);
+    CHECK(px == direct.px);
+    CHECK(offset == direct.offset_db);
+    CHECK(scale == direct.scale_db);
+}
+
 TEST_CASE("every_nth_for", "[webgate][spectrum]") {
     CHECK(every_nth_for(305.0) == 15);
     CHECK(every_nth_for(10.0) == 1);

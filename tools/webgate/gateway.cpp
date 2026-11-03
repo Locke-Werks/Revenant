@@ -137,6 +137,9 @@ namespace {
 {
     StreamsConfig config;
     config.hls = &hls;
+    // One reader for every phone: they all follow the same desktop.
+    auto display = std::make_shared<DisplaySettingsSource>(registry_display_reader());
+    config.display_settings = [display] { return display->current(); };
     return config;
 }
 

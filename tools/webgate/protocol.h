@@ -33,8 +33,15 @@ namespace revenant::webgate {
 enum class Tag : std::uint8_t { Spectrum = 1, Opus = 2 };
 
 // tag u8, offset_db f32, scale_db f32, source_start u64, center_hz f64,
-// span_hz f64, width_px u32, px[width_px]
+// span_hz f64, width_px u32, px[width_px], then the trace: trace_offset_db
+// f32, trace_scale_db f32, trace_px[width_px].
+//
+// px is the waterfall row, quantised to the desktop waterfall's ends, and
+// trace_px the spectrum trace, smoothed and quantised to the desktop
+// spectrum's ends (display_sync.h); each decodes as offset + px * scale. A
+// frame that stops after px has no trace of its own and draws px.
 inline constexpr std::size_t kSpectrumHeaderSize = 1 + 4 + 4 + 8 + 8 + 8 + 4;
+inline constexpr std::size_t kSpectrumTraceHeaderSize = 4 + 4;
 
 // tag u8, vrx u64, seq u32, packet[...]
 inline constexpr std::size_t kOpusHeaderSize = 1 + 8 + 4;
@@ -94,10 +101,15 @@ inline constexpr std::string_view kOps[] = {
 // tracks near the phone's view, sent each poll while a view is set. id is the
 // track id as a decimal string (a UInt64 does not survive a JSON number);
 // state is "live" or "held"; label is a modulation name or empty.
+//
+// "display" is the desktop's colours for the phone's waterfall and trace,
+// {waterfall, spectrum, trace, background}; display_sync.h has the shape. It
+// is sent on connect, on resume and when the desktop's settings change them.
 inline constexpr std::string_view kEvents[] = {
     "vrxStatus", "decoded", "transcript", "transcriptionStatus",
     "source",    "link",    "vrxRemoved", "hls",
     "hello",     "ping",    "vrxEventsEnded", "detections",
+    "display",
 };
 
 [[nodiscard]] bool is_known_op(std::string_view op);

@@ -1,7 +1,9 @@
 #include "tools/webgate/phone_streams.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <limits>
 #include <span>
 #include <utility>
 #include <variant>
@@ -254,6 +256,23 @@ void PhoneStreams::start()
 
     refresh_source();
     refresh_transcription();
+    refresh_display();
+}
+
+void PhoneStreams::refresh_display()
+{
+    display_.set_settings(config_.display_settings ? config_.display_settings()
+                                                   : ui::DisplaySettings{});
+    send_display_if_changed();
+}
+
+void PhoneStreams::send_display_if_changed()
+{
+    const std::string& now = display_.event();
+    if (now != sent_display_) {
+        sent_display_ = now;
+        queue_text(now);
+    }
 }
 
 void PhoneStreams::subscribe_vrx_events()
@@ -341,6 +360,9 @@ void PhoneStreams::tick()
     if (!last_detection_poll_ || t - *last_detection_poll_ >= config_.detection_poll) {
         refresh_detections();
     }
+    // The settings source re-reads the registry on its own interval, so this
+    // is a comparison on most ticks.
+    refresh_display();
 
     bool dropped = false;
     for (auto it = hls_.begin(); it != hls_.end();) {
@@ -401,6 +423,8 @@ void PhoneStreams::announce_state()
         sent_transcription_ = transcription_;
         queue_text(transcription_status_event(*transcription_));
     }
+    sent_display_ = display_.event();
+    queue_text(sent_display_);
     if (announced_hls_) {
         if (const auto it = hls_.find(*announced_hls_);
             it != hls_.end() && it->second.segmenter && !it->second.ends_at) {
@@ -548,7 +572,7 @@ void PhoneStreams::stop_spectrum()
 }
 
 std::optional<std::vector<std::uint8_t>> PhoneStreams::cut_spectrum(
-    const rpc::SpectrumFrame& frame) const
+    const rpc::SpectrumFrame& frame)
 {
     const auto& view = session_.view();
     if (!view || frame.power_db.empty()) {
@@ -569,10 +593,56 @@ std::optional<std::vector<std::uint8_t>> PhoneStreams::cut_spectrum(
         floor_db = -140.0F;
         ceiling_db = 0.0F;
     }
-    const auto reduced =
-        reduce(frame.power_db, first_bin_hz, bin_hz, frame.start, *view, floor_db, ceiling_db);
-    if (reduced.px.empty()) {
+    const ReducedColumns columns = reduce_columns(frame.power_db, first_bin_hz, bin_hz, *view);
+    if (columns.db.empty()) {
         return std::nullopt;
+    }
+
+    if (display_view_ && (display_view_->center_hz != view->center_hz ||
+                          display_view_->span_hz != view->span_hz ||
+                          display_view_->width_px != view->width_px)) {
+        display_.view_changed();
+    }
+    display_view_ = *view;
+
+    ReducedFrame reduced;
+    reduced.source_start = frame.start;
+    reduced.view = columns.view;
+    // Only the pixels over the spectrum are the desktop's columns: the ones a
+    // pan has moved off its edge are no level at all, and draw the bottom.
+    std::vector<float> waterfall(columns.db.size(), -std::numeric_limits<float>::infinity());
+    std::vector<float> trace = waterfall;
+    if (columns.end_valid > columns.first_valid) {
+        std::vector<float> shown_columns(columns.db.begin() + columns.first_valid,
+                                         columns.db.begin() + columns.end_valid);
+        // A pixel of NaN bins inside the spectrum is the floor sentinel the
+        // desktop's reduction would carry, not a hole in the history.
+        for (float& c : shown_columns) {
+            if (!std::isfinite(c)) {
+                c = ui::kSpectrumFloorDb;
+            }
+        }
+        const std::span<const float> whole(frame.power_db);
+        const DisplayFrame facts{frame.start, frame.count, source_rate_, first_bin_hz, floor_db,
+                                 ceiling_db};
+        const DisplayRow row =
+            display_.take(facts, whole, whole.subspan(columns.first_bin, columns.bin_count),
+                          shown_columns, columns.bins_per_px);
+        std::copy(shown_columns.begin(), shown_columns.end(),
+                  waterfall.begin() + columns.first_valid);
+        std::copy(row.trace_columns.begin(), row.trace_columns.end(),
+                  trace.begin() + columns.first_valid);
+        floor_db = row.waterfall.floor_db;
+        ceiling_db = row.waterfall.ceiling_db;
+        reduced.trace_px = quantise(trace, row.trace.floor_db, row.trace.ceiling_db,
+                                    reduced.trace_offset_db, reduced.trace_scale_db);
+        send_display_if_changed();
+    }
+    reduced.px = quantise(waterfall, floor_db, ceiling_db, reduced.offset_db, reduced.scale_db);
+    if (reduced.trace_px.empty()) {
+        reduced.trace_px = reduced.px;
+        reduced.trace_offset_db = reduced.offset_db;
+        reduced.trace_scale_db = reduced.scale_db;
     }
     return encode(reduced);
 }

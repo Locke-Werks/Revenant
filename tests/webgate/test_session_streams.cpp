@@ -63,6 +63,8 @@ struct Rig {
     std::function<revenant::Expected<revenant::rpc::TranscriptionStatus>()> speech;
     // Stands in for the engine's detections when set.
     std::function<revenant::Expected<revenant::rpc::DetectionList>(double, double)> detections;
+    // Stands in for the desktop's registry when set.
+    std::function<revenant::ui::DisplaySettings()> display;
     std::unique_ptr<PhoneSession> session;
     std::unique_ptr<PhoneStreams> streams;
 
@@ -87,7 +89,8 @@ struct Rig {
         config.max_queued_text = max_queued_text;
         config.transcription_status = speech;
         config.detections = detections;
-        streams = std::make_unique<PhoneStreams>(*session, &socket, strand, config);
+        config.display_settings = display;
+        streams =std::make_unique<PhoneStreams>(*session, &socket, strand, config);
         streams->start();
         strand.run_pending();
     }
@@ -512,6 +515,47 @@ TEST_CASE("transcriptionStatus goes out on connect, on change, and not otherwise
         rig.attach();
         CHECK(count_events(rig.socket, "transcriptionStatus") == 0);
     }
+}
+
+// Rejects a display event sent once at connect and never again, sent every
+// tick, or missing from a resumed socket; and a frame without its trace row.
+TEST_CASE("display goes out on connect, on change and on resume", "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.use_fake_clock = true;
+    revenant::ui::DisplaySettings desktop;
+    rig.display = [&desktop] { return desktop; };
+    rig.open(still_engine());
+    rig.attach();
+    REQUIRE(count_events(rig.socket, "display") == 1);
+
+    auto poll = [&] {
+        rig.fake_now += std::chrono::seconds(2);
+        rig.streams->tick();
+        rig.strand.run_pending();
+    };
+    poll();
+    CHECK(count_events(rig.socket, "display") == 1);
+
+    desktop.waterfall_theme = revenant::ui::colour_map::theme_by_id("amber");
+    poll();
+    CHECK(count_events(rig.socket, "display") == 2);
+    poll();
+    CHECK(count_events(rig.socket, "display") == 2);
+
+    rig.streams->announce_state();
+    rig.strand.run_pending();
+    CHECK(count_events(rig.socket, "display") == 3);
+
+    rig.command(R"({"id":1,"op":"setView","args":{"centerHz":100000000,"spanHz":2000000,"widthPx":800}})");
+    rig.streams->deliver_spectrum(synthetic_frame(0));
+    rig.strand.run_pending();
+    REQUIRE(rig.socket.count(Kind::Spectrum) == 1);
+    const auto frame = std::find_if(rig.socket.sent.begin(), rig.socket.sent.end(),
+                                    [](const auto& m) { return m.kind == Kind::Spectrum; });
+    CHECK(frame->binary.size() == revenant::webgate::kSpectrumHeaderSize + 800 +
+                                      revenant::webgate::kSpectrumTraceHeaderSize + 800);
 }
 
 TEST_CASE("slow socket drops oldest Opus", "[gpu][webgate][streams]")

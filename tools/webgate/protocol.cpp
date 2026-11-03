@@ -101,7 +101,11 @@ Expected<JsonValue::Reader> arg(const Command& c, std::string_view key) {
 
 std::vector<std::uint8_t> encode(const ReducedFrame& frame) {
     std::vector<std::uint8_t> out;
-    out.reserve(kSpectrumHeaderSize + frame.px.size());
+    // A trace of another width could not be read against width_px, so it is
+    // left off rather than sent malformed.
+    const bool trace = !frame.trace_px.empty() && frame.trace_px.size() == frame.px.size();
+    out.reserve(kSpectrumHeaderSize + frame.px.size() +
+                (trace ? kSpectrumTraceHeaderSize + frame.trace_px.size() : 0));
     out.push_back(static_cast<std::uint8_t>(Tag::Spectrum));
     put_f32(out, frame.offset_db);
     put_f32(out, frame.scale_db);
@@ -110,6 +114,11 @@ std::vector<std::uint8_t> encode(const ReducedFrame& frame) {
     put_f64(out, frame.view.span_hz);
     put_u32(out, static_cast<std::uint32_t>(frame.px.size()));
     out.insert(out.end(), frame.px.begin(), frame.px.end());
+    if (trace) {
+        put_f32(out, frame.trace_offset_db);
+        put_f32(out, frame.trace_scale_db);
+        out.insert(out.end(), frame.trace_px.begin(), frame.trace_px.end());
+    }
     return out;
 }
 

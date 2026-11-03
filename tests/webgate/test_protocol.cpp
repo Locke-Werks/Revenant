@@ -42,6 +42,28 @@ TEST_CASE("Spectrum frame has the exact little-endian layout", "[webgate][protoc
     CHECK(got.size() == wg::kSpectrumHeaderSize + 4);
 }
 
+// The trace row follows the waterfall row with its own window, so a phone that
+// reads only the first part still finds the header where it always was.
+TEST_CASE("Spectrum frame carries the trace row after the waterfall row", "[webgate][protocol]") {
+    wg::ReducedFrame f;
+    f.px = {0x10, 0x20};
+    f.trace_px = {0x30, 0x40};
+    f.trace_offset_db = 1.0f;
+    f.trace_scale_db = -2.0f;
+    f.view = {1.0, 2.0, 2};
+
+    const Bytes got = wg::encode(f);
+    REQUIRE(got.size() == wg::kSpectrumHeaderSize + 2 + wg::kSpectrumTraceHeaderSize + 2);
+    const Bytes tail(got.begin() + static_cast<std::ptrdiff_t>(wg::kSpectrumHeaderSize), got.end());
+    const Bytes want = {
+        0x10, 0x20,              // px
+        0x00, 0x00, 0x80, 0x3F,  // trace_offset_db
+        0x00, 0x00, 0x00, 0xC0,  // trace_scale_db
+        0x30, 0x40,              // trace_px
+    };
+    CHECK(tail == want);
+}
+
 TEST_CASE("Spectrum width on the wire is the pixel count", "[webgate][protocol]") {
     wg::ReducedFrame f;
     f.px = {1, 2, 3};
@@ -125,7 +147,7 @@ TEST_CASE("Every named op parses and the list is exact", "[webgate][protocol]") 
         INFO(op);
         CHECK(c.has_value());
     }
-    CHECK(std::size(wg::kEvents) == 12);
+    CHECK(std::size(wg::kEvents) == 13);
 }
 
 TEST_CASE("parse_command refuses an unknown op and names it", "[webgate][protocol]") {
