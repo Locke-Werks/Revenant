@@ -479,7 +479,15 @@ socket sat in CLOSE_WAIT.
   whose engine calls may take up to 60 s, run on a worker thread with the
   session's Client, never on the event loop. That phone's later commands wait
   behind it in order and its polls are skipped until the reply, which arrives
-  as an error at the deadline if the engine does not answer.
+  as an error at the deadline if the engine does not answer. The held
+  commands then replay under one shared 2 s wait, and none at all when the
+  slow command timed out, so they fail at once. At most 64 are held; past that
+  a command is answered `busy: ...; try again`. Shutting the gateway down can
+  wait for a slow command's worker, up to its 60 s deadline.
+- addVrx and setCalibration run on the loop under the 2 s cap, though the
+  engine allows them 15 s. On a GPU busy with speech to text the phone may be
+  told one failed while the engine finishes it anyway; the receiver list the
+  phone gets next shows what is really there.
 - **Every other command** runs on the event loop, waits once, and for at most
   2 s. A command the engine does not answer gets an error reply,
   `... the engine did not answer within 2 s`, and the session is usable

@@ -243,3 +243,42 @@ TEST_CASE("a stalled openSource runs off the loop: ticks and pings go on, later 
     CHECK(took < 3.0);
     CHECK(reply_to(socket, 52).find(R"("ok":true)") != std::string::npos);
 }
+
+TEST_CASE("commands held behind a stalled slow command replay without waiting, and the "
+          "queue is capped",
+          "[webgate][deadline]")
+{
+    StallRig rig;
+    rig.use_workers(500ms);
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+
+    rig.engine.answer(false);
+    rig.hub->text(id, R"({"id":60,"op":"openSource","args":{"uri":"synthetic:"}})");
+    // Ten that each call the engine, then enough more to pass the cap.
+    const std::size_t extra = revenant::webgate::kMaxHeldCommands - 10 + 3;
+    for (std::uint64_t n = 0; n < 10 + extra; ++n) {
+        rig.hub->text(id, R"({"id":)" + std::to_string(100 + n) +
+                              R"(,"op":"setCenter","args":{"hz":100000000}})");
+    }
+    rig.strand.run_pending();
+    // Past the cap, refused at once rather than queued.
+    const std::uint64_t last = 100 + 10 + extra - 1;
+    CHECK(reply_to(socket, last).find("busy") != std::string::npos);
+    CHECK(reply_to(socket, 100).empty());
+
+    // Wait for the worker to give up, without running the strand.
+    std::this_thread::sleep_for(800ms);
+    // Running the reply and every held command is the loop's cost: the slow
+    // command timed out, so none of them waits.
+    const auto start = Clock::now();
+    rig.strand.run_pending();
+    const double took = seconds_since(start);
+    CHECK(took < 1.0);
+    CHECK(reply_to(socket, 60).find("did not answer") != std::string::npos);
+    for (std::uint64_t n = 100; n < 110; ++n) {
+        const std::string reply = reply_to(socket, n);
+        INFO(reply);
+        CHECK(reply.find(R"("ok":false)") != std::string::npos);
+    }
+}

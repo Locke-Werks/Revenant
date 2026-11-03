@@ -384,6 +384,16 @@ void PhoneHub::text(std::uint64_t id, std::string_view text)
     if (connection.slow) {
         // Behind a slow command, in order: a phone that opens a source and
         // then adds a receiver means the receiver to land on the new source.
+        // Capped, so a phone cannot grow the queue without bound while the
+        // engine is stalled; past the cap a command is refused at once.
+        if (connection.slow_held.size() >= kMaxHeldCommands) {
+            if (command) {
+                send_bare(id, error_reply(command->id,
+                                          "busy: waiting for an earlier command the engine has "
+                                          "not answered yet; try again"));
+            }
+            return;
+        }
         connection.slow_held.emplace_back(text);
         return;
     }
@@ -423,7 +433,7 @@ void PhoneHub::run_slow(std::uint64_t id, Connection& connection, const Command&
 {
     Resident& resident = *connection.resident;
     connection.slow = true;
-    resident.slow_in_flight = true;
+    ++resident.slow_in_flight;
     // The Client is shared so it outlives a session destroyed while this
     // runs; the work touches nothing else of the hub's.
     work_runner_([this, id, token = resident.token, command,
@@ -446,8 +456,8 @@ void PhoneHub::slow_done(std::uint64_t id, const std::string& token, const Comma
                          std::string reply, bool stalled)
 {
     Resident* resident = find_token(token);
-    if (resident != nullptr) {
-        resident->slow_in_flight = false;
+    if (resident != nullptr && resident->slow_in_flight > 0) {
+        --resident->slow_in_flight;
     }
     const auto it = connections_.find(id);
     if (it == connections_.end()) {
@@ -456,13 +466,16 @@ void PhoneHub::slow_done(std::uint64_t id, const std::string& token, const Comma
     }
     auto& connection = it->second;
     connection.slow = false;
+    // One scope for the reply's refreshes and every held command replayed
+    // below, so together they wait once: text() opens its own scope inside
+    // this one, and a spent poll scope around a call fails it at once. When
+    // the engine just failed to answer the slow command it starts spent, so
+    // nothing here waits at all.
+    rpc::CallDeadline once(kLoopCommandDeadline, true);
+    if (stalled) {
+        once.mark_timed_out();
+    }
     if (resident != nullptr && connection.resident == resident) {
-        rpc::CallDeadline once(kLoopCommandDeadline, true);
-        // The engine just failed to answer this command, so the refreshes
-        // that follow it are skipped rather than each waiting on the loop.
-        if (stalled) {
-            once.mark_timed_out();
-        }
         resident->streams->on_reply(command, std::move(reply));
     } else {
         send_bare(id, std::move(reply));
@@ -672,7 +685,7 @@ void PhoneHub::tick()
 
     std::vector<std::string> expired;
     for (auto& [token, resident] : residents_) {
-        if (poll_now && !resident->slow_in_flight) {
+        if (poll_now && resident->slow_in_flight == 0) {
             resident->streams->tick();
         }
         if (resident->connection) {
@@ -732,7 +745,7 @@ void PhoneHub::recover_dead_sessions(std::chrono::steady_clock::time_point t)
         return;
     }
     for (auto& [token, resident] : residents_) {
-        if (resident->slow_in_flight || t - resident->last_probe < kProbeInterval) {
+        if (resident->slow_in_flight != 0 || t - resident->last_probe < kProbeInterval) {
             continue;
         }
         resident->last_probe = t;
@@ -771,7 +784,7 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
     auto& old_session = *resident.session;
     // A slow command holds this Client; asking it now would wait behind that
     // on the loop. The next probe after the reply asks instead.
-    if (resident.slow_in_flight || !connection_dead(old_session.client())) {
+    if (resident.slow_in_flight != 0 || !connection_dead(old_session.client())) {
         return false;
     }
 

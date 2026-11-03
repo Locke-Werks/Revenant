@@ -127,6 +127,10 @@ using WorkRunner = std::function<void(std::function<std::function<void()>()> wor
 // on a healthy engine, so a stalled one costs the loop this and no more.
 inline constexpr std::chrono::milliseconds kLoopCommandDeadline{2'000};
 
+// How many commands one phone may have waiting behind a slow command. The
+// app sends a handful at most; beyond this they are refused as busy.
+inline constexpr std::size_t kMaxHeldCommands = 64;
+
 // The holder text a phone's sessions log in with, from its address.
 [[nodiscard]] std::string phone_holder(std::string_view peer);
 
@@ -246,7 +250,7 @@ private:
         // A slow command is out on the work runner with this session's
         // Client. Its polls and probe are skipped meanwhile: they would only
         // queue behind it on that Client and hold the loop doing so.
-        bool slow_in_flight = false;
+        unsigned slow_in_flight = 0;
     };
     struct Connection {
         PhoneSocket* socket = nullptr;
