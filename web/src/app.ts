@@ -4,7 +4,8 @@
 import { HlsPlayer, silentWavUrl } from "./audio/hls_player";
 import { browserMediaSession, KeepListening } from "./audio/keep_listening";
 import { browserLiveAudioDeps, LiveAudio } from "./audio/live";
-import { parseDetections, snapTap, type Detection } from "./detections";
+import { labelAt, labelText, parseDetections, snapTap, type Detection } from "./detections";
+import { encryptedFlag, modeLabel, parseCatalogue, voiceStatus, type DecoderCatalogue } from "./decoders";
 import { attachGestures } from "./gestures";
 import { TuneLimiter } from "./tune_limiter";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
@@ -269,6 +270,16 @@ export function mountApp(root: HTMLElement): AppHandle {
   goLive.addEventListener("click", () => keep.goLive());
   document.addEventListener("visibilitychange", () => keep.visibility(document.hidden));
 
+  // The engine's decoders, asked for on every connect because an engine
+  // restart can bring a different set of vocoder plugins.
+  let catalogue: DecoderCatalogue | null = null;
+  // When each receiver last decoded an encrypted call. A call's flags repeat
+  // every superframe, so one this old has ended or gone clear.
+  const ENCRYPTED_HOLD_MS = 5_000;
+  const encryptedAt = new Map<number, number>();
+  // Detections as the receiver chips read them; the full list lives below.
+  let chipDetections: Detection[] = [];
+
   const receivers = new ReceiverController({
     link: gate,
     audio,
@@ -276,6 +287,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     toast,
     audioNote: (text) => notes.set("audio", text),
     tuneRanges: () => radio.tuneRanges(),
+    decoders: () => catalogue?.decoders ?? null,
   });
 
   sheet = new Sheet({
@@ -283,6 +295,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     setBandwidth: (hz) => receivers.setBandwidth(hz),
     setSquelch: (db) => receivers.setSquelch(db),
     setTranscribe: (c) => receivers.setTranscribe(c),
+    setDecoders: (names) => receivers.setDecoders(names),
     remove: (vrx) => receivers.remove(vrx),
     // The HLS element needs this gesture to play.
     toggleKeepListening: () => {
@@ -387,9 +400,33 @@ export function mountApp(root: HTMLElement): AppHandle {
     const f = transcriptEntry(e);
     if (f) feedModel.add(f);
   });
+  let encryptedTimer: number | undefined;
   link.on("decoded", (e) => {
     const f = decodedEntry(e);
     if (f) feedModel.add(f);
+    const vrx = typeof e.vrx === "number" ? e.vrx : null;
+    const flag = encryptedFlag(e);
+    if (vrx === null || flag === undefined) return;
+    const was = encryptedAt.has(vrx);
+    if (flag) encryptedAt.set(vrx, Date.now());
+    else encryptedAt.delete(vrx);
+    if (was === flag && !flag) return;
+    // Redrawn once the hold runs out, so the chip clears without a message.
+    window.clearTimeout(encryptedTimer);
+    encryptedTimer = window.setTimeout(() => renderReceivers(), ENCRYPTED_HOLD_MS + 50);
+    if (was !== flag) renderReceivers();
+  });
+  link.on("ready", () => {
+    gate.request("listDecoders").then(
+      (reply) => {
+        catalogue = parseCatalogue(reply);
+        sheet!.setCatalogue(catalogue.decoders);
+        renderReceivers();
+      },
+      // An engine that cannot list its decoders leaves the section empty;
+      // DV receivers still get their own decoder from the gateway.
+      () => undefined,
+    );
   });
   // The grabber names the sheet's tabs: a tap opens that tab, and a tap on
   // the tab already showing closes the sheet.
@@ -566,14 +603,29 @@ export function mountApp(root: HTMLElement): AppHandle {
       b.className = "chip rx";
       b.setAttribute("aria-pressed", String(r.vrx === active));
       const flag = r.audioError ? " !" : r.statusUnavailable ? " ?" : "";
-      b.textContent = `${formatMHz(r.hz)} ${r.mode.toUpperCase()}${flag}`;
+      const mode = modeLabel(r.mode);
+      b.textContent = `${formatMHz(r.hz)} ${mode}${flag}`;
+      const tags: { text: string; warn: boolean }[] = [];
+      if (r.vrx === active) {
+        const on = labelAt(r.hz, chipDetections);
+        if (on) tags.push({ text: labelText(on), warn: false });
+      }
+      const call = voiceStatus(r.mode, catalogue?.voiceModes ?? null, Date.now() - (encryptedAt.get(r.vrx) ?? -Infinity) < ENCRYPTED_HOLD_MS);
+      if (call) tags.push({ text: call, warn: true });
+      for (const t of tags) {
+        const s = document.createElement("span");
+        s.className = t.warn ? "rx-tag warn" : "rx-tag";
+        s.textContent = t.text;
+        b.append(s);
+      }
       const note = r.audioError ?? (r.statusUnavailable ? "the gateway could not read this receiver back; shown as sent" : "");
-      b.setAttribute("aria-label", `Receiver ${formatMHz(r.hz)} MHz ${r.mode.toUpperCase()}${note ? `, ${note}` : ""}`);
+      const said = [note, ...tags.map((t) => t.text)].filter((s) => s !== "").join(", ");
+      b.setAttribute("aria-label", `Receiver ${formatMHz(r.hz)} MHz ${mode}${said ? `, ${said}` : ""}`);
       if (note) b.title = note;
       const press = new ChipPress({
         longPress: () => {
           dial.stop();
-          confirmRemove(r.vrx, `${formatMHz(r.hz)} ${r.mode.toUpperCase()}`, b);
+          confirmRemove(r.vrx, `${formatMHz(r.hz)} ${mode}`, b);
         },
         schedule: (fn, ms) => {
           const h = window.setTimeout(fn, ms);
@@ -661,8 +713,19 @@ export function mountApp(root: HTMLElement): AppHandle {
     trace.setColours(colours);
     requestDraw();
   });
+  // The chips are rebuilt only when the active receiver's label text moves,
+  // not on every poll.
+  let chipLabel = "";
   link.on("detections", (e) => {
     detections = parseDetections(e);
+    chipDetections = detections;
+    const act = receivers.list.active === null ? undefined : receivers.list.get(receivers.list.active);
+    const on = act ? labelAt(act.hz, detections) : null;
+    const nextLabel = on ? labelText(on) : "";
+    if (nextLabel !== chipLabel) {
+      chipLabel = nextLabel;
+      renderReceivers();
+    }
     signals.update(detections);
     const boxes = detectionBoxes(detections);
     waterfall.setDetections(boxes, boxCarryRows(pacer.interval));

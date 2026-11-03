@@ -2,6 +2,7 @@
 // receiver, keep listening, and the radio panel.
 
 import { BANDWIDTHS_HZ, formatMHz, MODES, TRANSCRIBE_CHOICES, type Receiver, type TranscribeChoice } from "./receivers";
+import { decodersFor, modeLabel, toggled, type DecoderInfo } from "../decoders";
 
 export const SQUELCH_MIN_DBFS = -140;
 export const SQUELCH_MAX_DBFS = 0;
@@ -11,6 +12,7 @@ export interface SheetDeps {
   setBandwidth(hz: number): void;
   setSquelch(dbfs: number): void;
   setTranscribe(choice: TranscribeChoice): void;
+  setDecoders(names: string[]): void;
   remove(vrx: number): void;
   // Runs in the tap: the HLS element needs the gesture.
   toggleKeepListening(): void;
@@ -47,6 +49,10 @@ export class Sheet {
   private readonly speechLineEl: HTMLElement;
   private readonly keep: HTMLButtonElement;
   private readonly removeBtn: HTMLButtonElement;
+  private readonly decoderRow: HTMLElement;
+  private readonly decoderChips: HTMLElement;
+  private catalogue: readonly DecoderInfo[] = [];
+  private readonly setDecoders: (names: string[]) => void;
   private active: Receiver | null = null;
   private openListeners = new Set<(open: boolean) => void>();
 
@@ -79,6 +85,10 @@ export class Sheet {
       <label for="sh-speech">Speech</label>
       <select id="sh-speech" aria-label="Transcribe this receiver"></select>
     </div>
+    <div class="row decoders-row" id="sh-dec-row">
+      <span class="row-label" id="sh-dec-label">Decoders</span>
+      <div class="modes" role="group" aria-labelledby="sh-dec-label" id="sh-decoders"></div>
+    </div>
     <div class="row">
       <button type="button" class="btn toggle" id="sh-keep" aria-pressed="false">Keep listening</button>
       <button type="button" class="btn danger" id="sh-remove">Remove receiver</button>
@@ -101,6 +111,9 @@ export class Sheet {
     this.speechLineEl = this.el.querySelector("#sh-speech-line")!;
     this.keep = this.el.querySelector("#sh-keep")!;
     this.removeBtn = this.el.querySelector("#sh-remove")!;
+    this.decoderRow = this.el.querySelector("#sh-dec-row")!;
+    this.decoderChips = this.el.querySelector("#sh-decoders")!;
+    this.setDecoders = (names) => deps.setDecoders(names);
     this.extra = this.el.querySelector("#sh-extra")!;
     this.signalsHost = this.el.querySelector("#sh-tab-signals")!;
     this.radioHost = this.el.querySelector("#sh-tab-radio")!;
@@ -128,7 +141,7 @@ export class Sheet {
       b.type = "button";
       b.className = "chip";
       b.dataset.mode = m;
-      b.textContent = m.toUpperCase();
+      b.textContent = modeLabel(m);
       b.setAttribute("aria-pressed", "false");
       b.addEventListener("click", () => {
         if (this.active && this.active.mode !== m) deps.setMode(m);
@@ -203,7 +216,7 @@ export class Sheet {
     const hint = this.el.querySelector<HTMLElement>("#sh-hint")!;
     hint.hidden = r !== null;
     hint.textContent = sheetHint(others);
-    this.title.textContent = r ? `${formatMHz(r.hz)} MHz ${r.mode.toUpperCase()}` : "No receiver";
+    this.title.textContent = r ? `${formatMHz(r.hz)} MHz ${modeLabel(r.mode)}` : "No receiver";
     if (!r) return;
     for (const b of Array.from(this.modes.querySelectorAll<HTMLButtonElement>("button"))) {
       b.setAttribute("aria-pressed", String(b.dataset.mode === r.mode));
@@ -223,6 +236,40 @@ export class Sheet {
     if (r.squelchDbfs !== null && document.activeElement !== this.squelch) {
       this.squelch.value = String(Math.round(r.squelchDbfs));
       this.squelchOut.textContent = `${Math.round(r.squelchDbfs)} dB`;
+    }
+    this.renderDecoders(r);
+  }
+
+  // The engine's decoders, from listDecoders.
+  setCatalogue(all: readonly DecoderInfo[]): void {
+    this.catalogue = all;
+    this.renderDecoders(this.active);
+  }
+
+  // One toggle per decoder that reads the receiver's mode. Rebuilt only when
+  // the offered names change, so a tap's pressed state is not lost mid-render.
+  private renderDecoders(r: Receiver | null): void {
+    const offered = r ? decodersFor(r.mode, this.catalogue) : [];
+    this.decoderRow.hidden = offered.length === 0;
+    const key = offered.map((d) => d.name).join(",");
+    if (this.decoderChips.dataset.names !== key) {
+      this.decoderChips.dataset.names = key;
+      this.decoderChips.textContent = "";
+      for (const d of offered) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "chip";
+        b.dataset.decoder = d.name;
+        b.textContent = d.name.toUpperCase();
+        b.title = d.description;
+        b.addEventListener("click", () => {
+          if (this.active) this.setDecoders(toggled(this.active.decoders, d.name));
+        });
+        this.decoderChips.append(b);
+      }
+    }
+    for (const b of Array.from(this.decoderChips.querySelectorAll<HTMLButtonElement>("button"))) {
+      b.setAttribute("aria-pressed", String(r !== null && r.decoders.includes(b.dataset.decoder ?? "")));
     }
   }
 }

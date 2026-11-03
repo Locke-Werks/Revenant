@@ -496,7 +496,13 @@ html:has(.app), html:has(.app) body {
   gap: 8px;
   margin: 4px 0;
 }
-.row label { flex: 0 0 6.5em; color: var(--muted); font-size: 0.9rem; }
+.row label, .row .row-label { flex: 0 0 6.5em; color: var(--muted); font-size: 0.9rem; }
+.decoders-row { align-items: flex-start; }
+.decoders-row .row-label { padding-top: 8px; }
+.decoders-row .modes { flex: 1 1 auto; margin-bottom: 0; }
+/* A receiver chip's detection label and call state, after the frequency. */
+.chip.rx .rx-tag { margin-left: 6px; color: var(--muted); font-size: 0.8em; }
+.chip.rx .rx-tag.warn { color: var(--accent); }
 .row input[type="range"] { flex: 1 1 auto; min-height: var(--hit); accent-color: var(--accent); }
 .row output { flex: 0 0 4.5em; text-align: right; font-family: var(--mono); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 .hint { color: var(--muted); }

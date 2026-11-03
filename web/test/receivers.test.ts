@@ -56,6 +56,7 @@ test("a device that cannot run 2.4 MS/s gets no rate", () => {
 });
 import { sheetHint } from "../src/ui/sheet";
 import type { Detection } from "../src/detections";
+import type { DecoderInfo } from "../src/decoders";
 import {
   CONFIDENCE_MAX,
   CONFIDENCE_MIN,
@@ -180,7 +181,7 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-function rig(ranges: { lowHz: number; highHz: number }[] | null = null) {
+function rig(ranges: { lowHz: number; highHz: number }[] | null = null, catalogue: DecoderInfo[] | null = null) {
   const link = new FakeLink();
   const gate = new ReplaceGate(link);
   const audio = new FakeAudio(gate);
@@ -194,6 +195,7 @@ function rig(ranges: { lowHz: number; highHz: number }[] | null = null) {
     toast: (t) => toasts.push(t),
     tuneRanges: () => ranges,
     audioNote: (t) => notes.push(t),
+    decoders: () => catalogue,
   });
   return { link, gate, audio, keep, ctl, toasts, notes, chips: () => ctl.list.list().map((r) => `${r.vrx}:${r.hz}:${r.mode}`) };
 }
@@ -749,7 +751,7 @@ test("a drag tune for a receiver that is gone is not sent", async () => {
 // ---- Signals tab ---------------------------------------------------------------
 
 function det(id: string, snrDb: number, extra: Partial<Detection> = {}): Detection {
-  return { id, centerHz: 146_520_000, bandwidthHz: 8_000, snrDb, confidence: 0.9, state: "live", label: "", labelConfidence: 0, lastSeen: 0, ...extra };
+  return { id, centerHz: 146_520_000, bandwidthHz: 8_000, snrDb, confidence: 0.9, state: "live", label: "", labelKind: "", labelConfidence: 0, lastSeen: 0, ...extra };
 }
 
 test("signal rows run strongest first, ties by id", () => {
@@ -1046,4 +1048,67 @@ test("a receiver added at the mode's default width reads back as that default", 
   r.link.reply(status(1, 98_100_000, "wfm", { bandwidthHz: 0 }));
   await flush();
   assert.equal(r.ctl.list.get(1)!.bandwidthHz, null);
+});
+
+// ---- Decoders ------------------------------------------------------------------
+
+const RDS: DecoderInfo[] = [{ name: "rds", description: "", input: "realAudio", modes: ["wfm"] }];
+
+test("switching to wfm in the FM broadcast band turns RDS on", async () => {
+  const r = rig(null, RDS);
+  await listening(r, 1);
+  r.ctl.setMode("wfm");
+  r.link.reply(status(2, 146_520_000, "wfm", { replaced: 1, decoders: [] }));
+  await flush();
+  // 146.52 MHz is not broadcast FM: nothing is asked for.
+  assert.ok(r.link.last().op !== "setDecoders");
+
+  r.ctl.tap(98_100_000);
+  r.link.reply(status(2, 98_100_000, "wfm", { decoders: [] }));
+  await flush();
+  r.ctl.setMode("nfm");
+  r.link.reply(status(3, 98_100_000, "nfm", { replaced: 2, decoders: [] }));
+  await flush();
+  r.ctl.setMode("wfm");
+  r.link.reply(status(4, 98_100_000, "wfm", { replaced: 3, decoders: [] }));
+  await flush();
+  assert.deepEqual(r.link.last(), { op: "setDecoders", args: { vrx: 4, names: ["rds"] }, timeoutMs: undefined });
+  r.link.reply({ vrx: 4, decoders: ["rds"] });
+  await flush();
+  assert.deepEqual(r.ctl.list.get(4)!.decoders, ["rds"]);
+});
+
+test("no RDS is asked for when the engine has no rds decoder", async () => {
+  const r = rig(null, []);
+  await listening(r, 1);
+  r.ctl.setMode("wfm");
+  r.link.reply(status(2, 98_100_000, "wfm", { replaced: 1, decoders: [] }));
+  await flush();
+  assert.ok(r.link.last().op !== "setDecoders");
+});
+
+test("setDecoders sends the whole set and a refusal is a short toast", async () => {
+  const r = rig();
+  await listening(r, 1);
+  r.ctl.setDecoders(["pocsag"]);
+  assert.deepEqual(r.link.last().args, { vrx: 1, names: ["pocsag"] });
+  r.link.refuse("names: p25p1 does not read a nfm receiver (it reads p25p1, raw)");
+  await flush();
+  assert.deepEqual(r.toasts, ["Decoder refused: p25p1 does not read a nfm receiver (it reads p25p1, raw)"]);
+  assert.deepEqual(r.ctl.list.get(1)!.decoders, []);
+});
+
+test("a receiver reply carries its decoders onto the chip", async () => {
+  const r = rig();
+  r.ctl.tap(146_520_000);
+  r.link.reply(status(1, 146_520_000, "p25p1", { decoders: ["p25p1"] }));
+  await flush();
+  assert.deepEqual(r.ctl.list.get(1)!.decoders, ["p25p1"]);
+});
+
+test("a decoder the engine ended is reported by name", async () => {
+  const r = rig();
+  await listening(r, 1);
+  r.link.emit("vrxStatus", { event: "vrxStatus", vrx: 1, decoder: "pocsag", decoderError: "the decoder refused 8000 S/s. It needs 22050." });
+  assert.deepEqual(r.toasts, ["pocsag: the decoder refused 8000 S/s"]);
 });

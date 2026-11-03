@@ -14,8 +14,11 @@ import type { GatewayEvent, JsonValue, LinkEvent, Op } from "../protocol";
 import type { LinkEvents, RequestOptions } from "../link";
 import { clampInto, fits, recentreFor, shift, usableSpan, type Offsets, type Span, type TuneRange } from "../band_edge";
 import { passbandHz } from "../markers";
+import { shortRefusal, suggestDecoders, type DecoderInfo } from "../decoders";
 
-export const MODES = ["nfm", "am", "wfm", "usb", "lsb", "cw", "dsb", "sam", "raw"] as const;
+// Analog first, then the digital voice modes, whose voice the engine plays in
+// place of the discriminator once a call is up.
+export const MODES = ["nfm", "am", "wfm", "usb", "lsb", "cw", "dsb", "sam", "raw", "p25p1", "dstar", "tetra", "dmr"] as const;
 export const DEFAULT_MODE = "nfm";
 
 // Widths offered in the sheet; the engine clamps anything its channel cannot
@@ -76,6 +79,8 @@ export interface Receiver {
   // or off, and whether it is being transcribed right now.
   transcribe: TranscribeChoice;
   transcribing: boolean;
+  // The decoders the gateway has on this receiver, as its replies state.
+  decoders: string[];
 }
 
 export const TRANSCRIBE_CHOICES = ["auto", "on", "off"] as const;
@@ -131,6 +136,7 @@ export class ReceiverList {
       audioError: r.audioError ?? was?.audioError ?? null,
       transcribe: r.transcribe ?? was?.transcribe ?? "auto",
       transcribing: r.transcribing ?? was?.transcribing ?? false,
+      decoders: r.decoders ?? was?.decoders ?? [],
     };
     this.items.set(r.vrx, next);
     this.changed();
@@ -264,6 +270,8 @@ export interface ControllerDeps {
   // A sentence about live audio that stays until it no longer holds; null
   // clears it.
   audioNote(text: string | null): void;
+  // The engine's decoders, null until listDecoders has answered.
+  decoders?(): readonly DecoderInfo[] | null;
 }
 
 const NOT_STARTED = "The phone has not started sound yet. Tap the waterfall or a receiver to allow it.";
@@ -612,6 +620,34 @@ export class ReceiverController {
     void this.call("setVrxTranscribe", { vrx, choice });
   }
 
+  // The active receiver's whole decoder set.
+  setDecoders(names: string[]): void {
+    const vrx = this.list.active;
+    if (vrx === null) return;
+    this.applyDecoders(vrx, names);
+  }
+
+  private applyDecoders(vrx: number, names: string[]): void {
+    this.deps.link.request("setDecoders", { vrx, names }).then(
+      (reply) => {
+        const o = reply !== null && typeof reply === "object" && !Array.isArray(reply) ? reply : {};
+        const was = this.list.get(vrx);
+        if (!was || !Array.isArray(o.decoders)) return;
+        const decoders = o.decoders.filter((n): n is string => typeof n === "string");
+        this.list.upsert({ vrx, decoders, statusUnavailable: was.statusUnavailable });
+      },
+      (e: unknown) => this.deps.toast(`Decoder refused: ${shortRefusal(errorText(e))}`, "decoder"),
+    );
+  }
+
+  // A broadcast FM receiver starts with RDS on when the engine has it.
+  private suggest(r: Receiver): void {
+    const all = this.deps.decoders?.() ?? null;
+    if (!all) return;
+    const names = suggestDecoders(r.mode, r.hz, all);
+    if (names && names.some((n) => !r.decoders.includes(n))) this.applyDecoders(r.vrx, names);
+  }
+
   remove(vrx: number): void {
     this.removing.add(vrx);
     this.deps.link.request("removeVrx", { vrx }).then(
@@ -642,6 +678,7 @@ export class ReceiverController {
       if (!r) return;
       this.list.select(r.vrx);
       this.nowPlaying(r);
+      this.suggest(r);
       this.listen(r.vrx);
     });
   }
@@ -675,6 +712,7 @@ export class ReceiverController {
           if (active) this.list.select(r.vrx);
           this.nowPlaying(r);
         }
+        if (r && op === "setMode") this.suggest(this.list.get(r.vrx) ?? r);
         gate.release(vrx);
       },
       (e: unknown) => {
@@ -716,6 +754,7 @@ export class ReceiverController {
       statusUnavailable: reply.statusUnavailable === true,
       transcribe: choiceOf(reply.transcribe),
       transcribing: typeof reply.transcribing === "boolean" ? reply.transcribing : undefined,
+      decoders: Array.isArray(reply.decoders) ? reply.decoders.filter((n): n is string => typeof n === "string") : undefined,
     });
     if (reply.clamped === true) {
       const why = typeof reply.clampReason === "string" && reply.clampReason !== "" ? reply.clampReason : "the engine clamped this receiver";
@@ -735,6 +774,10 @@ export class ReceiverController {
     if (typeof e.audioError === "string") {
       this.list.upsert({ vrx, audioError: e.audioError, statusUnavailable: this.list.get(vrx)!.statusUnavailable });
       this.deps.toast(e.audioError);
+    }
+    if (typeof e.decoderError === "string") {
+      const name = typeof e.decoder === "string" && e.decoder !== "" ? e.decoder : "decoder";
+      this.deps.toast(`${name}: ${shortRefusal(e.decoderError)}`, "decoder");
     }
   }
 

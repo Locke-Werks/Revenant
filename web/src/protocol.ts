@@ -47,6 +47,8 @@ export const OPS = [
   "setDetection",
   "resume",
   "pong",
+  "listDecoders",
+  "setDecoders",
 ] as const;
 export type Op = (typeof OPS)[number];
 
