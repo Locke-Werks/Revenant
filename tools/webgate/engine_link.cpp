@@ -84,6 +84,15 @@ LinkState EngineLink::state() const
     return state_;
 }
 
+void EngineLink::cancel_waits()
+{
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        cancelled_ = true;
+    }
+    changed_.notify_all();
+}
+
 bool EngineLink::owns_engine() const
 {
     const std::lock_guard<std::mutex> lock(mutex_);
@@ -150,8 +159,13 @@ Expected<std::unique_ptr<rpc::Client>> EngineLink::phone_session(rpc::LoginMode 
         wake_.notify_all();
         // Up is the engine answering the link; Refused and a failed launch
         // will not change by waiting, and the connect below reports them.
+        // While a stop is under way Up is the engine being ended, so this
+        // waits it out; the stop leaves demanded_ alone, and the supervisor
+        // then starts a new engine for this ask.
         changed_.wait_for(lock, config_.demand_wait, [this] {
-            return state_ == LinkState::Up || state_ == LinkState::Refused || demand_failed_;
+            return cancelled_ ||
+                   (!stopping_ && (state_ == LinkState::Up || state_ == LinkState::Refused ||
+                                   demand_failed_));
         });
     }
 
@@ -259,12 +273,25 @@ void EngineLink::stop_own_engine()
     // dongle and the GPU context both: Windows closes every handle at exit.
     process_->stop();
 
-    const std::lock_guard<std::mutex> lock(mutex_);
-    launched_ = false;
-    demanded_ = false;
-    fresh_ = false;
-    ++idle_stops_;
-    idle_.reset();
+    std::string detail = "the engine is stopped until a phone connects";
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        launched_ = false;
+        fresh_ = false;
+        ++idle_stops_;
+        idle_.reset();
+        // Waiting before stopping_ clears, in the same critical section, so a
+        // claim that waited out the stop does not see the old Up and connect
+        // to nothing.
+        published_ = true;
+        state_ = LinkState::Waiting;
+        detail_ = detail;
+        stopping_ = false;
+    }
+    changed_.notify_all();
+    if (callback_) {
+        callback_(LinkState::Waiting, std::move(detail));
+    }
 }
 
 void EngineLink::supervise(const std::stop_token& stop)
@@ -303,18 +330,20 @@ void EngineLink::supervise(const std::stop_token& stop)
                 continue;
             }
             if (config_.on_demand) {
+                // The decision and stopping_ under one lock with the claims'
+                // last_demand_: see stopping_.
                 lock.lock();
-                const auto last_demand = last_demand_;
-                lock.unlock();
                 const bool idle =
-                    idle_.observe(alive->held, std::chrono::steady_clock::now(), last_demand);
-                if (idle && !ours) {
-                    // Somebody else's engine, which is theirs to stop. The ask
-                    // is over, though, so if it goes away now the link does
-                    // not start one of its own for a phone that has left.
-                    lock.lock();
+                    idle_.observe(alive->held, std::chrono::steady_clock::now(), last_demand_);
+                if (idle) {
+                    // The ask is over. Somebody else's engine is theirs to
+                    // stop, but if it goes away now the link does not start
+                    // one of its own for a phone that has left.
                     demanded_ = false;
-                    lock.unlock();
+                    stopping_ = ours;
+                }
+                lock.unlock();
+                if (idle && !ours) {
                     idle_.reset();
                 } else if (idle) {
                     stop_own_engine();
@@ -323,7 +352,6 @@ void EngineLink::supervise(const std::stop_token& stop)
                                  "other client has held it for %.1f s; the next phone starts it "
                                  "again\n",
                                  static_cast<double>(config_.idle_grace.count()) / 1000.0);
-                    publish(LinkState::Waiting, "the engine is stopped until a phone connects");
                     continue;
                 }
             }

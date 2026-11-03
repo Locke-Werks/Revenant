@@ -228,6 +228,10 @@ public:
 
     [[nodiscard]] LinkState state() const;
 
+    // Releases every phone_session waiting for an engine, now and later, so
+    // a shutdown can join the threads waiting in it. Any thread.
+    void cancel_waits();
+
     // Whether an engine this link started is running. Any thread.
     [[nodiscard]] bool owns_engine() const;
 
@@ -272,6 +276,12 @@ private:
     // did, whether the supervisor has given up on the current ask, and
     // whether the running engine is one of ours nobody has been handed yet.
     bool demanded_ = false;                  // guarded by mutex_
+    // Set under the same lock that reads last_demand_ for the stop decision,
+    // and cleared only once the engine is gone, so a claim either lands
+    // before the decision (and the stop is not taken) or waits out the stop
+    // and starts a new engine. Never a claim on an engine being ended.
+    bool stopping_ = false;                  // guarded by mutex_
+    bool cancelled_ = false;                 // guarded by mutex_
     bool poked_ = false;                     // guarded by mutex_
     bool demand_failed_ = false;             // guarded by mutex_
     bool fresh_ = false;                     // guarded by mutex_
