@@ -89,6 +89,10 @@ export interface LinkEvents {
   lease: LeaseEvent;
   vrx: GatewayEvent;
   vrxList: GatewayEvent;
+  calls: GatewayEvent;
+  talkgroups: GatewayEvent;
+  trunk: GatewayEvent;
+  dv: GatewayEvent;
 }
 export type LinkEventName = keyof LinkEvents;
 

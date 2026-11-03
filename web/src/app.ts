@@ -35,6 +35,8 @@ import { levelInBand, TopBar } from "./ui/top_bar";
 import { CentreTuner } from "./centre_tuner";
 import { clampToRanges } from "./band_edge";
 import { LeaseScreen, leaseScreenHtml } from "./ui/lease_screen";
+import { DvPanel } from "./ui/dv_panel";
+import { DV_KEY, DvReplay, hasDvReceiver, NO_DV, parseDv, parseRows, parseTrunk, type DvState } from "./dv";
 
 export function appScreenHtml(): string {
   return `
@@ -374,6 +376,71 @@ export function mountApp(root: HTMLElement): AppHandle {
   // resume, which can disagree with what this relaunched page shows. The
   // slider is the phone's record, so it is sent on every connect.
   link.on("ready", () => sendConfidence(signals.value()));
+
+  // ---- DV tab ----------------------------------------------------------------
+  // Shown while a digital voice receiver exists. Auto DV, trunk following and
+  // the call log all run in the gateway (tools/webgate/dv_feed.h); this draws
+  // them and sends the switches.
+  const report = (e: unknown) => toast(e instanceof Error ? e.message : String(e));
+  let dvState: DvState = NO_DV;
+  const dvReplay = new DvReplay(
+    {
+      autoDv: (on) => {
+        link.request("autoDv", { on }).catch(report);
+      },
+      follow: (vrx, on, maxFollowers) => {
+        link.request("trunkFollow", { vrx, on, maxFollowers }).catch(report);
+      },
+      rules: (r) => {
+        link.request("setTrunkRules", r ? { allow: r.allow, deny: r.deny, priority: r.priority } : {}).catch(report);
+      },
+    },
+    () => prefs.getItem(DV_KEY),
+    (text) => prefs.setItem(DV_KEY, text),
+  );
+  const dvPanel = new DvPanel({
+    setAutoDv: (on) => dvReplay.setAutoDv(on),
+    setFollow: (vrx, on, maxFollowers) => {
+      const hz = receivers.list.get(vrx)?.hz ?? dvReplay.state.follow?.hz ?? 0;
+      dvReplay.setFollow(vrx, hz, on, maxFollowers);
+    },
+    savedMaxFollowers: () => dvReplay.state.maxFollowers,
+    receivers: () => receivers.list.list(),
+    select: (vrx) => receivers.select(vrx),
+  });
+  sheet.dvHost.append(dvPanel.el);
+  const syncDv = () => {
+    const list = receivers.list.list();
+    // Auto DV on with nothing found yet still shows the tab, so it can be
+    // turned off where it was turned on.
+    sheet!.setDvShown(hasDvReceiver(list) || dvState.autoDv);
+    const id = receivers.list.active;
+    const r = id === null ? undefined : receivers.list.get(id);
+    dvPanel.setActive(r ? { vrx: r.vrx, mode: r.mode } : null);
+  };
+  receivers.list.onChange(syncDv);
+  receivers.list.onChange(() => dvReplay.receivers(receivers.list.list()));
+  link.on("dv", (e) => {
+    dvState = parseDv(e);
+    dvReplay.gateway(dvState);
+    dvPanel.setDv(dvState);
+    syncDv();
+  });
+  link.on("calls", (e) => dvPanel.setCalls(parseRows(e)));
+  link.on("talkgroups", (e) => dvPanel.setGroups(parseRows(e)));
+  link.on("trunk", (e) => dvPanel.setTrunk(parseTrunk(e)));
+  const sendDvTab = (visible: boolean) => {
+    link.request("dvTab", { visible }).catch(() => {});
+  };
+  sheet.onTab((tab) => {
+    dvPanel.setVisible(tab === "dv");
+    sendDvTab(tab === "dv");
+  });
+  link.on("ready", () => {
+    sendDvTab(sheetTab === "dv");
+    // A fresh session after a long lock knows none of the phone's switches.
+    dvReplay.ready(receivers.list.list());
+  });
 
   // ---- Speech, transcripts and the feed -------------------------------------
   const speechModel = new SpeechModel({ link: gate });

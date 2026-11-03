@@ -10,6 +10,7 @@
 #include <variant>
 
 #include "models/rds_text.h"
+#include "models/trunk_aliases.h"
 #include "tools/webgate/dispatch.h"
 #include "tools/webgate/protocol.h"
 #include "tools/webgate/spectrum_reducer.h"
@@ -249,6 +250,7 @@ PhoneStreams::PhoneStreams(PhoneSession& session, PhoneSocket* socket, Strand& s
 PhoneStreams::~PhoneStreams()
 {
     *alive_ = false;
+    release_dv_switches();
     {
         const std::lock_guard lock(inbox_->mutex);
         inbox_->closed = true;
@@ -328,6 +330,9 @@ void PhoneStreams::start()
     static_cast<void>(transcripts);
 
     apply_desktop_switches();
+    refresh_trunk_settings();
+    apply_dv_switches();
+    send_dv_state();
     refresh_source();
     send_receiver_list();
     refresh_transcription();
@@ -493,6 +498,19 @@ void PhoneStreams::on_text(std::string_view text)
     if (command->op == "openSource" || command->op == "setCenter") {
         refresh_source();
     }
+    if (command->op == "autoDv" || command->op == "trunkFollow") {
+        send_dv_state();
+    }
+    if (command->op == "autoDv") {
+        // At once rather than at the next poll, so the switch answers with
+        // the digital voice already on the span, as the desktop's does.
+        last_detection_poll_.reset();
+        refresh_detections();
+    }
+    if (command->op == "trunkFollow" || command->op == "dvTab" || command->op == "setTrunkRules") {
+        next_trunk_poll_.reset();
+        refresh_trunk();
+    }
     if (command->op == "setTranscription") {
         // After the reply, so the phone sees its own answer first.
         refresh_transcription();
@@ -535,6 +553,9 @@ void PhoneStreams::tick()
         refresh_detections();
     }
     refresh_rds();
+    refresh_trunk_settings();
+    refresh_calls();
+    refresh_trunk();
     // The settings source re-reads the registry on its own interval, so this
     // is a comparison on most ticks.
     refresh_display();
@@ -602,6 +623,13 @@ void PhoneStreams::announce_state()
     if (!sent_desktop_.empty()) {
         queue_text(sent_desktop_);
     }
+    sent_dv_.clear();
+    send_dv_state();
+    for (const std::string* sent : {&sent_calls_, &sent_talkgroups_, &sent_trunk_}) {
+        if (!sent->empty()) {
+            queue_text(*sent);
+        }
+    }
     if (announced_hls_ && hls_ && hls_->segmenter && !hls_->ends_at) {
         queue_text(event("hls", JsonObject()
                                     .add_u64("vrx", *announced_hls_)
@@ -629,7 +657,9 @@ void PhoneStreams::refresh_transcription()
 void PhoneStreams::refresh_detections()
 {
     const auto& view = session_.view();
-    if (!view) {
+    // Auto DV reads the detections whether or not a phone is looking, which
+    // is what lets it keep opening receivers while the phone is locked.
+    if (!view && !session_.auto_dv()) {
         return;
     }
     last_detection_poll_ = now();
@@ -638,6 +668,12 @@ void PhoneStreams::refresh_detections()
     const auto list = config_.detections ? config_.detections(session_.min_confidence(), 0.0)
                                          : session_.client().detections(session_.min_confidence(), 0.0);
     if (!list) {
+        return;
+    }
+    if (session_.auto_dv()) {
+        run_auto_dv(*list);
+    }
+    if (!view) {
         return;
     }
 
@@ -1000,6 +1036,8 @@ void PhoneStreams::detach()
     in_flight_ = false;
     opus_.clear();
     pending_spectrum_.reset();
+    // A locked phone is not looking at the tab; it says dvTab again on ready.
+    session_.set_dv_watch(false);
 }
 
 void PhoneStreams::pump()
@@ -1256,6 +1294,7 @@ Status PhoneStreams::subscribe_decoder(std::uint64_t vrx, const std::string& nam
                                                          .add_string("text", m.text)
                                                          .add_u64("sequence", m.sequence)
                                                          .add_raw("fields", fields_json(m.fields))));
+                    self.fold_call(m);
                 });
             };
     auto on_ended = [inbox, vrx, name, generation](const std::string& reason) {
@@ -1445,10 +1484,228 @@ void PhoneStreams::handle_vrx_event(const rpc::VrxEvent& e)
         return;
     }
     known_.erase(e.vrx);
+    session_.auto_dv_spawned().erase(e.vrx);
     session_.forget(e.vrx);
     queue_text(event("vrxRemoved",
                      JsonObject().add_u64("vrx", e.vrx).add_string("reason", e.reason)));
     reconcile();
+}
+
+// ---- The DV tab ------------------------------------------------------------
+
+// The DV tab's diagnostics in one place. MERGE NOTE: cold-start makes the
+// gateway a Windows GUI program that logs to a file; route this through that
+// log when it lands, since stderr then goes nowhere.
+void PhoneStreams::dv_log(const std::string& line)
+{
+    std::fprintf(stderr, "revenant-webgate: %s\n", line.c_str());
+}
+
+void PhoneStreams::release_dv_switches()
+{
+    // The session is ending: leave the engine as this phone found it, so a
+    // desktop that claims it next is not left with following off.
+    auto& client = session_.client();
+    if (session_.plugin_hold()) {
+        static_cast<void>(client.set_plugin_receivers(true));
+        session_.set_plugin_hold(false);
+    }
+    if (const auto follow = session_.trunk_follow()) {
+        static_cast<void>(client.set_trunk_follow(follow->vrx, false, 0));
+    }
+}
+
+std::int64_t PhoneStreams::wall_ms() const
+{
+    if (config_.wall_clock_ms) {
+        return config_.wall_clock_ms();
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+void PhoneStreams::fold_call(const rpc::DecodedMessage& message)
+{
+    if (!ui::is_call_decoder(message.decoder)) {
+        return;
+    }
+    // The receiver's frequency and whose it is, which the message does not
+    // carry; decoded_link.cpp reads the same two off the desktop's rack.
+    std::int64_t hz = 0;
+    std::string owner = "user";
+    if (const auto it = described_.find(message.vrx); it != described_.end()) {
+        hz = source_center_ + it->second.status.params.center;
+        owner = call_owner(it->second.opened_by);
+    }
+    for (const ui::CallFrame& frame : ui::call_frames(message, wall_ms(), hz, owner)) {
+        calls_.apply(frame);
+        calls_dirty_ = true;
+    }
+}
+
+void PhoneStreams::refresh_calls()
+{
+    // A call ends on silence as well as on its terminator, so time alone can
+    // change a row.
+    const bool expired = calls_.expire(wall_ms());
+    if (!expired && !calls_dirty_) {
+        return;
+    }
+    calls_dirty_ = false;
+    std::string calls = calls_event(calls_, aliases_);
+    if (calls != sent_calls_) {
+        sent_calls_ = calls;
+        queue_text(std::move(calls));
+    }
+    std::string groups = talkgroups_event(calls_, aliases_);
+    if (groups != sent_talkgroups_) {
+        sent_talkgroups_ = groups;
+        queue_text(std::move(groups));
+    }
+}
+
+void PhoneStreams::refresh_trunk_settings()
+{
+    if (!config_.desktop_settings) {
+        return;
+    }
+    const DesktopSettings saved = config_.desktop_settings();
+    if (saved.trunk_aliases != aliases_text_) {
+        aliases_text_ = saved.trunk_aliases;
+        aliases_ = ui::parse_trunk_aliases(aliases_text_.value_or("")).value;
+        // Rows name talkgroups by alias, so a new table is a change to them.
+        calls_dirty_ = true;
+        sent_trunk_.clear();
+    }
+    session_.set_desktop_trunk_rules(trunk_rules_from_text(saved.trunk_allow.value_or(""),
+                                                           saved.trunk_deny.value_or(""),
+                                                           saved.trunk_priority.value_or(""))
+                                         .rules);
+    const std::uint32_t max = clamp_followers(saved.trunk_max_followers.value_or(kDefaultMaxFollowers));
+    if (max != session_.desktop_max_followers()) {
+        session_.set_desktop_max_followers(max);
+        send_dv_state();
+    }
+}
+
+void PhoneStreams::send_dv_state()
+{
+    std::string now = dv_state_event(session_);
+    if (now != sent_dv_) {
+        sent_dv_ = now;
+        queue_text(std::move(now));
+    }
+}
+
+void PhoneStreams::apply_dv_switches()
+{
+    auto& client = session_.client();
+    if (session_.auto_dv()) {
+        // Refused only by an engine older than the call; see op_auto_dv.
+        session_.set_plugin_hold(static_cast<bool>(client.set_plugin_receivers(false)));
+    }
+    if (const auto follow = session_.trunk_follow()) {
+        static_cast<void>(client.set_trunk_rules(session_.wanted_trunk_rules()));
+        if (auto set = client.set_trunk_follow(follow->vrx, true, follow->max_followers); !set) {
+            dv_log("the engine refused trunk following: " + set.error().message);
+            session_.set_trunk_follow(std::nullopt);
+        }
+    }
+}
+
+void PhoneStreams::refresh_trunk()
+{
+    if (!session_.dv_watch() && !session_.trunk_follow()) {
+        return;
+    }
+    const auto t = now();
+    if (next_trunk_poll_ && t < *next_trunk_poll_) {
+        return;
+    }
+    const auto status =
+        config_.trunk_status ? config_.trunk_status() : session_.client().trunk_status();
+    std::string json;
+    if (!status) {
+        next_trunk_poll_ = t + config_.trunk_retry;
+        json = trunk_event({}, aliases_, status.error().message);
+    } else {
+        next_trunk_poll_ = t + config_.trunk_poll;
+        if (const auto follow = session_.trunk_follow()) {
+            // Not while this phone's Auto DV holds plugin receivers off: the
+            // Follow it asked for comes back when Auto DV goes off.
+            if (!status->enabled && !session_.plugin_hold()) {
+                // Following stopped by itself (the receiver went, the span
+                // moved): the phone's switch goes with it, as the desktop's
+                // solo does.
+                session_.set_trunk_follow(std::nullopt);
+                send_dv_state();
+            } else {
+                // Reconciled, not sent once, as trunk_link.cpp does, so a
+                // change made elsewhere is put back to what this phone asked.
+                auto& client = session_.client();
+                if (!same_trunk_rules(status->rules, session_.wanted_trunk_rules())) {
+                    static_cast<void>(client.set_trunk_rules(session_.wanted_trunk_rules()));
+                }
+                if (status->max_followers != follow->max_followers) {
+                    static_cast<void>(
+                        client.set_trunk_follow(status->control_vrx, true, follow->max_followers));
+                }
+            }
+        }
+        json = trunk_event(*status, aliases_);
+    }
+    if (json != sent_trunk_) {
+        sent_trunk_ = json;
+        queue_text(std::move(json));
+    }
+}
+
+void PhoneStreams::run_auto_dv(const rpc::DetectionList& list)
+{
+    if (!source_open_) {
+        return;
+    }
+    std::vector<PlacedReceiver> placed;
+    for (const auto vrx : session_.receiver_ids()) {
+        if (const auto* params = session_.last_params(vrx)) {
+            placed.push_back(
+                PlacedReceiver{vrx, static_cast<double>(source_center_ + params->center)});
+        }
+    }
+    auto& spawned = session_.auto_dv_spawned();
+    std::erase_if(spawned, [this](std::uint64_t vrx) { return !session_.has_receiver(vrx); });
+    const AutoDvPass pass = plan_auto_dv(list.detections, placed, spawned,
+                                         session_.auto_dv_dismissed(), session_.audio_vrx());
+    bool changed = false;
+    auto& client = session_.client();
+    for (const auto vrx : pass.retire) {
+        if (client.remove_vrx(vrx)) {
+            spawned.erase(vrx);
+            session_.forget(vrx);
+            changed = true;
+        }
+    }
+    // Held and heard, never selected: the phone stays on what it is listening
+    // to. The mode's own filter, as the desktop's place_startup_receiver.
+    for (const ui::DvSpawn& spawn : pass.open) {
+        rpc::VrxParams params;
+        params.demod = spawn.demod;
+        params.center = static_cast<std::int64_t>(std::llround(spawn.centre_hz)) - source_center_;
+        const auto id = client.add_vrx(params);
+        if (!id) {
+            dv_log("auto DV could not open " + std::string(spawn.protocol) + " at " +
+                   std::to_string(spawn.centre_hz / 1e6) + " MHz: " + id.error().message);
+            continue;
+        }
+        session_.learn(*id, params);
+        spawned.insert(*id);
+        known_.insert(*id);
+        changed = true;
+    }
+    if (changed) {
+        reconcile();
+    }
 }
 
 }  // namespace revenant::webgate

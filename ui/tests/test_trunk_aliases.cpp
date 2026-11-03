@@ -3,8 +3,26 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "models/trunk_aliases.h"
+#include "models/trunk_rules.h"
 
 using namespace revenant::ui;
+
+TEST_CASE("trunk rules: the three texts make one rule set", "[trunk_aliases]") {
+    const auto parsed = parse_trunk_rules("100, 200", "300\nnope", "500=5, 600=x");
+    CHECK(parsed.rules.allow == std::vector<std::uint32_t>{100, 200});
+    CHECK(parsed.rules.deny == std::vector<std::uint32_t>{300});
+    REQUIRE(parsed.rules.priorities.size() == 1);
+    CHECK(parsed.rules.priorities.front().talkgroup == 500);
+    CHECK(parsed.skipped == 2);
+}
+
+TEST_CASE("trunk rules: compared regardless of order", "[trunk_aliases]") {
+    const auto a = parse_trunk_rules("100, 200", "", "500=5, 600=3").rules;
+    auto b = parse_trunk_rules("200, 100", "", "600=3, 500=5").rules;
+    CHECK(same_trunk_rules(a, b));
+    b.priorities.front().priority = 9;
+    CHECK_FALSE(same_trunk_rules(a, b));
+}
 
 TEST_CASE("trunk aliases: parse, skip and format", "[trunk_aliases]") {
     const auto parsed = parse_trunk_aliases(

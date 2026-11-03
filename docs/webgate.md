@@ -283,6 +283,36 @@ live audio and Keep listening, so both play the same thing.
   event gives the id, and the URL stays the same when the listener moves to
   another receiver, so the player is not reloaded. An engine restart builds a
   new session object and the phone is sent a new id and URL.
+### DV tab
+
+A fourth tab, DV, appears while the engine has a digital voice receiver (P25,
+DMR, D-STAR, TETRA, a trunk follower) or Auto DV is on, and goes when the last
+one does; if it was open, Tune opens instead. The logic is the desktop's, run
+in the gateway so it carries on with the phone locked:
+
+- Auto DV opens a receiver on every verified DV signal no receiver covers and
+  never removes one, by `ui/models/dv_spawn.h`. As on the desktop, turning it
+  on holds plugin receivers off, which stops trunk following while it is on;
+  Follow comes back when Auto DV goes off.
+- Auto DV keeps running while the phone is locked only while its gateway
+  session lives: about 30 seconds after the socket drops, or for as long as
+  Keep listening is on. Past that the session ends, and on unlock the phone
+  sends its switches again and Auto DV picks up where the band is.
+- The phone keeps Auto DV, Follow (by its control channel's frequency, since
+  receiver ids change), the follower count and any rules it set in its own
+  storage, and sends them on every connect and resume.
+- When a phone session ends (linger, take over, lease lost), the gateway
+  leaves the engine as the phone found it: it lifts the plugin hold that
+  phone set and stops the following it started. Turning Auto DV off lifts
+  only a hold this phone set.
+- Follow trunk appears for a P25 receiver. The engine follows; the gateway
+  sends the desktop's saved allow, deny and priority lists (`trunk/*` in the
+  desktop's settings) unless the phone set its own, and puts them back if they
+  drift.
+- The calls and talkgroups tables are `ui/models/call_log.h` folded from the
+  decoded messages the gateway already receives, with the desktop's talkgroup
+  aliases. Tap a call to select its receiver.
+
 ### Keep listening
 
 Live audio plays through the page and stops when iOS suspends it. Keep
@@ -466,6 +496,11 @@ clamped, clampReason?, transcribe, transcribing, decoders}`.
 | `resume` | `token`, only as the first command | `{resumed:true}`, then the session's state as events |
 | `takeOver` | none | `{held:true}`, after the new session's `lease`, `hello` and `link` |
 | `pong` | none | none; answers `ping` |
+| `autoDv` | `on` | `{on}` |
+| `trunkFollow` | `vrx`, `on`, `maxFollowers`? (1 to 16, the desktop's count if absent) | `{on, vrx, maxFollowers}` |
+| `trunkStatus` | none | the `trunk` event's fields |
+| `setTrunkRules` | `allow`?, `deny`?, `priority`?, in the desktop panel's text form; none of them goes back to the desktop's | `{allow, deny, priorities, skipped}` |
+| `dvTab` | `visible` | `{visible}` |
 
 `setDetection` is per session and kept across a resume; detections below the
 bar are not sent.
@@ -493,6 +528,14 @@ bar are not sent.
 | `transcriptionStatus` | the `setTranscription` reply | on connect, resume and change |
 | `hls` | `vrx` (the receiver being listened to), `stream` (the session's stream id), `url`; or `url: null` and `error` | when Keep listening's stream starts or fails, and when the listener moves to another receiver (the URL does not change) |
 | `ping` | none | every 15 seconds |
+| `calls` | `items`: `{id, protocol, system, target, alias?, source, group, encrypted, emergency, frequencyHz, vrx, slot, owner, firstMs, lastMs, state, count}`, newest first, at most 100 | when a row changes, and on resume |
+| `talkgroups` | `items`, the same shape, one per talkgroup or station | when a row changes, and on resume |
+| `trunk` | `enabled`, `controlVrx`, `maxFollowers`, `tsbks`, `grants`, `note`, `fault`?, `calls`, `rules` | each second while the DV tab is open or following is on, when it changed |
+| `dv` | `autoDv`, `follow`: `{vrx, maxFollowers}` or null, `maxFollowers` (the desktop's) | on connect, resume and change |
+
+In `calls`, `state` is `live`, `ended` or `granted` (a control channel grant no
+receiver took); `firstMs` and `lastMs` are wall clock milliseconds.
+`tools/webgate/dv_feed.h` is the authority for all four.
 
 `dataLowHz` and `dataHighHz` are the outer edges of the spectrum's first and
 last bins. The spectrum starts half a coarse channel below the band, so these
@@ -705,6 +748,27 @@ Display
 46. Open the app with `?insets`, or tap with three fingers in the installed
     app: the overlay and layout ruler appear; the app reaches the bottom edge
     with no gap.
+
+DV tab
+
+47. With no P25, DMR, D-STAR or TETRA receiver, there is no DV tab. Open one:
+    the tab appears. Remove it while the DV tab is open: the tab goes and Tune
+    opens.
+48. Turn Auto DV on over a band with digital voice: a receiver opens on each
+    DV signal, none doubled over one already there. With Keep listening on,
+    lock the phone for a few minutes: new signals still get receivers.
+    Without it, lock for a few minutes and unlock: Auto DV is still on and
+    opens receivers for what is on the air. Signals that go quiet keep
+    theirs. Remove one: it is not opened again until Auto DV is turned on
+    afresh.
+49. Select a P25 control channel receiver: Follow trunk appears with the
+    desktop's follower count. Turn it on: the trunk line shows blocks and
+    grants, follower receivers appear and their calls play.
+50. The calls table lists the newest call first with time, talkgroup (the
+    desktop's alias where it has one), radio id, receiver and live, ended or
+    not followed; an encrypted call is dimmed and marked. Tap a call: its
+    receiver becomes the active one. The talkgroups table counts calls.
+51. Restart the engine with Auto DV and Follow on: both come back on.
 
 Report: any silence, the click at the cut, whether the Go live button ever
 appeared, whether the lock screen controls worked, and anything that was not

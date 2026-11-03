@@ -622,6 +622,12 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
     }
     fresh->set_keep_listening(old_session.keep_listening());
     fresh->set_min_confidence(old_session.min_confidence());
+    // The DV tab's switches go with the session; streams' start() puts them
+    // back on the new engine. Receiver ids are mapped below as they come back.
+    fresh->set_auto_dv(old_session.auto_dv());
+    fresh->auto_dv_dismissed() = old_session.auto_dv_dismissed();
+    fresh->set_trunk_rules(old_session.trunk_rules());
+    fresh->set_dv_watch(old_session.dv_watch());
 
     // Params hold the receiver's offset from the source centre. The phone
     // asked for an absolute frequency, so that is what is kept if the new
@@ -682,6 +688,12 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
         }
         if (old_session.audio_vrx() == old_id) {
             fresh->set_audio_vrx(*added);
+        }
+        if (old_session.auto_dv_spawned().contains(old_id)) {
+            fresh->auto_dv_spawned().insert(*added);
+        }
+        if (const auto& follow = old_session.trunk_follow(); follow && follow->vrx == old_id) {
+            fresh->set_trunk_follow(PhoneSession::TrunkFollow{*added, follow->max_followers});
         }
         recreated.push_back(JsonObject().add_u64("old", old_id).add_u64("new", *added).str());
     }

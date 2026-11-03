@@ -19,6 +19,7 @@
 
 #include "models/settings.h"
 #include "models/trunk_aliases.h"
+#include "models/trunk_rules.h"
 
 namespace revenant::ui {
 
@@ -28,30 +29,6 @@ constexpr auto kTrunkPoll = std::chrono::milliseconds(500);
 // An engine that refuses trunkStatus predates it; asking twice a second
 // would only fill the log.
 constexpr auto kTrunkRefusedPoll = std::chrono::seconds(10);
-
-rpc::TrunkRuleSet sorted(rpc::TrunkRuleSet rules)
-{
-    std::ranges::sort(rules.allow);
-    std::ranges::sort(rules.deny);
-    std::ranges::sort(rules.priorities, {}, &rpc::TrunkPriorityRule::talkgroup);
-    return rules;
-}
-
-bool same_rules(const rpc::TrunkRuleSet& a, const rpc::TrunkRuleSet& b)
-{
-    const auto x = sorted(a);
-    const auto y = sorted(b);
-    if (x.allow != y.allow || x.deny != y.deny || x.priorities.size() != y.priorities.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < x.priorities.size(); ++i) {
-        if (x.priorities[i].talkgroup != y.priorities[i].talkgroup ||
-            x.priorities[i].priority != y.priorities[i].priority) {
-            return false;
-        }
-    }
-    return true;
-}
 
 QString clock_of(std::int64_t ns)
 {
@@ -78,17 +55,15 @@ void EngineLink::load_trunk_text() const
 void EngineLink::store_trunk_rules()
 {
     load_trunk_text();
-    rpc::TrunkRuleSet rules;
-    rules.allow = parse_trunk_groups(trunk_allow_text_.toStdString()).value;
-    rules.deny = parse_trunk_groups(trunk_deny_text_.toStdString()).value;
+    rpc::TrunkRuleSet rules = parse_trunk_rules(trunk_allow_text_.toStdString(),
+                                                trunk_deny_text_.toStdString(),
+                                                trunk_priority_text_.toStdString())
+                                  .rules;
     // A solo replaces the allow list and beats the deny list: clicking a
     // talkgroup is the operator saying exactly what they want to hear.
     if (!trunk_solo_.empty()) {
         rules.allow.assign(trunk_solo_.begin(), trunk_solo_.end());
         std::erase_if(rules.deny, [this](std::uint32_t tg) { return trunk_solo_.contains(tg); });
-    }
-    for (const auto& [tg, priority] : parse_trunk_priorities(trunk_priority_text_.toStdString()).value) {
-        rules.priorities.push_back({tg, priority});
     }
     const std::lock_guard<std::mutex> lock(trunk_mutex_);
     trunk_rules_wanted_ = std::move(rules);
@@ -278,7 +253,7 @@ void EngineLink::apply_trunk()
         fault = QString::fromStdString(status.error().message);
     } else {
         trunk_next_poll_ = now + kTrunkPoll;
-        if (!same_rules(status->rules, rules)) {
+        if (!same_trunk_rules(status->rules, rules)) {
             (void)client_->set_trunk_rules(rules);
         }
         if (status->enabled && status->max_followers != max) {

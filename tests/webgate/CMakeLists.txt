@@ -21,6 +21,7 @@ add_executable(test_webgate
     ../reference/gpu_fixture.cpp
     test_engine_link.cpp
     test_lease.cpp
+    test_dv_feed.cpp
 )
 
 target_link_libraries(test_webgate PRIVATE
