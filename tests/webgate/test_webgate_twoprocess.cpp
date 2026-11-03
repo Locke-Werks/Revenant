@@ -592,7 +592,8 @@ TEST_CASE("phone round trip", "[webgate][twoprocess]")
     engine.reset();
     CHECK(rig.wait([&] { return !rig.engine_lease().held; }, 10s));
     auto after = rig.engine_client();
-    CHECK(std::ranges::find(engine_ids(*after), vrx) == engine_ids(*after).end());
+    const auto left = engine_ids(*after);
+    CHECK(std::ranges::find(left, vrx) == left.end());
 }
 
 TEST_CASE("two phones at one address share the engine", "[webgate][twoprocess]")
