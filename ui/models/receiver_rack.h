@@ -73,25 +73,26 @@ struct RackEntry {
     // put the strip back to opening for good.
     std::string refusal;
 
-    // True for a receiver an engine plugin opened and this rack took in, the
-    // trunk tracker's voice calls among them; owner is the plugin's name. See
-    // models/adopted_receivers.h for which receivers are taken in and why.
+    // True for a receiver opened elsewhere (an engine plugin, the trunk
+    // follower, a phone, an earlier connection) that this rack took in from
+    // the engine's events; owner names who opened it. See
+    // models/adopted_receivers.h for which receivers are taken in.
     //
-    // AN ADOPTED ENTRY IS HEARD AND NOTHING ELSE. Its mute, solo and gain are
-    // this client's, because they act on the mix and touch nothing on the
-    // engine. It is never focused, since focus hands the receiver to the pane
-    // and the pane retunes it, and never removed from here, since the plugin
-    // closes it when its call ends. A write to it would be this window
-    // arguing with the plugin over a receiver that is the plugin's.
+    // ADOPTED SAYS WHERE IT CAME FROM, NOT WHAT MAY BE DONE WITH IT. The
+    // engine serves one user, so the operator controls it like any other:
+    // focus, tune, remove. What differs is bookkeeping: the engine's events
+    // keep it in the rack and take it out, and a reconnection does not make it
+    // again. Focusing one takes it in for good (ReceiverRack::take_in), since
+    // the pane retunes it and from then on it is this window's to put back.
     bool adopted = false;
     std::string owner;
 };
 
-// Whether focus may land on an entry: anything this client made, and nothing
-// it adopted.
-[[nodiscard]] inline bool rack_entry_focusable(const RackEntry& entry)
+// Whether focus may land on an entry. Every one: with one user there is no
+// receiver this window may not take.
+[[nodiscard]] inline bool rack_entry_focusable(const RackEntry& /*entry*/)
 {
-    return !entry.adopted;
+    return true;
 }
 
 // What the strip, the audio section and a transcript's hover card call an
@@ -215,6 +216,20 @@ public:
         entry.owner = std::move(owner);
         entry.engine_id = engine_id;
         return key;
+    }
+
+    // An adopted entry becomes one this window made: labelled "RX n", put
+    // back by a reconnection, and no longer taken out by the engine's events.
+    // False when there is no such entry or it was never adopted.
+    bool take_in(std::uint64_t key)
+    {
+        RackEntry* entry = find(key);
+        if (entry == nullptr || !entry->adopted) {
+            return false;
+        }
+        entry->adopted = false;
+        entry->owner.clear();
+        return true;
     }
 
     // The adopted entry for an engine id, or nothing. Adopted entries only:

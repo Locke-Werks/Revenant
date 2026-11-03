@@ -9,10 +9,9 @@
 // every receiver and who owns it, and this file says which of them the rack
 // takes in.
 //
-// WHAT ADOPTED MEANS. A strip like an auto DV receiver's: its own slot and
-// colour, heard, with mute, solo and gain, all of which act on this client's
-// mix and nothing else. It is never focused and never removed from here; see
-// RackEntry::adopted in models/receiver_rack.h for why.
+// WHAT ADOPTED MEANS. Where the receiver came from, not what may be done
+// with it: the operator focuses, tunes and removes it like any other. See
+// RackEntry::adopted in models/receiver_rack.h.
 
 #pragma once
 
