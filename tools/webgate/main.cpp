@@ -13,7 +13,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -30,6 +32,8 @@ struct Options {
     std::string engine = "127.0.0.1:17690";
     std::filesystem::path state_dir;
     std::filesystem::path web_root;
+    std::filesystem::path token_file;
+    std::optional<long> session_linger_ms;
 };
 
 [[nodiscard]] std::filesystem::path exe_directory() {
@@ -57,12 +61,17 @@ struct Options {
 void usage() {
     std::puts(
         "usage: revenant-webgate [--port N] [--http-port N] [--engine HOST:PORT]\n"
-        "                        [--state-dir DIR] [--web-root DIR]\n"
+        "                        [--state-dir DIR] [--web-root DIR] [--token-file PATH]\n"
+        "                        [--session-linger-ms N]\n"
         "  --port        HTTPS and WebSocket port (default 17700)\n"
         "  --http-port   plain HTTP port that serves the CA profile (default 17701)\n"
         "  --engine      the engine's Cap'n Proto address (default 127.0.0.1:17690)\n"
         "  --state-dir   certificates live here (default %LOCALAPPDATA%\\Revenant\\webgate)\n"
-        "  --web-root    the web app (default: web beside the executable)");
+        "  --web-root    the web app (default: web beside the executable)\n"
+        "  --token-file  the engine's token (default: the engine's own default path)\n"
+        "  --session-linger-ms N\n"
+        "                how long a phone's session outlives its dropped socket\n"
+        "                without keep listening (default 30000); tests shorten it");
 }
 
 [[nodiscard]] bool parse_port(std::string_view text, int& out) {
@@ -150,6 +159,17 @@ int main(int argc, char** argv) {
             options.state_dir = std::filesystem::path(std::string(value));
         } else if (arg == "--web-root") {
             options.web_root = std::filesystem::path(std::string(value));
+        } else if (arg == "--token-file") {
+            options.token_file = std::filesystem::path(std::string(value));
+        } else if (arg == "--session-linger-ms") {
+            char* end = nullptr;
+            const std::string copy(value);
+            const long ms = std::strtol(copy.c_str(), &end, 10);
+            if (end == copy.c_str() || *end != '\0' || ms < 0) {
+                std::fprintf(stderr, "revenant-webgate: --session-linger-ms is not a count\n");
+                return 2;
+            }
+            options.session_linger_ms = ms;
         } else {
             std::fprintf(stderr, "revenant-webgate: unknown option %s\n", argv[i - 1]);
             usage();
@@ -180,6 +200,12 @@ int main(int argc, char** argv) {
     // EngineLink decides whether the address is one such an engine would be
     // reachable at; this only says where the executable is.
     link_config.engine_exe = exe_directory() / "revenant-engine.exe";
+    link_config.token_path = options.token_file;
+
+    revenant::webgate::HubTiming timing;
+    if (options.session_linger_ms) {
+        timing.detached_linger = std::chrono::milliseconds(*options.session_linger_ms);
+    }
 
     try {
         auto io = kj::setupAsyncIo();
@@ -199,7 +225,7 @@ int main(int argc, char** argv) {
         rt.link = std::make_unique<revenant::webgate::EngineLink>(link_config);
         auto* link = rt.link.get();
         rt.gateway = std::make_unique<revenant::webgate::Gateway>(
-            io, [link] { return link->new_session(); }, rt.server->hls);
+            io, [link] { return link->new_session(); }, rt.server->hls, timing);
         auto* gateway = rt.gateway.get();
         link->on_state([gateway](revenant::webgate::LinkState state, std::string detail) {
             gateway->on_link_state(state, std::move(detail));

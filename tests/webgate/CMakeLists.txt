@@ -34,3 +34,28 @@ catch_discover_tests(test_webgate
         LABELS "webgate"
         TIMEOUT 300
 )
+
+# revenant-webgate end to end against a real revenant-engine, each in its own
+# process. A binary of its own so test_webgate stays quick to build; the two
+# executables are dependencies, so building this builds what it runs.
+add_executable(test_webgate_twoprocess
+    ../support/no_modal_dialogs.cpp
+    test_webgate_twoprocess.cpp
+)
+target_link_libraries(test_webgate_twoprocess PRIVATE
+    revenant_webgate_lib
+    Catch2::Catch2WithMain
+)
+target_include_directories(test_webgate_twoprocess PRIVATE "${CMAKE_SOURCE_DIR}")
+target_compile_definitions(test_webgate_twoprocess PRIVATE
+    REVENANT_ENGINE_EXE="$<TARGET_FILE:revenant-engine>"
+    REVENANT_WEBGATE_EXE="$<TARGET_FILE:revenant-webgate>"
+)
+add_dependencies(test_webgate_twoprocess revenant-engine revenant-webgate)
+revenant_apply_warnings(test_webgate_twoprocess)
+
+catch_discover_tests(test_webgate_twoprocess
+    PROPERTIES
+        LABELS "webgate"
+        TIMEOUT 300
+)
