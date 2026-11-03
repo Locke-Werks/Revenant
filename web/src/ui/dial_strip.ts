@@ -15,7 +15,7 @@ const SLOP_PX = 4;
 const HEIGHT_PX = 56;
 const MAJOR_EVERY = 10;
 const ACCENT = "#d6262a";
-export const EMPTY_HINT = "Long-press the waterfall to add a receiver";
+export const EMPTY_HINT = "Drag to tune. Long-press to add a receiver";
 
 export class DialStrip {
   readonly el: HTMLElement;
@@ -127,13 +127,18 @@ export class DialStrip {
     g.clearRect(0, 0, w, HEIGHT_PX);
     const r = this.deps.active();
     // With nothing to tune the strip stays, dimmed, and says how to begin.
-    this.el.classList.toggle("idle", !r);
-    if (!r) {
+    // A negative id is the radio's centre, tuned while no receiver is.
+    const idle = !r || r.vrx < 0;
+    this.el.classList.toggle("idle", idle);
+    const hint = () => {
       g.font = "13px -apple-system, system-ui, sans-serif";
       g.textAlign = "center";
       g.textBaseline = "middle";
       g.fillStyle = "#8e8e97";
-      g.fillText(EMPTY_HINT, w / 2, HEIGHT_PX / 2);
+      g.fillText(EMPTY_HINT, w / 2, r ? HEIGHT_PX - 12 : HEIGHT_PX / 2);
+    };
+    if (!r) {
+      hint();
       return;
     }
     const step = fineStep(r.mode);
@@ -166,5 +171,6 @@ export class DialStrip {
     g.moveTo(centerX, 0);
     g.lineTo(centerX, HEIGHT_PX);
     g.stroke();
+    if (idle) hint();
   }
 }

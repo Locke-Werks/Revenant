@@ -26,6 +26,8 @@ const FINE_STEPS: Record<string, number> = {
   nfm: 100,
   raw: 100,
   wfm: 1000,
+  // No receiver: the dial moves the radio itself, in broadcast-sized steps.
+  centre: 10_000,
 };
 
 export function fineStep(mode: string): number {

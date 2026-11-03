@@ -190,8 +190,13 @@ export class TopBar {
   show(r: Receiver | null): void {
     this.active = r;
     this.freq.textContent = "";
-    if (r) {
-      for (const d of readoutDigits(r.hz)) {
+    // With no receiver the digits are the radio's centre, and a swipe on
+    // them moves it.
+    const hz = r ? r.hz : this.viewHz;
+    if (hz === null) {
+      this.freq.textContent = "--- MHz";
+    } else {
+      for (const d of readoutDigits(hz)) {
         const s = document.createElement("span");
         s.textContent = d.ch;
         if (d.index !== null) {
@@ -201,8 +206,6 @@ export class TopBar {
         this.freq.append(s);
       }
       this.freq.append(" MHz");
-    } else {
-      this.freq.textContent = this.viewHz === null ? "--- MHz" : `${formatMHz(this.viewHz)} MHz`;
     }
     // No receiver: the readout names where the display is, dimmed, and there
     // is no level to show.

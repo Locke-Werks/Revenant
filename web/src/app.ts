@@ -28,6 +28,8 @@ import { ChipPress } from "./ui/chip_press";
 import { DialStrip } from "./ui/dial_strip";
 import { Ruler } from "./ui/ruler";
 import { levelInBand, TopBar } from "./ui/top_bar";
+import { CentreTuner } from "./centre_tuner";
+import { clampToRanges } from "./band_edge";
 
 export function appScreenHtml(): string {
   return `
@@ -119,6 +121,9 @@ export function mountApp(root: HTMLElement): AppHandle {
   };
 
   let band: Band | null = null;
+  // Where a centre tune with no receiver is taking the radio; the dimmed
+  // readout shows it instead of the view's centre while it lasts.
+  let centrePreviewHz: number | null = null;
   // The band trimmed to the spectrum's real edges, as the source event gives
   // them; what the view is clamped to.
   let limits: Band | null = null;
@@ -131,7 +136,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     waterfall.draw();
     trace.draw();
     ruler.draw();
-    top.viewCentre(view ? view.centerHz : null);
+    top.viewCentre(centrePreviewHz ?? (view ? view.centerHz : null));
     drawMarks();
     layoutCaptions();
   };
@@ -404,14 +409,43 @@ export function mountApp(root: HTMLElement): AppHandle {
 
   // The dial shares the waterfall drag's preview-and-hold path, so the chip
   // and readout follow it and a stale reply cannot pull it back.
+  // With no receiver the dial moves the radio's centre: a pseudo receiver
+  // with a negative id, which the dial stops on as soon as a real one is
+  // active.
+  const CENTRE_VRX = -1;
+  const centre = new CentreTuner({
+    send: (hz) =>
+      gate.request("setCenter", { hz }).catch((e: unknown) => toast(e instanceof Error ? e.message : String(e), "tune")),
+    ranges: () => radio.tuneRanges(),
+    preview: (hz) => showCentre(hz),
+  });
+  const showCentre = (hz: number | null) => {
+    centrePreviewHz = hz;
+    top.viewCentre(hz ?? (view ? view.centerHz : null));
+  };
+  const centreLimiter = new TuneLimiter(
+    (hz) => centre.set(hz),
+    () => performance.now(),
+    (fn, ms) => {
+      const h = window.setTimeout(fn, ms);
+      return () => window.clearTimeout(h);
+    },
+  );
   const dial = new DialStrip({
     active: () => {
       const id = receivers.list.active;
       const r = id === null ? undefined : receivers.list.get(id);
-      return r ? { vrx: r.vrx, hz: r.hz, mode: r.mode } : null;
+      if (r) return { vrx: r.vrx, hz: r.hz, mode: r.mode };
+      if (!band) return null;
+      return { vrx: CENTRE_VRX, hz: centrePreviewHz ?? band.centerHz, mode: "centre" };
     },
-    preview: (hz) => receivers.preview(hz) !== null,
-    tune: (vrx, hz) => receivers.tuneDragged(hz, vrx),
+    preview: (hz) => {
+      if (receivers.list.active !== null) return receivers.preview(hz) !== null;
+      if (!band) return false;
+      showCentre(Math.round(hz));
+      return true;
+    },
+    tune: (vrx, hz) => (vrx === CENTRE_VRX ? centre.set(hz) : receivers.tuneDragged(hz, vrx)),
     end: () => receivers.endDrag(),
     now: () => performance.now(),
     schedule: (fn, ms) => {
@@ -428,6 +462,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   // A digit swipe previews and sends like a waterfall drag, so the readout
   // follows the finger and the gateway sees a rate-limited stream.
   let swiping = false;
+  let swipingCentre = false;
   const digitLimiter = new TuneLimiter(
     (hz) => receivers.tuneDragged(hz),
     () => performance.now(),
@@ -449,14 +484,27 @@ export function mountApp(root: HTMLElement): AppHandle {
       swiping = true;
       const id = receivers.list.active;
       const r = id === null ? undefined : receivers.list.get(id);
-      return r ? r.hz : null;
+      if (r) return r.hz;
+      // The dimmed readout: the swipe moves the radio's centre.
+      swipingCentre = band !== null;
+      return band ? centrePreviewHz ?? band.centerHz : null;
     },
     swipeStep: (hz) => {
+      if (swipingCentre) {
+        showCentre(Math.round(hz));
+        centreLimiter.set(hz);
+        return;
+      }
       if (!receivers.preview(hz)) return;
       digitLimiter.set(hz);
     },
     swipeEnd: () => {
       swiping = false;
+      if (swipingCentre) {
+        swipingCentre = false;
+        centreLimiter.flush();
+        return;
+      }
       digitLimiter.flush();
       receivers.endDrag();
     },
@@ -612,6 +660,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   );
   // Where the finger has taken the receiver; null between drags.
   let dragHz: number | null = null;
+  let centreDragHz: number | null = null;
   // The view follows only once the receiver is this close to an edge, so a
   // small nudge does not slide the picture under the finger.
   const EDGE_FRACTION = 0.1;
@@ -621,6 +670,16 @@ export function mountApp(root: HTMLElement): AppHandle {
     {
       dragTune: (dHz) => {
         if (!Number.isFinite(dHz) || swiping) return;
+        // No receiver: the drag moves the radio, the way dragging the band
+        // would, so a drag to the right goes down in frequency.
+        if (receivers.list.active === null && dragHz === null) {
+          if (!band) return;
+          if (centreDragHz === null) dial.stop();
+          centreDragHz = clampToRanges((centreDragHz ?? centrePreviewHz ?? band.centerHz) - dHz, radio.tuneRanges());
+          showCentre(Math.round(centreDragHz));
+          centreLimiter.set(centreDragHz);
+          return;
+        }
         let next = dragHz;
         if (next === null) {
           dial.stop();
@@ -646,6 +705,11 @@ export function mountApp(root: HTMLElement): AppHandle {
         requestDraw();
       },
       dragEnd: () => {
+        if (centreDragHz !== null) {
+          centreDragHz = null;
+          centreLimiter.flush();
+          return;
+        }
         dragHz = null;
         tuneLimiter.flush();
         receivers.endDrag();
@@ -680,6 +744,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     status.source(e);
     radio.source(e);
     receivers.setSource(e);
+    centre.settled();
     renderStatus();
     if (e.open !== true || typeof e.centerHz !== "number" || typeof e.rateHz !== "number") {
       band = null;
