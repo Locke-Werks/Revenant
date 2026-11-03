@@ -8,6 +8,7 @@ add_executable(test_webgate
     test_display_sync.cpp
     test_display_bench.cpp
     test_audio_opus.cpp
+    test_audio_rate.cpp
     test_protocol.cpp
     test_dispatch.cpp
     test_session_streams.cpp

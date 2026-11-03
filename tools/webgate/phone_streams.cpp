@@ -17,10 +17,6 @@ namespace revenant::webgate {
 
 namespace {
 
-// Opus and the AAC segmenter both run at 48 kHz; anything else would play at
-// the wrong pitch, so it is reported rather than resampled here.
-constexpr std::uint32_t kPhoneAudioRate = 48'000;
-
 // The engine's default dispatch size. Only a first guess: EngineInfo does not
 // carry the block size, so the first frame's sample count corrects it.
 constexpr double kAssumedBlockSamples = 65'536.0;
@@ -1182,16 +1178,20 @@ void PhoneStreams::handle_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk)
         return;
     }
     auto& path = audio_[vrx];
-    if (chunk.sample_rate != kPhoneAudioRate) {
-        if (!path.reported_error) {
-            path.reported_error = true;
-            queue_text(event(
-                "vrxStatus",
-                JsonObject().add_u64("vrx", vrx).add_string(
-                    "audioError", "the receiver's audio is at " +
-                                      std::to_string(chunk.sample_rate) +
-                                      " Hz and the phone's audio path takes 48000 Hz only")));
+    // Once per receiver to both the phone and the console: the phone's
+    // vrxStatus alone left a silent DV channel with nothing in the log.
+    const auto report = [&](const std::string& message) {
+        if (path.reported_error) {
+            return;
         }
+        path.reported_error = true;
+        std::fprintf(stderr, "revenant-webgate: receiver %llu audio: %s\n",
+                     static_cast<unsigned long long>(vrx), message.c_str());
+        queue_text(event("vrxStatus",
+                         JsonObject().add_u64("vrx", vrx).add_string("audioError", message)));
+    };
+    if (chunk.sample_rate == 0) {
+        report("the receiver's audio chunk carries no sample rate");
         return;
     }
 
@@ -1212,18 +1212,13 @@ void PhoneStreams::handle_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk)
         }
         mono = downmixed;
     }
+    mono = path.rate.convert(chunk.sample_rate, mono);
 
     if (session_.audio_vrx() == vrx && attached()) {
         if (!path.opus) {
             auto created = LiveOpusEncoder::create(kPhoneAudioRate);
             if (!created) {
-                if (!path.reported_error) {
-                    path.reported_error = true;
-                    queue_text(event("vrxStatus", JsonObject()
-                                                      .add_u64("vrx", vrx)
-                                                      .add_string("audioError",
-                                                                  created.error().message)));
-                }
+                report(created.error().message);
             } else {
                 path.opus = std::move(*created);
             }
