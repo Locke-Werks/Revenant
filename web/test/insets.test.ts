@@ -61,15 +61,21 @@ test("the previous normal launch is the newest without the overlay from before t
   assert.equal(previousNormal([c(3, true)], 10), null);
 });
 
-test("an installed app one status bar short is extended by the top inset, and only then", () => {
-  const g = { standalone: true, insetTop: 62, screenWidth: 440, screenHeight: 956, landscape: false };
-  assert.equal(shortViewportFix({ ...g, innerHeight: 894 }), 62);
-  assert.equal(shortViewportFix({ ...g, innerHeight: 956 }), 0);
-  assert.equal(shortViewportFix({ ...g, innerHeight: 1125 }), 0);
-  assert.equal(shortViewportFix({ ...g, innerHeight: 894, standalone: false }), 0);
-  // Landscape: the screen's short side, with a landscape top inset.
+test("a short installed viewport is extended by its shortfall in CSS px, at any page zoom", () => {
+  const g = { standalone: true, screenWidth: 440, screenHeight: 956, landscape: false };
+  // The owner's cold launch at 85% page zoom: 956 / 0.85 - 1052.
+  assert.equal(shortViewportFix({ ...g, innerHeight: 1052, scale: 0.85 }), 72.7);
+  // The same phone after a reload: full height.
+  assert.equal(shortViewportFix({ ...g, innerHeight: 1125, scale: 0.85 }), 0);
+  assert.equal(shortViewportFix({ ...g, innerHeight: 894, scale: 1 }), 62);
+  assert.equal(shortViewportFix({ ...g, innerHeight: 956, scale: 1 }), 0);
+  assert.equal(shortViewportFix({ ...g, innerHeight: 894, scale: null }), 62);
+  assert.equal(shortViewportFix({ ...g, innerHeight: 894, scale: 1, standalone: false }), 0);
+  // A gap this large is not the bug (a keyboard, split view).
+  assert.equal(shortViewportFix({ ...g, innerHeight: 600, scale: 1 }), 0);
+  // Landscape measures against the screen's short side.
   const l = { standalone: true, screenWidth: 440, screenHeight: 956, landscape: true };
-  assert.equal(shortViewportFix({ ...l, insetTop: 20, innerHeight: 420 }), 20);
-  assert.equal(shortViewportFix({ ...l, insetTop: 0, innerHeight: 440 }), 0);
-  assert.equal(shortViewportFix({ ...l, insetTop: 20, innerHeight: 440 }), 0);
+  assert.equal(shortViewportFix({ ...l, innerHeight: 420, scale: 1 }), 20);
+  assert.equal(shortViewportFix({ ...l, innerHeight: 440, scale: 1 }), 0);
+  assert.equal(shortViewportFix({ ...l, innerHeight: 440 / 0.85, scale: 0.85 }), 0);
 });

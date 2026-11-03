@@ -219,6 +219,7 @@ export function showInsets(doc: Document, win: Window): void {
       `wider than screen at open: ${wideBefore.join("; ") || "none"}`,
       `wider than screen now: ${overWide(doc, win.screen.width).join("; ") || "none"}`,
       `widest during load: ${wideAtLoad(win)}`,
+      `--short-fix ${doc.documentElement.style.getPropertyValue("--short-fix") || "unset"}  deficit ${((Math.max(win.screen.width, win.screen.height) / (vv?.scale || 1)) - win.innerHeight).toFixed(1)} (portrait)`,
       `last launch without ruler: ${previousLaunch(win)}`,
       `viewport re-pins: ${repins(win)}`,
       `scale ${vv ? vv.scale.toFixed(3) : "n/a"}  scrollWidth ${root.scrollWidth}  innerWidth ${win.innerWidth}`,
@@ -284,26 +285,37 @@ export function pinViewportWidth(win: Window): () => void {
   return later;
 }
 
-// The iOS 26+ standalone short viewport: the layout viewport leaves out the
-// status bar yet starts at the top of the glass, so a box sized to it stops a
-// top inset short of the bottom. Returns how far to extend the app, or 0.
-export function shortViewportFix(g: { standalone: boolean; innerHeight: number; insetTop: number; screenWidth: number; screenHeight: number; landscape: boolean }): number {
-  if (!g.standalone || g.insetTop <= 0) return 0;
+// The iOS 26+ standalone short viewport: on a cold launch the layout viewport
+// can stop short of the bottom of the glass (a reload then gets it right).
+// The screen is in points and the viewport in CSS px, which part ways under
+// Safari's page zoom (the owner runs 85%), so the shortfall is measured in
+// CSS px through the scale. Returns how far to extend the app, 0 when the
+// viewport already reaches the glass or the gap is too large to be this bug.
+export function shortViewportFix(g: {
+  standalone: boolean;
+  innerHeight: number;
+  scale: number | null;
+  screenWidth: number;
+  screenHeight: number;
+  landscape: boolean;
+}): number {
+  if (!g.standalone) return 0;
+  const scale = g.scale !== null && g.scale > 0 ? g.scale : 1;
   const tall = g.landscape ? Math.min(g.screenWidth, g.screenHeight) : Math.max(g.screenWidth, g.screenHeight);
-  return Math.abs(g.innerHeight + g.insetTop - tall) <= 2 ? g.insetTop : 0;
+  const deficit = tall / scale - g.innerHeight;
+  return deficit > 1 && deficit < 200 ? Math.round(deficit * 10) / 10 : 0;
 }
 
+// iOS may correct the viewport later, after which the fix measures 0 and
+// turns itself off.
 export function trackShortViewport(win: Window): void {
   const doc = win.document;
-  const probe = doc.createElement("div");
-  probe.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;padding-top:env(safe-area-inset-top)";
-  doc.body.append(probe);
   const landscape = win.matchMedia("(orientation: landscape)");
   const set = () => {
     const fix = shortViewportFix({
       standalone: (win.navigator as Navigator & { standalone?: boolean }).standalone === true,
       innerHeight: win.innerHeight,
-      insetTop: parseFloat(win.getComputedStyle(probe).paddingTop) || 0,
+      scale: win.visualViewport?.scale ?? null,
       screenWidth: win.screen.width,
       screenHeight: win.screen.height,
       landscape: landscape.matches,
@@ -312,6 +324,7 @@ export function trackShortViewport(win: Window): void {
   };
   set();
   win.addEventListener("resize", set);
+  win.addEventListener("orientationchange", set);
   win.visualViewport?.addEventListener("resize", set);
   landscape.addEventListener("change", set);
 }

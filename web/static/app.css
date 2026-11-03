@@ -143,8 +143,8 @@ html:has(.app), html:has(.app) body {
 /* Top bar: the frequency, the mode, the meter, in that order of size. */
 .top {
   grid-area: top;
-  /* 8 px past the inset clears the soft edge of iOS's status bar blur. */
-  padding-top: calc(env(safe-area-inset-top) + 8px);
+  /* 20 px past the inset clears the soft edge of iOS's status bar blur. */
+  padding-top: calc(env(safe-area-inset-top) + 20px);
 }
 /* iOS blurs whatever sits under the status bar; an opaque band there leaves
    it nothing of ours to blur. */
