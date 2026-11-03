@@ -317,6 +317,18 @@ test("glue: an engine restart maps the id, or reports it lost", async () => {
   assert.match(g.ui.message ?? "", /out of range/);
 });
 
+test("glue: a restart map is applied once and lost names old ids", async () => {
+  const g = glue();
+  g.keep.on();
+  g.link.emit("link", { event: "link", state: "up", detail: "", recreated: [{ old: 4, new: 5 }, { old: 5, new: 4 }], lost: [{ vrx: 5, reason: "x" }] });
+  assert.equal(g.keep.state, "Background");
+  assert.equal(g.ui.message, null);
+  g.keep.retarget(5, 9);
+  g.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 5, reason: "replaced" });
+  await g.clock.advance(REPLACE_GRACE_MS * 2);
+  assert.equal(g.keep.state, "Background");
+});
+
 test("glue: a reconnect that lost the session asks for keep listening again", () => {
   const g = glue();
   g.keep.on();

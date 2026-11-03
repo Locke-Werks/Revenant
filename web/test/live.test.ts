@@ -235,6 +235,18 @@ test("live: a recreated receiver keeps playing under its new id; a removed one s
   assert.deepEqual(sink.pushed, [1]);
 });
 
+test("live: a restart map is applied once, so a swap or a lost old id equal to a new one keeps playing", async () => {
+  const { audio, link } = setup();
+  await audio.start(1);
+  link.emit("link", { event: "link", state: "up", detail: "", recreated: [{ old: 1, new: 2 }, { old: 2, new: 1 }] });
+  assert.equal(audio.vrx, 2);
+  // Old 2 was refused by the new engine; old 2 is not the new 2.
+  link.emit("link", { event: "link", state: "up", detail: "", recreated: [{ old: 2, new: 3 }], lost: [{ vrx: 3, reason: "x" }] });
+  assert.equal(audio.vrx, 3);
+  link.emit("link", { event: "link", state: "up", detail: "", recreated: [{ old: 1, new: 3 }], lost: [{ vrx: 3, reason: "gone" }] });
+  assert.equal(audio.vrx, null);
+});
+
 test("live: unlock creates and resumes the context synchronously, once", async () => {
   const { audio, ctx, contexts } = setup();
   void audio.unlock();

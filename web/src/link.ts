@@ -91,6 +91,10 @@ void _allEvents;
 
 export class LinkError extends Error {}
 
+export interface RequestOptions {
+  timeoutMs?: number;
+}
+
 interface Pending {
   resolve: (v: JsonValue) => void;
   reject: (e: Error) => void;
@@ -169,14 +173,16 @@ export class Link {
   // statusUnavailable, and callers need all of it. Rejects with the gateway's
   // error text unchanged, or a LinkError if the socket is not ready or drops
   // before the reply.
-  request(op: Op, args?: { [key: string]: JsonValue }): Promise<JsonValue> {
+  // timeoutMs overrides REQUEST_TIMEOUT_MS for ops the engine may spend longer
+  // on, such as opening or enumerating devices.
+  request(op: Op, args?: { [key: string]: JsonValue }, opts?: RequestOptions): Promise<JsonValue> {
     if (!this.isReady || this.ws === null) {
       return Promise.reject(new LinkError("not connected"));
     }
-    return this.send(op, args);
+    return this.send(op, args, opts?.timeoutMs ?? REQUEST_TIMEOUT_MS);
   }
 
-  private send(op: Op, args?: { [key: string]: JsonValue }): Promise<JsonValue> {
+  private send(op: Op, args?: { [key: string]: JsonValue }, timeoutMs = REQUEST_TIMEOUT_MS): Promise<JsonValue> {
     const ws = this.ws;
     if (ws === null) return Promise.reject(new LinkError("not connected"));
     const id = this.nextId++;
@@ -188,8 +194,8 @@ export class Link {
     }
     return new Promise<JsonValue>((resolve, reject) => {
       const timer = this.deps.timers.setTimeout(() => {
-        if (this.pending.delete(id)) reject(new LinkError(`${op}: no reply in ${REQUEST_TIMEOUT_MS / 1000} s`));
-      }, REQUEST_TIMEOUT_MS);
+        if (this.pending.delete(id)) reject(new LinkError(`${op}: no reply in ${timeoutMs / 1000} s`));
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       ws.send(text);
     });

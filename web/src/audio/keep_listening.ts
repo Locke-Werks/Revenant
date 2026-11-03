@@ -90,10 +90,16 @@ export class KeepListening {
       this.request(this.gatewayWants());
     });
     deps.link.on("link", (e) => {
-      for (const r of e.recreated ?? []) if (r.old === this.following) this.following = r.new;
-      for (const l of e.lost ?? []) {
-        if (l.vrx === this.following) this.gone(`the receiver was lost when the engine restarted: ${l.reason}`);
+      // Both lists name OLD ids, which a new id may equal: one lookup.
+      const was = this.following;
+      if (was === null) return;
+      const lost = (e.lost ?? []).find((l) => l.vrx === was);
+      if (lost) {
+        this.gone(`the receiver was lost when the engine restarted: ${lost.reason}`);
+        return;
       }
+      const to = (e.recreated ?? []).find((r) => r.old === was);
+      if (to) this.following = to.new;
     });
     deps.link.on("vrxRemoved", (e) => {
       if (typeof e.vrx !== "number" || e.vrx !== this.following) return;
@@ -155,6 +161,13 @@ export class KeepListening {
   visibility(hidden: boolean): void {
     if (hidden) this.handoff.hidden();
     else this.handoff.visible();
+  }
+
+  // The receiver moved to a new id (a mode or bandwidth replace, or another
+  // receiver chosen to listen to): follow it, so the old id's removal is not
+  // taken for this one's.
+  retarget(oldVrx: number, newVrx: number): void {
+    if (this.following === oldVrx) this.following = newVrx;
   }
 
   // What the lock screen shows: the receiver's frequency and mode.

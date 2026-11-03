@@ -316,6 +316,20 @@ test("a request on a dead socket rejects on timeout", async () => {
   await p.catch((e: unknown) => assert.equal(e instanceof LinkError, true));
 });
 
+test("a request can carry its own timeout", async () => {
+  const { link, timers, cur } = rig();
+  link.start();
+  cur().open();
+  const p = link.request("openSource", { uri: "rtlsdr:0" }, { timeoutMs: 30_000 });
+  let settled = false;
+  p.catch(() => {}).finally(() => void (settled = true));
+  timers.advance(REQUEST_TIMEOUT_MS + 1);
+  await tick();
+  assert.equal(settled, false);
+  timers.advance(30_000 - REQUEST_TIMEOUT_MS - 1);
+  await assert.rejects(p, /openSource: no reply in 30 s/);
+});
+
 test("a resume that times out keeps the token and reconnects", async () => {
   const { link, sockets, timers, store, cur } = rig("tok-keep");
   link.start();

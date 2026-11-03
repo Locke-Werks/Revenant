@@ -89,8 +89,16 @@ export class LiveAudio {
       void deps.link.request("audio", { vrx: this.active, on: true }).catch(() => {});
     });
     deps.link.on("link", (e) => {
-      for (const r of e.recreated ?? []) this.retarget(r.old, r.new);
-      for (const l of e.lost ?? []) if (l.vrx === this.active) this.clear();
+      // Both lists name OLD ids, and a fresh engine numbers from 1, so a new
+      // id can equal an old one: look the active id up once, before moving.
+      const active = this.active;
+      if (active === null) return;
+      if ((e.lost ?? []).some((l) => l.vrx === active)) {
+        this.clear();
+        return;
+      }
+      const to = (e.recreated ?? []).find((r) => r.old === active);
+      if (to) this.retarget(to.old, to.new);
     });
     deps.link.on("vrxRemoved", (e) => {
       if (typeof e.vrx === "number" && e.vrx === this.active) this.clear();

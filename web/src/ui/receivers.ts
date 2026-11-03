@@ -1,0 +1,430 @@
+// The phone's receivers: frequency entry, the chip list, and the controller
+// that turns taps and sheet controls into gateway ops and keeps the list,
+// live audio and keep listening on the same ids as they change.
+//
+// Ids change under the phone in two ways. setMode and setBandwidth make a new
+// receiver and remove the old one (the engine will not change either in
+// place), so the reply carries the new vrx and `replaced`, and a vrxRemoved
+// for the old id arrives in either order with it. An engine restart rebuilds
+// every receiver under new ids, sent as a map on the link event. ReplaceGate
+// holds the old id's removal until the reply has moved everything across, so
+// live audio never sees its receiver vanish on a mode change.
+
+import type { GatewayEvent, JsonValue, LinkEvent, Op } from "../protocol";
+import type { LinkEvents, RequestOptions } from "../link";
+
+export const MODES = ["nfm", "am", "wfm", "usb", "lsb", "cw", "dsb", "sam", "raw"] as const;
+export const DEFAULT_MODE = "nfm";
+
+// Widths offered in the sheet; the engine clamps anything its channel cannot
+// carry and says so.
+export const BANDWIDTHS_HZ = [2_400, 3_000, 6_000, 10_000, 12_500, 25_000, 50_000, 200_000];
+
+// "146.52", "146.52M", "146520k" and "146520000" are the same frequency. A
+// bare number below 100000 is read as MHz, since nobody types 146 meaning
+// 146 Hz and an HF frequency in hertz has six digits or more.
+export function parseFrequency(text: string): number | null {
+  const m = /^\s*(\d+(?:\.\d*)?|\.\d+)\s*([kKmMgG]?)(?:[hH][zZ])?\s*$/.exec(text);
+  if (!m) return null;
+  const value = Number(m[1]);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const unit = (m[2] ?? "").toLowerCase();
+  const scale = unit === "k" ? 1e3 : unit === "m" ? 1e6 : unit === "g" ? 1e9 : value < 100_000 && !/hz/i.test(text) ? 1e6 : 1;
+  const hz = Math.round(value * scale);
+  return hz > 0 ? hz : null;
+}
+
+export function formatMHz(hz: number): string {
+  return (hz / 1e6).toFixed(4);
+}
+
+export interface Receiver {
+  vrx: number;
+  hz: number;
+  mode: string;
+  bandwidthHz: number | null;
+  squelchDbfs: number | null;
+  // The gateway could not read the receiver back and answered with what was
+  // sent; shown as such, not as an error.
+  statusUnavailable: boolean;
+  audioError: string | null;
+}
+
+export class ReceiverList {
+  private items = new Map<number, Receiver>();
+  private activeId: number | null = null;
+  private listeners = new Set<() => void>();
+
+  get active(): number | null {
+    return this.activeId;
+  }
+
+  get(vrx: number): Receiver | undefined {
+    return this.items.get(vrx);
+  }
+
+  has(vrx: number): boolean {
+    return this.items.has(vrx);
+  }
+
+  list(): Receiver[] {
+    return [...this.items.values()].sort((a, b) => a.vrx - b.vrx);
+  }
+
+  onChange(fn: () => void): () => void {
+    this.listeners.add(fn);
+    return () => void this.listeners.delete(fn);
+  }
+
+  select(vrx: number | null): void {
+    if (vrx !== null && !this.items.has(vrx)) return;
+    this.activeId = vrx;
+    this.changed();
+  }
+
+  // A reply from addVrx, tune, setSquelch, setMode or setBandwidth. Fields the
+  // reply leaves out keep what was there.
+  upsert(r: { vrx: number } & Partial<Omit<Receiver, "vrx">>): Receiver {
+    const was = this.items.get(r.vrx);
+    const next: Receiver = {
+      vrx: r.vrx,
+      hz: r.hz ?? was?.hz ?? 0,
+      mode: r.mode ?? was?.mode ?? DEFAULT_MODE,
+      bandwidthHz: r.bandwidthHz ?? was?.bandwidthHz ?? null,
+      squelchDbfs: r.squelchDbfs ?? was?.squelchDbfs ?? null,
+      statusUnavailable: r.statusUnavailable ?? false,
+      audioError: r.audioError ?? was?.audioError ?? null,
+    };
+    this.items.set(r.vrx, next);
+    this.changed();
+    return next;
+  }
+
+  remove(vrx: number): Receiver | undefined {
+    const was = this.items.get(vrx);
+    if (!was) return undefined;
+    this.items.delete(vrx);
+    if (this.activeId === vrx) this.activeId = null;
+    this.changed();
+    return was;
+  }
+
+  // Old ids to new, applied as one step: a fresh engine numbers from 1, so
+  // a map can swap two ids.
+  remap(pairs: { old: number; new: number }[]): void {
+    if (pairs.length === 0) return;
+    const to = new Map(pairs.map((p) => [p.old, p.new]));
+    const next = new Map<number, Receiver>();
+    for (const r of this.items.values()) {
+      const id = to.get(r.vrx) ?? r.vrx;
+      next.set(id, { ...r, vrx: id });
+    }
+    this.items = next;
+    if (this.activeId !== null) this.activeId = to.get(this.activeId) ?? this.activeId;
+    this.changed();
+  }
+
+  private changed(): void {
+    for (const fn of this.listeners) fn();
+  }
+}
+
+// ---- The gate ----------------------------------------------------------------
+
+// The parts of Link the controller and the audio paths use.
+export interface GateLink {
+  readonly ready: boolean;
+  request(op: Op, args?: { [key: string]: JsonValue }, opts?: RequestOptions): Promise<JsonValue>;
+  on<K extends keyof LinkEvents>(name: K, fn: (payload: LinkEvents[K]) => void): () => void;
+}
+
+// Stands between Link and everything that reacts to vrxRemoved. A removal of
+// an id with a replace in flight waits until the replace settles; the lost
+// ids of an engine restart, whose removals name OLD ids a recreated receiver
+// may now be using, are dropped.
+export class ReplaceGate implements GateLink {
+  private removedFns = new Set<(e: GatewayEvent) => void>();
+  private holding = new Map<number, GatewayEvent[]>();
+  private staleLost = new Set<number>();
+
+  constructor(private readonly link: GateLink) {
+    link.on("vrxRemoved", (e) => this.removed(e));
+    link.on("link", (e) => {
+      this.staleLost.clear();
+      for (const l of e.lost ?? []) this.staleLost.add(l.vrx);
+    });
+  }
+
+  get ready(): boolean {
+    return this.link.ready;
+  }
+
+  request(op: Op, args?: { [key: string]: JsonValue }, opts?: RequestOptions): Promise<JsonValue> {
+    return this.link.request(op, args, opts);
+  }
+
+  on<K extends keyof LinkEvents>(name: K, fn: (payload: LinkEvents[K]) => void): () => void {
+    if (name !== "vrxRemoved") return this.link.on(name, fn);
+    const f = fn as (e: GatewayEvent) => void;
+    this.removedFns.add(f);
+    return () => void this.removedFns.delete(f);
+  }
+
+  hold(vrx: number): void {
+    if (!this.holding.has(vrx)) this.holding.set(vrx, []);
+  }
+
+  // Delivers whatever was held for vrx. Call after the replace has moved
+  // everything to the new id, so listeners find nothing under the old one.
+  release(vrx: number): void {
+    const held = this.holding.get(vrx);
+    this.holding.delete(vrx);
+    for (const e of held ?? []) this.deliver(e);
+  }
+
+  private removed(e: GatewayEvent): void {
+    if (typeof e.vrx === "number") {
+      if (this.staleLost.delete(e.vrx)) return;
+      const held = this.holding.get(e.vrx);
+      if (held) {
+        held.push(e);
+        return;
+      }
+    }
+    this.deliver(e);
+  }
+
+  private deliver(e: GatewayEvent): void {
+    for (const fn of [...this.removedFns]) fn(e);
+  }
+}
+
+// ---- The controller ----------------------------------------------------------
+
+export interface ControllerAudio {
+  readonly vrx: number | null;
+  unlock(): Promise<void>;
+  start(vrx: number): Promise<void>;
+  stop(): void;
+  resume(): Promise<boolean>;
+  retarget(oldVrx: number, newVrx: number): void;
+}
+
+export interface ControllerKeep {
+  retarget(oldVrx: number, newVrx: number): void;
+  setNowPlaying(now: { hz: number; mode: string }): void;
+}
+
+export interface ControllerDeps {
+  link: ReplaceGate;
+  audio: ControllerAudio;
+  keep: ControllerKeep;
+  // A sentence that comes and goes.
+  toast(text: string): void;
+  // A sentence about live audio that stays until it no longer holds; null
+  // clears it.
+  audioNote(text: string | null): void;
+}
+
+const NOT_STARTED = "The phone has not started sound yet. Tap the waterfall or a receiver to allow it.";
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function num(v: JsonValue | undefined): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+export class ReceiverController {
+  readonly list = new ReceiverList();
+  // Removals this phone asked for, so their events are not reported as news.
+  private removing = new Set<number>();
+
+  constructor(private readonly deps: ControllerDeps) {
+    const link = deps.link;
+    link.on("vrxStatus", (e) => this.onStatus(e));
+    link.on("vrxRemoved", (e) => this.onRemoved(e));
+    link.on("link", (e) => this.onLink(e));
+  }
+
+  // Tap on the waterfall: tune the active receiver, or add one there. Runs
+  // inside the gesture, which is where iOS lets audio start.
+  tap(hz: number): void {
+    void this.deps.audio.unlock();
+    const active = this.list.active;
+    if (active === null) {
+      this.add(hz);
+      return;
+    }
+    this.call("tune", { vrx: active, hz: Math.round(hz) }).then((r) => {
+      if (r) this.nowPlaying(r);
+    });
+  }
+
+  // Long press: another receiver there, which becomes the one heard.
+  longPress(hz: number): void {
+    void this.deps.audio.unlock();
+    this.add(hz);
+  }
+
+  // A chip tap. Also in a gesture.
+  select(vrx: number): void {
+    if (!this.list.has(vrx)) return;
+    const was = this.deps.audio.vrx;
+    this.list.select(vrx);
+    if (was !== null && was !== vrx) this.deps.keep.retarget(was, vrx);
+    const r = this.list.get(vrx)!;
+    this.deps.keep.setNowPlaying({ hz: r.hz, mode: r.mode });
+    this.listen(vrx);
+  }
+
+  setMode(mode: string): void {
+    const vrx = this.list.active;
+    if (vrx === null) return;
+    this.replace(vrx, "setMode", { vrx, mode });
+  }
+
+  setBandwidth(hz: number): void {
+    const vrx = this.list.active;
+    if (vrx === null) return;
+    this.replace(vrx, "setBandwidth", { vrx, hz: Math.round(hz) });
+  }
+
+  setSquelch(dbfs: number): void {
+    const vrx = this.list.active;
+    if (vrx === null) return;
+    void this.call("setSquelch", { vrx, dbfs });
+  }
+
+  remove(vrx: number): void {
+    this.removing.add(vrx);
+    this.deps.link.request("removeVrx", { vrx }).then(
+      () => {
+        if (this.deps.audio.vrx === vrx) this.deps.audio.stop();
+        this.list.remove(vrx);
+      },
+      (e: unknown) => {
+        this.removing.delete(vrx);
+        this.deps.toast(errorText(e));
+      },
+    );
+  }
+
+  private add(hz: number): void {
+    void this.call("addVrx", { hz: Math.round(hz), mode: DEFAULT_MODE }).then((r) => {
+      if (!r) return;
+      this.list.select(r.vrx);
+      this.nowPlaying(r);
+      this.listen(r.vrx);
+    });
+  }
+
+  private listen(vrx: number): void {
+    const audio = this.deps.audio;
+    audio.start(vrx).then(
+      async () => {
+        this.deps.audioNote((await audio.resume()) ? null : NOT_STARTED);
+      },
+      (e: unknown) => this.deps.audioNote(`Live audio unavailable: ${errorText(e)}`),
+    );
+  }
+
+  private replace(vrx: number, op: "setMode" | "setBandwidth", args: { [key: string]: JsonValue }): void {
+    const gate = this.deps.link;
+    gate.hold(vrx);
+    this.deps.link.request(op, args).then(
+      (reply) => {
+        const replaced = num((reply as { replaced?: JsonValue } | null)?.replaced);
+        const r = this.fromReply(reply, replaced);
+        if (r && replaced !== undefined && r.vrx !== replaced) {
+          // Everything moves before the old id's removal is let through.
+          this.deps.audio.retarget(replaced, r.vrx);
+          this.deps.keep.retarget(replaced, r.vrx);
+          const active = this.list.active === replaced;
+          this.list.remove(replaced);
+          if (active) this.list.select(r.vrx);
+          this.nowPlaying(r);
+        }
+        gate.release(vrx);
+      },
+      (e: unknown) => {
+        this.deps.toast(errorText(e));
+        gate.release(vrx);
+      },
+    );
+  }
+
+  // Sends op and applies a receiver-shaped reply. Undefined after a refusal,
+  // which has been shown.
+  private call(op: Op, args: { [key: string]: JsonValue }): Promise<Receiver | undefined> {
+    return this.deps.link.request(op, args).then(
+      (reply) => this.fromReply(reply),
+      (e: unknown) => {
+        this.deps.toast(errorText(e));
+        return undefined;
+      },
+    );
+  }
+
+  private fromReply(reply: JsonValue, replaced?: number): Receiver | undefined {
+    if (reply === null || typeof reply !== "object" || Array.isArray(reply)) return undefined;
+    const vrx = num(reply.vrx);
+    if (vrx === undefined) return undefined;
+    // A replace's new receiver inherits the old one's place in the list.
+    if (replaced !== undefined && replaced !== vrx && this.list.has(replaced) && !this.list.has(vrx)) {
+      const old = this.list.get(replaced)!;
+      this.list.upsert({ ...old, vrx });
+    }
+    const r = this.list.upsert({
+      vrx,
+      hz: num(reply.hz),
+      mode: typeof reply.mode === "string" ? reply.mode : undefined,
+      bandwidthHz: num(reply.bandwidthHz),
+      squelchDbfs: num(reply.squelchDbfs),
+      statusUnavailable: reply.statusUnavailable === true,
+    });
+    if (reply.clamped === true) {
+      const why = typeof reply.clampReason === "string" && reply.clampReason !== "" ? reply.clampReason : "the engine clamped this receiver";
+      this.deps.toast(why);
+    }
+    return r;
+  }
+
+  private nowPlaying(r: Receiver): void {
+    if (this.list.active === r.vrx) this.deps.keep.setNowPlaying({ hz: r.hz, mode: r.mode });
+  }
+
+  private onStatus(e: GatewayEvent): void {
+    const vrx = num(e.vrx);
+    if (vrx === undefined || !this.list.has(vrx)) return;
+    if (typeof e.audioError === "string") {
+      this.list.upsert({ vrx, audioError: e.audioError, statusUnavailable: this.list.get(vrx)!.statusUnavailable });
+      this.deps.toast(e.audioError);
+    }
+  }
+
+  private onRemoved(e: GatewayEvent): void {
+    const vrx = num(e.vrx);
+    if (vrx === undefined) return;
+    if (this.removing.delete(vrx)) {
+      this.list.remove(vrx);
+      return;
+    }
+    const was = this.list.remove(vrx);
+    if (!was) return;
+    const reason = typeof e.reason === "string" && e.reason !== "" ? e.reason : "removed by the engine";
+    this.deps.toast(`Receiver at ${formatMHz(was.hz)} MHz removed: ${reason}`);
+  }
+
+  private onLink(e: LinkEvent): void {
+    const lost = e.lost ?? [];
+    // Lost ids are old ids: take them out before the map reuses them.
+    for (const l of lost) {
+      const was = this.list.remove(l.vrx);
+      const where = was ? `at ${formatMHz(was.hz)} MHz` : String(l.vrx);
+      this.deps.toast(`Receiver ${where} lost when the engine restarted: ${l.reason}`);
+    }
+    this.list.remap(e.recreated ?? []);
+  }
+}
