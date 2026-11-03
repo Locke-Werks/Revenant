@@ -92,6 +92,15 @@ namespace revenant::webgate {
 
 [[nodiscard]] std::string dispatch(PhoneSession& session, const Command& command);
 
+// The commands whose engine calls may take up to rpc::kSlowCallDeadline
+// (listSources, openSource, setTranscription, listDecoders). They read and
+// change nothing on the PhoneSession, only the engine, which is what lets the
+// hub run them on a worker thread with just the session's Client.
+[[nodiscard]] bool runs_off_loop(std::string_view op);
+
+// dispatch for one of those, given only the Client. Any thread.
+[[nodiscard]] std::string dispatch_off_loop(rpc::Client& client, const Command& command);
+
 // The "dv" event: the session's Auto DV and trunk follow switches (dv_feed.h).
 [[nodiscard]] std::string dv_state_event(const PhoneSession& session);
 

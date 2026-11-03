@@ -9,6 +9,8 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -80,7 +82,27 @@ struct StallRig {
         hub = std::make_unique<PhoneHub>(strand, config, timing);
     }
 
-    ~StallRig() { hub.reset(); }
+    std::vector<std::thread> workers;
+
+    ~StallRig()
+    {
+        for (auto& worker : workers) {
+            worker.join();
+        }
+        hub.reset();
+    }
+
+    // What the Gateway wires, with the worker's deadline shortened so the
+    // test does not wait out kSlowCallDeadline.
+    void use_workers(std::chrono::milliseconds deadline)
+    {
+        hub->set_work_runner([this, deadline](std::function<std::function<void()>()> work) {
+            workers.emplace_back([this, deadline, work = std::move(work)] {
+                const rpc::CallDeadline scope(deadline);
+                strand.post(work());
+            });
+        });
+    }
 
     std::uint64_t connect(FakeSocket& socket)
     {
@@ -162,10 +184,10 @@ TEST_CASE("a command the engine does not answer gets an error reply, and the ses
     const std::string reply = reply_to(socket, 41);
     INFO(reply);
     CHECK(reply.find(R"("ok":false)") != std::string::npos);
-    CHECK(reply.find("did not answer within 5 s") != std::string::npos);
+    CHECK(reply.find("did not answer within 2 s") != std::string::npos);
     // One deadline for the command, not one per call it and its follow-up
     // refresh would have made.
-    CHECK(took < static_cast<double>(rpc::kCallDeadline.count()) / 1000.0 + 1.5);
+    CHECK(took < 3.0);
 
     // The same client, reused: the engine answers again and so does the
     // session. setCenter is not implemented by the stand-in, so the reply is
@@ -178,4 +200,46 @@ TEST_CASE("a command the engine does not answer gets an error reply, and the ses
     REQUIRE_FALSE(again.empty());
     CHECK(again.find("did not answer") == std::string::npos);
     CHECK(rig.hub->session(id)->client().info());
+}
+
+TEST_CASE("a stalled openSource runs off the loop: ticks and pings go on, later commands "
+          "wait their turn, and the error reply arrives at the deadline",
+          "[webgate][deadline]")
+{
+    StallRig rig;
+    rig.use_workers(1500ms);
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+
+    rig.engine.answer(false);
+    const auto start = Clock::now();
+    rig.hub->text(id, R"({"id":51,"op":"openSource","args":{"uri":"synthetic:"}})");
+    rig.hub->text(id, R"({"id":52,"op":"setView","args":{"centerHz":1e8,"spanHz":1e6,"widthPx":400}})");
+    // The loop came straight back: nothing on it waited for the engine.
+    CHECK(seconds_since(start) < 0.2);
+
+    // Ticks while it is out: no wait (its session's polls are skipped) and
+    // pings on time. Each stands in for the loop serving HTTP meanwhile.
+    const auto pings = count_containing(socket, R"("event":"ping")");
+    for (int i = 0; i < 3; ++i) {
+        CHECK(rig.tick(1100ms) < 0.2);
+    }
+    CHECK(count_containing(socket, R"("event":"ping")") == pings + 3);
+    CHECK(reply_to(socket, 51).empty());
+    // Held behind it, not run ahead of it.
+    CHECK(reply_to(socket, 52).empty());
+
+    // The reply lands when the worker's deadline passes, then the held one.
+    while (reply_to(socket, 52).empty() && seconds_since(start) < 5.0) {
+        rig.strand.run_pending();
+        std::this_thread::sleep_for(20ms);
+    }
+    const double took = seconds_since(start);
+    const std::string reply = reply_to(socket, 51);
+    INFO(reply);
+    CHECK(reply.find(R"("ok":false)") != std::string::npos);
+    CHECK(reply.find("did not answer within 1.5 s") != std::string::npos);
+    CHECK(took >= 1.4);
+    CHECK(took < 3.0);
+    CHECK(reply_to(socket, 52).find(R"("ok":true)") != std::string::npos);
 }

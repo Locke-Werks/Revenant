@@ -475,16 +475,22 @@ socket sat in CLOSE_WAIT.
   most 2 s in every 4 s, and pings go out before any poll. The log says
   `the engine did not answer a poll within 2.0 s` once when a streak starts and
   `the engine is answering polls again` when it ends.
-- **Commands** from the phone wait once with each call's own deadline (5 s, or
-  60 s for opening a source). A command the engine does not answer gets an
-  error reply, `... the engine did not answer within 5 s`, and the session is
-  usable afterwards.
+- **Slow commands** (listSources, openSource, setTranscription, listDecoders),
+  whose engine calls may take up to 60 s, run on a worker thread with the
+  session's Client, never on the event loop. That phone's later commands wait
+  behind it in order and its polls are skipped until the reply, which arrives
+  as an error at the deadline if the engine does not answer.
+- **Every other command** runs on the event loop, waits once, and for at most
+  2 s. A command the engine does not answer gets an error reply,
+  `... the engine did not answer within 2 s`, and the session is usable
+  afterwards. Seating a session, link changes and rebuilds have the same cap.
 - **Liveness**: the link's probe may time out twice in a row; the third
   consecutive timeout is treated as the engine gone and takes the reconnect
   path.
 
-The polls still run on the event loop. Moving them to a worker would take the
-engine off the loop entirely and is not done yet.
+The polls and the quick commands still run on the event loop, bounded by the
+2 s caps above. Moving the polls to a worker would take the engine off the
+loop entirely and is not done yet.
 
 **"Revenant is not reachable".** The app opened but the gateway did not answer
 within 4 seconds. Check that `revenant-webgate.exe` is running, that the phone

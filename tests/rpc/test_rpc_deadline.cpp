@@ -116,15 +116,24 @@ TEST_CASE("kOwnDeadline keeps the call's own deadline", "[rpc][deadline]") {
     auto client = connect_to(engine);
     engine.answer(false);
 
-    const rpc::CallDeadline outer(200ms);
-    const rpc::CallDeadline own(rpc::kOwnDeadline, true);
-    REQUIRE(rpc::CallDeadline::current() == &own);
-    const auto start = std::chrono::steady_clock::now();
-    const auto running = client->running();
-    REQUIRE_FALSE(running);
-    // kCallDeadline, not the outer 200 ms.
-    CHECK(running.error().message == "running: the engine did not answer within 5 s");
-    CHECK(seconds_since(start) >= 4.5);
+    {
+        const rpc::CallDeadline own(rpc::kOwnDeadline, true);
+        REQUIRE(rpc::CallDeadline::current() == &own);
+        const auto start = std::chrono::steady_clock::now();
+        const auto running = client->running();
+        REQUIRE_FALSE(running);
+        // kCallDeadline: nothing around it says otherwise.
+        CHECK(running.error().message == "running: the engine did not answer within 5 s");
+        CHECK(seconds_since(start) >= 4.5);
+    }
+    {
+        // An enclosing scope's deadline is the one kept.
+        const rpc::CallDeadline outer(200ms);
+        const rpc::CallDeadline own(rpc::kOwnDeadline, true);
+        const auto running = client->running();
+        REQUIRE_FALSE(running);
+        CHECK(running.error().message == "running: the engine did not answer within 0.2 s");
+    }
 }
 
 TEST_CASE("a call queued behind a stalled one times out on its own deadline",
@@ -161,4 +170,19 @@ TEST_CASE("a timeout inside a nested scope marks the outer poll scope", "[rpc][d
     }
     CHECK(outer.timed_out());
     CHECK(rpc::CallDeadline::current() == &outer);
+}
+
+TEST_CASE("a scope nested inside a spent poll scope does not wait again", "[rpc][deadline]") {
+    revenant::test::StallEngine engine;
+    auto client = connect_to(engine);
+    engine.answer(false);
+
+    const rpc::CallDeadline outer(200ms, true);
+    CHECK_FALSE(client->info());
+    const auto start = std::chrono::steady_clock::now();
+    const rpc::CallDeadline inner(rpc::kOwnDeadline, true);
+    const auto skipped = client->running();
+    REQUIRE_FALSE(skipped);
+    CHECK(skipped.error().message.find("skipped") != std::string::npos);
+    CHECK(seconds_since(start) < 0.1);
 }

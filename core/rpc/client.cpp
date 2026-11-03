@@ -1670,13 +1670,13 @@ private:
 
         CallDeadline* scope = CallDeadline::current();
         const std::chrono::milliseconds deadline =
-            scope != nullptr && scope->deadline() != kOwnDeadline ? scope->deadline() : fallback;
+            scope != nullptr ? scope->effective(fallback) : fallback;
         const auto timed_out_error = [what, deadline]() {
             return Error{std::format("{}: the engine did not answer within {:g} s", what,
                                      static_cast<double>(deadline.count()) / 1000.0),
                          ErrorCategory::TimedOut};
         };
-        if (scope != nullptr && scope->poll() && scope->timed_out()) {
+        if (scope != nullptr && scope->poll_spent()) {
             return std::unexpected(Error{
                 std::format("{}: skipped, the engine did not answer an earlier call in this poll",
                             what),
@@ -1708,7 +1708,13 @@ private:
             if (scope != nullptr) {
                 scope->mark_timed_out();
             }
-            return std::unexpected(timed_out_error());
+            // Not asked at all, so not "did not answer": the log reader is
+            // looking for the call that is actually stuck.
+            return std::unexpected(Error{
+                std::format("{}: still queued after {:g} s behind another call the engine has "
+                            "not answered",
+                            what, static_cast<double>(deadline.count()) / 1000.0),
+                ErrorCategory::TimedOut});
         }
 
         // Written on the loop thread and read here after executeSync returns,
@@ -2222,7 +2228,7 @@ Expected<Calibration> ClientImpl::set_calibration(const CalibrationSettings& set
         wire.setIqCorrection(settings.iq_correction);
         return request.send().then(
             [](auto&& response) { return read_calibration(response.getCalibration()); });
-    });
+    }, kGpuCallDeadline);
 }
 
 Expected<SourceTuning> ClientImpl::source_can_retune() {
@@ -2262,7 +2268,7 @@ Expected<std::uint64_t> ClientImpl::add_vrx(const VrxParams& params, VrxLifetime
         write_vrx_params(request.initParams(), params);
         request.setKeep(lifetime == VrxLifetime::Kept);
         return request.send().then([](auto&& response) { return response.getId(); });
-    });
+    }, kGpuCallDeadline);
 }
 
 Status ClientImpl::remove_vrx(std::uint64_t id) {
@@ -2423,7 +2429,7 @@ Status ClientImpl::set_plugin_receivers(bool allowed) {
         auto request = state.session.setPluginReceiversRequest();
         request.setAllowed(allowed);
         return request.send().ignoreResult();
-    });
+    }, kSlowCallDeadline);
 }
 
 // Nothing is checked here and everything is checked at the server, which is
@@ -3065,7 +3071,7 @@ Expected<VocoderPlugins> ClientImpl::vocoder_plugins() {
             }
             return out;
         });
-    });
+    }, kSlowCallDeadline);
 }
 
 Expected<EnginePlugins> ClientImpl::engine_plugins() {
@@ -3091,7 +3097,7 @@ Expected<EnginePlugins> ClientImpl::engine_plugins() {
             }
             return out;
         });
-    });
+    }, kSlowCallDeadline);
 }
 
 // P25 trunk following.
@@ -3381,7 +3387,7 @@ Expected<std::string> ClientImpl::subscribe_decoded(std::uint64_t vrx, std::stri
                     return kj::Promise<std::string>(kj::mv(failure));
                 });
         });
-    });
+    }, kSlowCallDeadline);
 }
 
 Expected<Client::WidebandSubscription> ClientImpl::subscribe_wideband_decoded(
@@ -3420,7 +3426,7 @@ Expected<Client::WidebandSubscription> ClientImpl::subscribe_wideband_decoded(
                 forget_decoded(key);
                 return kj::Promise<WidebandSubscription>(kj::mv(failure));
             });
-    });
+    }, kSlowCallDeadline);
 }
 
 void ClientImpl::unsubscribe_decoded(std::uint64_t vrx, std::string_view decoder) {

@@ -569,9 +569,9 @@ template <class Edit>
     return JsonObject().add_string("stage", *stage).add_bool("on", *on).str();
 }
 
-[[nodiscard]] Result op_list_sources(PhoneSession& session, const Command&)
+[[nodiscard]] Result op_list_sources(rpc::Client& client, const Command&)
 {
-    const auto sources = session.client().list_sources();
+    const auto sources = client.list_sources();
     if (!sources) {
         return std::unexpected(sources.error());
     }
@@ -582,7 +582,7 @@ template <class Edit>
     return JsonObject().add_raw("sources", join(items)).str();
 }
 
-[[nodiscard]] Result op_open_source(PhoneSession& session, const Command& command)
+[[nodiscard]] Result op_open_source(rpc::Client& client, const Command& command)
 {
     const auto uri = command.get_string("uri");
     if (!uri) {
@@ -592,13 +592,13 @@ template <class Edit>
     // cannot destroy a working one. A phone switching radios has asked for
     // exactly that trade, and has no other way to close, so close first. A
     // close with nothing open succeeds.
-    if (auto closed = session.client().close_source(); !closed) {
+    if (auto closed = client.close_source(); !closed) {
         return std::unexpected(closed.error());
     }
-    if (auto opened = session.client().open_source(*uri); !opened) {
+    if (auto opened = client.open_source(*uri); !opened) {
         return std::unexpected(opened.error());
     }
-    const auto descriptor = session.client().source_descriptor();
+    const auto descriptor = client.source_descriptor();
     if (!descriptor) {
         return std::unexpected(descriptor.error());
     }
@@ -714,13 +714,13 @@ template <class Edit>
     return JsonObject().add_double("minConfidence", *bar).str();
 }
 
-[[nodiscard]] Result op_set_transcription(PhoneSession& session, const Command& command)
+[[nodiscard]] Result op_set_transcription(rpc::Client& client, const Command& command)
 {
     const auto on = command.get_bool("on");
     if (!on) {
         return std::unexpected(on.error());
     }
-    const auto status = session.client().set_transcription(*on);
+    const auto status = client.set_transcription(*on);
     if (!status) {
         return std::unexpected(status.error());
     }
@@ -762,9 +762,9 @@ template <class Edit>
     return vrx_json(*status, *center, session.decoders(*vrx));
 }
 
-[[nodiscard]] Result op_list_decoders(PhoneSession& session, const Command&)
+[[nodiscard]] Result op_list_decoders(rpc::Client& client, const Command&)
 {
-    const auto decoders = session.client().decoders();
+    const auto decoders = client.decoders();
     if (!decoders) {
         return std::unexpected(decoders.error());
     }
@@ -785,7 +785,7 @@ template <class Edit>
     // Which digital voice modes will actually play. D-STAR and DMR need a
     // plugin, and with none the engine plays silence without saying why, so
     // the phone has to be told here. Null is unknown, which is not "none".
-    const auto plugins = session.client().vocoder_plugins();
+    const auto plugins = client.vocoder_plugins();
     const auto voice = plugins ? voice_modes(*plugins) : std::nullopt;
     if (voice) {
         out.add_raw("voiceModes", string_array(*voice));
@@ -981,7 +981,7 @@ template <class Edit>
     if (op == "trunkStatus") return op_trunk_status(session, command);
     if (op == "setTrunkRules") return op_set_trunk_rules(session, command);
     if (op == "dvTab") return op_dv_tab(session, command);
-    if (op == "listDecoders") return op_list_decoders(session, command);
+    if (op == "listDecoders") return op_list_decoders(session.client(), command);
     if (op == "setDecoders") return op_set_decoders(session, command);
     if (op == "addVrx") return op_add_vrx(session, command);
     if (op == "removeVrx") return op_remove_vrx(session, command);
@@ -992,13 +992,13 @@ template <class Edit>
     if (op == "setCenter") return op_set_center(session, command);
     if (op == "setGain") return op_set_gain(session, command);
     if (op == "setGainAuto") return op_set_gain_auto(session, command);
-    if (op == "listSources") return op_list_sources(session, command);
-    if (op == "openSource") return op_open_source(session, command);
+    if (op == "listSources") return op_list_sources(session.client(), command);
+    if (op == "openSource") return op_open_source(session.client(), command);
     if (op == "setView") return op_set_view(session, command);
     if (op == "audio") return op_audio(session, command);
     if (op == "keepListening") return op_keep_listening(session, command);
     if (op == "setDetection") return op_set_detection(session, command);
-    if (op == "setTranscription") return op_set_transcription(session, command);
+    if (op == "setTranscription") return op_set_transcription(session.client(), command);
     if (op == "setVrxTranscribe") return op_set_vrx_transcribe(session, command);
     return fail("unknown op: " + std::string(op.substr(0, 64)));
 }
@@ -1064,6 +1064,31 @@ bool transcription_report_due(const rpc::TranscriptionStatus& sent, const rpc::T
 std::string dispatch(PhoneSession& session, const Command& command)
 {
     const auto result = run(session, command);
+    if (!result) {
+        return error_reply(command.id, result.error().message);
+    }
+    return ok_reply(command.id, *result);
+}
+
+bool runs_off_loop(std::string_view op)
+{
+    return op == "listSources" || op == "openSource" || op == "setTranscription" ||
+           op == "listDecoders";
+}
+
+std::string dispatch_off_loop(rpc::Client& client, const Command& command)
+{
+    const std::string_view op = command.op;
+    Result result = fail("not a command that runs off the loop: " + std::string(op.substr(0, 64)));
+    if (op == "listSources") {
+        result = op_list_sources(client, command);
+    } else if (op == "openSource") {
+        result = op_open_source(client, command);
+    } else if (op == "setTranscription") {
+        result = op_set_transcription(client, command);
+    } else if (op == "listDecoders") {
+        result = op_list_decoders(client, command);
+    }
     if (!result) {
         return error_reply(command.id, result.error().message);
     }

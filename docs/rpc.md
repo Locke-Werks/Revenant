@@ -2250,7 +2250,8 @@ phone gateway's event loop included.
 | Calls | Deadline |
 | --- | --- |
 | Everything not listed below (`rpc::kCallDeadline`) | 5 s |
-| `list_sources`, `open_source`, `close_source`, `set_transcription`, `capture_catalog`, `capture_search`, `capture_occupancy`, `start_timeshift_replay` (`rpc::kSlowCallDeadline`) | 60 s |
+| `add_vrx`, `set_calibration`: they wait on a GPU that may be busy with speech to text (`rpc::kGpuCallDeadline`) | 15 s |
+| `list_sources`, `open_source`, `close_source`, `set_transcription`, `capture_catalog`, `capture_search`, `capture_occupancy`, `start_timeshift_replay`, `vocoder_plugins`, `engine_plugins`, `set_plugin_receivers`, `subscribe_decoded`, `subscribe_wideband_decoded` (`rpc::kSlowCallDeadline`) | 60 s |
 | Periodic polls, by the caller's choice (`rpc::kPollDeadline`) | 2 s |
 
 How it works: `on_loop` races the call's promise against the loop's timer with
@@ -2263,8 +2264,15 @@ behind another caller's call counts against the deadline too.
 while in scope. With `poll = true` the scope also waits at most once: after one
 call inside it times out, the rest fail at once with TimedOut, so a tick of a
 dozen polls against a stalled engine costs one deadline. `rpc::kOwnDeadline`
-keeps each call's own deadline and changes only that. A timeout in a nested
-scope marks the outer one.
+keeps the deadline that would apply without the scope (an enclosing scope's,
+else the call's own) and changes only that. A spent poll scope anywhere around
+a call makes it fail at once, and a timeout in a nested scope marks the outer
+one. A call that could not even start because another caller's call holds the
+Client says `still queued after N s behind another call the engine has not
+answered`.
+
+The desktop uses the same Client and so the same deadlines; nothing under
+`ui/` opens a scope.
 
 TimedOut is not Disconnected. The connection may be fine and the engine busy,
 so a poll skips a turn, and a supervisor decides how many in a row mean gone

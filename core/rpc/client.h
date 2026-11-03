@@ -67,16 +67,22 @@ namespace revenant::rpc {
 // kCallDeadline is the default. The calls that legitimately take longer
 // (list_sources paying a libusb timeout per absent dongle, open_source and close_source on a slow dongle, set_transcription loading a
 // model, the capture catalog, search and occupancy reads over a long
-// recording, start_timeshift_replay) get kSlowCallDeadline. A CallDeadline in
-// scope on the calling thread overrides both.
+// recording, start_timeshift_replay, the vocoder and engine plugin scans,
+// set_plugin_receivers, and subscribe_decoded and its wideband twin, which may
+// load a vocoder plugin the first time) get kSlowCallDeadline. add_vrx and
+// set_calibration wait on a GPU that may be busy with speech to text and get
+// kGpuCallDeadline. A CallDeadline in scope on the calling thread overrides
+// all three.
 inline constexpr std::chrono::milliseconds kCallDeadline{5'000};
+inline constexpr std::chrono::milliseconds kGpuCallDeadline{15'000};
 inline constexpr std::chrono::milliseconds kSlowCallDeadline{60'000};
 
 // What a periodic poll should wait: a poll that misses a turn is retried on
 // the next, so waiting long buys nothing but a stalled caller.
 inline constexpr std::chrono::milliseconds kPollDeadline{2'000};
 
-// Given to a CallDeadline, keeps each call's own deadline (kCallDeadline or
+// Given to a CallDeadline, keeps the deadline that would apply without it (an
+// enclosing scope's, else each call's own kCallDeadline, kGpuCallDeadline or
 // kSlowCallDeadline) and changes only the poll behaviour below. Zero, by
 // contrast, means no deadline at all.
 inline constexpr std::chrono::milliseconds kOwnDeadline{-1};
@@ -107,6 +113,28 @@ public:
     [[nodiscard]] std::chrono::milliseconds deadline() const { return deadline_; }
     [[nodiscard]] bool poll() const { return poll_; }
     void mark_timed_out() { timed_out_ = true; }
+
+    // The deadline this scope imposes: its own, or for kOwnDeadline the
+    // nearest enclosing scope's that is not kOwnDeadline, or fallback.
+    [[nodiscard]] std::chrono::milliseconds effective(std::chrono::milliseconds fallback) const {
+        for (const CallDeadline* s = this; s != nullptr; s = s->outer_) {
+            if (s->deadline_ != kOwnDeadline) {
+                return s->deadline_;
+            }
+        }
+        return fallback;
+    }
+
+    // Whether this scope or any scope around it is a poll scope that has
+    // already timed out, so "waits at most once" holds across nesting.
+    [[nodiscard]] bool poll_spent() const {
+        for (const CallDeadline* s = this; s != nullptr; s = s->outer_) {
+            if (s->poll_ && s->timed_out_) {
+                return true;
+            }
+        }
+        return false;
+    }
 
 private:
     std::chrono::milliseconds deadline_;

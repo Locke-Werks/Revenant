@@ -56,6 +56,9 @@ public:
     PhoneSession& operator=(PhoneSession&&) = delete;
 
     [[nodiscard]] rpc::Client& client() { return *client_; }
+    // The same Client, shared, for a command run on a worker: the worker keeps
+    // it alive if the session is destroyed while the command runs.
+    [[nodiscard]] std::shared_ptr<rpc::Client> shared_client() const { return client_; }
 
     // The two engine calls dispatch makes after it has already changed engine
     // state, routed here so a test can make them fail. Production never sets
@@ -191,7 +194,7 @@ private:
     rpc::TrunkRuleSet desktop_rules_;
     std::uint32_t desktop_max_followers_ = 2;
     bool dv_watch_ = false;
-    std::unique_ptr<rpc::Client> client_;
+    std::shared_ptr<rpc::Client> client_;
     struct Known {
         rpc::VrxParams params;
         bool opened_here = true;

@@ -192,6 +192,19 @@ Gateway::Gateway(kj::AsyncIoContext& io, NewSession new_session, HlsRegistry& hl
             finished->store(true);
         });
     });
+    // The slow phone commands, on the same kind of thread and joined the same
+    // way, so their engine wait never holds the loop serving HTTP and pings.
+    hub_.set_work_runner([this](std::function<std::function<void()>()> work) {
+        prune_claims();
+        claims_.push_back(Claim{});
+        Claim& claim = claims_.back();
+        claim.done = std::make_shared<std::atomic<bool>>(false);
+        claim.thread = std::thread([this, work = std::move(work), finished = claim.done]() {
+            std::function<void()> then = work();
+            strand_.post(std::move(then));
+            finished->store(true);
+        });
+    });
 }
 
 Gateway::~Gateway()

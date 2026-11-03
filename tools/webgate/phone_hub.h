@@ -117,6 +117,16 @@ using ClaimRunner = std::function<void(
     rpc::LoginMode mode, std::string holder,
     std::function<void(Expected<std::unique_ptr<rpc::Client>>)> done)>;
 
+// Runs work on a thread other than the event loop, then runs what it returns
+// on the hub's strand. For the commands dispatch.h says run off the loop,
+// whose engine calls may wait up to rpc::kSlowCallDeadline. Empty means the
+// hub runs them in place, capped like every other command.
+using WorkRunner = std::function<void(std::function<std::function<void()>()> work)>;
+
+// What any command run on the event loop may wait for the engine: cheap calls
+// on a healthy engine, so a stalled one costs the loop this and no more.
+inline constexpr std::chrono::milliseconds kLoopCommandDeadline{2'000};
+
 // The holder text a phone's sessions log in with, from its address.
 [[nodiscard]] std::string phone_holder(std::string_view peer);
 
@@ -196,6 +206,10 @@ public:
     // first connection.
     void set_claim_runner(ClaimRunner runner) { claim_runner_ = std::move(runner); }
 
+    // Slow commands run through this when set; see WorkRunner. Set before the
+    // first connection.
+    void set_work_runner(WorkRunner runner) { work_runner_ = std::move(runner); }
+
     // For tests and the gateway.
     [[nodiscard]] std::size_t sessions() const { return residents_.size(); }
     [[nodiscard]] PhoneSession* session(std::uint64_t connection) const;
@@ -229,6 +243,10 @@ private:
         // The link event of a change that went to the rebuild instead, sent
         // plain if the rebuild fails.
         bool link_owed = false;
+        // A slow command is out on the work runner with this session's
+        // Client. Its polls and probe are skipped meanwhile: they would only
+        // queue behind it on that Client and hold the loop doing so.
+        bool slow_in_flight = false;
     };
     struct Connection {
         PhoneSocket* socket = nullptr;
@@ -247,6 +265,10 @@ private:
         // that arrived meanwhile, replayed once it lands.
         std::optional<std::uint64_t> taking_over;
         std::deque<std::string> held;
+        // A slow command on the work runner, and the commands that arrived
+        // meanwhile, run in order once its reply is in.
+        bool slow = false;
+        std::deque<std::string> slow_held;
     };
 
     [[nodiscard]] std::chrono::steady_clock::time_point now() const;
@@ -285,6 +307,13 @@ private:
     // restart the link never reported (back within one probe) and retries a
     // rebuild that could not get a connection.
     void recover_dead_sessions(std::chrono::steady_clock::time_point now);
+
+    // Sends a slow command to the work runner. See WorkRunner.
+    void run_slow(std::uint64_t id, Connection& connection, const Command& command);
+    // Its reply, on the strand. The connection and the session may be gone.
+    void slow_done(std::uint64_t id, const std::string& token, const Command& command,
+                   std::string reply, bool stalled);
+    WorkRunner work_runner_;
 
     // A poll turn finished; timed_out when any call in it did.
     void note_poll(bool timed_out, std::chrono::steady_clock::time_point now);
