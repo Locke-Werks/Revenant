@@ -30,8 +30,6 @@ export async function render(host: Host): Promise<void> {
 }
 
 // Skipped under node, where the tests import this module without a page.
-// A launch reload (reloadIfShort) was tried for the short viewport and left
-// it 72.7 px short, so it is not called; --short-fix remains the fallback.
 if (typeof document !== "undefined") {
   if ("serviceWorker" in navigator) {
     let fingers = 0;
@@ -66,8 +64,6 @@ if (typeof document !== "undefined") {
   }
   pinViewport(window);
   trackShortViewport(window);
-  // Re-applying the viewport meta (pinViewportWidth) does not narrow the
-  // layout viewport on iOS: 0.850 -> 0.850 on the owner's phone, so it is off.
   insetsToggle(document, window);
   let store: Storage | null = null;
   try {

@@ -68,52 +68,6 @@ function wideAtLoad(win: Window): string {
   return `scrollWidth ${w.maxScrollWidth} at ${w.at} ms: ${items || "nothing past the screen"}`;
 }
 
-// Launches recorded by the head script in index.html, newest last. The
-// current launch writes its own entry 3 s in, so the newest without the
-// overlay that was written before this page loaded is the previous one.
-export interface LaunchCapture {
-  t: number;
-  overlay: boolean;
-  maxScrollWidth: number;
-  at: number;
-  items: { label: string; width: number; css: string }[];
-  scale: number | null;
-  innerWidth: number;
-  innerHeight?: number;
-  screenWidth?: number;
-  screenHeight?: number;
-  insets?: { top: number; bottom: number } | null;
-  savedAt?: number;
-}
-
-export function previousNormal(list: LaunchCapture[], loadedAt: number): LaunchCapture | null {
-  for (let i = list.length - 1; i >= 0; i--) if (!list[i]!.overlay && list[i]!.t < loadedAt) return list[i]!;
-  return null;
-}
-
-function previousLaunch(win: Window): string {
-  let list: LaunchCapture[] = [];
-  try {
-    list = JSON.parse(win.localStorage.getItem("revenant.wideLaunches") ?? "[]") as LaunchCapture[];
-  } catch {
-    return "not stored";
-  }
-  const loadedAt = Date.now() - win.performance.now();
-  const p = previousNormal(Array.isArray(list) ? list : [], loadedAt);
-  if (!p) return "none recorded";
-  const items = p.items.map((x) => `${x.label} ${x.width.toFixed(1)} (${x.css})`).join("; ");
-  const ins = p.insets ? `t ${p.insets.top} b ${p.insets.bottom}` : "n/a";
-  return (
-    `at ${p.savedAt ?? "?"} ms: inner ${p.innerWidth}x${p.innerHeight ?? "?"} scale ${p.scale ?? "n/a"} ` +
-    `screen ${p.screenWidth ?? "?"}x${p.screenHeight ?? "?"} insets ${ins}; widest ${p.maxScrollWidth} at ${p.at} ms: ${items || "nothing past the screen"}`
-  );
-}
-
-function repins(win: Window): string {
-  const log = (win as unknown as { __repins?: Repin[] }).__repins ?? [];
-  return log.map((r) => `${r.at} ms ${r.before?.toFixed(3) ?? "n/a"} -> ${r.after?.toFixed(3) ?? "n/a"}`).join("; ") || "none";
-}
-
 function rectText(name: string, r: { top: number; bottom: number; height: number }): string {
   return `${name} top ${r.top.toFixed(1)} bottom ${r.bottom.toFixed(1)} h ${r.height.toFixed(1)}`;
 }
@@ -220,9 +174,6 @@ export function showInsets(doc: Document, win: Window): void {
       `wider than screen now: ${overWide(doc, win.screen.width).join("; ") || "none"}`,
       `widest during load: ${wideAtLoad(win)}`,
       `--top-clear ${win.getComputedStyle(root).getPropertyValue("--top-clear").trim() || "unset"}  --short-fix ${doc.documentElement.style.getPropertyValue("--short-fix") || "unset"}  deficit ${((Math.max(win.screen.width, win.screen.height) / (vv?.scale || 1)) - win.innerHeight).toFixed(1)} (portrait)`,
-      `short-viewport reload: ${shortReloadText(win)}`,
-      `last launch without ruler: ${previousLaunch(win)}`,
-      `viewport re-pins: ${repins(win)}`,
       `scale ${vv ? vv.scale.toFixed(3) : "n/a"}  scrollWidth ${root.scrollWidth}  innerWidth ${win.innerWidth}`,
     ].join("\n");
   };
@@ -232,58 +183,6 @@ export function showInsets(doc: Document, win: Window): void {
   win.visualViewport?.addEventListener("scroll", render);
   // The app and its sheet mount after this runs and move when the sheet opens.
   win.setInterval(render, 1000);
-}
-
-// The layout viewport is wider than the device when the page is zoomed out or
-// the root is wider than the screen's width along the current orientation.
-export function needsRepin(g: { scale: number | null; clientWidth: number; screenWidth: number; screenHeight: number; landscape: boolean }): boolean {
-  const deviceWidth = g.landscape ? Math.max(g.screenWidth, g.screenHeight) : Math.min(g.screenWidth, g.screenHeight);
-  if (g.scale !== null && g.scale < 0.99) return true;
-  return deviceWidth > 0 && g.clientWidth > deviceWidth + 0.5;
-}
-
-export interface Repin {
-  at: number;
-  before: number | null;
-  after: number | null;
-}
-
-// iOS settles the layout viewport's width early and keeps it; changing the
-// viewport meta makes it work the width out again. Checked after mount and
-// after every size change, settled first so a rotation is not caught halfway.
-export function pinViewportWidth(win: Window): () => void {
-  const doc = win.document;
-  const log: Repin[] = [];
-  (win as unknown as { __repins: Repin[] }).__repins = log;
-  let timer = 0;
-  const check = () => {
-    const meta = doc.querySelector<HTMLMetaElement>('meta[name="viewport"]');
-    if (!meta) return;
-    const landscape = win.matchMedia("(orientation: landscape)").matches;
-    const scale = win.visualViewport?.scale ?? null;
-    const wide = needsRepin({
-      scale,
-      clientWidth: doc.documentElement.clientWidth,
-      screenWidth: win.screen.width,
-      screenHeight: win.screen.height,
-      landscape,
-    });
-    if (!wide || log.length >= 10) return;
-    const content = meta.getAttribute("content") ?? "";
-    meta.setAttribute("content", "");
-    win.requestAnimationFrame(() => {
-      meta.setAttribute("content", content);
-      win.requestAnimationFrame(() => log.push({ at: Math.round(win.performance.now()), before: scale, after: win.visualViewport?.scale ?? null }));
-    });
-  };
-  const later = () => {
-    win.clearTimeout(timer);
-    timer = win.setTimeout(check, 250);
-  };
-  win.addEventListener("resize", later);
-  win.addEventListener("orientationchange", later);
-  win.visualViewport?.addEventListener("resize", later);
-  return later;
 }
 
 // The iOS 26+ standalone short viewport: on a cold launch the layout viewport
@@ -305,70 +204,6 @@ export function shortViewportFix(g: {
   const tall = g.landscape ? Math.min(g.screenWidth, g.screenHeight) : Math.max(g.screenWidth, g.screenHeight);
   const deficit = tall / scale - g.innerHeight;
   return deficit > 1 && deficit < 200 ? Math.round(deficit * 10) / 10 : 0;
-}
-
-// A cold launch can get the short viewport where a reload gets the full one,
-// so the cure is one reload before anything live has started. Once tried,
-// a viewport that is still short keeps the --short-fix extension instead.
-export type LaunchAction = "reload" | "extend" | "none";
-
-export function launchAction(deficit: number, reloadedAlready: boolean): LaunchAction {
-  if (!(deficit > 1 && deficit < 200)) return "none";
-  return reloadedAlready ? "extend" : "reload";
-}
-
-const SHORT_RELOAD_KEY = "revenant.shortReload";
-// Shared with sw_reload.ts so the two reload paths cannot both fire.
-export const RELOAD_AT_KEY = "revenant.swReloadAt";
-
-export function currentDeficit(win: Window): number {
-  if ((win.navigator as Navigator & { standalone?: boolean }).standalone !== true) return 0;
-  return shortViewportFix({
-    standalone: true,
-    innerHeight: win.innerHeight,
-    scale: win.visualViewport?.scale ?? null,
-    screenWidth: win.screen.width,
-    screenHeight: win.screen.height,
-    landscape: win.matchMedia("(orientation: landscape)").matches,
-  });
-}
-
-// Runs first thing at launch. True when the page is reloading and nothing
-// else should start. The outcome of each try is kept for the ruler.
-export function reloadIfShort(win: Window): boolean {
-  let session: Storage | null = null;
-  try {
-    session = win.sessionStorage;
-  } catch {
-    return false;
-  }
-  const deficit = currentDeficit(win);
-  const tried = session.getItem(SHORT_RELOAD_KEY);
-  const action = launchAction(deficit, tried !== null);
-  if (tried !== null && session.getItem("revenant.shortReloadLogged") === null) {
-    session.setItem("revenant.shortReloadLogged", "1");
-    try {
-      win.localStorage.setItem("revenant.shortReloadLog", JSON.stringify({ t: Date.now(), before: Number(tried), after: deficit }));
-    } catch {
-      // The ruler just has less to say.
-    }
-  }
-  if (action !== "reload") return false;
-  session.setItem(SHORT_RELOAD_KEY, String(deficit));
-  session.setItem(RELOAD_AT_KEY, String(Date.now()));
-  win.location.reload();
-  return true;
-}
-
-export function shortReloadText(win: Window): string {
-  try {
-    const raw = win.localStorage.getItem("revenant.shortReloadLog");
-    if (!raw) return "never";
-    const r = JSON.parse(raw) as { t: number; before: number; after: number };
-    return `${new Date(r.t).toLocaleString()}: deficit ${r.before} -> ${r.after}`;
-  } catch {
-    return "not stored";
-  }
 }
 
 // iOS may correct the viewport later, after which the fix measures 0 and

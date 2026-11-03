@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { launchAction, needsRepin, previousNormal, shortViewportFix, rulerMarks, widest, type LaunchCapture } from "../src/insets";
+import { shortViewportFix, rulerMarks, widest } from "../src/insets";
 
 test("ruler lines fall every 100 px below the height, none at 0", () => {
   assert.deepEqual(rulerMarks(450), [100, 200, 300, 400]);
@@ -18,15 +18,13 @@ test("layout code does not size anything from the screen's height", () => {
   ];
   for (const f of files) {
     let text = readFileSync(f, "utf8");
-    // The overlay prints the screen; the re-pin reads its width along the
-    // orientation, never to size anything.
+    // The overlay prints the screen, never to size anything.
     if (f === "src/insets.ts") {
-      text = text.replace(/export function showInsets[\s\S]*?\n}\n/, "").replace(/export function pinViewportWidth[\s\S]*?\n}\n/, "")
+      text = text.replace(/export function showInsets[\s\S]*?\n}\n/, "")
         // Compares the viewport with the screen to detect the short case; the
         // size it applies is the inset, not the screen.
         .replace(/export function shortViewportFix[\s\S]*?\n}\n/, "")
-        .replace(/export function trackShortViewport[\s\S]*?\n}\n/, "")
-        .replace(/export function currentDeficit[\s\S]*?\n}\n/, "");
+        .replace(/export function trackShortViewport[\s\S]*?\n}\n/, "");
     }
     assert.equal(/screen\.(height|availHeight)/.test(text), false, f);
   }
@@ -47,20 +45,6 @@ test("no canvas is given a pixel width taken from the page", () => {
   }
 });
 
-test("a zoomed-out page or a root wider than the device asks for a re-pin", () => {
-  const g = { scale: 1, clientWidth: 440, screenWidth: 440, screenHeight: 956, landscape: false };
-  assert.equal(needsRepin(g), false);
-  assert.equal(needsRepin({ ...g, scale: 0.85 }), true);
-  assert.equal(needsRepin({ ...g, clientWidth: 518, scale: null }), true);
-  assert.equal(needsRepin({ ...g, clientWidth: 956, landscape: true }), false);
-});
-
-test("the previous normal launch is the newest without the overlay from before this load", () => {
-  const c = (t: number, overlay: boolean): LaunchCapture => ({ t, overlay, maxScrollWidth: 484, at: 300, items: [], scale: 0.91, innerWidth: 484 });
-  assert.equal(previousNormal([c(1, false), c(2, false), c(3, true)], 10)!.t, 2);
-  assert.equal(previousNormal([c(1, false), c(20, false)], 10)!.t, 1);
-  assert.equal(previousNormal([c(3, true)], 10), null);
-});
 
 test("a short installed viewport is extended by its shortfall in CSS px, at any page zoom", () => {
   const g = { standalone: true, screenWidth: 440, screenHeight: 956, landscape: false };
@@ -81,10 +65,3 @@ test("a short installed viewport is extended by its shortfall in CSS px, at any 
   assert.equal(shortViewportFix({ ...l, innerHeight: 440 / 0.85, scale: 0.85 }), 0);
 });
 
-test("a short cold launch reloads once, then falls back to extending", () => {
-  assert.equal(launchAction(72.7, false), "reload");
-  assert.equal(launchAction(72.7, true), "extend");
-  assert.equal(launchAction(0, false), "none");
-  assert.equal(launchAction(0, true), "none");
-  assert.equal(launchAction(300, false), "none");
-});
