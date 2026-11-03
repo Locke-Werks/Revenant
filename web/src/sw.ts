@@ -17,15 +17,13 @@ export interface WaitableEventLike {
   waitUntil(p: Promise<unknown>): void;
 }
 export interface CacheLike {
-  addAll(urls: string[]): Promise<void>;
+  addAll(requests: unknown[]): Promise<void>;
   match(req: unknown, opts?: { ignoreSearch?: boolean }): Promise<unknown>;
-  put(req: unknown, res: unknown): Promise<void>;
 }
 export interface CachesLike {
   open(name: string): Promise<CacheLike>;
   keys(): Promise<string[]>;
   delete(name: string): Promise<boolean>;
-  match(req: unknown, opts?: { ignoreSearch?: boolean }): Promise<unknown>;
 }
 export interface WorkerScope {
   location: { origin: string };
@@ -36,6 +34,12 @@ export interface WorkerScope {
   addEventListener(type: "install" | "activate", fn: (e: WaitableEventLike) => void): void;
   addEventListener(type: "fetch", fn: (e: FetchEventLike) => void): void;
 }
+
+// Builds the request that fills the cache. A plain URL string could be answered
+// from the HTTP cache, pinning a stale file under the new cache name; reload
+// forces the network. Injected so tests need no Request global.
+export type MakeRequest = (url: string) => unknown;
+const reloadRequest: MakeRequest = (url) => new Request(url, { cache: "reload" });
 
 const CACHE_PREFIX = "revenant-";
 
@@ -56,12 +60,25 @@ export function shouldHandle(req: FetchRequestLike, origin: string): boolean {
   return true;
 }
 
-export function installWorker(scope: WorkerScope, cacheName: string, shellFiles: string[]): void {
+// The reachability probe in offline.ts: the manifest with a probe parameter.
+// It must see the network, or "reachable" would always be true. Nothing else
+// gets this exemption, so a stray ?probe on a shell file is still cached.
+export function isProbe(req: FetchRequestLike): boolean {
+  const url = new URL(req.url);
+  return url.pathname === "/manifest.webmanifest" && url.searchParams.has("probe");
+}
+
+export function installWorker(
+  scope: WorkerScope,
+  cacheName: string,
+  shellFiles: string[],
+  makeRequest: MakeRequest = reloadRequest,
+): void {
   scope.addEventListener("install", (e) => {
     e.waitUntil(
       scope.caches
         .open(cacheName)
-        .then((c) => c.addAll(shellFiles))
+        .then((c) => c.addAll(shellFiles.map(makeRequest)))
         .then(() => scope.skipWaiting?.()),
     );
   });
@@ -83,18 +100,22 @@ export function installWorker(scope: WorkerScope, cacheName: string, shellFiles:
 
   scope.addEventListener("fetch", (e) => {
     if (!shouldHandle(e.request, scope.location.origin)) return;
-    // The probe in offline.ts carries a query string and must see the network,
-    // not a cached copy, or "reachable" would always be true.
-    if (new URL(e.request.url).searchParams.has("probe")) return;
+    if (isProbe(e.request)) return;
     e.respondWith(
-      // Cache first for the shell. Navigations fall back to the cached index so
-      // the app opens with webgate down and can show its own offline screen.
-      scope.caches.match(e.request, { ignoreSearch: true }).then((hit) => {
-        if (hit) return hit;
-        return scope.fetch(e.request).catch(() =>
-          e.request.mode === "navigate" ? scope.caches.match("/index.html") : Promise.reject(new Error("offline")),
-        );
-      }),
+      // Cache first for the shell, from this build's cache only: a leftover
+      // cache from an older build must never answer. Navigations fall back to
+      // the cached index so the app opens with webgate down and can show its
+      // own offline screen.
+      scope.caches
+        .open(cacheName)
+        .then((cache) =>
+          cache.match(e.request, { ignoreSearch: true }).then((hit) => {
+            if (hit) return hit;
+            return scope.fetch(e.request).catch(() =>
+              e.request.mode === "navigate" ? cache.match("/index.html") : Promise.reject(new Error("offline")),
+            );
+          }),
+        ),
     );
   });
 }

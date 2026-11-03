@@ -69,42 +69,59 @@ revenant_embed_version(revenant-webgate DESCRIPTION "Revenant web gateway")
 # skipped so a machine that only builds the C++ (CI without Node) still
 # configures. The gateway then runs without a web directory and serves 404s.
 #
-# Two commands keyed on different inputs: npm ci reruns only when the lockfile
-# changes, the bundle only when a source does, so an ordinary build touches
-# neither.
+# Three steps keyed on different inputs, so an ordinary build repeats none of
+# the expensive ones: npm ci reruns when the lockfile changes, the bundle when a
+# source changes, and the copy beside the exe on every build of the target.
+#
+# The bundle goes to one directory per build tree, shared by the configurations
+# of a multi-config generator, and its output file is the custom command's
+# OUTPUT, so deleting it also reruns the bundle. The copy is deliberately not
+# stamped: a stamp is shared across configurations, and a Release build after a
+# Debug one would find it current and never populate the Release exe's web/.
 find_program(REVENANT_NPM npm)
 find_program(REVENANT_NODE node)
 if(REVENANT_NPM AND REVENANT_NODE)
     set(WEB_DIR "${CMAKE_SOURCE_DIR}/web")
+    set(WEB_OUT "${CMAKE_CURRENT_BINARY_DIR}/web-dist")
     file(GLOB_RECURSE WEB_SOURCES CONFIGURE_DEPENDS
         "${WEB_DIR}/src/*" "${WEB_DIR}/static/*")
+    if(WIN32)
+        set(WEB_NPM_RUN cmd /c "${REVENANT_NPM}")
+    else()
+        set(WEB_NPM_RUN "${REVENANT_NPM}")
+    endif()
     set(WEB_DEPS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/web-npm-ci.stamp")
-    set(WEB_BUILD_STAMP "${CMAKE_CURRENT_BINARY_DIR}/web-build.stamp")
 
     add_custom_command(
         OUTPUT "${WEB_DEPS_STAMP}"
-        COMMAND "${REVENANT_NPM}" ci
+        # npm is npm.cmd on Windows. In the batch file the Visual Studio generator
+        # writes, calling a .cmd without `call` ends the script, so the touch
+        # below would never run; cmd /c is an executable and returns.
+        COMMAND ${WEB_NPM_RUN} ci
         COMMAND "${CMAKE_COMMAND}" -E touch "${WEB_DEPS_STAMP}"
         DEPENDS "${WEB_DIR}/package.json" "${WEB_DIR}/package-lock.json"
         WORKING_DIRECTORY "${WEB_DIR}"
         COMMENT "web: npm ci"
         VERBATIM)
 
+    # sw.js is the last file build.mjs writes, so it stands for the whole
+    # directory.
     add_custom_command(
-        OUTPUT "${WEB_BUILD_STAMP}"
-        COMMAND "${REVENANT_NODE}" build.mjs
-        COMMAND "${CMAKE_COMMAND}" -E remove_directory "$<TARGET_FILE_DIR:revenant-webgate>/web"
-        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${WEB_DIR}/dist"
-                "$<TARGET_FILE_DIR:revenant-webgate>/web"
-        COMMAND "${CMAKE_COMMAND}" -E touch "${WEB_BUILD_STAMP}"
+        OUTPUT "${WEB_OUT}/sw.js"
+        COMMAND "${REVENANT_NODE}" build.mjs "${WEB_OUT}"
         DEPENDS "${WEB_DEPS_STAMP}" ${WEB_SOURCES}
                 "${WEB_DIR}/build.mjs" "${WEB_DIR}/tsconfig.json"
         WORKING_DIRECTORY "${WEB_DIR}"
-        COMMENT "web: bundle and copy beside revenant-webgate"
+        COMMENT "web: bundle"
         VERBATIM)
 
-    add_custom_target(revenant_web ALL DEPENDS "${WEB_BUILD_STAMP}")
-    add_dependencies(revenant_web revenant-webgate)
+    add_custom_target(revenant_web ALL
+        DEPENDS "${WEB_OUT}/sw.js"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory "$<TARGET_FILE_DIR:revenant-webgate>/web"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${WEB_OUT}"
+                "$<TARGET_FILE_DIR:revenant-webgate>/web"
+        COMMENT "web: copy beside revenant-webgate"
+        VERBATIM)
 else()
     message(STATUS "npm or node not found: skipping the revenant_web target (phone web app not built)")
 endif()

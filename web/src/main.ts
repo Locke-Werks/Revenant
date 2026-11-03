@@ -36,7 +36,14 @@ export async function render(host: Host): Promise<void> {
 // Skipped under node, where the tests import this module without a page.
 if (typeof document !== "undefined") {
   if ("serviceWorker" in navigator) {
-    void navigator.serviceWorker.register("/sw.js");
+    // A home screen app is resumed far more often than it is launched, and the
+    // browser only checks for a new worker on navigation. Checking when the app
+    // comes back to the foreground is what lets an update land.
+    void navigator.serviceWorker.register("/sw.js").then((reg) => {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") void reg.update().catch(() => {});
+      });
+    });
   }
   const root = document.getElementById("app");
   if (root) {

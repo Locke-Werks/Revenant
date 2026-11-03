@@ -6,7 +6,9 @@ import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
-const dist = "dist";
+// The output directory is an argument so each CMake build tree bundles into its
+// own, instead of every preset sharing and wiping one folder in the source tree.
+const dist = process.argv[2] ?? "dist";
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
 cpSync("static", dist, { recursive: true });
