@@ -69,6 +69,13 @@ enum class ErrorCategory : std::uint8_t {
     // Out of resources now. Worth asking again, later rather than at once,
     // because asking again immediately is what caused it.
     Overloaded,
+
+    // The peer did not answer within the caller's deadline. The connection
+    // may be fine and the peer merely busy, so this is not Disconnected: a
+    // poll skips a turn and asks again, and a supervisor decides how many in
+    // a row mean the peer is gone. Raised by core/rpc/client.cpp alone; it
+    // never crosses the wire.
+    TimedOut,
 };
 
 // A failure carries a message meant for a person: what was being attempted and
@@ -163,6 +170,8 @@ inline Error with_context(Error inner, std::string_view context) {
             return "unimplemented";
         case ErrorCategory::Overloaded:
             return "overloaded";
+        case ErrorCategory::TimedOut:
+            return "timed out";
         case ErrorCategory::Unclassified:
             break;
     }

@@ -37,6 +37,7 @@ if(TARGET revenant_rpc_server)
         ../support/no_modal_dialogs.cpp
         ../reference/gpu_fixture.cpp
         test_decode_lane.cpp
+        test_rpc_deadline.cpp
         test_rpc_agc.cpp
         test_rpc_audio.cpp
         test_rpc_auth.cpp
@@ -71,6 +72,12 @@ if(TARGET revenant_rpc_server)
         Catch2::Catch2WithMain
     )
     target_include_directories(revenant_rpc_tests PRIVATE "${CMAKE_SOURCE_DIR}")
+
+    # test_rpc_decode.cpp crossed COFF's section limit in a Debug build when
+    # client.h grew its call deadlines on 2026-11-03.
+    if(MSVC)
+        target_compile_options(revenant_rpc_tests PRIVATE /bigobj)
+    endif()
 
     # Session.vocoderPlugins against real plugin DLLs: the fixtures
     # tests/decode builds, copied into a folder the case scans. Their built

@@ -1377,6 +1377,10 @@ struct LoopState {
 
     // The one receiver event subscription, or null.
     kj::Own<schema::VrxEventSubscription::Client> vrx_events;
+
+    // The loop's timer, which every call's deadline races against. Set by
+    // run() once the io context exists; it lives as long as that context.
+    kj::Timer* timer = nullptr;
 };
 
 class ClientImpl;
@@ -1655,10 +1659,29 @@ private:
     // Defined here rather than out of line because the return type is deduced
     // from the promise body hands back, and spelling that twice is worse than
     // having a template body in a class definition.
+    //
+    // fallback is the deadline when no CallDeadline is in scope: kCallDeadline,
+    // or kSlowCallDeadline for the handful of calls client.h names.
     template <typename Func>
-    auto on_loop(std::string_view what, Func&& body)
+    auto on_loop(std::string_view what, Func&& body,
+                 std::chrono::milliseconds fallback = kCallDeadline)
         -> Expected<typename PromiseValue<std::invoke_result_t<Func&, LoopState&>>::type> {
         using Value = typename PromiseValue<std::invoke_result_t<Func&, LoopState&>>::type;
+
+        CallDeadline* scope = CallDeadline::current();
+        const std::chrono::milliseconds deadline =
+            scope != nullptr && scope->deadline() != kOwnDeadline ? scope->deadline() : fallback;
+        const auto timed_out_error = [what, deadline]() {
+            return Error{std::format("{}: the engine did not answer within {:g} s", what,
+                                     static_cast<double>(deadline.count()) / 1000.0),
+                         ErrorCategory::TimedOut};
+        };
+        if (scope != nullptr && scope->poll() && scope->timed_out()) {
+            return std::unexpected(Error{
+                std::format("{}: skipped, the engine did not answer an earlier call in this poll",
+                            what),
+                ErrorCategory::TimedOut});
+        }
 
         // Checked before the mutex, not after. A callback that called back
         // into its own Client would otherwise block on a lock the thread
@@ -1676,16 +1699,42 @@ private:
             return fail(std::format("{}: this client is not connected", what));
         }
 
-        const std::lock_guard<std::mutex> serialise(calls_);
+        // The lock is itself a wait: a call queued behind one the engine is
+        // not answering must not wait longer than its own deadline for it.
+        std::unique_lock<std::timed_mutex> serialise(calls_, std::defer_lock);
+        if (deadline.count() <= 0) {
+            serialise.lock();
+        } else if (!serialise.try_lock_for(deadline)) {
+            if (scope != nullptr) {
+                scope->mark_timed_out();
+            }
+            return std::unexpected(timed_out_error());
+        }
+
+        // Written on the loop thread and read here after executeSync returns,
+        // which orders the two.
+        bool expired = false;
 
         try {
-            auto deliver_to_loop = [this, &body]() {
+            auto deliver_to_loop = [this, &body, deadline, &expired]() {
                 LoopState* state = state_;
                 if (state == nullptr) {
                     kj::throwFatalException(
                         KJ_EXCEPTION(DISCONNECTED, "the client event loop is shutting down"));
                 }
-                return body(*state);
+                auto answer = body(*state);
+                if (deadline.count() <= 0 || state->timer == nullptr) {
+                    return answer;
+                }
+                // exclusiveJoin cancels the loser. When the timer wins, the
+                // call's promise is dropped, which is what tells capnp to send
+                // the engine a Finish and discard whatever answer comes later.
+                return answer.exclusiveJoin(
+                    state->timer->afterDelay(deadline.count() * kj::MILLISECONDS)
+                        .then([&expired]() -> kj::Promise<Value> {
+                            expired = true;
+                            return KJ_EXCEPTION(OVERLOADED, "call deadline passed");
+                        }));
             };
 
             if constexpr (std::is_void_v<Value>) {
@@ -1695,6 +1744,12 @@ private:
                 return executor_->executeSync(deliver_to_loop);
             }
         } catch (const kj::Exception& failure) {
+            if (expired) {
+                if (scope != nullptr) {
+                    scope->mark_timed_out();
+                }
+                return std::unexpected(timed_out_error());
+            }
             return std::unexpected(translate(what, failure));
         } catch (const std::exception& failure) {
             return std::unexpected(Error{std::format("{}: {}", what, failure.what())});
@@ -1754,7 +1809,7 @@ private:
     std::uint64_t vrx_event_generation_ = 0;
 
     // client.h says calls queue. This is what makes them.
-    std::mutex calls_;
+    std::timed_mutex calls_;
 
     // Read from any thread and ordered against nothing: they are counters for
     // a display, not a handshake.
@@ -1801,7 +1856,7 @@ kj::Promise<void> SpectrumReceiverImpl::frame(FrameContext context) {
 
 ClientImpl::~ClientImpl() noexcept {
     {
-        const std::lock_guard<std::mutex> serialise(calls_);
+        const std::lock_guard<std::timed_mutex> serialise(calls_);
 
         if (executor_.get() != nullptr && std::this_thread::get_id() != loop_id_) {
             try {
@@ -1953,6 +2008,7 @@ void ClientImpl::run(const std::string& address, std::uint16_t port,
             kj::mv(shutdown.fulfiller),
             {},
         };
+        state.timer = &io.provider->getTimer();
 
         // Declared after `state` so it clears the pointer before `state` is
         // destroyed. The event loop outlives LoopState by the length of this
@@ -2042,7 +2098,7 @@ Expected<std::vector<SourceDescriptor>> ClientImpl::list_sources() {
             }
             return out;
         });
-    });
+    }, kSlowCallDeadline);
 }
 
 Expected<SourceStats> ClientImpl::source_stats() {
@@ -2191,13 +2247,13 @@ Status ClientImpl::open_source(std::string_view uri) {
         auto request = state.session.openSourceRequest();
         request.setUri(capnp::Text::Reader(owned.c_str(), owned.size()));
         return request.send().ignoreResult();
-    });
+    }, kSlowCallDeadline);
 }
 
 Status ClientImpl::close_source() {
     return on_loop("close_source", [](LoopState& state) {
         return state.session.closeSourceRequest().send().ignoreResult();
-    });
+    }, kSlowCallDeadline);
 }
 
 Expected<std::uint64_t> ClientImpl::add_vrx(const VrxParams& params, VrxLifetime lifetime) {
@@ -2353,7 +2409,7 @@ Expected<TimeShiftExtent> ClientImpl::start_timeshift_replay(std::int64_t at_ns,
         request.setSpeed(speed);
         return request.send().then(
             [](auto&& response) { return read_timeshift_extent(response.getExtent()); });
-    });
+    }, kSlowCallDeadline);
 }
 
 Status ClientImpl::stop_timeshift_replay() {
@@ -2709,7 +2765,7 @@ Expected<TranscriptionStatus> ClientImpl::set_transcription(bool on) {
         request.setOn(on);
         return request.send().then(
             [](auto&& response) { return read_transcription_status(response.getStatus()); });
-    });
+    }, kSlowCallDeadline);
 }
 
 Expected<TranscriptionStatus> ClientImpl::transcription_status() {
@@ -3194,7 +3250,7 @@ Expected<CaptureCatalog> ClientImpl::capture_catalog(std::optional<std::int64_t>
             }
             return out;
         });
-    });
+    }, kSlowCallDeadline);
 }
 
 Expected<CaptureSearchResult> ClientImpl::capture_search(const CaptureQuery& query) {
@@ -3231,7 +3287,7 @@ Expected<CaptureSearchResult> ClientImpl::capture_search(const CaptureQuery& que
             }
             return out;
         });
-    });
+    }, kSlowCallDeadline);
 }
 
 Expected<std::vector<CaptureBucket>> ClientImpl::capture_occupancy(
@@ -3255,7 +3311,7 @@ Expected<std::vector<CaptureBucket>> ClientImpl::capture_occupancy(
             }
             return buckets;
         });
-    });
+    }, kSlowCallDeadline);
 }
 
 void ClientImpl::forget_decoded(const DecodedKey& key) {
@@ -3586,6 +3642,32 @@ Expected<std::unique_ptr<Client>> Client::connect(std::string_view address, std:
         return std::unexpected(started.error());
     }
     return std::unique_ptr<Client>(std::move(client));
+}
+
+namespace {
+// Per thread because a scope describes what its own caller is willing to
+// wait, and the Client is shared by threads that are willing to wait
+// different amounts.
+thread_local CallDeadline* innermost_deadline = nullptr;
+}  // namespace
+
+CallDeadline::CallDeadline(std::chrono::milliseconds deadline, bool poll)
+    : deadline_(deadline), poll_(poll), outer_(innermost_deadline) {
+    innermost_deadline = this;
+}
+
+CallDeadline::~CallDeadline() {
+    // A timeout inside a nested scope is a timeout inside the outer one too,
+    // or an outer poll scope would wait again for an engine already known to
+    // be stalled.
+    if (timed_out_ && outer_ != nullptr) {
+        outer_->timed_out_ = true;
+    }
+    innermost_deadline = outer_;
+}
+
+CallDeadline* CallDeadline::current() {
+    return innermost_deadline;
 }
 
 }  // namespace revenant::rpc

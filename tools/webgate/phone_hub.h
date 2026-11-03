@@ -94,6 +94,14 @@ struct HubTiming {
     // leave a TCP connection open with nobody on the other end.
     std::chrono::milliseconds ping_interval{kPingIntervalMs};
     std::chrono::milliseconds silence_limit{45'000};
+
+    // The engine polls in tick() run on the event loop. Each tick's polls
+    // share one CallDeadline of poll_deadline that waits at most once, and
+    // after a tick whose poll timed out the next poll waits
+    // stalled_poll_interval, so a stalled engine leaves the loop free to
+    // serve HTTP and pings for most of the time.
+    std::chrono::milliseconds poll_deadline = rpc::kPollDeadline;
+    std::chrono::milliseconds stalled_poll_interval{2'000};
 };
 
 // Where a session gets an engine connection: on connect, on take over and
@@ -194,6 +202,10 @@ public:
     [[nodiscard]] PhoneStreams* streams(std::uint64_t connection) const;
     [[nodiscard]] std::string token(std::uint64_t connection) const;
     [[nodiscard]] bool holds(const std::string& token) const { return residents_.contains(token); }
+    // Whether the last poll turn timed out, and how many have. For tests and
+    // the log.
+    [[nodiscard]] bool engine_stalled() const { return engine_stalled_; }
+    [[nodiscard]] std::uint64_t polls_timed_out() const { return polls_timed_out_; }
     // The cache every phone of this hub shares.
     [[nodiscard]] const FrameLevelsCache& frame_levels() const { return *base_.frame_levels; }
 
@@ -273,6 +285,12 @@ private:
     // restart the link never reported (back within one probe) and retries a
     // rebuild that could not get a connection.
     void recover_dead_sessions(std::chrono::steady_clock::time_point now);
+
+    // A poll turn finished; timed_out when any call in it did.
+    void note_poll(bool timed_out, std::chrono::steady_clock::time_point now);
+    bool engine_stalled_ = false;
+    std::chrono::steady_clock::time_point next_stalled_poll_{};
+    std::uint64_t polls_timed_out_ = 0;
 
     Strand& strand_;
     StreamsConfig base_;

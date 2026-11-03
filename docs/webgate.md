@@ -454,10 +454,37 @@ the gateway cannot be reached; see the next two items.
 
 **Background and live audio stop, the app still shows the link up.** The
 engine is hung rather than dead: it holds the connection open but does not
-answer. The gateway has no timeout on engine calls yet, so Keep listening and
-live audio stay silent until the engine answers again or its process exits,
-after which the gateway recovers on its own. End `revenant-engine.exe` in Task
-Manager if it does not come back.
+answer. Keep listening and live audio stay silent until the engine answers
+again or its process exits, after which the gateway recovers on its own. End
+`revenant-engine.exe` in Task Manager if it does not come back. The gateway
+itself keeps serving the page and its pings meanwhile; see Engine calls have
+deadlines.
+
+### Engine calls have deadlines
+
+Every engine call the gateway makes gives up after a deadline (docs/rpc.md,
+Call deadlines). On 2026-11-03 a call made from the gateway's event loop never
+returned while the engine was under heavy GPU load, and the whole gateway
+stopped answering: HTTPS timed out, the phone showed "not reachable", the
+socket sat in CLOSE_WAIT.
+
+- **Polls** (source state, detections, transcription status, RDS, trunk
+  status, the session probe) share one 2 s deadline per 250 ms tick, and the
+  first that times out fails the rest of that tick at once. After a timed-out
+  poll the next one waits 2 s, so a stalled engine blocks the event loop for at
+  most 2 s in every 4 s, and pings go out before any poll. The log says
+  `the engine did not answer a poll within 2.0 s` once when a streak starts and
+  `the engine is answering polls again` when it ends.
+- **Commands** from the phone wait once with each call's own deadline (5 s, or
+  60 s for opening a source). A command the engine does not answer gets an
+  error reply, `... the engine did not answer within 5 s`, and the session is
+  usable afterwards.
+- **Liveness**: the link's probe may time out twice in a row; the third
+  consecutive timeout is treated as the engine gone and takes the reconnect
+  path.
+
+The polls still run on the event loop. Moving them to a worker would take the
+engine off the loop entirely and is not done yet.
 
 **"Revenant is not reachable".** The app opened but the gateway did not answer
 within 4 seconds. Check that `revenant-webgate.exe` is running, that the phone

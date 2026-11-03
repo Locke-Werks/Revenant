@@ -165,6 +165,9 @@ bool PhoneHub::make_room()
 PhoneHub::Resident& PhoneHub::seat(std::uint64_t id, std::unique_ptr<rpc::Client> client,
                                    std::string holder)
 {
+    // Seating subscribes and reads the engine's state, on the event loop;
+    // see text() for why it waits once.
+    const rpc::CallDeadline once(rpc::kOwnDeadline, true);
     static_cast<void>(make_room());
     auto resident = std::make_unique<Resident>();
     resident->token = new_token();
@@ -355,6 +358,11 @@ void PhoneHub::settle_losses()
 
 void PhoneHub::text(std::uint64_t id, std::string_view text)
 {
+    // A command waits once: the first call the engine does not answer fails
+    // the command with an error reply, and the rest of what this command
+    // would have asked fails at once rather than each waiting its own
+    // deadline on the event loop.
+    const rpc::CallDeadline once(rpc::kOwnDeadline, true);
     const auto it = connections_.find(id);
     if (it == connections_.end()) {
         return;
@@ -579,9 +587,20 @@ void PhoneHub::tick()
         disconnect(id);
     }
 
+    // Every poll this tick shares one deadline, and the first that times out
+    // makes the rest fail at once: these calls run on the event loop that
+    // serves HTTP and the sockets, so a stalled engine costs one kPollDeadline
+    // per poll turn and not one per call. While the engine is stalled the
+    // polls back off to stalled_poll_interval, which keeps the loop free for
+    // most of each interval. Pings went out above, before any of this.
+    const bool poll_now = !engine_stalled_ || t >= next_stalled_poll_;
+    rpc::CallDeadline poll(timing_.poll_deadline, true);
+
     std::vector<std::string> expired;
     for (auto& [token, resident] : residents_) {
-        resident->streams->tick();
+        if (poll_now) {
+            resident->streams->tick();
+        }
         if (resident->connection) {
             continue;
         }
@@ -604,7 +623,33 @@ void PhoneHub::tick()
         residents_.erase(token);
     }
 
-    recover_dead_sessions(t);
+    if (poll_now) {
+        recover_dead_sessions(t);
+        note_poll(poll.timed_out(), t);
+    }
+}
+
+void PhoneHub::note_poll(bool timed_out, std::chrono::steady_clock::time_point t)
+{
+    // Logged once per streak, at its start and its end: a stalled engine
+    // polled four times a second would otherwise fill the log.
+    if (timed_out) {
+        ++polls_timed_out_;
+        next_stalled_poll_ = t + timing_.stalled_poll_interval;
+        if (!engine_stalled_) {
+            engine_stalled_ = true;
+            std::fprintf(stderr,
+                         "revenant-webgate: the engine did not answer a poll within %.1f s; "
+                         "polling every %.1f s until it does\n",
+                         static_cast<double>(timing_.poll_deadline.count()) / 1000.0,
+                         static_cast<double>(timing_.stalled_poll_interval.count()) / 1000.0);
+        }
+        return;
+    }
+    if (engine_stalled_) {
+        engine_stalled_ = false;
+        std::fprintf(stderr, "revenant-webgate: the engine is answering polls again\n");
+    }
 }
 
 void PhoneHub::recover_dead_sessions(std::chrono::steady_clock::time_point t)
@@ -626,6 +671,7 @@ void PhoneHub::recover_dead_sessions(std::chrono::steady_clock::time_point t)
 
 void PhoneHub::link_state(LinkState state, std::string detail)
 {
+    const rpc::CallDeadline once(rpc::kOwnDeadline, true);
     const bool rising = state == LinkState::Up && link_state_ != LinkState::Up;
     link_state_ = state;
     link_detail_ = std::move(detail);
@@ -680,6 +726,7 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
 
 void PhoneHub::rebuilt(const std::string& token, Expected<std::unique_ptr<rpc::Client>> client)
 {
+    const rpc::CallDeadline once(rpc::kOwnDeadline, true);
     Resident* resident = find_token(token);
     if (resident == nullptr) {
         // Expired or taken over while the connect ran. Dropping the Client
