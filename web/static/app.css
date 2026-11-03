@@ -123,7 +123,13 @@ button {
   background: transparent;
   border-color: transparent;
   padding: 0 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* The digits take vertical drags; without this the page scrolls instead. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
+.app .freq .digit { display: inline-block; min-width: 0.6em; text-align: center; }
 .freq-entry { flex: 0 1 11em; }
 .freq-entry input,
 .app input:not([type]),

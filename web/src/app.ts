@@ -320,10 +320,34 @@ export function mountApp(root: HTMLElement): AppHandle {
   });
   root.querySelector("#dial-slot")!.append(dial.el);
 
+  // A digit swipe previews and sends like a waterfall drag, so the readout
+  // follows the finger and the gateway sees a rate-limited stream.
+  const digitLimiter = new TuneLimiter(
+    (hz) => receivers.tuneDragged(hz),
+    () => performance.now(),
+    (fn, ms) => {
+      const h = window.setTimeout(fn, ms);
+      return () => window.clearTimeout(h);
+    },
+  );
   const top = new TopBar({
     tune: (hz) => {
       dial.stop();
       receivers.tap(hz);
+    },
+    swipeBegin: () => {
+      dial.stop();
+      const id = receivers.list.active;
+      const r = id === null ? undefined : receivers.list.get(id);
+      return r ? r.hz : null;
+    },
+    swipeStep: (hz) => {
+      if (!receivers.preview(hz)) return;
+      digitLimiter.set(hz);
+    },
+    swipeEnd: () => {
+      digitLimiter.flush();
+      receivers.endDrag();
     },
     openSheet: () => sheet!.setOpen(true),
     toast,
