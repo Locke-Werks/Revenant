@@ -494,6 +494,15 @@ test("source behind real time below 0.98, measured, and not paced slow on purpos
   assert.equal(sourceBehind({ event: "source", open: true }), false);
 });
 
+test("problems are chips, the stopping one first and marked", () => {
+  const s = new StatusModel();
+  s.eventsEnded("restart");
+  const p = s.problems();
+  assert.deepEqual(p[0], { text: "connecting", stops: true });
+  assert.equal(p.length, 2);
+  assert.equal(p[1]!.stops, false);
+});
+
 test("the status pill names what is wrong and the waterfall freezes while not up", () => {
   const s = new StatusModel();
   assert.equal(s.pill(), "connecting");

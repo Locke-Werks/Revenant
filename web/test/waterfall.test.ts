@@ -78,7 +78,7 @@ test("rows wider than the texture are clipped to it", () => {
 test("colour map runs from the background to yellow-white, opaque", () => {
   const c = colormap();
   assert.equal(c.length, 1024);
-  assert.deepEqual([...c.subarray(0, 4)], [0x14, 0x14, 0x18, 255]);
+  assert.deepEqual([...c.subarray(0, 4)], [0x0a, 0x0a, 0x0c, 255]);
   assert.deepEqual([...c.subarray(1020, 1024)], [0xff, 0xf0, 0xa0, 255]);
   for (let i = 3; i < 1024; i += 4) assert.equal(c[i], 255);
 });

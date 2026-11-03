@@ -1,6 +1,7 @@
 import { chooseScreen, installScreenHtml, type StandaloneEnv } from "./install";
 import { gatewayReachable, offlineScreenHtml, type Probe } from "./offline";
 import { appScreenHtml, mountApp } from "./app";
+import { insetsToggle, pinViewport, showInsets, wantsInsets } from "./insets";
 
 export interface Host {
   root: { innerHTML: string; querySelector(sel: string): { addEventListener(ev: string, fn: () => void): void } | null };
@@ -39,6 +40,15 @@ if (typeof document !== "undefined") {
       });
     });
   }
+  pinViewport(window);
+  insetsToggle(document, window);
+  let store: Storage | null = null;
+  try {
+    store = window.localStorage;
+  } catch {
+    // Private browsing: the query string still works.
+  }
+  if (wantsInsets(location.search, store)) showInsets(document, window);
   const root = document.getElementById("app");
   if (root) {
     void render({

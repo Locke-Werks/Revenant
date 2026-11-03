@@ -1,13 +1,16 @@
 // The waterfall's palette: the app background at the noise floor, through the
 // accent red, to yellow-white for the strongest signals. Built once as a 256
-// entry RGBA table, indexed by the row's byte value.
+// entry RGBA table, indexed by the row's byte value. Every stop is lighter
+// than the one before, so a stronger signal never reads as a weaker one; the
+// test checks CIE L* across the whole table.
 
 const STOPS: [number, number, number, number][] = [
-  [0.0, 0x14, 0x14, 0x18],
-  [0.25, 0x1b, 0x1b, 0x1f],
-  [0.45, 0x5a, 0x14, 0x22],
-  [0.65, 0xd6, 0x26, 0x2a],
-  [0.85, 0xf2, 0x8c, 0x28],
+  [0.0, 0x0a, 0x0a, 0x0c],
+  [0.2, 0x0e, 0x0e, 0x11],
+  [0.4, 0x2a, 0x0e, 0x14],
+  [0.55, 0x6a, 0x14, 0x20],
+  [0.7, 0xd6, 0x26, 0x2a],
+  [0.86, 0xf2, 0x8c, 0x28],
   [1.0, 0xff, 0xf0, 0xa0],
 ];
 

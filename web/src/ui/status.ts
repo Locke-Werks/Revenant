@@ -82,6 +82,16 @@ export class StatusModel {
     return this.engine !== null && this.engine !== "up";
   }
 
+  // Everything wrong, as short chips over the display: a stopping condition
+  // first and marked, so it takes the accent while the rest stay grey.
+  problems(): { text: string; stops: boolean }[] {
+    const out: { text: string; stops: boolean }[] = [];
+    const p = this.pill();
+    if (p !== null) out.push({ text: p, stops: true });
+    for (const c of this.chips()) out.push({ text: c, stops: false });
+    return out;
+  }
+
   chips(): string[] {
     const out: string[] = [];
     if (this.behind && this.sourceOpen) out.push("source behind real time");

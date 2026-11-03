@@ -1,8 +1,14 @@
 :root {
-  --bg: #1b1b1f;
+  /* Near-black with one accent; everything else is a grey. */
+  --bg: #0a0a0c;
   --fg: #e6e6ea;
-  --muted: #9a9aa3;
+  --muted: #8e8e97;
+  --dim: #5c5c64;
   --accent: #d6262a;
+  --sans: -apple-system, system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  /* Cause and effect only, and never slower than this. */
+  --quick: 120ms;
 }
 
 * { box-sizing: border-box; }
@@ -12,12 +18,13 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--fg);
-  font: 16px/1.4 -apple-system, system-ui, sans-serif;
+  font: 16px/1.4 var(--sans);
   -webkit-text-size-adjust: 100%;
 }
 
-/* viewport-fit=cover draws under the notch and home indicator, so the app pads
-   itself by the insets instead of letting content sit beneath them. */
+/* viewport-fit=cover draws under the notch and home indicator, so the setup
+   screens pad themselves by the insets. The running app is fixed and pads
+   its own bars instead. */
 #app {
   min-height: 100%;
   padding-top: env(safe-area-inset-top);
@@ -57,79 +64,86 @@ button {
 /* ---- The running app --------------------------------------------------- */
 
 :root {
-  --panel: #232329;
-  --line: #3a3a42;
-  --chip: #2a2a30;
-  --warn: #fff0a0;
+  --panel: rgba(18, 18, 21, 0.96);
+  --line: #24242a;
+  --chip: #18181c;
+  --warn: #c8c8ce;
   /* Apple's minimum touch target. */
   --hit: 44px;
 }
 
-/* Fixed inside the safe areas, so a rubber-band scroll cannot drag it and
-   nothing sits under the notch or the home indicator. Portrait: top bar,
-   waterfall, receiver rail, one column a thumb can reach. */
-.app {
-  position: fixed;
-  top: env(safe-area-inset-top);
-  right: env(safe-area-inset-right);
-  bottom: env(safe-area-inset-bottom);
-  left: env(safe-area-inset-left);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
-  grid-template-areas: "top" "stage" "rail" "dial";
+/* With the app up nothing scrolls: a scrolled document carries every fixed
+   element with it, up under the status bar. */
+html:has(.app), html:has(.app) body {
+  overflow: hidden;
   overscroll-behavior: none;
 }
-/* Last row, so it sits on the edge the home indicator is above. */
-.dial {
-  grid-area: dial;
-  background: #0b0b0d;
-  border-top: 1px solid var(--line);
-}
-.dial-strip canvas {
-  display: block;
-  width: 100%;
-  height: 56px;
-  touch-action: none;
-  -webkit-user-select: none;
-  user-select: none;
+
+/* Edge to edge. Each bar pads itself by the inset on its own edge, so its
+   background reaches the glass and the display fills what is left. */
+.app {
+  position: fixed;
+  inset: 0;
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "top" "rail" "stage" "dial";
+  background: var(--bg);
+  overscroll-behavior: none;
 }
 .app button {
   margin: 0;
-  padding: 0 14px;
+  padding: 0 12px;
   min-height: var(--hit);
   min-width: var(--hit);
-  border-radius: 12px;
+  border-radius: 10px;
   color: var(--fg);
   background: var(--chip);
-  border: 1px solid var(--line);
-  font-size: 0.95rem;
+  border: 1px solid transparent;
+  font-size: 0.9rem;
+  transition: background-color var(--quick) ease-out, border-color var(--quick) ease-out, color var(--quick) ease-out;
 }
+.app button:active { background: #222228; }
 .app button:disabled { opacity: 0.45; }
-.app button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
-.app .btn.danger { color: #ffb4b4; }
+.app button[aria-pressed="true"] { border-color: var(--accent); color: var(--fg); }
+.app .btn.danger { color: var(--accent); }
 
-.top { grid-area: top; }
+/* Top bar: the frequency, the mode, the meter, in that order of size. */
+.top {
+  grid-area: top;
+  padding-top: env(safe-area-inset-top);
+}
 .topbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--line);
+  gap: 6px;
+  padding: 2px 8px 0;
 }
 .app .freq {
-  font-size: 1.35rem;
+  font-family: var(--mono);
+  font-size: 1.9rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
   background: transparent;
   border-color: transparent;
-  padding: 0 6px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 0 2px;
   /* The digits take vertical drags; without this the page scrolls instead. */
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
 }
 .app .freq .digit { display: inline-block; min-width: 0.6em; text-align: center; }
+.app .chip.mode {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--accent);
+  background: transparent;
+  border-color: var(--line);
+  border-radius: 999px;
+}
 .freq-entry { flex: 0 1 11em; }
 .freq-entry input,
 .app input:not([type]),
@@ -139,28 +153,64 @@ button {
   font: inherit;
   font-size: 16px; /* Below 16px iOS zooms the page on focus. */
   color: var(--fg);
-  background: var(--bg);
+  background: var(--chip);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 0 10px;
 }
+.freq-entry input { font-family: var(--mono); }
 .meter {
   position: relative;
   flex: 1 1 auto;
-  min-width: 60px;
-  height: 22px;
-  border-radius: 6px;
+  min-width: 48px;
+  height: 6px;
+  border-radius: 3px;
   background: var(--chip);
   overflow: hidden;
 }
 .meter-fill {
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, #3d8b3d, #c9b23a 70%, var(--accent));
+  background: linear-gradient(90deg, #4a4a52, #8e8e97 70%, var(--accent));
   transform-origin: left;
   transform: scaleX(0);
   transition: transform 80ms linear;
 }
+
+/* Receiver chips, a size down, under the top bar. */
+.rail {
+  grid-area: rail;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 4px;
+}
+.chips {
+  flex: 1 1 auto;
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.chips::-webkit-scrollbar { display: none; }
+.app .chip {
+  border-radius: 999px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.app .chip.rx {
+  min-height: 32px;
+  padding: 0 10px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.app .chip.rx[aria-pressed="true"] { color: var(--fg); }
+.app .controls { flex: 0 0 auto; font-size: 0.85rem; color: var(--muted); background: transparent; }
+.app .chip.speech { flex: 0 0 auto; font-size: 0.78rem; min-height: 32px; color: var(--muted); }
+.app .chip.speech.failed { border-color: var(--accent); color: var(--accent); }
+
+/* The display: trace, ruler, waterfall, full width, no frame. */
 .stage {
   grid-area: stage;
   position: relative;
@@ -168,7 +218,8 @@ button {
   flex-direction: column;
   min-height: 0;
 }
-.wf-trace { flex: 0 0 72px; width: 100%; height: 72px; display: block; }
+.wf-trace { flex: 0 0 88px; width: 100%; height: 88px; display: block; }
+.wf-ruler { flex: 0 0 18px; width: 100%; height: 18px; display: block; }
 .wf-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -192,7 +243,7 @@ button {
 /* No engine: the rows on screen are old, and look it. */
 .stage.frozen canvas { opacity: 0.35; filter: grayscale(0.7); }
 
-/* Over the waterfall; only its controls take touches, so gestures pass
+/* Over the display; only its controls take touches, so gestures pass
    through everywhere else. */
 .overlay {
   position: absolute;
@@ -201,7 +252,7 @@ button {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 8px;
+  padding: 6px 8px;
   gap: 6px;
 }
 .overlay button { pointer-events: auto; }
@@ -212,21 +263,15 @@ button {
   gap: 4px;
 }
 .status-chip, .behind {
-  font-size: 0.8rem;
-  padding: 3px 8px;
+  font-size: 0.75rem;
+  padding: 2px 8px;
   border-radius: 999px;
-  background: rgba(20, 20, 24, 0.85);
+  color: var(--muted);
+  background: rgba(10, 10, 12, 0.85);
   border: 1px solid var(--line);
 }
-.status-chip { color: var(--warn); }
-.pill {
-  margin-top: 20%;
-  padding: 10px 18px;
-  border-radius: 999px;
-  background: rgba(20, 20, 24, 0.9);
-  border: 1px solid var(--accent);
-  font-weight: 600;
-}
+/* What stops the display takes the accent; the rest stays grey. */
+.status-chip.stops { color: var(--fg); border-color: var(--accent); }
 .app .golive {
   background: var(--accent);
   border-color: var(--accent);
@@ -246,35 +291,32 @@ button {
 .toasts { margin-top: 0; }
 .note, .toast {
   pointer-events: auto;
-  font-size: 0.85rem;
-  padding: 6px 10px;
-  border-radius: 10px;
-  background: rgba(20, 20, 24, 0.92);
+  font-size: 0.8rem;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(10, 10, 12, 0.9);
   border: 1px solid var(--line);
 }
 .note { display: flex; align-items: center; gap: 8px; color: var(--warn); }
 .note-text { flex: 1 1 auto; }
-.app .note-close { background: transparent; border-color: transparent; }
+.app .note-close { background: transparent; border-color: transparent; min-height: 28px; min-width: 28px; }
 
-.rail {
-  grid-area: rail;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  border-top: 1px solid var(--line);
+/* Last row, on the edge the home indicator sits over; its own padding keeps
+   the strip above the indicator while its background runs to the glass. */
+.dial {
+  grid-area: dial;
+  padding-bottom: env(safe-area-inset-bottom);
 }
-.chips {
-  flex: 1 1 auto;
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  scrollbar-width: none;
+.dial-strip canvas {
+  display: block;
+  width: 100%;
+  height: 56px;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
-.app .chip { border-radius: 999px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.app .controls { flex: 0 0 auto; }
 
-/* The sheet rises from the bottom over the waterfall, within thumb reach. */
+/* The sheet rises from the bottom over the display, within thumb reach. */
 .sheet {
   position: fixed;
   left: env(safe-area-inset-left);
@@ -284,10 +326,8 @@ button {
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border-top: 1px solid var(--line);
-  border-radius: 16px 16px 0 0;
+  border-radius: 14px 14px 0 0;
   padding-bottom: env(safe-area-inset-bottom);
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.5);
   z-index: 10;
 }
 .sheet[hidden] { display: none; }
@@ -295,57 +335,59 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 8px 6px 16px;
-  border-bottom: 1px solid var(--line);
+  padding: 4px 8px 4px 16px;
 }
-.sheet h2, .panel h2 { font-size: 1rem; margin: 0; }
-.sheet-body { overflow-y: auto; padding: 8px 16px 16px; }
-.tabs { display: flex; gap: 6px; padding: 6px 16px; border-bottom: 1px solid var(--line); }
-.app .chip.tab[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+.sheet h2, .panel h2 { font-size: 0.8rem; font-weight: 600; margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.sheet-body { overflow-y: auto; padding: 4px 16px 16px; }
+.tabs { display: flex; gap: 4px; padding: 4px 16px; }
+.app .chip.tab { background: transparent; color: var(--muted); }
+.app .chip.tab[aria-selected="true"] { border-color: var(--accent); color: var(--fg); }
 .signal-list { list-style: none; padding: 0; margin: 0; }
-.signal-list li { margin: 4px 0; }
+.signal-list li { margin: 2px 0; }
 .signal {
   width: 100%;
   min-height: var(--hit);
   text-align: left;
   white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
 }
 .signal.held { color: var(--muted); }
-.panel { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.panel { padding: 8px 0; border-top: 1px solid var(--line); }
+.panel:first-child { border-top: 0; }
 .panel-status { margin: 6px 0; color: var(--muted); }
-.modes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.modes { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.modes button { font-family: var(--mono); }
 .row {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 6px 0;
+  margin: 4px 0;
 }
-.row label { flex: 0 0 6.5em; color: var(--muted); }
+.row label { flex: 0 0 6.5em; color: var(--muted); font-size: 0.9rem; }
 .row input[type="range"] { flex: 1 1 auto; min-height: var(--hit); accent-color: var(--accent); }
-.row output { flex: 0 0 4.5em; text-align: right; font-variant-numeric: tabular-nums; }
+.row output { flex: 0 0 4.5em; text-align: right; font-family: var(--mono); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 .hint { color: var(--muted); }
 .sources { list-style: none; padding: 0; margin: 0; }
 .sources li { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
 .sources .why { color: var(--muted); font-size: 0.85rem; }
 
-/* Landscape: the waterfall takes the full width, and the top bar and the
+/* Landscape: the display takes the full width, and the top bar and the
    receivers fold into a narrow rail on the right; the sheet becomes a side
-   panel over the waterfall. */
+   panel over the display. */
 @media (orientation: landscape) {
   .app {
     grid-template-columns: minmax(0, 1fr) 176px;
     grid-template-rows: auto minmax(0, 1fr) auto;
     grid-template-areas: "stage top" "stage rail" "dial dial";
   }
-  .top { border-left: 1px solid var(--line); }
-  .topbar { flex-wrap: wrap; border-bottom: 0; }
-  .app .freq { font-size: 1.1rem; }
+  .stage { padding-top: env(safe-area-inset-top); }
+  .topbar { flex-wrap: wrap; }
+  .app .freq { font-size: 1.2rem; }
   .rail {
     flex-direction: column;
     align-items: stretch;
-    border-top: 0;
-    border-left: 1px solid var(--line);
     min-height: 0;
   }
   .chips { flex-direction: column; overflow-x: hidden; overflow-y: auto; }
@@ -356,9 +398,7 @@ button {
     bottom: env(safe-area-inset-bottom);
     width: min(380px, 50vw);
     max-height: none;
-    border-radius: 16px 0 0 16px;
-    border-top: 0;
-    border-left: 1px solid var(--line);
+    border-radius: 14px 0 0 14px;
     padding-bottom: 0;
   }
 }
@@ -387,18 +427,34 @@ button {
   line-height: 1.25;
   padding: 2px 6px;
   border-radius: 6px;
-  background: rgba(20, 20, 24, 0.82);
+  background: rgba(10, 10, 12, 0.82);
   overflow-wrap: anywhere;
 }
 .caption.doubt .caption-text { font-style: italic; color: var(--muted); }
-.app .chip.speech { flex: 0 0 auto; font-size: 0.8rem; }
-.app .chip.speech.failed { border-color: var(--warn); color: var(--warn); }
 
 .feed { max-height: 14em; overflow-y: auto; }
 .feed-row { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
-.feed-label { flex: 0 0 5.5em; color: var(--muted); font-size: 0.8rem; }
+.feed-label { flex: 0 0 5.5em; color: var(--muted); font-size: 0.8rem; font-family: var(--mono); }
 .feed-text { flex: 1 1 auto; overflow-wrap: anywhere; }
 .feed-empty { color: var(--muted); }
 
 /* Out of the grid, so they take no cell in either orientation. */
 #sheet-slot, .app > audio { position: absolute; }
+
+/* ?insets: what the phone reports, over everything, touch-transparent. */
+.insets-debug {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 100;
+  margin: 0;
+  padding: 8px 10px;
+  font: 12px/1.4 var(--mono);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.85);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  pointer-events: none;
+  white-space: pre;
+}

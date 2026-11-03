@@ -8,7 +8,8 @@ import { parseDetections, snapTap, type Detection } from "./detections";
 import { attachGestures } from "./gestures";
 import { TuneLimiter } from "./tune_limiter";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
-import { DEFAULT_ACCENT, detectionBoxes } from "./markers";
+import { AutoScale, remapRow, rowExtentsDb } from "./autoscale";
+import { DEFAULT_ACCENT, detectionBoxes, passbandHz } from "./markers";
 import { drawReceivers, type ReceiverMark } from "./overlay";
 import { SpectrumTrace } from "./spectrum_trace";
 import { clampView, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
@@ -24,6 +25,7 @@ import { SpeechModel, speechLine, SpeechSwitch } from "./ui/speech_switch";
 import { StatusModel } from "./ui/status";
 import { Notes, Toasts } from "./ui/toast";
 import { DialStrip } from "./ui/dial_strip";
+import { Ruler } from "./ui/ruler";
 import { levelInBand, TopBar } from "./ui/top_bar";
 
 export function appScreenHtml(): string {
@@ -32,10 +34,10 @@ export function appScreenHtml(): string {
   <div class="top" id="top-slot"></div>
   <div class="stage" id="stage">
     <canvas id="trace" class="wf-trace"></canvas>
+    <canvas id="ruler" class="wf-ruler" aria-hidden="true"></canvas>
     <div id="wf-body" class="wf-body"><canvas id="waterfall" class="wf-canvas"></canvas><canvas id="wf-marks" class="wf-marks" aria-hidden="true"></canvas><div id="captions" class="captions" aria-hidden="true"></div></div>
     <div class="overlay">
-      <div class="status-chips" id="status-chips"></div>
-      <div class="pill" id="status-pill" role="status" hidden></div>
+      <div class="status-chips" id="status-chips" role="status"></div>
       <div class="behind" id="kl-behind" hidden>Background audio, about 3 s behind</div>
       <button type="button" class="golive" id="kl-golive" hidden>Go live</button>
       <div class="notes" id="notes" role="status"></div>
@@ -95,6 +97,9 @@ export function mountApp(root: HTMLElement): AppHandle {
   const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || DEFAULT_ACCENT;
   const waterfall = createWaterfall(wfCanvas, accent);
   const trace = new SpectrumTrace(traceCanvas, accent);
+  const rulerCanvas = root.querySelector<HTMLCanvasElement>("#ruler")!;
+  const ruler = new Ruler(rulerCanvas);
+  const scale = new AutoScale();
   const marksCanvas = root.querySelector<HTMLCanvasElement>("#wf-marks")!;
   const marks = marksCanvas.getContext("2d");
 
@@ -118,6 +123,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     drawQueued = false;
     waterfall.draw();
     trace.draw();
+    ruler.draw();
     drawMarks();
     layoutCaptions();
   };
@@ -165,6 +171,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     view = v;
     waterfall.setView(v);
     trace.setView(v);
+    ruler.setView(v);
     sync.update(v);
     requestDraw();
   };
@@ -176,6 +183,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     widthDev = Math.max(1, Math.min(MAX_WIDTH_PX, Math.round(wCss * dpr)));
     waterfall.resize(Math.max(1, Math.round(wCss * dpr)), Math.max(1, Math.round(hCss * dpr)));
     trace.resize(Math.max(1, Math.round(traceCanvas.clientWidth * dpr)), Math.max(1, Math.round(traceCanvas.clientHeight * dpr)));
+    ruler.resize(Math.max(1, Math.round(rulerCanvas.clientWidth * dpr)), Math.max(1, Math.round(rulerCanvas.clientHeight * dpr)));
     marksCanvas.width = Math.max(1, Math.round(wCss * dpr));
     marksCanvas.height = Math.max(1, Math.round(hCss * dpr));
     if (view) apply({ ...view, widthPx: widthDev });
@@ -470,18 +478,14 @@ export function mountApp(root: HTMLElement): AppHandle {
 
   // ---- Status --------------------------------------------------------------
   const status = new StatusModel();
-  const pill = root.querySelector<HTMLElement>("#status-pill")!;
   const statusChips = root.querySelector<HTMLElement>("#status-chips")!;
   const renderStatus = () => {
-    const text = status.pill();
-    pill.hidden = text === null;
-    pill.textContent = text ?? "";
     stage.classList.toggle("frozen", status.frozen());
     statusChips.textContent = "";
-    for (const c of status.chips()) {
+    for (const c of status.problems()) {
       const d = document.createElement("div");
-      d.className = "status-chip";
-      d.textContent = c;
+      d.className = c.stops ? "status-chip stops" : "status-chip";
+      d.textContent = c.text;
       statusChips.append(d);
     }
   };
@@ -628,13 +632,18 @@ export function mountApp(root: HTMLElement): AppHandle {
       forgetRows();
     }
     if (waterfall.state !== "lost" && clock.push(Number(f.sourceStart))) captionStore.clear();
-    waterfall.pushRow(f);
-    trace.setRow(f);
+    // The rows are the view, so their extents are what is in view. The meter
+    // below reads the gateway's own bytes, which the remap does not touch.
+    const ext = rowExtentsDb(f);
+    const s = scale.update(ext.minDb, ext.maxDb, performance.now());
+    const shown = { ...f, px: remapRow(f, s, new Uint8Array(f.px.length)) };
+    waterfall.pushRow(shown);
+    trace.setRow(shown);
     const active = receivers.list.active;
     const r = active === null ? undefined : receivers.list.get(active);
     if (r) {
-      const half = (r.bandwidthHz ?? 12_500) / 2;
-      top.level(levelInBand(f, r.hz - half, r.hz + half));
+      const pb = passbandHz(r.mode, r.hz, r.bandwidthHz ?? null);
+      top.level(levelInBand(f, pb.lowHz, pb.highHz));
     }
     requestDraw();
   });

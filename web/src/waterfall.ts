@@ -382,7 +382,7 @@ class CanvasRenderer implements Renderer {
   }
 
   clear(): void {
-    this.ctx.fillStyle = "#141418";
+    this.ctx.fillStyle = "#0a0a0c";
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
 

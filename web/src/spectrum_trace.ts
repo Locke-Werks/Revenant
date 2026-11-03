@@ -52,7 +52,7 @@ export class SpectrumTrace {
     if (!ctx) return;
     const w = this.canvas.width;
     const h = this.canvas.height;
-    ctx.fillStyle = "#1b1b1f";
+    ctx.fillStyle = "#0a0a0c";
     ctx.fillRect(0, 0, w, h);
     const view = this.view;
     if (!view) return;

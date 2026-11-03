@@ -14,7 +14,7 @@ export interface DialStripDeps extends DialDeps {
 const SLOP_PX = 4;
 const HEIGHT_PX = 56;
 const MAJOR_EVERY = 10;
-const ACCENT = "#e0524f";
+const ACCENT = "#d6262a";
 
 export class DialStrip {
   readonly el: HTMLElement;
