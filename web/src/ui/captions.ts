@@ -42,10 +42,6 @@ export class RowClock {
   private readonly starts = new Float64Array(RING_ROWS);
   private count = 0;
   private head = -1;
-  // Bumped each time the source starts over, so a holder of old captions can
-  // tell they belong to a clock that no longer exists.
-  epoch = 0;
-
   get size(): number {
     return this.count;
   }
@@ -54,10 +50,12 @@ export class RowClock {
   // backwards): everything before it is forgotten. A new source counts from
   // its own zero, so an old row left in would sit in the wrong place.
   push(sourceStart: number): boolean {
+    // A row without a usable clock cannot be placed against, and a NaN left in
+    // the ring would break the search for every row after it.
+    if (!Number.isFinite(sourceStart)) return false;
     let reset = false;
     if (this.count > 0 && sourceStart < this.starts[this.head]!) {
       this.clear();
-      this.epoch++;
       reset = true;
     }
     this.head = (this.head + 1) % RING_ROWS;
@@ -131,6 +129,10 @@ export class CaptionStore {
     this.items = [];
   }
 
+  dropReceiver(vrx: number): void {
+    this.items = this.items.filter((c) => c.vrx !== vrx);
+  }
+
   // Old ids to new, as one step, the way ReceiverList.remap does it.
   remap(pairs: { old: number; new: number }[]): void {
     if (pairs.length === 0) return;
@@ -198,6 +200,7 @@ export class CaptionLayer {
     private readonly host: HTMLElement,
     private readonly store: CaptionStore,
     private readonly clock: RowClock,
+    private readonly createEl: (tag: string) => HTMLElement = (tag) => document.createElement(tag),
   ) {}
 
   layout(g: LayerGeometry): void {
@@ -227,9 +230,9 @@ export class CaptionLayer {
   }
 
   private build(c: Caption): HTMLElement {
-    const el = document.createElement("div");
+    const el = this.createEl("div");
     el.className = c.confidence < 0.5 ? "caption doubt" : "caption";
-    const text = document.createElement("div");
+    const text = this.createEl("div");
     text.className = "caption-text";
     text.textContent = c.text;
     el.append(text);

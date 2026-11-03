@@ -593,3 +593,23 @@ test("an engine restart's id map reaches remap listeners once", async () => {
   r.link.emit("link", { event: "link", state: "up", detail: "", recreated: [], lost: [] });
   assert.deepEqual(moves, [[{ old: 1, new: 5 }]]);
 });
+
+test("gone listeners hear of own removals, engine removals and lost receivers", async () => {
+  const r = rig();
+  const gone: number[] = [];
+  r.ctl.onGone((v) => gone.push(v));
+  r.ctl.tap(146_520_000);
+  r.link.reply(status(1, 146_520_000));
+  await flush();
+  r.ctl.longPress(162_550_000);
+  r.link.reply(status(2, 162_550_000));
+  await flush();
+  r.ctl.remove(2);
+  r.link.reply({ vrx: 2 });
+  await flush();
+  assert.deepEqual(gone, [2]);
+  r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 1, reason: "retuned" });
+  assert.deepEqual(gone, [2, 1]);
+  r.link.emit("link", { event: "link", state: "up", detail: "", recreated: [], lost: [{ vrx: 7, reason: "gone" }] });
+  assert.deepEqual(gone, [2, 1, 7]);
+});

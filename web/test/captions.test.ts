@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  CaptionLayer,
+  captionFromEvent,
   CaptionStore,
   MAX_CAPTIONS,
+  MAX_CAPTION_CHARS,
   placeCaption,
   RowClock,
   rowForSample,
@@ -14,6 +17,7 @@ import {
   FeedModel,
   FeedView,
   MAX_FEED,
+  MAX_FEED_CHARS,
   transcriptEntry,
   type HostEl,
 } from "../src/ui/feed";
@@ -78,14 +82,21 @@ test("RowClock keeps the right rows after the ring wraps", () => {
 test("RowClock: a source that starts over drops what came before", () => {
   const c = new RowClock();
   for (let i = 0; i < 10; i++) c.push(1_000_000 + i * 1000);
-  const epoch = c.epoch;
   // The new source counts from zero.
   assert.equal(c.push(0), true);
-  assert.equal(c.epoch, epoch + 1);
   assert.equal(c.size, 1);
   assert.equal(c.ageOf(1_005_000), 0, "a sample past the new newest row clamps to it, it cannot reach old rows");
   assert.equal(c.push(1000), false);
   assert.equal(c.ageOf(500), 1);
+});
+
+test("RowClock ignores a row without a usable clock", () => {
+  const c = new RowClock();
+  c.push(100);
+  assert.equal(c.push(Number.NaN), false);
+  assert.equal(c.push(Number.POSITIVE_INFINITY), false);
+  assert.equal(c.size, 1);
+  assert.equal(c.ageOf(150), 0);
 });
 
 test("RowClock.clear forgets everything", () => {
@@ -189,6 +200,15 @@ test("the store remaps receiver ids in one step, so a swap holds", () => {
   assert.deepEqual(store.list().map((c) => c.vrx), [2, 9]);
 });
 
+test("the store drops a receiver captions", () => {
+  const store = new CaptionStore();
+  add(store, 1, 0);
+  add(store, 2, 1);
+  add(store, 1, 2);
+  store.dropReceiver(1);
+  assert.deepEqual(store.list().map((c) => c.vrx), [2]);
+});
+
 test("the store can drop one caption or all of them", () => {
   const store = new CaptionStore();
   add(store, 1, 0);
@@ -241,24 +261,6 @@ test("parseSpeechStatus reads the gateway's object and refuses nonsense", () => 
   assert.equal(parseSpeechStatus({ modelState: "ready" }), null);
 });
 
-type TimerFn = () => void;
-class FakeTimers {
-  pending: { fn: TimerFn; ms: number; id: number }[] = [];
-  private n = 0;
-  setTimeout = (fn: TimerFn, ms: number): unknown => {
-    const id = ++this.n;
-    this.pending.push({ fn, ms, id });
-    return id;
-  };
-  clearTimeout = (h: unknown): void => {
-    this.pending = this.pending.filter((p) => p.id !== h);
-  };
-  fire(): void {
-    const p = this.pending.shift();
-    p?.fn();
-  }
-}
-
 class SpeechLink implements GateLink {
   ready = true;
   sent: { op: string; args?: { [key: string]: JsonValue } }[] = [];
@@ -293,35 +295,35 @@ function status(over: { [key: string]: JsonValue } = {}): JsonValue {
   return { enabled: true, modelState: "ready", modelName: "m", bytesDone: 0, bytesTotal: 0, detail: "", ...over };
 }
 
-test("the switch turns speech on, follows the download, and stops asking once ready", async () => {
+test("the switch asks for on, and the reply and later pushes set the state", async () => {
   const link = new SpeechLink();
-  const timers = new FakeTimers();
-  const m = new SpeechModel({ link, timers });
+  const m = new SpeechModel({ link });
   assert.equal(m.status, null);
   m.toggle();
   assert.deepEqual(link.sent[0], { op: "setTranscription", args: { on: true } });
   link.reply(status({ modelState: "downloading", bytesDone: 10, bytesTotal: 100 }));
   await flush();
   assert.equal(speechLabel(m.status), "Speech: downloading 10%");
-  assert.equal(timers.pending.length, 1, "a poll is armed while the model is not ready");
-
-  timers.fire();
-  assert.deepEqual(link.sent[1], { op: "setTranscription", args: { on: true } });
-  link.reply(status({ modelState: "downloading", bytesDone: 60, bytesTotal: 100 }));
-  await flush();
+  // The gateway pushes progress; the phone never asks again by itself.
+  link.emit("transcriptionStatus", { event: "transcriptionStatus", ...(status({ modelState: "downloading", bytesDone: 60, bytesTotal: 100 }) as object) });
   assert.equal(speechLabel(m.status), "Speech: downloading 60%");
-  assert.equal(timers.pending.length, 1);
-
-  timers.fire();
-  link.reply(status({ modelState: "ready" }));
-  await flush();
+  link.emit("transcriptionStatus", { event: "transcriptionStatus", ...(status({ modelState: "ready" }) as object) });
   assert.equal(speechLabel(m.status), "Speech on");
-  assert.equal(timers.pending.length, 0);
+  assert.equal(link.sent.length, 1);
+});
+
+test("a pushed state shows before the phone has touched the switch", () => {
+  const link = new SpeechLink();
+  const m = new SpeechModel({ link });
+  link.emit("transcriptionStatus", { event: "transcriptionStatus", ...(status() as object) });
+  assert.equal(speechLabel(m.status), "Speech on");
+  m.toggle();
+  assert.deepEqual(link.sent[0], { op: "setTranscription", args: { on: false } });
 });
 
 test("the switch turns speech off when it is on", async () => {
   const link = new SpeechLink();
-  const m = new SpeechModel({ link, timers: new FakeTimers() });
+  const m = new SpeechModel({ link });
   m.toggle();
   link.reply(status());
   await flush();
@@ -332,59 +334,44 @@ test("the switch turns speech off when it is on", async () => {
   assert.equal(speechLabel(m.status), "Speech off");
 });
 
-test("a failed model stops the poll and shows the engine's sentence", async () => {
+test("a failed model shows the engine sentence, and a tap retries", async () => {
   const link = new SpeechLink();
-  const timers = new FakeTimers();
-  const m = new SpeechModel({ link, timers });
+  const m = new SpeechModel({ link });
   m.toggle();
   link.reply(status({ modelState: "failed", detail: "checksum did not match" }));
   await flush();
   assert.equal(speechLine(m.status), "Speech failed: checksum did not match");
-  assert.equal(timers.pending.length, 0);
+  m.toggle();
+  assert.deepEqual(link.sent[1], { op: "setTranscription", args: { on: true } });
 });
 
-test("a refused switch keeps the old state and reports the sentence", async () => {
+test("every refusal is reported, including the same sentence twice", async () => {
   const link = new SpeechLink();
-  const m = new SpeechModel({ link, timers: new FakeTimers() });
-  const errors: (string | null)[] = [];
-  m.onChange(() => errors.push(m.error));
+  const m = new SpeechModel({ link });
+  const told: string[] = [];
+  m.onRefused((t) => told.push(t));
   m.toggle();
   link.refuse("the engine does not transcribe");
   await flush();
-  assert.equal(m.status, null);
   assert.equal(m.error, "the engine does not transcribe");
-});
-
-test("a transcript arriving shows speech is on even before the phone asked", async () => {
-  const link = new SpeechLink();
-  const m = new SpeechModel({ link, timers: new FakeTimers() });
-  m.heardTranscript();
-  assert.equal(speechLabel(m.status), "Speech on");
   m.toggle();
-  assert.deepEqual(link.sent[0], { op: "setTranscription", args: { on: false } });
-});
-
-test("a transcriptionStatus event is applied if the gateway sends one", () => {
-  const link = new SpeechLink();
-  const m = new SpeechModel({ link, timers: new FakeTimers() });
-  link.emit("transcriptionStatus", { event: "transcriptionStatus", ...(status({ modelState: "loading" }) as object) });
-  assert.equal(speechLabel(m.status), "Speech: loading");
-});
-
-test("a poll resumes after a reconnect", async () => {
-  const link = new SpeechLink();
-  const timers = new FakeTimers();
-  const m = new SpeechModel({ link, timers });
-  m.toggle();
-  link.reply(status({ modelState: "loading" }));
+  assert.equal(m.error, null, "cleared when the next request starts");
+  link.refuse("the engine does not transcribe");
   await flush();
+  assert.deepEqual(told, ["the engine does not transcribe", "the engine does not transcribe"]);
+  assert.equal(m.status, null);
+});
+
+test("a request that fails because the link dropped is not reported as a refusal", async () => {
+  const link = new SpeechLink();
+  const m = new SpeechModel({ link });
+  const told: string[] = [];
+  m.onRefused((t) => told.push(t));
+  m.toggle();
   link.ready = false;
-  timers.fire();
-  assert.equal(link.sent.length, 1, "nothing is sent while the link is down");
-  assert.equal(timers.pending.length, 0);
-  link.ready = true;
-  link.emit("ready", { resumed: true });
-  assert.equal(timers.pending.length, 1);
+  link.refuse("connection lost");
+  await flush();
+  assert.deepEqual(told, []);
 });
 
 // ---- Feed --------------------------------------------------------------------
@@ -406,6 +393,20 @@ test("the feed keeps at most MAX_FEED entries, dropping the oldest", () => {
   assert.equal(all.length, MAX_FEED);
   assert.equal(all[0]!.text, `t${MAX_FEED + 29}`);
   assert.equal(all[all.length - 1]!.text, "t30");
+});
+
+test("the feed drops a receiver entries and clips long text", () => {
+  const feed = new FeedModel();
+  feed.add({ kind: "transcript", vrx: 1, label: "Speech", text: "a" });
+  feed.add({ kind: "transcript", vrx: 2, label: "Speech", text: "b" });
+  feed.dropReceiver(1);
+  assert.deepEqual(feed.forReceiver(1), []);
+  assert.equal(feed.forReceiver(2).length, 1);
+  const long = transcriptEntry({ event: "transcript", vrx: 2, text: "x".repeat(MAX_FEED_CHARS + 100) })!;
+  assert.equal(long.text.length, MAX_FEED_CHARS);
+  assert.ok(long.text.endsWith("\u2026"));
+  const d = decodedEntry({ event: "decoded", vrx: 2, decoder: "p25p1", kind: "", text: "y".repeat(MAX_FEED_CHARS + 1) })!;
+  assert.equal(d.text.length, MAX_FEED_CHARS);
 });
 
 test("the feed follows a receiver's id changes", () => {
@@ -481,4 +482,91 @@ test("the feed view says so when there is nothing to show", () => {
   assert.match(host.children[0]!.textContent, /No receiver/);
   view.render(1);
   assert.match(host.children[0]!.textContent, /Nothing decoded yet/);
+});
+
+// ---- captionFromEvent and the layer ------------------------------------------
+
+test("captionFromEvent needs a receiver, a frequency, a sample range and text", () => {
+  const ok = { event: "transcript" as const, vrx: 1, centerHz: 146_520_000, sourceStart: 10, sourceEnd: 20, text: " hi ", confidence: 0.9 };
+  assert.deepEqual(captionFromEvent(ok), { vrx: 1, hz: 146_520_000, text: "hi", sourceStart: 10, sourceEnd: 20, confidence: 0.9 });
+  for (const missing of ["vrx", "centerHz", "sourceStart", "sourceEnd", "text"]) {
+    const e: { [k: string]: JsonValue } = { ...ok };
+    delete e[missing];
+    assert.equal(captionFromEvent(e as typeof ok), null, missing);
+  }
+  assert.equal(captionFromEvent({ ...ok, text: "   " }), null);
+});
+
+test("captionFromEvent truncates long text and repairs a backwards range", () => {
+  const base = { event: "transcript" as const, vrx: 1, centerHz: 1, sourceStart: 50, sourceEnd: 20, text: "w".repeat(MAX_CAPTION_CHARS + 50) };
+  const c = captionFromEvent(base)!;
+  assert.equal(c.text.length, MAX_CAPTION_CHARS);
+  assert.ok(c.text.endsWith("\u2026"));
+  assert.equal(c.sourceEnd, 50);
+  assert.equal(c.confidence, 1);
+});
+
+class FakeNode {
+  className = "";
+  textContent = "";
+  hidden = false;
+  style: { [k: string]: string } = {};
+  children: FakeNode[] = [];
+  parent: FakeNode | null = null;
+  append(...nodes: FakeNode[]): void {
+    for (const n of nodes) {
+      n.parent = this;
+      this.children.push(n);
+    }
+  }
+  remove(): void {
+    if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this);
+    this.parent = null;
+  }
+}
+
+test("the caption layer builds an element per live caption, moves it, hides it off view and removes it when dropped", () => {
+  const host = new FakeNode();
+  const store = new CaptionStore();
+  const clock = clockOf(CLOCK_STARTS);
+  const layer = new CaptionLayer(host as unknown as HTMLElement, store, clock, () => new FakeNode() as unknown as HTMLElement);
+  const g = { view: VIEW, widthCss: 1000, rowHeightCss: 2, visibleRows: 1024 };
+  store.add({ vrx: 1, hz: 100_000_000, text: "<b>hi</b>", sourceStart: 4_000, sourceEnd: 6_000, confidence: 0.2 });
+
+  layer.layout(g);
+  assert.equal(host.children.length, 1);
+  const el = host.children[0]!;
+  assert.equal(el.className, "caption doubt");
+  assert.equal(el.children[0]!.textContent, "<b>hi</b>");
+  assert.equal(el.hidden, false);
+  assert.equal(el.style.transform, "translate(500.0px, 28.0px)");
+  assert.equal(el.style.height, "6.0px");
+
+  // Panned away: kept, hidden, and the same element.
+  layer.layout({ ...g, view: { ...VIEW, centerHz: 130_000_000 } });
+  assert.equal(host.children.length, 1);
+  assert.equal(host.children[0], el);
+  assert.equal(el.hidden, true);
+
+  // Back in view, and the same element again.
+  layer.layout(g);
+  assert.equal(el.hidden, false);
+
+  // Its rows scroll past what is visible: element and store entry go.
+  layer.layout({ ...g, visibleRows: 10 });
+  assert.equal(host.children.length, 0);
+  assert.equal(store.list().length, 0);
+});
+
+test("the caption layer removes the element of a caption the store cleared", () => {
+  const host = new FakeNode();
+  const store = new CaptionStore();
+  const layer = new CaptionLayer(host as unknown as HTMLElement, store, clockOf(CLOCK_STARTS), () => new FakeNode() as unknown as HTMLElement);
+  const g = { view: VIEW, widthCss: 1000, rowHeightCss: 2, visibleRows: 1024 };
+  store.add({ vrx: 1, hz: 100_000_000, text: "x", sourceStart: 4_000, sourceEnd: 6_000, confidence: 1 });
+  layer.layout(g);
+  assert.equal(host.children.length, 1);
+  store.clear();
+  layer.layout(g);
+  assert.equal(host.children.length, 0);
 });

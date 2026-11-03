@@ -278,6 +278,7 @@ export class ReceiverController {
   // Receivers with a setMode or setBandwidth in flight. A tap tuning one
   // would land on an id about to be removed.
   private replacing = new Set<number>();
+  private goneFns = new Set<(vrx: number) => void>();
   private remapFns = new Set<(pairs: { old: number; new: number }[]) => void>();
 
   // Everything else that keys on a receiver id (captions, the feed) follows
@@ -285,6 +286,16 @@ export class ReceiverController {
   // replace's single pair and an engine restart's map.
   onRemap(fn: (pairs: { old: number; new: number }[]) => void): void {
     this.remapFns.add(fn);
+  }
+
+  // Called when a receiver is gone for good (removed here, removed by the
+  // engine, or lost in a restart), so what was kept for it can go too.
+  onGone(fn: (vrx: number) => void): void {
+    this.goneFns.add(fn);
+  }
+
+  private gone(vrx: number): void {
+    for (const fn of this.goneFns) fn(vrx);
   }
 
   private remapped(pairs: { old: number; new: number }[]): void {
@@ -364,6 +375,7 @@ export class ReceiverController {
         this.removing.delete(vrx);
         if (this.deps.audio.vrx === vrx) this.deps.audio.stop();
         this.list.remove(vrx);
+        this.gone(vrx);
       },
       (e: unknown) => {
         this.removing.delete(vrx);
@@ -474,6 +486,7 @@ export class ReceiverController {
   private onRemoved(e: GatewayEvent): void {
     const vrx = num(e.vrx);
     if (vrx === undefined) return;
+    this.gone(vrx);
     if (this.removing.delete(vrx)) {
       this.list.remove(vrx);
       return;
@@ -491,6 +504,7 @@ export class ReceiverController {
     const lost = e.lost ?? [];
     // Lost ids are old ids: take them out before the map reuses them.
     for (const l of lost) {
+      this.gone(l.vrx);
       const was = this.list.remove(l.vrx);
       const where = was ? `at ${formatMHz(was.hz)} MHz` : String(l.vrx);
       this.deps.toast(`Receiver ${where} lost when the engine restarted: ${l.reason}`);

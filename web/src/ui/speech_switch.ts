@@ -3,11 +3,9 @@
 // first time is a visible process: absent, downloading with a percent,
 // verifying, loading, ready, or failed with the engine's own sentence.
 //
-// The gateway has no read-only status op and never pushes
-// `transcriptionStatus`; setTranscription is the only way to see the state.
-// Asking again with the value already in force changes nothing, so the model
-// polls with it while the model is on its way, and applies the event too
-// should the gateway ever send one.
+// The gateway pushes a `transcriptionStatus` event on connect, on resume and
+// whenever the state changes (a download moving a whole percent counts), and
+// the reply to setTranscription carries the same object.
 
 import type { GatewayEvent, JsonValue } from "../protocol";
 import type { GateLink } from "./receivers";
@@ -24,10 +22,6 @@ export interface SpeechStatus {
   bytesTotal: number;
   detail: string;
 }
-
-export const POLL_MS = 1_000;
-// A model the engine never starts fetching is not worth asking about forever.
-export const MAX_ABSENT_POLLS = 10;
 
 export function parseSpeechStatus(v: JsonValue | GatewayEvent): SpeechStatus | null {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return null;
@@ -94,85 +88,62 @@ export function speechLine(s: SpeechStatus | null): string {
   }
 }
 
-function pending(s: SpeechStatus): boolean {
-  return s.enabled && s.modelState !== "ready" && s.modelState !== "failed";
-}
-
 export interface SpeechDeps {
   link: GateLink;
-  timers: { setTimeout(fn: () => void, ms: number): unknown; clearTimeout(h: unknown): void };
 }
 
 export class SpeechModel {
   status: SpeechStatus | null = null;
-  // The engine's sentence when the last request was refused; cleared by the
-  // next answer.
+  // The engine's sentence for the last refusal; cleared when the next
+  // request starts.
   error: string | null = null;
   private listeners = new Set<() => void>();
-  private timer: unknown = null;
-  private absentPolls = 0;
+  private refusals = new Set<(text: string) => void>();
 
+  // The gateway pushes the state on connect, on resume and whenever it
+  // changes, so nothing here asks for it. The replies to the switch carry it
+  // too and are applied the same way.
   constructor(private readonly deps: SpeechDeps) {
     deps.link.on("transcriptionStatus", (e) => this.apply(e));
-    deps.link.on("ready", () => this.schedule());
   }
 
   onChange(fn: () => void): void {
     this.listeners.add(fn);
   }
 
-  toggle(): void {
-    this.absentPolls = 0;
-    this.ask(!(this.status?.enabled ?? false));
+  // Once per refused request, however alike the sentences are.
+  onRefused(fn: (text: string) => void): void {
+    this.refusals.add(fn);
   }
 
-  // A transcript can only come from an engine that is transcribing, so a page
-  // that opened onto a running session learns that without asking.
-  heardTranscript(): void {
-    if (this.status?.enabled && this.status.modelState === "ready") return;
-    this.status = { enabled: true, modelState: "ready", modelName: this.status?.modelName ?? "", bytesDone: 0, bytesTotal: 0, detail: "" };
-    this.changed();
+  // On when it is off, off when it is on, and on again when the model failed:
+  // a tap on a failed switch is a retry, not a turn-off.
+  toggle(): void {
+    const s = this.status;
+    this.ask(!(s?.enabled === true && s.modelState !== "failed"));
   }
 
   private ask(on: boolean): void {
-    this.cancel();
+    this.error = null;
     this.deps.link.request("setTranscription", { on }).then(
       (reply) => {
-        this.error = null;
-        const s = parseSpeechStatus(reply);
-        if (s) this.status = s;
-        this.changed();
-        this.schedule();
+        this.apply(reply);
       },
       (e: unknown) => {
+        // A dropped link is the status pill's news, not a refusal.
+        if (!this.deps.link.ready) return;
         this.error = e instanceof Error ? e.message : String(e);
         this.changed();
+        for (const fn of this.refusals) fn(this.error);
       },
     );
   }
 
-  private apply(e: GatewayEvent): void {
-    const s = parseSpeechStatus(e);
+  private apply(v: JsonValue | GatewayEvent): void {
+    const s = parseSpeechStatus(v);
     if (!s) return;
     this.status = s;
     this.changed();
-    this.schedule();
-  }
-
-  private schedule(): void {
-    if (this.timer !== null || !this.status || !pending(this.status)) return;
-    if (this.status.modelState === "absent" && ++this.absentPolls > MAX_ABSENT_POLLS) return;
-    this.timer = this.deps.timers.setTimeout(() => {
-      this.timer = null;
-      // Down: the reconnect's ready event restarts the poll.
-      if (!this.deps.link.ready || !this.status || !pending(this.status)) return;
-      this.ask(true);
-    }, POLL_MS);
-  }
-
-  private cancel(): void {
-    if (this.timer !== null) this.deps.timers.clearTimeout(this.timer);
-    this.timer = null;
   }
 
   private changed(): void {
@@ -189,13 +160,9 @@ export class SpeechSwitch {
     this.el.type = "button";
     this.el.className = "chip speech";
     this.el.addEventListener("click", () => model.toggle());
-    let shown: string | null = null;
-    model.onChange(() => {
-      this.render();
-      // The refusal, or a failed model, once; the line in the sheet stays.
-      if (model.error !== null && model.error !== shown) toast(model.error);
-      shown = model.error;
-    });
+    model.onChange(() => this.render());
+    // Every refusal gets its sentence, including the same one twice.
+    model.onRefused(toast);
     this.render();
   }
 

@@ -238,10 +238,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   sheet.extra.append(radio.el);
 
   // ---- Speech, transcripts and the feed -------------------------------------
-  const speechModel = new SpeechModel({
-    link: gate,
-    timers: { setTimeout: (fn, ms) => window.setTimeout(fn, ms), clearTimeout: (h) => window.clearTimeout(h as number) },
-  });
+  const speechModel = new SpeechModel({ link: gate });
   const feedModel = new FeedModel();
   const feedPanel = document.createElement("section");
   feedPanel.className = "panel feed-panel";
@@ -270,6 +267,10 @@ export function mountApp(root: HTMLElement): AppHandle {
     captionStore.remap(pairs);
     feedModel.remap(pairs);
   });
+  receivers.onGone((vrx) => {
+    captionStore.dropReceiver(vrx);
+    feedModel.dropReceiver(vrx);
+  });
   speechModel.onChange(() => {
     sheet!.speechLine(speechLine(speechModel.status));
     const s = speechModel.status;
@@ -277,7 +278,6 @@ export function mountApp(root: HTMLElement): AppHandle {
   });
   sheet.speechLine(speechLine(null));
   link.on("transcript", (e) => {
-    speechModel.heardTranscript();
     const c = captionFromEvent(e);
     if (c) {
       captionStore.add(c);

@@ -5,6 +5,13 @@
 import type { GatewayEvent, JsonValue } from "../protocol";
 
 export const MAX_FEED = 200;
+// Engine and over-the-air text can be any length; one line of feed is not
+// worth more than this.
+export const MAX_FEED_CHARS = 500;
+
+function clip(text: string): string {
+  return text.length > MAX_FEED_CHARS ? `${text.slice(0, MAX_FEED_CHARS - 1)}…` : text;
+}
 
 export interface FeedEntry {
   id: number;
@@ -41,6 +48,12 @@ export class FeedModel {
     return out;
   }
 
+  dropReceiver(vrx: number): void {
+    const before = this.items.length;
+    this.items = this.items.filter((e) => e.vrx !== vrx);
+    if (this.items.length !== before) this.changed();
+  }
+
   remap(pairs: { old: number; new: number }[]): void {
     if (pairs.length === 0) return;
     const to = new Map(pairs.map((p) => [p.old, p.new]));
@@ -66,7 +79,7 @@ export function transcriptEntry(e: GatewayEvent): NewFeedEntry | null {
   const vrx = vrxOf(e);
   const text = typeof e.text === "string" ? e.text.trim() : "";
   if (vrx === null || text === "") return null;
-  return { kind: "transcript", vrx, label: "Speech", text };
+  return { kind: "transcript", vrx, label: "Speech", text: clip(text) };
 }
 
 function fieldValue(v: JsonValue): string {
@@ -88,7 +101,7 @@ export function decodedEntry(e: GatewayEvent): NewFeedEntry | null {
   const decoder = typeof e.decoder === "string" ? e.decoder : "";
   const kind = typeof e.kind === "string" ? e.kind : "";
   const label = [decoder, kind].filter((s) => s !== "").join(" ") || "Decoded";
-  return { kind: "decoded", vrx, label, text };
+  return { kind: "decoded", vrx, label, text: clip(text) };
 }
 
 // The few things the view needs from an element, so a test can stand in.

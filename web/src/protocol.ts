@@ -197,6 +197,12 @@ export interface LinkEvent {
   lost?: { vrx: number; reason: string }[];
 }
 
+// "transcriptionStatus" carries the fields of the setTranscription result
+// (enabled, modelState, modelName, bytesDone, bytesTotal, detail, ...). The
+// gateway sends it on connect, on resume, and whenever the switch, the model
+// state, its name or the detail change or a download moves a whole percent
+// (transcription_report_due in tools/webgate/dispatch.h).
+
 // "source". While open it carries the band and the engine's pacing:
 // realtimeFactor is capture seconds per wall second over the engine's recent
 // window (0 means not measured yet, not stalled) and pacedBy the pace in force
