@@ -1052,6 +1052,7 @@ void PhoneStreams::reconcile_decoded()
         if (!session_.owns(it->first)) {
             for (const auto& name : it->second) {
                 client.unsubscribe_decoded(it->first, name);
+                decoder_generation_.erase(std::pair(it->first, name));
             }
             decoded_applied_.erase(it->first);
             it = decoded_.erase(it);
@@ -1070,6 +1071,7 @@ void PhoneStreams::reconcile_decoded()
         for (auto it = running.begin(); it != running.end();) {
             if (std::ranges::find(wanted, *it) == wanted.end()) {
                 client.unsubscribe_decoded(vrx, *it);
+                decoder_generation_.erase(std::pair(vrx, *it));
                 it = running.erase(it);
             } else {
                 ++it;
@@ -1101,9 +1103,8 @@ std::set<std::string> PhoneStreams::decoding(std::uint64_t vrx) const
 Status PhoneStreams::subscribe_decoder(std::uint64_t vrx, const std::string& name)
 {
     auto inbox = inbox_;
-    const auto subscribed = session_.client().subscribe_decoded(
-            vrx, name,
-            [inbox](const rpc::DecodedMessage& m) {
+    const std::uint64_t generation = ++next_decoder_generation_;
+    auto on_message = [inbox](const rpc::DecodedMessage& m) {
                 put_item(inbox, [m](PhoneStreams& self) {
                     self.queue_text(event("decoded", JsonObject()
                                                          .add_u64("vrx", m.vrx)
@@ -1113,17 +1114,25 @@ Status PhoneStreams::subscribe_decoder(std::uint64_t vrx, const std::string& nam
                                                          .add_u64("sequence", m.sequence)
                                                          .add_raw("fields", fields_json(m.fields))));
                 });
-            },
-            [inbox, vrx, name](const std::string& reason) {
+            };
+    auto on_ended = [inbox, vrx, name, generation](const std::string& reason) {
                 // The decoder stopped on its own (it refused the rate it was
                 // fed, say). It is left out of the running set so the phone's
                 // next change of set can try it again, and the phone is told.
-                put_item(inbox, [vrx, name, reason](PhoneStreams& self) {
+                put_item(inbox, [vrx, name, reason, generation](PhoneStreams& self) {
                     // A receiver that went (a removal, or a mode change's
                     // replacement) ends its decoders too; vrxRemoved says that.
                     if (!self.session_.owns(vrx)) {
                         return;
                     }
+                    // The subscription this ended has since been dropped or
+                    // replaced; the one running now is not the one that ended.
+                    const auto key = std::pair(vrx, name);
+                    if (const auto it = self.decoder_generation_.find(key);
+                        it == self.decoder_generation_.end() || it->second != generation) {
+                        return;
+                    }
+                    self.decoder_generation_.erase(key);
                     if (const auto it = self.decoded_.find(vrx); it != self.decoded_.end()) {
                         it->second.erase(name);
                     }
@@ -1132,10 +1141,16 @@ Status PhoneStreams::subscribe_decoder(std::uint64_t vrx, const std::string& nam
                                                            .add_string("decoder", name)
                                                            .add_string("decoderError", reason)));
                 });
-            });
+            };
+    const auto subscribed =
+        config_.subscribe_decoded
+            ? config_.subscribe_decoded(vrx, name, std::move(on_message), std::move(on_ended))
+            : session_.client().subscribe_decoded(vrx, name, std::move(on_message),
+                                                  std::move(on_ended));
     if (!subscribed) {
         return std::unexpected(subscribed.error());
     }
+    decoder_generation_[std::pair(vrx, name)] = generation;
     return {};
 }
 

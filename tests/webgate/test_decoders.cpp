@@ -323,6 +323,47 @@ TEST_CASE("an engine restart re-applies each receiver's decoders", "[gpu][webgat
     static_cast<void>(plain);
 }
 
+TEST_CASE("an ended event from a decoder turned off and on again leaves the new one running",
+          "[gpu][webgate][decoders]")
+{
+    REVENANT_NEEDS_GPU();
+    std::vector<std::function<void(const std::string&)>> ends;
+    Rig rig([&ends](StreamsConfig& config) {
+        config.subscribe_decoded = [&ends](std::uint64_t, std::string_view name,
+                                           std::function<void(const rpc::DecodedMessage&)>,
+                                           std::function<void(const std::string&)> on_ended)
+            -> revenant::Expected<std::string> {
+            ends.push_back(std::move(on_ended));
+            return std::string(name);
+        };
+    });
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    const auto dv = rig.add(id, socket, kCenter + 200'000, "p25p1");
+    auto* streams = rig.hub->streams(id);
+    REQUIRE(streams != nullptr);
+    REQUIRE(ends.size() == 1);
+
+    REQUIRE(contains(rig.set(id, socket, dv, "[]"), R"("ok":true)"));
+    REQUIRE(contains(rig.set(id, socket, dv, R"(["p25p1"])"), R"("ok":true)"));
+    REQUIRE(ends.size() == 2);
+    REQUIRE(streams->decoding(dv) == Names{"p25p1"});
+
+    // The first subscription's end arrives late, after its replacement.
+    const auto sent = socket.sent.size();
+    ends[0]("the decoder stopped");
+    rig.strand.run_pending();
+    CHECK(streams->decoding(dv) == Names{"p25p1"});
+    for (std::size_t i = sent; i < socket.sent.size(); ++i) {
+        CHECK_FALSE(contains(socket.sent[i].text, "decoderError"));
+    }
+
+    // The live one ending is still reported.
+    ends[1]("the decoder stopped");
+    rig.strand.run_pending();
+    CHECK(streams->decoding(dv).empty());
+}
+
 // ---- RDS ---------------------------------------------------------------------
 
 namespace {

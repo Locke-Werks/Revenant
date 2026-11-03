@@ -154,6 +154,13 @@ struct StreamsConfig {
     std::chrono::milliseconds rds_poll{1000};
     std::chrono::milliseconds rds_retry{10'000};
 
+    // Stands in for Client::subscribe_decoded, so a test can end a
+    // subscription when it likes. Empty subscribes on the engine.
+    std::function<Expected<std::string>(std::uint64_t, std::string_view,
+                                        std::function<void(const rpc::DecodedMessage&)>,
+                                        std::function<void(const std::string&)>)>
+        subscribe_decoded;
+
     // How long a segmenter outlives keepListening going off, so a quick lock
     // and unlock does not rebuild the stream.
     std::chrono::milliseconds hls_linger{30'000};
@@ -383,6 +390,11 @@ private:
     // until the phone changes the set or the receiver is recreated.
     std::map<std::uint64_t, std::vector<std::string>> decoded_applied_;
     std::map<std::uint64_t, std::set<std::string>> decoded_;
+    // The generation of each live decoder subscription. An ended event still
+    // queued from one the phone turned off and on again carries the old
+    // generation, and must not take the new subscription out of decoded_.
+    std::map<std::pair<std::uint64_t, std::string>, std::uint64_t> decoder_generation_;
+    std::uint64_t next_decoder_generation_ = 0;
     bool vrx_events_resubscribed_ = false;
 
     // The desktop's scale state for this phone, and the display event it was
