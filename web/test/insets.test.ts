@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appGeometry, screenTallPx } from "../src/insets";
+import { appGeometry, rulerMarks, screenTallPx } from "../src/insets";
 
 test("a viewport overshooting the glass by both insets puts the app a top inset down, screen tall", () => {
   // Measured on the owner's phone with ?insets: insets 62/34, innerHeight 1052.
@@ -19,4 +19,9 @@ test("an overshoot the insets do not explain is not guessed at", () => {
 test("the screen's length follows the orientation", () => {
   assert.equal(screenTallPx(440, 956, false), 956);
   assert.equal(screenTallPx(440, 956, true), 440);
+});
+
+test("ruler lines fall every 100 px below the height, none at 0", () => {
+  assert.deepEqual(rulerMarks(450), [100, 200, 300, 400]);
+  assert.deepEqual(rulerMarks(400), [100, 200, 300]);
 });

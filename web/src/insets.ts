@@ -34,32 +34,119 @@ export function insetsToggle(doc: Document, win: Window): void {
   );
 }
 
+// Labels for a ruler line every `step` CSS px from 0 down to `height`.
+export function rulerMarks(height: number, step = 100): number[] {
+  const out: number[] = [];
+  for (let y = step; y < height; y += step) out.push(y);
+  return out;
+}
+
+function rectText(name: string, r: { top: number; bottom: number; height: number }): string {
+  return `${name} top ${r.top.toFixed(1)} bottom ${r.bottom.toFixed(1)} h ${r.height.toFixed(1)}`;
+}
+
+// A layout ruler drawn inside the app: what the viewport, the app box and the
+// sheet's handle really occupy, in the page's own coordinates, so a screenshot
+// from the phone settles where things are instead of guessing. Touches pass
+// through everything but the close button.
 export function showInsets(doc: Document, win: Window): void {
+  const layer = doc.createElement("div");
+  layer.className = "insets-layer";
+  layer.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:100;pointer-events:none;";
+  doc.body.append(layer);
+
   const probe = doc.createElement("div");
   probe.style.cssText =
     "position:fixed;visibility:hidden;pointer-events:none;" +
     "padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)";
-  const box = doc.createElement("pre");
-  box.className = "insets-debug";
-  doc.body.append(probe, box);
+  const units = ["100dvh", "100lvh", "100svh", "100vh"].map((u) => {
+    const p = doc.createElement("div");
+    p.style.cssText = `position:absolute;visibility:hidden;pointer-events:none;width:1px;height:${u}`;
+    return { u, p };
+  });
+  doc.body.append(probe, ...units.map((x) => x.p));
+
+  // (a) A box pinned to all four viewport edges with no height of its own.
+  const frame = doc.createElement("div");
+  frame.style.cssText = "position:fixed;top:0;bottom:0;left:0;right:0;outline:2px solid red;outline-offset:-2px;pointer-events:none;";
+  const frameText = doc.createElement("div");
+  frameText.style.cssText = "position:absolute;left:4px;bottom:4px;color:red;font:11px/1.2 ui-monospace,monospace;background:rgba(0,0,0,0.7);";
+  frame.append(frameText);
+
+  const box = (color: string) => {
+    const b = doc.createElement("div");
+    b.style.cssText = `position:fixed;outline:2px solid ${color};outline-offset:-2px;pointer-events:none;`;
+    const t = doc.createElement("div");
+    t.style.cssText = `position:absolute;right:4px;top:4px;color:${color};font:11px/1.2 ui-monospace,monospace;background:rgba(0,0,0,0.7);`;
+    b.append(t);
+    return { b, t };
+  };
+  const appBox = box("#4af");
+  const grabBox = box("#4f4");
+
+  const lines = doc.createElement("div");
+  const text = doc.createElement("pre");
+  text.className = "insets-debug";
+  const close = doc.createElement("button");
+  close.type = "button";
+  close.textContent = "Close ruler";
+  close.style.cssText = "position:fixed;left:50%;top:22%;transform:translateX(-50%);pointer-events:auto;z-index:101;margin:0;";
+  close.addEventListener("click", () => {
+    try {
+      win.localStorage.removeItem(KEY);
+    } catch {
+      // The query string still turns it on.
+    }
+    layer.remove();
+  });
+  layer.append(lines, frame, appBox.b, grabBox.b, text, close);
+
+  const place = (target: { b: HTMLElement; t: HTMLElement }, name: string, el: Element | null) => {
+    if (!el) {
+      target.b.hidden = true;
+      return;
+    }
+    const r = el.getBoundingClientRect();
+    target.b.hidden = false;
+    Object.assign(target.b.style, { top: `${r.top}px`, left: `${r.left}px`, width: `${r.width}px`, height: `${r.height}px` });
+    target.t.textContent = rectText(name, r);
+  };
+
   const render = () => {
+    const fr = frame.getBoundingClientRect();
+    frameText.textContent = rectText("fixed 0/0", fr);
+    lines.textContent = "";
+    for (const y of rulerMarks(Math.max(fr.bottom, win.innerHeight, win.screen.height))) {
+      const l = doc.createElement("div");
+      l.style.cssText = `position:fixed;left:0;right:0;top:${y}px;height:1px;background:rgba(255,255,0,0.6);pointer-events:none;`;
+      const lab = doc.createElement("span");
+      lab.textContent = String(y);
+      lab.style.cssText = "position:absolute;left:2px;top:-12px;color:#ff0;font:10px ui-monospace,monospace;";
+      l.append(lab);
+      lines.append(l);
+    }
+    place(appBox, "app", doc.querySelector(".app"));
+    place(grabBox, "grab", doc.querySelector(".sheet:not([hidden])") ?? doc.querySelector(".grabber"));
     const cs = win.getComputedStyle(probe);
     const vv = win.visualViewport;
     const nav = win.navigator as Navigator & { standalone?: boolean };
-    box.textContent = [
+    const root = doc.documentElement;
+    text.textContent = [
       `inset t ${cs.paddingTop} r ${cs.paddingRight} b ${cs.paddingBottom} l ${cs.paddingLeft}`,
-      `innerHeight ${win.innerHeight}  clientHeight ${doc.documentElement.clientHeight}`,
+      `innerHeight ${win.innerHeight}  outerHeight ${win.outerHeight}  clientHeight ${root.clientHeight}`,
       `visualViewport.height ${vv ? vv.height.toFixed(1) : "n/a"}  offsetTop ${vv ? vv.offsetTop.toFixed(1) : "n/a"}`,
-      `scrollY ${win.scrollY}  screen ${win.screen.width}x${win.screen.height}`,
+      `scrollY ${win.scrollY}  screen ${win.screen.width}x${win.screen.height}  availHeight ${win.screen.availHeight}`,
+      units.map((x) => `${x.u} ${x.p.getBoundingClientRect().height.toFixed(1)}`).join("  "),
       `standalone ${nav.standalone === true}`,
-      `--app-top ${doc.documentElement.style.getPropertyValue("--app-top") || "unset"}  --app-h ${doc.documentElement.style.getPropertyValue("--app-h") || "unset"}`,
+      `--app-top ${root.style.getPropertyValue("--app-top") || "unset"}  --app-h ${root.style.getPropertyValue("--app-h") || "unset"}  overshoot top ${root.dataset.overshootTop ?? "n/a"}`,
     ].join("\n");
   };
   render();
-  win.addEventListener("resize", render);
-  win.addEventListener("scroll", render);
+  for (const t of ["resize", "scroll", "orientationchange"]) win.addEventListener(t, render);
   win.visualViewport?.addEventListener("resize", render);
   win.visualViewport?.addEventListener("scroll", render);
+  // The app and its sheet mount after this runs and move when the sheet opens.
+  win.setInterval(render, 1000);
 }
 
 // Where the glass is inside the layout viewport. An installed app on iOS 27
@@ -113,7 +200,11 @@ export function trackAppGeometry(win: Window): void {
       insetTop: parseFloat(cs.paddingTop) || 0,
       insetBottom: parseFloat(cs.paddingBottom) || 0,
     });
-    doc.documentElement.style.setProperty("--app-top", `${g.topPx}px`);
+    // Round 2 applied g.topPx here and the phone showed the top bar pushed
+    // down by it, so the overshoot is not where the glass starts. Kept at 0
+    // until the ruler in showInsets says otherwise; the overlay prints it.
+    doc.documentElement.style.setProperty("--app-top", "0px");
+    doc.documentElement.dataset.overshootTop = String(g.topPx);
     doc.documentElement.style.setProperty("--app-h", `${g.heightPx}px`);
   };
   set();
