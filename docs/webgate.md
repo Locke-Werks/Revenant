@@ -70,7 +70,7 @@ exits when the gateway does. An engine that is already running is used as it is.
 | `--state-dir DIR` | `%LOCALAPPDATA%\Revenant\webgate` | Where the certificates live |
 | `--web-root DIR` | `web` beside the exe | The phone app |
 | `--token-file PATH` | the engine's own default | The engine's token file |
-| `--session-linger-ms N` | 600000 | How long a phone's receivers survive a dropped connection (see below) |
+| `--session-linger-ms N` | 30000 | How long a phone's receivers survive a dropped connection (see below) |
 
 Both ports listen on `0.0.0.0`. The first start creates the certificate
 authority and a server certificate and prints the names the certificate covers:
@@ -154,7 +154,8 @@ Limits:
 - If the source is slower than real time there is less audio than time, and
   the stream underruns whatever the phone does.
 - If the connection drops (a locked iPhone often leaves a connection half open),
-  the gateway keeps the phone's receivers for 10 minutes (`--session-linger-ms`).
+  the gateway keeps the phone's receivers for 30 seconds (`--session-linger-ms`),
+  or for as long as Keep listening is fetching audio.
   Within that time the app reattaches to the same receivers on its own. After
   it, or after the engine restarts and a receiver cannot be recreated, the
   receivers are gone and the app says why.
@@ -228,13 +229,11 @@ longest ago; it is refused only when all 16 are connected right now.
   nothing on for 45 seconds is closed, which detaches its session.
 - Every WebSocket opens its own engine session. When the socket drops, the
   session detaches and lingers so the phone can resume it:
-  - with no receivers and Keep listening off, for 30 seconds;
-  - otherwise for 10 minutes;
+  - for 30 seconds;
   - with Keep listening on, also until 60 seconds after the last HLS request
     for one of its receivers, whichever is later.
 
-  `--session-linger-ms` shortens the 10 minute figure (and the 30 second one
-  with it, when smaller). At most 16 sessions exist at once: a connection past
+  `--session-linger-ms` sets the 30 second figure. At most 16 sessions exist at once: a connection past
   that evicts the oldest detached session, or is closed with code 1013 and a
   reason saying too many phones are connected when every session is attached.
 

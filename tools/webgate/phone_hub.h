@@ -11,12 +11,14 @@
 //   no receivers and keep listening off:
 //                       empty_linger after the drop. Every WebSocket opens an
 //                       engine session, so a page that connected and left
-//                       must not hold one for ten minutes.
+//                       must not hold one any longer than that.
 //   otherwise:          detached_linger after the drop.
 //   keep listening on:  the same, and also until hls_idle after the last HLS
 //                        request for one of its receivers, whichever is later.
-// The base linger is long because an iPhone app sits backgrounded for minutes
-// between glances, and coming back to its receivers beats starting over.
+// The base linger covers a socket dropped by a network blip or an app switch.
+// The owner chose 30 s over the earlier 10 min on 2026-11-03: a phone that is
+// put away without keep listening should not hold the radio's receivers for
+// minutes. Keep listening is how a locked phone keeps its session.
 // On expiry it is destroyed exactly as a disconnect used to destroy it: its
 // streams unsubscribe and its receivers are removed.
 //
@@ -51,7 +53,7 @@ namespace revenant::webgate {
 [[nodiscard]] std::string link_event(LinkState state, const std::string& detail);
 
 struct HubTiming {
-    std::chrono::milliseconds detached_linger{600'000};
+    std::chrono::milliseconds detached_linger{30'000};
     std::chrono::milliseconds empty_linger{30'000};
     std::size_t max_residents = 16;
     std::chrono::milliseconds hls_idle{60'000};

@@ -178,7 +178,7 @@ TEST_CASE("keep listening outlives a dropped socket while HLS is fetched",
     REQUIRE(rig.registry.find(vrx) != nullptr);
 
     rig.hub->disconnect(id);
-    // Past the 10 min base linger, so only the fetches keep it.
+    // Well past the 30 s base linger, so only the fetches keep it.
     for (int i = 0; i < 660; ++i) {
         rig.registry.fetched(vrx);
         rig.advance(seconds(1));
@@ -195,7 +195,7 @@ TEST_CASE("keep listening outlives a dropped socket while HLS is fetched",
     CHECK_FALSE(rig.engine_has(vrx));
 }
 
-TEST_CASE("keep listening never shortens the 10 min base linger", "[gpu][webgate][hub]")
+TEST_CASE("keep listening with no fetches lasts until hls_idle", "[gpu][webgate][hub]")
 {
     REVENANT_NEEDS_GPU();
     HubRig rig;
@@ -204,15 +204,18 @@ TEST_CASE("keep listening never shortens the 10 min base linger", "[gpu][webgate
     const auto token = rig.hub->token(id);
     rig.listen(id, socket, true);
 
-    // No HLS fetch at all: hls_idle passes long before the base linger does.
+    // No HLS fetch at all: the later of the 30 s base linger and the 60 s
+    // hls_idle decides, so the session is still there at 59 s.
     rig.hub->disconnect(id);
-    rig.advance(seconds(599));
+    rig.advance(seconds(29));
     CHECK(rig.hub->holds(token));
-    rig.advance(seconds(2));
+    rig.advance(seconds(30));
+    CHECK(rig.hub->holds(token));
+    rig.advance(seconds(3));
     CHECK_FALSE(rig.hub->holds(token));
 }
 
-TEST_CASE("a detached session without keep listening goes after 10 min", "[gpu][webgate][hub]")
+TEST_CASE("a detached session without keep listening goes after 30 s", "[gpu][webgate][hub]")
 {
     REVENANT_NEEDS_GPU();
     HubRig rig;
@@ -222,7 +225,7 @@ TEST_CASE("a detached session without keep listening goes after 10 min", "[gpu][
     const auto vrx = rig.listen(id, socket, false);
 
     rig.hub->disconnect(id);
-    rig.advance(seconds(599));
+    rig.advance(seconds(29));
     CHECK(rig.hub->holds(token));
     CHECK(rig.engine_has(vrx));
     rig.advance(seconds(2));
@@ -436,22 +439,6 @@ TEST_CASE("keep listening holds an empty detached session for the full linger",
     CHECK(rig.hub->holds(token));
     rig.advance(seconds(570));
     CHECK_FALSE(rig.hub->holds(token));
-}
-
-TEST_CASE("a detached session with a receiver outlives the 30 s empty linger",
-          "[gpu][webgate][hub]")
-{
-    REVENANT_NEEDS_GPU();
-    HubRig rig;
-    FakeSocket socket;
-    const auto id = rig.connect(socket);
-    const auto token = rig.hub->token(id);
-    const auto vrx = rig.listen(id, socket, false);
-
-    rig.hub->disconnect(id);
-    rig.advance(seconds(31));
-    CHECK(rig.hub->holds(token));
-    CHECK(rig.engine_has(vrx));
 }
 
 TEST_CASE("a connection past the cap evicts the oldest detached session",
