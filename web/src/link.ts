@@ -28,6 +28,11 @@ export const RESUME_KEY = "revenant.resume";
 export const REQUEST_TIMEOUT_MS = 10_000;
 // Silence for two ping intervals means the socket is dead whatever it claims.
 export const STALE_MS = 2 * PING_INTERVAL_MS;
+// The first command on a socket is answered only once the gateway has an
+// engine, and on a cold start it is starting one: up to 20 s
+// (tools/webgate/engine_link.h, kDemandWait). Dropping the socket at 10 s
+// would abandon the claim and start over.
+export const RESUME_TIMEOUT_MS = 25_000;
 // The backoff starts over only once a link has stayed up this long, so a
 // gateway that accepts and immediately drops does not get hammered.
 export const STABLE_MS = 5_000;
@@ -89,6 +94,7 @@ export interface LinkEvents {
   lease: LeaseEvent;
   vrx: GatewayEvent;
   vrxList: GatewayEvent;
+  engine: GatewayEvent;
 }
 export type LinkEventName = keyof LinkEvents;
 
@@ -263,7 +269,7 @@ export class Link {
     // resume is accepted only as a connection's first command, so it goes out
     // before anything else and requests wait for it to settle.
     this.freshToken = null;
-    const p = this.send("resume", { token });
+    const p = this.send("resume", { token }, RESUME_TIMEOUT_MS);
     this.resumeId = this.nextId - 1;
     p.then(
       () => this.resumeSettled(ws, true),

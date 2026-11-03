@@ -697,6 +697,10 @@ export function mountApp(root: HTMLElement): AppHandle {
     status.socket(false);
     renderStatus();
   });
+  link.on("engine", (e) => {
+    status.starting(e.state === "starting");
+    renderStatus();
+  });
   link.on("link", (e) => {
     status.link(e.state, e.detail, e.recreated !== undefined || e.lost !== undefined);
     renderStatus();

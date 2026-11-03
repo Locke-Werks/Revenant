@@ -29,8 +29,17 @@ export class StatusModel {
   private behind = false;
   private ended: string | null = null;
 
+  private engineStarting = false;
+
   socket(up: boolean): void {
     this.socketUp = up;
+    if (!up) this.engineStarting = false;
+  }
+
+  // The gateway is starting an engine for this phone ("engine" event).
+  // Ends with the link reporting the engine, or with the socket.
+  starting(on: boolean): void {
+    this.engineStarting = on;
   }
 
   // The link is ready. A session that was not resumed is a new one with its
@@ -47,6 +56,7 @@ export class StatusModel {
     this.engine = state;
     this.engineDetail = detail;
     if (state === "up") this.everUp = true;
+    if (state === "up" || state === "refused") this.engineStarting = false;
   }
 
   source(e: SourceEvent): void {
@@ -60,6 +70,9 @@ export class StatusModel {
 
   // One line for whatever stops the waterfall, or null when nothing does.
   pill(): string | null {
+    // Ahead of the socket: the socket is open but not ready until the claim
+    // that is waiting for the engine lands.
+    if (this.engineStarting) return "Starting the engine...";
     if (!this.socketUp) return this.everUp ? "reconnecting" : "connecting";
     switch (this.engine) {
       case "starting":

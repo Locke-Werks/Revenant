@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BACKOFF_MAX_MS, LinkError, REQUEST_TIMEOUT_MS, STABLE_MS, Link, RESUME_KEY, wireLifecycle, type SocketLike } from "../src/link";
+import { BACKOFF_MAX_MS, LinkError, REQUEST_TIMEOUT_MS, RESUME_TIMEOUT_MS, STABLE_MS, Link, RESUME_KEY, wireLifecycle, type SocketLike } from "../src/link";
 import { encodeSpectrum, PING_INTERVAL_MS } from "../src/protocol";
 
 class FakeSocket implements SocketLike {
@@ -336,7 +336,11 @@ test("a resume that times out keeps the token and reconnects", async () => {
   const { link, sockets, timers, store, cur } = rig("tok-keep");
   link.start();
   cur().open();
-  timers.advance(REQUEST_TIMEOUT_MS);
+  // Longer than an ordinary request: the gateway may be starting an engine.
+  timers.advance(REQUEST_TIMEOUT_MS + 1);
+  await tick();
+  assert.equal(sockets.length, 1);
+  timers.advance(RESUME_TIMEOUT_MS - REQUEST_TIMEOUT_MS - 1);
   await tick();
   assert.equal(store.getItem(RESUME_KEY), "tok-keep");
   timers.advance(500);

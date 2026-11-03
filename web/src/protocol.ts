@@ -72,6 +72,7 @@ export const EVENTS = [
   "lease",
   "vrx",
   "vrxList",
+  "engine",
 ] as const;
 export type EventName = (typeof EVENTS)[number];
 
