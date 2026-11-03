@@ -61,6 +61,7 @@
 #include "tools/webgate/hls_playlist.h"
 #include "tools/webgate/phone_mix.h"
 #include "tools/webgate/display_sync.h"
+#include "tools/webgate/dv_feed.h"
 #include "tools/webgate/session.h"
 #include "tools/webgate/spectrum_reducer.h"
 #include "tools/webgate/voice_gain.h"
@@ -165,6 +166,20 @@ struct StreamsConfig {
                                         std::function<void(const rpc::DecodedMessage&)>,
                                         std::function<void(const std::string&)>)>
         subscribe_decoded;
+
+    // Where the trunk follower's status is read. Empty reads the engine; tests
+    // supply one, since a control channel's grants cannot be steered.
+    std::function<Expected<rpc::TrunkStatusInfo>()> trunk_status;
+
+    // How often trunk status is read while the DV tab is open or following
+    // is on, and how long a refusal waits: an engine without the call would
+    // only fill the log.
+    std::chrono::milliseconds trunk_poll{1000};
+    std::chrono::milliseconds trunk_retry{10'000};
+
+    // Wall clock milliseconds since the epoch, for the call rows. Empty is
+    // std::chrono::system_clock.
+    std::function<std::int64_t()> wall_clock_ms;
 
     // How long a segmenter outlives keepListening going off, so a quick lock
     // and unlock does not rebuild the stream.
@@ -341,6 +356,18 @@ private:
     // a failed read, so a detector that is not ready does not reach the phone.
     void refresh_detections();
     void refresh_rds();
+    // The DV tab (dv_feed.h): one decoded message into the call log, the
+    // calls and talkgroups events when they changed, the trunk status poll,
+    // one Auto DV pass over a detection list, and the session's switches put
+    // back on the engine when a session starts.
+    void fold_call(const rpc::DecodedMessage& message);
+    void refresh_calls();
+    void refresh_trunk();
+    void run_auto_dv(const rpc::DetectionList& list);
+    void apply_dv_switches();
+    void refresh_trunk_settings();
+    void send_dv_state();
+    [[nodiscard]] std::int64_t wall_ms() const;
     // Takes the desktop's settings in and sends a display event when the
     // colours they give are not the ones last sent.
     void refresh_display();
@@ -467,6 +494,17 @@ private:
     std::map<std::pair<std::uint64_t, std::string>, std::uint64_t> decoder_generation_;
     std::uint64_t next_decoder_generation_ = 0;
     bool vrx_events_resubscribed_ = false;
+
+    // The DV tab.
+    ui::CallLog calls_;
+    bool calls_dirty_ = false;
+    std::string sent_calls_;
+    std::string sent_talkgroups_;
+    std::string sent_trunk_;
+    std::string sent_dv_;
+    TrunkAliases aliases_;
+    std::optional<std::string> aliases_text_;
+    std::optional<std::chrono::steady_clock::time_point> next_trunk_poll_;
 
     // The desktop's scale state for this phone, and the display event it was
     // last sent. The view is the one the last row was cut for.

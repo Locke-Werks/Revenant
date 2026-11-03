@@ -129,6 +129,13 @@ DesktopSettings read_desktop_settings(const DesktopValueReader& read)
     if (const auto bar = double_of("detections", "confidenceBar")) {
         s.confidence_bar = ui::restore_detection_bar(bar, kConfidenceTop);
     }
+    s.trunk_aliases = read("trunk", "aliases");
+    s.trunk_allow = read("trunk", "allow");
+    s.trunk_deny = read("trunk", "deny");
+    s.trunk_priority = read("trunk", "priority");
+    if (const auto text = read("trunk", "maxFollowers")) {
+        s.trunk_max_followers = parse_int(*text);
+    }
     return s;
 }
 
@@ -139,7 +146,7 @@ DesktopValueReader registry_desktop_reader()
         // Only the groups the desktop writes under are read.
         const std::string_view top = group.substr(0, group.find('/'));
         if (top != "engine" && top != "radio" && top != "speech" && top != "detections" &&
-            top != "source") {
+            top != "source" && top != "trunk") {
             return std::nullopt;
         }
         std::string key(group);

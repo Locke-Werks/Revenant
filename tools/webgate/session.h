@@ -35,6 +35,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -127,7 +128,57 @@ public:
     [[nodiscard]] double min_confidence() const { return min_confidence_; }
     void set_min_confidence(double value) { min_confidence_ = value; }
 
+    // ---- The DV tab's switches (dv_feed.h) ----
+    // Auto DV: on or off, the receivers it opened (so it hands back only its
+    // own), and the frequencies the phone removed a receiver from while it
+    // was on, which it leaves alone until it is turned on afresh.
+    [[nodiscard]] bool auto_dv() const { return auto_dv_; }
+    void set_auto_dv(bool on)
+    {
+        auto_dv_ = on;
+        auto_dv_dismissed_.clear();
+    }
+    [[nodiscard]] std::set<std::uint64_t>& auto_dv_spawned() { return auto_dv_spawned_; }
+    [[nodiscard]] const std::set<std::uint64_t>& auto_dv_spawned() const { return auto_dv_spawned_; }
+    [[nodiscard]] std::vector<double>& auto_dv_dismissed() { return auto_dv_dismissed_; }
+    [[nodiscard]] const std::vector<double>& auto_dv_dismissed() const { return auto_dv_dismissed_; }
+
+    // Trunk following as the phone asked for it, kept so a session rebuilt
+    // on a restarted engine asks again.
+    struct TrunkFollow {
+        std::uint64_t vrx = 0;
+        std::uint32_t max_followers = 0;
+    };
+    [[nodiscard]] const std::optional<TrunkFollow>& trunk_follow() const { return trunk_follow_; }
+    void set_trunk_follow(std::optional<TrunkFollow> follow) { trunk_follow_ = follow; }
+
+    // The rules the phone set with setTrunkRules; without them the desktop's.
+    [[nodiscard]] const std::optional<rpc::TrunkRuleSet>& trunk_rules() const { return trunk_rules_; }
+    void set_trunk_rules(std::optional<rpc::TrunkRuleSet> rules) { trunk_rules_ = std::move(rules); }
+    // The desktop's saved rules and follower count, refreshed by the streams.
+    [[nodiscard]] const rpc::TrunkRuleSet& desktop_trunk_rules() const { return desktop_rules_; }
+    void set_desktop_trunk_rules(rpc::TrunkRuleSet rules) { desktop_rules_ = std::move(rules); }
+    [[nodiscard]] std::uint32_t desktop_max_followers() const { return desktop_max_followers_; }
+    void set_desktop_max_followers(std::uint32_t n) { desktop_max_followers_ = n; }
+    [[nodiscard]] const rpc::TrunkRuleSet& wanted_trunk_rules() const
+    {
+        return trunk_rules_ ? *trunk_rules_ : desktop_rules_;
+    }
+
+    // Whether the phone has the DV tab open, which is when trunk status is
+    // polled without following on.
+    [[nodiscard]] bool dv_watch() const { return dv_watch_; }
+    void set_dv_watch(bool on) { dv_watch_ = on; }
+
 private:
+    bool auto_dv_ = false;
+    std::set<std::uint64_t> auto_dv_spawned_;
+    std::vector<double> auto_dv_dismissed_;
+    std::optional<TrunkFollow> trunk_follow_;
+    std::optional<rpc::TrunkRuleSet> trunk_rules_;
+    rpc::TrunkRuleSet desktop_rules_;
+    std::uint32_t desktop_max_followers_ = 2;
+    bool dv_watch_ = false;
     std::unique_ptr<rpc::Client> client_;
     struct Known {
         rpc::VrxParams params;

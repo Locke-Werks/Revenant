@@ -10,6 +10,7 @@
 
 #include "core/error.h"
 #include "core/rpc/types.h"
+#include "tools/webgate/dv_feed.h"
 
 namespace revenant::webgate {
 
@@ -355,9 +356,24 @@ template <class Change>
     if (!vrx) {
         return std::unexpected(vrx.error());
     }
+    // While Auto DV is on, a receiver the phone takes away means "not that
+    // frequency", as the desktop's dismissReceiver does, or the next pass
+    // would open it again.
+    std::optional<double> dismissed;
+    if (session.auto_dv()) {
+        if (const auto* params = session.last_params(*vrx)) {
+            if (const auto center = source_center(session)) {
+                dismissed = static_cast<double>(*center + params->center);
+            }
+        }
+    }
     if (auto removed = session.client().remove_vrx(*vrx); !removed) {
         return std::unexpected(removed.error());
     }
+    if (dismissed) {
+        session.auto_dv_dismissed().push_back(*dismissed);
+    }
+    session.auto_dv_spawned().erase(*vrx);
     session.forget(*vrx);
     return JsonObject().add_u64("vrx", *vrx).str();
 }
@@ -816,9 +832,129 @@ template <class Edit>
     return JsonObject().add_u64("vrx", *vrx).add_raw("decoders", string_array(unique)).str();
 }
 
+// ---- The DV tab --------------------------------------------------------------
+
+// Auto DV, the desktop's way: on, the engine closes the plugin's receivers and
+// opens no more, so Auto DV and the trunk tracker never share a channel
+// (EngineLink::apply_auto_dv). Off lifts that hold. A refusal is an engine
+// older than the call, and Auto DV still runs beside the tracker.
+[[nodiscard]] Result op_auto_dv(PhoneSession& session, const Command& command)
+{
+    const auto on = command.get_bool("on");
+    if (!on) {
+        return std::unexpected(on.error());
+    }
+    if (session.auto_dv() != *on) {
+        session.set_auto_dv(*on);
+        static_cast<void>(session.client().set_plugin_receivers(!*on));
+    }
+    return JsonObject().add_bool("on", *on).str();
+}
+
+[[nodiscard]] Result op_trunk_follow(PhoneSession& session, const Command& command)
+{
+    const auto on = command.get_bool("on");
+    if (!on) {
+        return std::unexpected(on.error());
+    }
+    std::uint32_t max = session.desktop_max_followers();
+    if (command.has("maxFollowers")) {
+        const auto n = command.get_i64("maxFollowers");
+        if (!n) {
+            return std::unexpected(n.error());
+        }
+        if (*n < kMinFollowers || *n > kMaxFollowers) {
+            return fail("maxFollowers: must be 1 to 16");
+        }
+        max = clamp_followers(*n);
+    }
+    std::uint64_t vrx = 0;
+    if (*on) {
+        const auto id = receiver_arg(session, command);
+        if (!id) {
+            return std::unexpected(id.error());
+        }
+        vrx = *id;
+        // Rules first, so the first grant is judged by them, as the desktop does.
+        static_cast<void>(session.client().set_trunk_rules(session.wanted_trunk_rules()));
+    } else if (session.trunk_follow()) {
+        vrx = session.trunk_follow()->vrx;
+    } else if (command.has("vrx")) {
+        const auto id = command.get_u64("vrx");
+        if (!id) {
+            return std::unexpected(id.error());
+        }
+        vrx = *id;
+    }
+    if (auto set = session.client().set_trunk_follow(vrx, *on, max); !set) {
+        return std::unexpected(set.error());
+    }
+    session.set_trunk_follow(*on ? std::optional(PhoneSession::TrunkFollow{vrx, max}) : std::nullopt);
+    return JsonObject().add_bool("on", *on).add_u64("vrx", vrx).add_u64("maxFollowers", max).str();
+}
+
+[[nodiscard]] Result op_trunk_status(PhoneSession& session, const Command&)
+{
+    const auto status = session.client().trunk_status();
+    if (!status) {
+        return std::unexpected(status.error());
+    }
+    return trunk_status_json(*status, {});
+}
+
+// The rules in the desktop panel's own text form, so a list pasted on either
+// reads the same. Absent fields clear back to the desktop's saved rules.
+[[nodiscard]] Result op_set_trunk_rules(PhoneSession& session, const Command& command)
+{
+    if (!command.has("allow") && !command.has("deny") && !command.has("priority")) {
+        session.set_trunk_rules(std::nullopt);
+    } else {
+        std::string texts[3];
+        const char* keys[3] = {"allow", "deny", "priority"};
+        for (int i = 0; i < 3; ++i) {
+            if (command.has(keys[i])) {
+                auto text = command.get_string(keys[i]);
+                if (!text) {
+                    return std::unexpected(text.error());
+                }
+                texts[i] = std::move(*text);
+            }
+        }
+        auto parsed = trunk_rules_from_text(texts[0], texts[1], texts[2]);
+        session.set_trunk_rules(std::move(parsed.rules));
+        if (auto set = session.client().set_trunk_rules(session.wanted_trunk_rules()); !set) {
+            return std::unexpected(set.error());
+        }
+        std::string body = trunk_rules_json(session.wanted_trunk_rules());
+        body.pop_back();
+        return body + ",\"skipped\":" + std::to_string(parsed.skipped) + "}";
+    }
+    if (auto set = session.client().set_trunk_rules(session.wanted_trunk_rules()); !set) {
+        return std::unexpected(set.error());
+    }
+    std::string body = trunk_rules_json(session.wanted_trunk_rules());
+    body.pop_back();
+    return body + ",\"skipped\":0}";
+}
+
+[[nodiscard]] Result op_dv_tab(PhoneSession& session, const Command& command)
+{
+    const auto visible = command.get_bool("visible");
+    if (!visible) {
+        return std::unexpected(visible.error());
+    }
+    session.set_dv_watch(*visible);
+    return JsonObject().add_bool("visible", *visible).str();
+}
+
 [[nodiscard]] Result run(PhoneSession& session, const Command& command)
 {
     const std::string_view op = command.op;
+    if (op == "autoDv") return op_auto_dv(session, command);
+    if (op == "trunkFollow") return op_trunk_follow(session, command);
+    if (op == "trunkStatus") return op_trunk_status(session, command);
+    if (op == "setTrunkRules") return op_set_trunk_rules(session, command);
+    if (op == "dvTab") return op_dv_tab(session, command);
     if (op == "listDecoders") return op_list_decoders(session, command);
     if (op == "setDecoders") return op_set_decoders(session, command);
     if (op == "addVrx") return op_add_vrx(session, command);
@@ -919,6 +1055,20 @@ std::string handle_text(PhoneSession& session, std::string_view text)
         return error_reply(*id, command.error().message);
     }
     return dispatch(session, *command);
+}
+
+std::string dv_state_event(const PhoneSession& session)
+{
+    const auto& follow = session.trunk_follow();
+    const std::string follow_json = follow ? JsonObject()
+                                                 .add_u64("vrx", follow->vrx)
+                                                 .add_u64("maxFollowers", follow->max_followers)
+                                                 .str()
+                                           : std::string("null");
+    return event("dv", JsonObject()
+                           .add_bool("autoDv", session.auto_dv())
+                           .add_raw("follow", follow_json)
+                           .add_u64("maxFollowers", session.desktop_max_followers()));
 }
 
 }  // namespace revenant::webgate

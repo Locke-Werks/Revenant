@@ -141,13 +141,13 @@ TEST_CASE("Argument getters name the key on a type or range error", "[webgate][p
 }
 
 TEST_CASE("Every named op parses and the list is exact", "[webgate][protocol]") {
-    CHECK(std::size(wg::kOps) == 22);
+    CHECK(std::size(wg::kOps) == 27);
     for (auto op : wg::kOps) {
         auto c = wg::parse_command(R"({"id":1,"op":")" + std::string(op) + R"("})");
         INFO(op);
         CHECK(c.has_value());
     }
-    CHECK(std::size(wg::kEvents) == 14);
+    CHECK(std::size(wg::kEvents) == 18);
 }
 
 TEST_CASE("get_string_list reads an array of strings and refuses anything else",
