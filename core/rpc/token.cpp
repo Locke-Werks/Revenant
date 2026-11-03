@@ -384,13 +384,12 @@ void ensure_parent_directory(const std::wstring& path) {
     static_cast<void>(CreateDirectoryW(parent.c_str(), nullptr));
 }
 
-[[nodiscard]] Expected<Token> write_new_token_file(const std::wstring& wide,
-                                                   const std::string& path) {
-    auto minted = random_token();
-    if (!minted) {
-        return std::unexpected(minted.error());
-    }
-
+// The same write for every secret that needs the owner-and-SYSTEM DACL. `what`
+// names the file in messages ("token file", "private file"), because the same
+// failure reads differently depending on which secret it was.
+[[nodiscard]] Status write_file_with_private_acl(const std::wstring& wide, const std::string& path,
+                                                 std::string_view contents, bool replace,
+                                                 const char* what) {
     MintedAcl acl;
     if (auto built = acl.build(); !built) {
         return std::unexpected(built.error());
@@ -399,26 +398,40 @@ void ensure_parent_directory(const std::wstring& path) {
 
     ensure_parent_directory(wide);
 
-    const HANDLE file = CreateFileW(wide.c_str(), GENERIC_WRITE, 0, &attributes, CREATE_NEW,
+    const HANDLE file = CreateFileW(wide.c_str(), GENERIC_WRITE, 0, &attributes,
+                                    replace ? CREATE_ALWAYS : CREATE_NEW,
                                     FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         const DWORD code = GetLastError();
-        return fail(std::format("could not create the token file {}: {}", path,
+        return fail(std::format("could not create the {} {}: {}", what, path,
                                 win32_message(code)),
                     code);
     }
 
-    const std::string text = token_to_hex(*minted) + "\n";
     DWORD written = 0;
-    const BOOL ok = WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written,
-                              nullptr);
+    const BOOL ok = WriteFile(file, contents.data(), static_cast<DWORD>(contents.size()),
+                              &written, nullptr);
     const DWORD code = GetLastError();
     CloseHandle(file);
 
-    if (ok == 0 || written != text.size()) {
-        return fail(std::format("could not write the token file {}: {}", path,
+    if (ok == 0 || written != contents.size()) {
+        return fail(std::format("could not write the {} {}: {}", what, path,
                                 win32_message(code)),
                     code);
+    }
+    return {};
+}
+
+[[nodiscard]] Expected<Token> write_new_token_file(const std::wstring& wide,
+                                                   const std::string& path) {
+    auto minted = random_token();
+    if (!minted) {
+        return std::unexpected(minted.error());
+    }
+    const std::string text = token_to_hex(*minted) + "\n";
+    if (auto written = write_file_with_private_acl(wide, path, text, false, "token file");
+        !written) {
+        return std::unexpected(written.error());
     }
     return *minted;
 }
@@ -671,6 +684,14 @@ Expected<Token> load_or_mint_token(const std::string& path) {
     return loaded;
 }
 
+Status write_private_file(const std::string& path, std::string_view contents, bool replace) {
+    auto wide = widen(path);
+    if (!wide) {
+        return std::unexpected(wide.error());
+    }
+    return write_file_with_private_acl(*wide, path, contents, replace, "private file");
+}
+
 Expected<Token> rotate_token(const std::string& path) {
     auto wide = widen(path);
     if (!wide) {
@@ -709,6 +730,9 @@ Expected<Token> load_or_mint_token(const std::string&) {
     return std::unexpected(not_supported());
 }
 Expected<Token> rotate_token(const std::string&) { return std::unexpected(not_supported()); }
+Status write_private_file(const std::string&, std::string_view, bool) {
+    return std::unexpected(not_supported());
+}
 
 #endif  // _WIN32
 

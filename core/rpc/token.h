@@ -144,4 +144,15 @@ using Token = std::array<std::uint8_t, kTokenBytes>;
 // the sessions the leak already bought.
 [[nodiscard]] Expected<Token> rotate_token(const std::string& path);
 
+// Writes a file only this account and SYSTEM can open, with that DACL applied
+// at creation so there is no window in which the directory's inherited ACEs
+// apply. This is the ACL the token file gets; it is exposed so other secrets
+// (the web gateway's TLS private keys) share one implementation of it.
+//
+// replace false fails if the file exists, as mint_token does. replace true
+// overwrites; an existing file keeps the DACL it already has, which is the one
+// this function gave it.
+[[nodiscard]] Status write_private_file(const std::string& path, std::string_view contents,
+                                        bool replace);
+
 }  // namespace revenant::rpc

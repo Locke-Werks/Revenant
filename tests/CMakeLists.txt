@@ -111,6 +111,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rpc/CMakeLists.txt")
     add_subdirectory(rpc)
 endif()
 
+# Guarded on the tool existing, which is itself guarded on REVENANT_BUILD_TOOLS.
+if(TARGET revenant_webgate_lib)
+    add_subdirectory(webgate)
+endif()
+
 if(REVENANT_BUILD_TOOLS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists.txt")
     add_subdirectory(tools)
 endif()

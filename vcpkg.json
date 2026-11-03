@@ -14,7 +14,13 @@
         "rtlsdr",
         "hackrf",
         "codec2",
-        "capnproto",
+        {
+            "name": "capnproto",
+            "features": [
+                "openssl"
+            ]
+        },
+        "opus",
         "whisper-cpp",
         {
             "name": "ggml",
