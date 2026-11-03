@@ -438,3 +438,75 @@ TEST_CASE("the DV ops refuse bad arguments in their own words", "[gpu][webgate][
     CHECK(contains(reply, R"("allow":[100,200])"));
     CHECK(t.session->wanted_trunk_rules().priorities.size() == 1);
 }
+
+TEST_CASE("auto DV off lifts only a plugin hold this phone set", "[gpu][webgate][dv]")
+{
+    REVENANT_NEEDS_GPU();
+    DvRig t;
+    // Off with nothing held: nothing to lift, so the desktop's hold stands.
+    t.command(R"({"id":1,"op":"autoDv","args":{"on":false}})");
+    CHECK_FALSE(t.session->plugin_hold());
+    t.command(R"({"id":2,"op":"autoDv","args":{"on":true}})");
+    CHECK(t.session->plugin_hold());
+    t.command(R"({"id":3,"op":"autoDv","args":{"on":false}})");
+    CHECK_FALSE(t.session->plugin_hold());
+}
+
+TEST_CASE("a session that ends lifts its hold and stops the following it started",
+          "[gpu][webgate][dv]")
+{
+    REVENANT_NEEDS_GPU();
+    DvRig t;
+    t.command(R"({"id":1,"op":"addVrx","args":{"hz":851050000,"mode":"p25p1"}})");
+    const auto vrx = t.session->receiver_ids().front();
+    // The poll reads the rig's status, which has to agree it is following.
+    t.trunk.enabled = true;
+    t.command(R"({"id":2,"op":"trunkFollow","args":{"vrx":)" + std::to_string(vrx) +
+              R"(,"on":true,"maxFollowers":3}})");
+    const std::string reply = t.last(R"("id":2,)");
+    INFO(reply);
+    REQUIRE(contains(reply, R"("ok":true)"));
+    auto& client = t.session->client();
+    REQUIRE(client.trunk_status().has_value());
+    CHECK(client.trunk_status()->enabled);
+    t.command(R"({"id":3,"op":"autoDv","args":{"on":true}})");
+    REQUIRE(t.session->plugin_hold());
+    REQUIRE(t.session->trunk_follow().has_value());
+
+    t.streams.reset();
+    CHECK_FALSE(t.session->plugin_hold());
+    CHECK_FALSE(client.trunk_status()->enabled);
+    // The phone's intent outlives the streams, so a rebuilt one asks again.
+    t.start();
+    CHECK(t.session->plugin_hold());
+    CHECK(client.trunk_status()->enabled);
+}
+
+TEST_CASE("following held off by auto DV is kept and comes back when it goes off",
+          "[gpu][webgate][dv]")
+{
+    REVENANT_NEEDS_GPU();
+    DvRig t;
+    t.session->set_trunk_follow(wg::PhoneSession::TrunkFollow{42, 2});
+    t.command(R"({"id":1,"op":"autoDv","args":{"on":true}})");
+    REQUIRE(t.session->plugin_hold());
+    t.trunk.enabled = false;
+    t.command(R"({"id":2,"op":"dvTab","args":{"visible":true}})");
+    CHECK(t.session->trunk_follow().has_value());
+
+    // Without the hold, an engine that stopped following ends the switch.
+    t.command(R"({"id":3,"op":"autoDv","args":{"on":false}})");
+    t.tick(std::chrono::milliseconds(1100));
+    CHECK_FALSE(t.session->trunk_follow().has_value());
+}
+
+TEST_CASE("a detached phone stops the trunk poll until it says dvTab again", "[gpu][webgate][dv]")
+{
+    REVENANT_NEEDS_GPU();
+    DvRig t;
+    t.command(R"({"id":1,"op":"dvTab","args":{"visible":true}})");
+    t.streams->detach();
+    const int polls = t.trunk_polls;
+    t.tick(std::chrono::milliseconds(1100));
+    CHECK(t.trunk_polls == polls);
+}

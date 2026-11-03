@@ -368,6 +368,10 @@ private:
     void refresh_trunk_settings();
     void send_dv_state();
     [[nodiscard]] std::int64_t wall_ms() const;
+    // Lifts the plugin hold this session set and stops the following it
+    // started. Run as the streams end, which is when a session ends.
+    void release_dv_switches();
+    static void dv_log(const std::string& line);
     // Takes the desktop's settings in and sends a display event when the
     // colours they give are not the ones last sent.
     void refresh_display();

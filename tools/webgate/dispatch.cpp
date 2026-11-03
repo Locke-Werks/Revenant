@@ -846,7 +846,19 @@ template <class Edit>
     }
     if (session.auto_dv() != *on) {
         session.set_auto_dv(*on);
-        static_cast<void>(session.client().set_plugin_receivers(!*on));
+    }
+    auto& client = session.client();
+    if (*on && !session.plugin_hold()) {
+        session.set_plugin_hold(static_cast<bool>(client.set_plugin_receivers(false)));
+    } else if (!*on && session.plugin_hold()) {
+        // Only a hold this phone set: the desktop's Auto DV keeps its own.
+        static_cast<void>(client.set_plugin_receivers(true));
+        session.set_plugin_hold(false);
+        // Following the phone still wants picks up again, as the desktop's
+        // tracker does once its Auto DV is off.
+        if (const auto& follow = session.trunk_follow()) {
+            static_cast<void>(client.set_trunk_follow(follow->vrx, true, follow->max_followers));
+        }
     }
     return JsonObject().add_bool("on", *on).str();
 }

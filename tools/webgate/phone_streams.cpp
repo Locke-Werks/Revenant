@@ -250,6 +250,7 @@ PhoneStreams::PhoneStreams(PhoneSession& session, PhoneSocket* socket, Strand& s
 PhoneStreams::~PhoneStreams()
 {
     *alive_ = false;
+    release_dv_switches();
     {
         const std::lock_guard lock(inbox_->mutex);
         inbox_->closed = true;
@@ -1035,6 +1036,8 @@ void PhoneStreams::detach()
     in_flight_ = false;
     opus_.clear();
     pending_spectrum_.reset();
+    // A locked phone is not looking at the tab; it says dvTab again on ready.
+    session_.set_dv_watch(false);
 }
 
 void PhoneStreams::pump()
@@ -1490,6 +1493,28 @@ void PhoneStreams::handle_vrx_event(const rpc::VrxEvent& e)
 
 // ---- The DV tab ------------------------------------------------------------
 
+// The DV tab's diagnostics in one place. MERGE NOTE: cold-start makes the
+// gateway a Windows GUI program that logs to a file; route this through that
+// log when it lands, since stderr then goes nowhere.
+void PhoneStreams::dv_log(const std::string& line)
+{
+    std::fprintf(stderr, "revenant-webgate: %s\n", line.c_str());
+}
+
+void PhoneStreams::release_dv_switches()
+{
+    // The session is ending: leave the engine as this phone found it, so a
+    // desktop that claims it next is not left with following off.
+    auto& client = session_.client();
+    if (session_.plugin_hold()) {
+        static_cast<void>(client.set_plugin_receivers(true));
+        session_.set_plugin_hold(false);
+    }
+    if (const auto follow = session_.trunk_follow()) {
+        static_cast<void>(client.set_trunk_follow(follow->vrx, false, 0));
+    }
+}
+
 std::int64_t PhoneStreams::wall_ms() const
 {
     if (config_.wall_clock_ms) {
@@ -1578,13 +1603,12 @@ void PhoneStreams::apply_dv_switches()
     auto& client = session_.client();
     if (session_.auto_dv()) {
         // Refused only by an engine older than the call; see op_auto_dv.
-        static_cast<void>(client.set_plugin_receivers(false));
+        session_.set_plugin_hold(static_cast<bool>(client.set_plugin_receivers(false)));
     }
     if (const auto follow = session_.trunk_follow()) {
         static_cast<void>(client.set_trunk_rules(session_.wanted_trunk_rules()));
         if (auto set = client.set_trunk_follow(follow->vrx, true, follow->max_followers); !set) {
-            std::fprintf(stderr, "revenant-webgate: the engine refused trunk following: %s\n",
-                         set.error().message.c_str());
+            dv_log("the engine refused trunk following: " + set.error().message);
             session_.set_trunk_follow(std::nullopt);
         }
     }
@@ -1608,7 +1632,9 @@ void PhoneStreams::refresh_trunk()
     } else {
         next_trunk_poll_ = t + config_.trunk_poll;
         if (const auto follow = session_.trunk_follow()) {
-            if (!status->enabled) {
+            // Not while this phone's Auto DV holds plugin receivers off: the
+            // Follow it asked for comes back when Auto DV goes off.
+            if (!status->enabled && !session_.plugin_hold()) {
                 // Following stopped by itself (the receiver went, the span
                 // moved): the phone's switch goes with it, as the desktop's
                 // solo does.
@@ -1668,9 +1694,8 @@ void PhoneStreams::run_auto_dv(const rpc::DetectionList& list)
         params.center = static_cast<std::int64_t>(std::llround(spawn.centre_hz)) - source_center_;
         const auto id = client.add_vrx(params);
         if (!id) {
-            std::fprintf(stderr, "revenant-webgate: auto DV could not open %.*s at %.4f MHz: %s\n",
-                         static_cast<int>(spawn.protocol.size()), spawn.protocol.data(),
-                         spawn.centre_hz / 1e6, id.error().message.c_str());
+            dv_log("auto DV could not open " + std::string(spawn.protocol) + " at " +
+                   std::to_string(spawn.centre_hz / 1e6) + " MHz: " + id.error().message);
             continue;
         }
         session_.learn(*id, params);

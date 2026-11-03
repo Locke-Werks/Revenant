@@ -128,7 +128,7 @@ struct ParsedTrunkRules {
                                                      std::string_view priority);
 [[nodiscard]] std::string trunk_rules_json(const rpc::TrunkRuleSet& rules);
 
-// Order-blind, as trunk_link.cpp compares what the engine reports.
+// Order-blind; ui/models/trunk_rules.h, shared with the desktop.
 [[nodiscard]] bool same_trunk_rules(const rpc::TrunkRuleSet& a, const rpc::TrunkRuleSet& b);
 
 [[nodiscard]] std::uint32_t clamp_followers(std::int64_t count);

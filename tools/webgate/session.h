@@ -138,6 +138,11 @@ public:
         auto_dv_ = on;
         auto_dv_dismissed_.clear();
     }
+    // Whether this session switched the engine's plugin receivers off for its
+    // Auto DV. The switch is engine-wide, so only a hold this session set is
+    // lifted by it, and the hold goes when the session does.
+    [[nodiscard]] bool plugin_hold() const { return plugin_hold_; }
+    void set_plugin_hold(bool held) { plugin_hold_ = held; }
     [[nodiscard]] std::set<std::uint64_t>& auto_dv_spawned() { return auto_dv_spawned_; }
     [[nodiscard]] const std::set<std::uint64_t>& auto_dv_spawned() const { return auto_dv_spawned_; }
     [[nodiscard]] std::vector<double>& auto_dv_dismissed() { return auto_dv_dismissed_; }
@@ -172,6 +177,7 @@ public:
 
 private:
     bool auto_dv_ = false;
+    bool plugin_hold_ = false;
     std::set<std::uint64_t> auto_dv_spawned_;
     std::vector<double> auto_dv_dismissed_;
     std::optional<TrunkFollow> trunk_follow_;
