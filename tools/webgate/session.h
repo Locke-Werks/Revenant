@@ -6,10 +6,21 @@
 // so independence between phones is by ownership: this object tracks the ids
 // it created itself and its destructor removes those and no others.
 //
-// THREADS. Not synchronised. A phone's commands arrive in order on its one
-// socket and are dispatched one at a time; anything else touching a session
-// (the stream pumps in Task 10) must go through the same strand or add its
-// own lock around these accessors.
+// THREADS. Not synchronised, and does not need to be: every access is on one
+// strand, which in the gateway is the kj event loop thread.
+//
+//   Commands are dispatched there (Gateway::receive -> PhoneStreams::on_text).
+//   PhoneStreams reads and changes the session there.
+//   The rpc::Client's callbacks arrive on the client's own event loop thread
+//   and never touch a session: PhoneStreams' callbacks copy into a locked
+//   inbox and post a wake-up to the strand, and the work happens when the
+//   strand runs it. phone_streams.h has the whole model, including what the
+//   socket, the HLS registry and the segmenters may be touched from (the
+//   strand, and nothing else).
+//
+// The client's blocking calls are made from the strand, so a slow engine
+// call holds up every phone's sends for its duration; on loopback that is
+// accepted.
 
 #pragma once
 

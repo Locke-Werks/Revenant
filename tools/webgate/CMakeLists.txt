@@ -28,6 +28,8 @@ add_library(revenant_webgate_lib STATIC
     protocol.cpp
     session.cpp
     dispatch.cpp
+    phone_streams.cpp
+    gateway.cpp
 )
 
 target_include_directories(revenant_webgate_lib PUBLIC "${CMAKE_SOURCE_DIR}")

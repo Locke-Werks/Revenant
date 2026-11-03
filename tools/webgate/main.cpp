@@ -1,19 +1,26 @@
 // revenant-webgate: the HTTPS and WebSocket gateway an iPhone web app uses to
 // drive the engine over the LAN.
 //
-// This stage only settles the TLS identity: it parses the command line, makes
-// sure the certificate authority and server certificate exist, prints what the
-// certificate covers, and exits. The listeners come in later stages.
+// Settles the TLS identity, binds the two listeners, connects to the engine
+// (starting revenant-engine.exe from beside this executable when nothing
+// answers), and serves phones until the process is ended.
+
+// http.h (through gateway.h) before <windows.h>: windows.h defines DELETE,
+// which breaks kj::HttpMethod.
+#include "tools/webgate/gateway.h"
+#include "tools/webgate/http.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <string_view>
 
 #include <windows.h>
 
 #include "tools/webgate/certs.h"
+#include "tools/webgate/engine_link.h"
 
 namespace {
 
@@ -66,6 +73,21 @@ void usage() {
         return false;
     }
     out = static_cast<int>(value);
+    return true;
+}
+
+// "HOST:PORT", split at the last colon.
+[[nodiscard]] bool parse_engine(std::string_view text, std::string& host, std::uint16_t& port) {
+    const auto colon = text.rfind(':');
+    if (colon == std::string_view::npos || colon == 0) {
+        return false;
+    }
+    int value = 0;
+    if (!parse_port(text.substr(colon + 1), value) || value == 0) {
+        return false;
+    }
+    host = std::string(text.substr(0, colon));
+    port = static_cast<std::uint16_t>(value);
     return true;
 }
 
@@ -125,8 +147,57 @@ int main(int argc, char** argv) {
     for (const std::string& san : revenant::webgate::certificate_sans(paths.server_crt())) {
         std::printf("  covers %s\n", san.c_str());
     }
-    std::printf("https port %d, http port %d, engine %s, web root %s\n", options.port,
-                options.http_port, options.engine.c_str(), options.web_root.string().c_str());
-    std::fflush(stdout);
+    revenant::webgate::EngineLinkConfig link_config;
+    if (!parse_engine(options.engine, link_config.address, link_config.port)) {
+        std::fprintf(stderr, "revenant-webgate: --engine must be HOST:PORT\n");
+        return 2;
+    }
+    // The spec has the gateway start its own engine when none is running.
+    // EngineLink decides whether the address is one such an engine would be
+    // reachable at; this only says where the executable is.
+    link_config.engine_exe = exe_directory() / "revenant-engine.exe";
+
+    try {
+        auto io = kj::setupAsyncIo();
+
+        revenant::webgate::ServerConfig server_config;
+        server_config.https_port = static_cast<std::uint16_t>(options.port);
+        server_config.http_port = static_cast<std::uint16_t>(options.http_port);
+        server_config.web_root = options.web_root;
+        server_config.certs = paths;
+        auto server = std::make_unique<revenant::webgate::HttpServer>(io, server_config);
+        if (const auto listening = server->listen(); !listening) {
+            std::fprintf(stderr, "revenant-webgate: %s\n", listening.error().message.c_str());
+            return 1;
+        }
+
+        auto link = std::make_unique<revenant::webgate::EngineLink>(link_config);
+        auto gateway = std::make_unique<revenant::webgate::Gateway>(io, *link, server->hls);
+        link->on_state([&gateway](revenant::webgate::LinkState state, std::string detail) {
+            gateway->on_link_state(state, std::move(detail));
+        });
+        server->on_websocket = [&gateway](kj::Own<kj::WebSocket> socket) {
+            return gateway->accept(kj::mv(socket));
+        };
+        link->start();
+
+        std::printf("https port %u, http port %u, engine %s, web root %s\n",
+                    static_cast<unsigned>(server->https_port()),
+                    static_cast<unsigned>(server->http_port()), options.engine.c_str(),
+                    options.web_root.string().c_str());
+        std::fflush(stdout);
+
+        server->run().exclusiveJoin(gateway->run()).wait(io.waitScope);
+
+        // Link first so no state callback lands on a gateway being torn down;
+        // then the server, whose connections own the phones, while the
+        // gateway and the HLS registry they use still exist.
+        link.reset();
+        server.reset();
+        gateway.reset();
+    } catch (const kj::Exception& e) {
+        std::fprintf(stderr, "revenant-webgate: %s\n", e.getDescription().cStr());
+        return 1;
+    }
     return 0;
 }
