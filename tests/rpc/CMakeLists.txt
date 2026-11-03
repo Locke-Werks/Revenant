@@ -312,16 +312,16 @@ if(TARGET revenant-engine)
 
     set(engined_uri "synthetic:wideband?rate=2400032&emitters=4&seed=4242&samples=4800064")
     revenant_engined_refuses(a_detector_budget_over_one
-        "--detector-cpu 1\\.5 is not above 0 and at most 1\\. It is a share of one core"
+        "--detector-cpu 1\\.5 is not above 0 and at most 1\\. It is cores"
         "${engined_uri}" --detector-cpu 1.5)
     revenant_engined_refuses(a_zero_detector_budget
         "--detector-cpu 0 is not above 0 and at most 1"
         "${engined_uri}" --detector-cpu 0)
     revenant_engined_refuses(a_negative_probe_budget
-        "--probe-cpu -0\\.5 is not above 0 and at most 1.*--probes 0 is how to run without probes"
+        "--probe-cpu -0\\.5 is not above 0 and at most 2.*--probes 0 is how to run without probes"
         "${engined_uri}" --probe-cpu=-0.5)
     revenant_engined_refuses(a_nan_probe_budget
-        "--probe-cpu nan is not above 0 and at most 1"
+        "--probe-cpu nan is not above 0 and at most 2"
         "${engined_uri}" --probe-cpu nan)
     revenant_engined_refuses(an_infinite_detector_budget
         "--detector-cpu inf is not above 0 and at most 1"
