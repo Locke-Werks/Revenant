@@ -300,6 +300,18 @@ button {
 }
 .sheet h2, .panel h2 { font-size: 1rem; margin: 0; }
 .sheet-body { overflow-y: auto; padding: 8px 16px 16px; }
+.tabs { display: flex; gap: 6px; padding: 6px 16px; border-bottom: 1px solid var(--line); }
+.app .chip.tab[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+.signal-list { list-style: none; padding: 0; margin: 0; }
+.signal-list li { margin: 4px 0; }
+.signal {
+  width: 100%;
+  min-height: var(--hit);
+  text-align: left;
+  white-space: pre-wrap;
+  font-variant-numeric: tabular-nums;
+}
+.signal.held { color: var(--muted); }
 .panel { padding: 8px 0; border-bottom: 1px solid var(--line); }
 .panel-status { margin: 6px 0; color: var(--muted); }
 .modes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }

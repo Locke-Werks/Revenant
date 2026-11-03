@@ -330,6 +330,22 @@ export class ReceiverController {
     });
   }
 
+  // Picking a detected signal: tune the active receiver, then fit its width.
+  // The width change replaces the receiver under a new id, so it waits for the
+  // tune's reply rather than racing it with the old id.
+  tuneFit(hz: number, bandwidthHz: number): void {
+    const active = this.list.active;
+    if (active === null || this.replacing.has(active)) return;
+    void this.deps.audio.unlock();
+    this.tuneSeq++;
+    this.call("tune", { vrx: active, hz: Math.round(hz) }).then((r) => {
+      if (!r) return;
+      this.nowPlaying(r);
+      if (this.list.active !== r.vrx || this.replacing.has(r.vrx)) return;
+      if (this.list.get(r.vrx)?.bandwidthHz !== bandwidthHz) this.setBandwidth(bandwidthHz);
+    });
+  }
+
   // A drag shows the active receiver at hz at once; the engine's answer comes
   // later and replaces it. Returns the receiver, or null when there is none to
   // drag or it is mid-replace.

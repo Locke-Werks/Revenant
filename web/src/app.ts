@@ -19,6 +19,7 @@ import { decodedEntry, FeedModel, FeedView, transcriptEntry } from "./ui/feed";
 import { RadioPanel } from "./ui/radio_panel";
 import { formatMHz, ReceiverController, ReplaceGate } from "./ui/receivers";
 import { Sheet } from "./ui/sheet";
+import { SignalsPanel } from "./ui/signals";
 import { SpeechModel, speechLine, SpeechSwitch } from "./ui/speech_switch";
 import { StatusModel } from "./ui/status";
 import { Notes, Toasts } from "./ui/toast";
@@ -259,7 +260,32 @@ export function mountApp(root: HTMLElement): AppHandle {
   });
   root.querySelector("#sheet-slot")!.append(sheet.el);
   const radio = new RadioPanel({ link: gate, toast });
-  sheet.extra.append(radio.el);
+  sheet.radioHost.append(radio.el);
+
+  // ---- Signals tab ---------------------------------------------------------
+  // Newest source sample index from the spectrum rows: lastSeen is an index
+  // in the same count, so this is "now" for the age column.
+  let newestIndex: number | null = null;
+  const signals = new SignalsPanel({
+    hasActiveReceiver: () => receivers.list.active !== null,
+    stopDial: () => dial.stop(),
+    tuneFit: (hz, bw) => receivers.tuneFit(hz, bw),
+    reveal: (hz) => {
+      if (!view) return;
+      const lo = view.centerHz - view.spanHz / 2;
+      const hi = view.centerHz + view.spanHz / 2;
+      if (hz < lo || hz > hi) apply(panBy(view, hz - view.centerHz));
+    },
+    toast,
+    setMinConfidence: (v) => {
+      link.request("setDetection", { minConfidence: v }).catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)));
+    },
+    clock: () => (newestIndex !== null && band ? { index: newestIndex, rateHz: band.rateHz } : null),
+  });
+  sheet.signalsHost.append(signals.el);
+  sheet.onTab((tab) => {
+    if (tab === "signals") signals.render();
+  });
 
   // ---- Speech, transcripts and the feed -------------------------------------
   const speechModel = new SpeechModel({ link: gate });
@@ -466,6 +492,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   let detections: Detection[] = [];
   link.on("detections", (e) => {
     detections = parseDetections(e);
+    signals.update(detections);
     const boxes = detectionBoxes(detections);
     waterfall.setDetections(boxes);
     trace.setDetections(boxes);
@@ -572,6 +599,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     // existed (a relaunch from the home screen), so the first row's own view
     // stands in until a source event names the band.
     if (!view) apply({ centerHz: f.centerHz, spanHz: f.spanHz, widthPx: widthDev });
+    newestIndex = Number(f.sourceStart);
     // Frozen means the engine is gone: whatever trickles in is not news.
     if (status.frozen()) return;
     // A context loss or the 2D handover drops history, and the rows it kept

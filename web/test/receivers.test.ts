@@ -55,6 +55,17 @@ test("a device that cannot run 2.4 MS/s gets no rate", () => {
   assert.equal(openUri({ ...rtl, maxRate: 2_000_000 }, null), "rtlsdr://0?freq=98100000");
 });
 import { sheetHint } from "../src/ui/sheet";
+import type { Detection } from "../src/detections";
+import {
+  CONFIDENCE_MAX,
+  CONFIDENCE_MIN,
+  CONFIDENCE_SEND_MS,
+  heardAgo,
+  pickSignal,
+  RateLimitedSender,
+  signalRows,
+  type PickDeps,
+} from "../src/ui/signals";
 import { levelInBand } from "../src/ui/top_bar";
 import type { GatewayEvent, JsonValue, LinkEvent } from "../src/protocol";
 
@@ -721,4 +732,137 @@ test("a drag tune for a receiver that is gone is not sent", async () => {
   const n = r.link.sent.length;
   r.ctl.tuneDragged(146_700_000, 9);
   assert.equal(r.link.sent.length, n);
+});
+
+// ---- Signals tab ---------------------------------------------------------------
+
+function det(id: string, snrDb: number, extra: Partial<Detection> = {}): Detection {
+  return { id, centerHz: 146_520_000, bandwidthHz: 8_000, snrDb, confidence: 0.9, state: "live", label: "", labelConfidence: 0, lastSeen: 0, ...extra };
+}
+
+test("signal rows run strongest first, ties by id", () => {
+  const rows = signalRows([det("10", 5), det("9", 5), det("3", 20)]);
+  assert.deepEqual(rows.map((d) => d.id), ["3", "9", "10"]);
+});
+
+test("time since heard is read from sample indices at the source rate", () => {
+  assert.equal(heardAgo(1_000_000, 1_000_000, 2_400_000), "now");
+  assert.equal(heardAgo(0, 2_400_000 * 5, 2_400_000), "5 s ago");
+  assert.equal(heardAgo(0, 2_400_000 * 125, 2_400_000), "2 min ago");
+  assert.equal(heardAgo(0, 2_400_000 * 7_300, 2_400_000), "2 h ago");
+});
+
+test("time since heard is blank without a clock, and never negative", () => {
+  assert.equal(heardAgo(10, null, 2_400_000), "");
+  assert.equal(heardAgo(10, 100, 0), "");
+  assert.equal(heardAgo(5_000_000, 1_000_000, 2_400_000), "now");
+});
+
+function pickRig(hasActive = true) {
+  const calls: string[] = [];
+  const deps: PickDeps = {
+    hasActiveReceiver: () => hasActive,
+    stopDial: () => calls.push("stop"),
+    tuneFit: (hz, bw) => calls.push(`tune ${hz} ${bw}`),
+    reveal: (hz) => calls.push(`reveal ${hz}`),
+    toast: (t) => calls.push(`toast ${t}`),
+  };
+  return { calls, deps };
+}
+
+test("picking a signal stops the dial, tunes to the centre at the fitted width and reveals it", () => {
+  const { calls, deps } = pickRig();
+  pickSignal(det("1", 10, { centerHz: 162_550_000, bandwidthHz: 9_000 }), deps);
+  assert.deepEqual(calls, ["stop", "tune 162550000 10000", "reveal 162550000"]);
+});
+
+test("a signal wider than every choice gets the widest", () => {
+  const { calls, deps } = pickRig();
+  pickSignal(det("1", 10, { bandwidthHz: 900_000 }), deps);
+  assert.equal(calls[1], "tune 146520000 200000");
+});
+
+test("picking with no active receiver only says so", () => {
+  const { calls, deps } = pickRig(false);
+  pickSignal(det("1", 10), deps);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!, /^toast /);
+});
+
+test("tuneFit tunes the active receiver, then fits the width when it differs", async () => {
+  const r = rig();
+  r.ctl.tap(146_520_000);
+  r.link.reply(status(1, 146_520_000));
+  await flush();
+  r.ctl.tuneFit(162_550_000, 25_000);
+  assert.deepEqual(r.link.last(), { op: "tune", args: { vrx: 1, hz: 162_550_000 }, timeoutMs: undefined });
+  const n = r.link.sent.length;
+  r.link.reply(status(1, 162_550_000));
+  await flush();
+  assert.equal(r.link.sent.length, n + 1);
+  assert.deepEqual(r.link.last(), { op: "setBandwidth", args: { vrx: 1, hz: 25_000 }, timeoutMs: undefined });
+});
+
+test("tuneFit leaves the width alone when the receiver already has it", async () => {
+  const r = rig();
+  r.ctl.tap(146_520_000);
+  r.link.reply(status(1, 146_520_000));
+  await flush();
+  const n = r.link.sent.length;
+  r.ctl.tuneFit(162_550_000, 12_500);
+  r.link.reply(status(1, 162_550_000));
+  await flush();
+  assert.equal(r.link.sent.length, n + 1);
+});
+
+test("tuneFit with no receiver sends nothing", () => {
+  const r = rig();
+  r.ctl.tuneFit(162_550_000, 25_000);
+  assert.equal(r.link.sent.length, 0);
+});
+
+function senderRig() {
+  let t = 1000;
+  const sent: number[] = [];
+  let pending: { fn: () => void; at: number } | null = null;
+  const s = new RateLimitedSender(
+    (v) => sent.push(v),
+    () => t,
+    (fn, ms) => {
+      const p = { fn, at: t + ms };
+      pending = p;
+      return () => {
+        if (pending === p) pending = null;
+      };
+    },
+  );
+  const advance = (ms: number) => {
+    t += ms;
+    if (pending && pending.at <= t) {
+      const p = pending;
+      pending = null;
+      p.fn();
+    }
+  };
+  return { s, sent, advance };
+}
+
+test("the confidence slider sends once per 250 ms and ends on the last value", () => {
+  assert.equal(CONFIDENCE_SEND_MS, 250);
+  const { s, sent, advance } = senderRig();
+  s.set(0.1);
+  s.set(0.2);
+  s.set(0.3);
+  assert.deepEqual(sent, [0.1]);
+  advance(249);
+  assert.deepEqual(sent, [0.1]);
+  advance(1);
+  assert.deepEqual(sent, [0.1, 0.3]);
+  advance(300);
+  assert.deepEqual(sent, [0.1, 0.3]);
+});
+
+test("the slider range stays inside what the gateway accepts", () => {
+  assert.equal(CONFIDENCE_MIN, 0);
+  assert.equal(CONFIDENCE_MAX, 0.99);
 });
