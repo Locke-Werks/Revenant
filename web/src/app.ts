@@ -24,6 +24,7 @@ import { readConfidence, SignalsPanel } from "./ui/signals";
 import { SpeechModel, speechLine, SpeechSwitch } from "./ui/speech_switch";
 import { StatusModel } from "./ui/status";
 import { Notes, Toasts } from "./ui/toast";
+import { ChipPress } from "./ui/chip_press";
 import { DialStrip } from "./ui/dial_strip";
 import { Ruler } from "./ui/ruler";
 import { levelInBand, TopBar } from "./ui/top_bar";
@@ -466,6 +467,35 @@ export function mountApp(root: HTMLElement): AppHandle {
 
   const chipsEl = root.querySelector<HTMLElement>("#chips")!;
   const railEl = root.querySelector<HTMLElement>("#rail")!;
+  // Removal offered on the chip itself, anchored under it. It lives in the
+  // rail, not among the chips, because the chips are rebuilt on every change.
+  const confirmEl = document.createElement("div");
+  confirmEl.className = "chip-confirm";
+  confirmEl.setAttribute("role", "alertdialog");
+  confirmEl.hidden = true;
+  confirmEl.innerHTML = `<span class="chip-confirm-text"></span><button type="button" class="btn danger" data-act="remove">Remove</button><button type="button" class="btn" data-act="cancel">Cancel</button>`;
+  railEl.append(confirmEl);
+  let confirmFor: number | null = null;
+  const closeConfirm = () => {
+    confirmFor = null;
+    confirmEl.hidden = true;
+  };
+  const confirmRemove = (vrx: number, label: string, chip: HTMLElement) => {
+    confirmFor = vrx;
+    confirmEl.querySelector(".chip-confirm-text")!.textContent = `Remove ${label}?`;
+    confirmEl.hidden = false;
+    // Under the chip, kept inside the rail's width.
+    const railBox = railEl.getBoundingClientRect();
+    const chipBox = chip.getBoundingClientRect();
+    const left = Math.max(0, Math.min(chipBox.left - railBox.left, railBox.width - confirmEl.offsetWidth));
+    confirmEl.style.left = `${left}px`;
+    confirmEl.style.top = `${chipBox.bottom - railBox.top}px`;
+  };
+  confirmEl.addEventListener("click", (ev) => {
+    const act = (ev.target as Element).closest<HTMLElement>("[data-act]")?.dataset.act;
+    if (act === "remove" && confirmFor !== null) receivers.remove(confirmFor);
+    if (act) closeConfirm();
+  });
   const renderReceivers = () => {
     const list = receivers.list.list();
     const active = receivers.list.active;
@@ -480,14 +510,31 @@ export function mountApp(root: HTMLElement): AppHandle {
       const note = r.audioError ?? (r.statusUnavailable ? "the gateway could not read this receiver back; shown as sent" : "");
       b.setAttribute("aria-label", `Receiver ${formatMHz(r.hz)} MHz ${r.mode.toUpperCase()}${note ? `, ${note}` : ""}`);
       if (note) b.title = note;
+      const press = new ChipPress({
+        longPress: () => {
+          dial.stop();
+          confirmRemove(r.vrx, `${formatMHz(r.hz)} ${r.mode.toUpperCase()}`, b);
+        },
+        schedule: (fn, ms) => {
+          const h = window.setTimeout(fn, ms);
+          return () => window.clearTimeout(h);
+        },
+      });
+      b.addEventListener("pointerdown", (ev) => press.down(ev.clientX, ev.clientY));
+      b.addEventListener("pointermove", (ev) => press.move(ev.clientX, ev.clientY));
+      b.addEventListener("pointerup", () => press.up());
+      b.addEventListener("pointercancel", () => press.up());
+      b.addEventListener("contextmenu", (ev) => ev.preventDefault());
       // A tap in its own handler, so live audio may start from it.
       b.addEventListener("click", () => {
+        if (!press.click()) return;
         dial.stop();
         receivers.select(r.vrx);
       });
       chipsEl.append(b);
     }
     railEl.hidden = list.length === 0;
+    if (confirmFor !== null && !list.some((r) => r.vrx === confirmFor)) closeConfirm();
     const current = active === null ? null : receivers.list.get(active) ?? null;
     top.show(current);
     sheet!.show(current, list.length > 0);
