@@ -228,13 +228,17 @@ int main(int argc, char** argv) {
         rt.link = std::make_unique<revenant::webgate::EngineLink>(link_config);
         auto* link = rt.link.get();
         rt.gateway = std::make_unique<revenant::webgate::Gateway>(
-            io, [link] { return link->new_session(); }, rt.server->hls, timing);
+            io,
+            [link](revenant::rpc::LoginMode mode, const std::string& holder) {
+                return link->new_session(mode, holder);
+            },
+            rt.server->hls, timing);
         auto* gateway = rt.gateway.get();
         link->on_state([gateway](revenant::webgate::LinkState state, std::string detail) {
             gateway->on_link_state(state, std::move(detail));
         });
-        rt.server->on_websocket = [gateway](kj::Own<kj::WebSocket> socket) {
-            return gateway->accept(kj::mv(socket));
+        rt.server->on_websocket = [gateway](kj::Own<kj::WebSocket> socket, std::string peer) {
+            return gateway->accept(kj::mv(socket), std::move(peer));
         };
         link->start();
 

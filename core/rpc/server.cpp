@@ -300,6 +300,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <deque>
 #include <filesystem>
 #include <format>
@@ -1373,7 +1374,28 @@ class ServerImpl;
 struct VrxOwner {
     std::uint64_t session = 0;
     bool keep = false;
+
+    // Opened by a client through addVrx, as against by a plugin or the trunk
+    // follower. Only these go when the lease ends: a plugin's receivers are
+    // the plugin's to manage, and it outlives every client.
+    bool client = false;
 };
+
+// The engine's one lease, docs/superpowers/specs/2026-11-03-single-user-
+// engine-design.md. Loop thread only.
+//
+// sessions maps each claiming session of the holder to the connection it
+// arrived on, which is what a takeover closes. A lease is joined by a claim
+// carrying the same holder text from any connection, which is how a client
+// that opens one connection per session, as webgate does for its phones,
+// stays one user.
+struct Lease {
+    std::string holder;
+    std::string since;
+    std::map<std::uint64_t, std::uint64_t> sessions;
+};
+
+enum class LeaseMode : std::uint8_t { Claim, TakeOver, Observe };
 
 // One receiver event as it happened, before anybody's point of view is put on
 // it. Taken once and shared by every subscriber's queue, so a burst costs one
@@ -1786,9 +1808,30 @@ public:
     // VrxStatus. end_session is called by a session's destructor and removes
     // every receiver that session created and did not keep.
     [[nodiscard]] std::uint64_t open_session() { return next_session_++; }
-    void record_vrx(engine::VrxId vrx, std::uint64_t session, bool keep);
+    void record_vrx(engine::VrxId vrx, std::uint64_t session, bool keep, bool client = false);
     [[nodiscard]] VrxOwner owner_of(engine::VrxId vrx) const;
     void end_session(std::uint64_t session);
+
+    // The lease. Loop thread, all of them.
+    //
+    // join_lease is login's half: a claim takes a free lease or joins one held
+    // under the same holder text and is otherwise refused with the message
+    // the schema fixes; a takeover evicts whoever holds it. holds_lease is
+    // what a claiming session checks on every call, so one evicted by a
+    // takeover is refused in the window before its connection closes.
+    // end_session releases the lease when the holder's last claiming session
+    // goes, and only then removes the receivers clients opened without keep.
+    [[nodiscard]] Status join_lease(std::uint64_t session, std::uint64_t connection,
+                                    std::string holder, LeaseMode mode);
+    [[nodiscard]] bool holds_lease(std::uint64_t session) const;
+    [[nodiscard]] const std::optional<Lease>& lease() const { return lease_; }
+    [[nodiscard]] const std::string& last_taken_by() const { return last_taken_by_; }
+
+    // The accept loop's registry of live connections, so a takeover can
+    // close the evicted holder's. Set and cleared by serve().
+    struct Connections;
+    void close_connections_later(std::vector<std::uint64_t> connections,
+                                 kj::Promise<void> after);
 
     // Everything this server holds about a receiver the engine has just
     // removed, taken down in one place so that removeVrx and a session ending
@@ -1909,6 +1952,8 @@ public:
 
 private:
     void serve(ServerOptions options);
+    [[nodiscard]] kj::Promise<void> accept_loop(kj::ConnectionReceiver& listener, Token token);
+    void forget_connection(std::uint64_t connection);
     void announce(Status status);
 
     void run_listings();
@@ -2403,6 +2448,13 @@ private:
     std::uint64_t next_session_ = 1;
     std::map<std::uint32_t, VrxOwner> vrx_owners_;
 
+    // See Lease. last_taken_by_ is the holder that last took the lease over,
+    // which an evicted session's refusal names.
+    std::optional<Lease> lease_;
+    std::string last_taken_by_;
+    Connections* connections_ = nullptr;
+    kj::Timer* timer_ = nullptr;
+
     // One route per decoder per receiver with at least one subscriber, keyed
     // by the receiver and the decoder's registry name. The map is the loop
     // thread's; each route's contents are shared with its decode lane under
@@ -2807,13 +2859,57 @@ private:
 
 class SessionImpl final : public schema::Session::Server {
 public:
-    explicit SessionImpl(ServerImpl& owner) : owner_(owner), id_(owner.open_session()) {}
+    SessionImpl(ServerImpl& owner, bool observe)
+        : owner_(owner), id_(owner.open_session()), observe_(observe) {}
+
+    [[nodiscard]] std::uint64_t id() const { return id_; }
+
+    // THE LEASE IS CHECKED HERE, ONCE, AND NOT IN EVERY METHOD, for the reason
+    // the schema gives against a login test on Session: the next method added
+    // would have to remember it. An observer reaches the three calls the spec
+    // allows it and nothing else; a claimer evicted by a takeover reaches
+    // nothing, in the moment between the takeover and its connection closing.
+    DispatchCallResult dispatchCall(std::uint64_t interfaceId, std::uint16_t methodId,
+                                    capnp::CallContext<capnp::AnyPointer, capnp::AnyPointer>
+                                        context) override {
+        if (interfaceId == capnp::typeId<schema::Session>()) {
+            constexpr std::uint16_t kInfo = 0;
+            constexpr std::uint16_t kListSources = 2;
+            constexpr std::uint16_t kLeaseStatus = 50;
+            const bool always = methodId == kLeaseStatus;
+            if (observe_ && !always && methodId != kInfo && methodId != kListSources) {
+                return {to_exception(Error{"observing only: this session logged in with "
+                                           "observe, which may call info, listSources and "
+                                           "leaseStatus"}),
+                        false};
+            }
+            if (!observe_ && !always && !owner_.holds_lease(id_)) {
+                return {to_exception(Error{std::format(
+                            "the engine was taken over by {}, and this session no longer "
+                            "holds it",
+                            owner_.last_taken_by())}),
+                        false};
+            }
+        }
+        return schema::Session::Server::dispatchCall(interfaceId, methodId, context);
+    }
+
+    kj::Promise<void> leaseStatus(LeaseStatusContext context) override {
+        auto results = context.getResults();
+        const auto& lease = owner_.lease();
+        results.setHeld(lease.has_value());
+        if (lease) {
+            results.setHolder(kj::StringPtr(lease->holder.c_str()));
+            results.setSince(kj::StringPtr(lease->since.c_str()));
+        }
+        return kj::READY_NOW;
+    }
 
     SessionImpl(const SessionImpl&) = delete;
     SessionImpl& operator=(const SessionImpl&) = delete;
 
-    // THE RECEIVER LIFETIME RULE, and this destructor is the whole of how it
-    // is enforced. Not an override, for the reason SubscriptionImpl's
+    // THE LEASE'S END, and this destructor is the whole of how a session's
+    // leaving reaches it. Not an override, for the reason SubscriptionImpl's
     // destructor gives: capnp::Capability::Server has no virtual destructor,
     // and kj::heap disposes through this concrete type.
     //
@@ -2908,7 +3004,7 @@ public:
         // will run this session's destructor, so there is no interleaving in
         // which the receiver exists, the session ends, and nothing knew whose
         // it was.
-        owner_.record_vrx(*id, id_, request.getKeep());
+        owner_.record_vrx(*id, id_, request.getKeep(), true);
         context.getResults().setId(id->value);
         return kj::READY_NOW;
     }
@@ -3825,21 +3921,17 @@ private:
     // a capability and not a secret: a session proves itself by being held,
     // and the number only lets two receivers' creators be compared.
     const std::uint64_t id_;
+    const bool observe_;
 };
 
 // The bootstrap capability, and the only thing an unauthenticated connection
 // holds.
 //
-// ONE OF THESE IS SHARED BY EVERY CONNECTION, WHICH IS SAFE BECAUSE IT HAS NO
-// STATE
-//
-// capnp 1.4.0's TwoPartyServer takes exactly one Capability::Client and has no
-// BootstrapFactory overload; the factory exists on RpcSystem alone. Getting a
-// bootstrap per connection would mean replacing rpc.listen with a hand-written
-// accept loop inside serve(), which is already the hardest function in this
-// file. It is not needed: this object holds a reference and 32 bytes, both set
-// on the loop thread before the listener exists, so login needs no lock and
-// adds no thread.
+// ONE PER CONNECTION, carrying that connection's number for the lease. It
+// holds a reference, 32 bytes and the number, all set on the loop thread, so
+// login needs no lock and adds no thread. Until 2026-11-03 one was shared by
+// every connection through TwoPartyServer::listen; see the note at the end of
+// this block.
 //
 // LOGIN MINTS A FRESH SESSION PER CALL
 //
@@ -3852,10 +3944,14 @@ private:
 // with the TwoPartyServer local, on this thread, exactly as the single
 // bootstrap Session used to.
 //
-// The two sessions differ in one respect since 2026-09-22, which is what they
-// own: each takes the receivers IT created with it when it ends, so dropping
-// one of two sessions on a connection removes that one's receivers and leaves
-// the other's. SessionImpl's destructor has the rule.
+// From 2026-09-22 to 2026-11-03 the two sessions differed in what they
+// owned: each took the receivers IT created with it when it ended. That rule
+// is gone with the lease; ServerImpl::end_session has what replaced it.
+//
+// ONE SHARED BOOTSTRAP NO LONGER, since 2026-11-03. The lease has to know a
+// connection from its neighbour, so ServerImpl::accept_loop gives each
+// connection its own TwoPartyServer and an Authenticator carrying that
+// connection's number.
 //
 // WHAT THIS PARAGRAPH USED TO SAY: "SessionImpl's only member is ServerImpl&".
 // It gained the login number with the receiver lifetime rule, and a reader who
@@ -3863,7 +3959,8 @@ private:
 // would now be minting owners.
 class AuthenticatorImpl final : public schema::Authenticator::Server {
 public:
-    AuthenticatorImpl(ServerImpl& owner, Token token) : owner_(owner), token_(token) {}
+    AuthenticatorImpl(ServerImpl& owner, Token token, std::uint64_t connection)
+        : owner_(owner), token_(token), connection_(connection) {}
 
     kj::Promise<void> login(LoginContext context) override {
         const capnp::Data::Reader offered = context.getParams().getToken();
@@ -3882,13 +3979,56 @@ public:
                 "client"});
         }
 
-        context.getResults().setSession(kj::heap<SessionImpl>(owner_));
+        // The token first, so a caller without it learns nothing about who
+        // holds the engine.
+        const auto request = context.getParams();
+        LeaseMode mode = LeaseMode::Claim;
+        switch (request.getMode()) {
+            case schema::LoginMode::CLAIM: mode = LeaseMode::Claim; break;
+            case schema::LoginMode::TAKE_OVER: mode = LeaseMode::TakeOver; break;
+            case schema::LoginMode::OBSERVE: mode = LeaseMode::Observe; break;
+            default:
+                return to_exception(Error{"login was refused: the mode is one this engine does "
+                                          "not know"});
+        }
+        std::string holder = request.hasHolder() ? std::string(request.getHolder().cStr()) : "";
+        if (holder.empty()) {
+            holder = "unknown client";
+        }
+
+        auto session = kj::heap<SessionImpl>(owner_, mode == LeaseMode::Observe);
+        if (mode != LeaseMode::Observe) {
+            // A refused session is dropped here, and its destructor finds it
+            // in no lease, so the refusal leaves nothing behind.
+            if (auto joined = owner_.join_lease(session->id(), connection_, std::move(holder), mode);
+                !joined) {
+                return to_exception(joined.error());
+            }
+        }
+        context.getResults().setSession(kj::mv(session));
         return kj::READY_NOW;
     }
 
 private:
     ServerImpl& owner_;
     Token token_;
+    std::uint64_t connection_;
+};
+
+// Every live connection, by the number its Authenticator carries. The accept
+// loop replaces TwoPartyServer::listen, whose single shared bootstrap could
+// not tell one connection from another, and a lease has to: a takeover
+// closes the evicted holder's connections. Each entry is a TwoPartyServer of
+// its own serving that one stream, and erasing it closes the connection and
+// releases everything the far end held, as a disconnect does.
+struct ServerImpl::Connections {
+    struct One {
+        kj::Own<kj::AsyncIoStream> stream;
+        kj::Own<capnp::TwoPartyServer> rpc;
+        kj::Promise<void> watch = nullptr;
+    };
+    std::map<std::uint64_t, One> live;
+    std::uint64_t next = 1;
 };
 
 Status ServerImpl::start(const ServerOptions& options) {
@@ -4004,7 +4144,9 @@ void ServerImpl::serve(ServerOptions options) {
         // capability's does not.
         Token token{};
         std::copy_n(options.token.begin(), kTokenBytes, token.begin());
-        capnp::TwoPartyServer rpc(kj::heap<AuthenticatorImpl>(*this, token));
+        Connections connections;
+        connections_ = &connections;
+        timer_ = &io.provider->getTimer();
 
         // After the RPC system so that outstanding sends are cancelled before
         // the system they were issued through is torn down.
@@ -4012,7 +4154,7 @@ void ServerImpl::serve(ServerOptions options) {
         sends_ = &sends;
 
         try {
-            auto serving = rpc.listen(*listener)
+            auto serving = accept_loop(*listener, token)
                                .exclusiveJoin(pump())
                                .exclusiveJoin(kj::mv(shutdown.promise));
 
@@ -4031,6 +4173,8 @@ void ServerImpl::serve(ServerOptions options) {
         // would destroy them on the caller's thread.
         sends.clear();
         sends_ = nullptr;
+        connections_ = nullptr;
+        timer_ = nullptr;
         subscriptions_.clear();
         vrx_event_nodes_.clear();
 
@@ -4924,8 +5068,8 @@ void ServerImpl::end_rds_for_vrx(engine::VrxId vrx) {
 // Receiver lifetime
 // ---------------------------------------------------------------------------
 
-void ServerImpl::record_vrx(engine::VrxId vrx, std::uint64_t session, bool keep) {
-    vrx_owners_[vrx.value] = VrxOwner{.session = session, .keep = keep};
+void ServerImpl::record_vrx(engine::VrxId vrx, std::uint64_t session, bool keep, bool client) {
+    vrx_owners_[vrx.value] = VrxOwner{.session = session, .keep = keep, .client = client};
     emit_plugin_event(vrx_event(RV_ENGINE_EVENT_VRX_ADDED, vrx), vrx);
     announce_vrx_added(vrx);
 }
@@ -4967,30 +5111,165 @@ void ServerImpl::after_vrx_removed(engine::VrxId vrx, kj::StringPtr reason) {
     transcribe_choices_.erase(vrx.value);
 }
 
-// WHAT A SESSION ENDING TAKES WITH IT, which is its own receivers and nothing
-// else.
+// ---------------------------------------------------------------------------
+// The lease
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// ISO 8601 local time with its offset, to the second: 2026-11-03T14:05:09-05:00.
+// The offset is there so a client in another zone, the phone among them, reads
+// the same instant.
+[[nodiscard]] std::string lease_time_now() {
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#if defined(_WIN32)
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char text[40] = {};
+    if (std::strftime(text, sizeof text, "%Y-%m-%dT%H:%M:%S%z", &local) == 0) {
+        return {};
+    }
+    std::string out(text);
+    // strftime's %z is +hhmm; the extended form the date uses wants +hh:mm.
+    if (out.size() >= 5) {
+        out.insert(out.size() - 2, ":");
+    }
+    return out;
+}
+
+}  // namespace
+
+Status ServerImpl::join_lease(std::uint64_t session, std::uint64_t connection, std::string holder,
+                              LeaseMode mode) {
+    if (!lease_.has_value()) {
+        lease_ = Lease{.holder = std::move(holder), .since = lease_time_now(), .sessions = {}};
+        lease_->sessions[session] = connection;
+        return {};
+    }
+    if (lease_->holder == holder) {
+        lease_->sessions[session] = connection;
+        return {};
+    }
+    if (mode == LeaseMode::Claim) {
+        // Verbatim: the spec fixes this text and clients parse it.
+        return fail(std::format("in use: {} since {}", lease_->holder, lease_->since));
+    }
+
+    // A takeover. The old holder's receivers stay where they are, which is
+    // the point: the new holder inherits the radio as it is.
+    Lease old = std::move(*lease_);
+    lease_ = Lease{.holder = holder, .since = lease_time_now(), .sessions = {}};
+    lease_->sessions[session] = connection;
+    last_taken_by_ = holder;
+
+    kj::Vector<kj::Promise<void>> told;
+    for (const auto& node : vrx_event_nodes_) {
+        if (node->cancelled || !old.sessions.contains(node->session)) {
+            continue;
+        }
+        auto request = node->receiver.leaseLostRequest();
+        request.setNewHolder(kj::StringPtr(holder.c_str()));
+        told.add(request.send().ignoreResult().catch_([](kj::Exception&&) {}));
+    }
+
+    std::vector<std::uint64_t> doomed;
+    for (const auto& entry : old.sessions) {
+        const std::uint64_t conn = entry.second;
+        if (conn != connection && std::ranges::find(doomed, conn) == doomed.end()) {
+            doomed.push_back(conn);
+        }
+    }
+    close_connections_later(std::move(doomed), kj::joinPromises(told.releaseAsArray()));
+    return {};
+}
+
+bool ServerImpl::holds_lease(std::uint64_t session) const {
+    return lease_.has_value() && lease_->sessions.contains(session);
+}
+
+// Closed once the leaseLost notices have gone out, or after two seconds if a
+// stalled client never answers one: a holder that cannot be told must still
+// lose the radio.
+void ServerImpl::close_connections_later(std::vector<std::uint64_t> connections,
+                                         kj::Promise<void> after) {
+    if (sends_ == nullptr || timer_ == nullptr || connections.empty()) {
+        return;
+    }
+    sends_->add(after.exclusiveJoin(timer_->afterDelay(2 * kj::SECONDS))
+                    .then([this, connections = std::move(connections)]() {
+                        if (connections_ == nullptr) {
+                            return;
+                        }
+                        for (const std::uint64_t id : connections) {
+                            connections_->live.erase(id);
+                        }
+                    }));
+}
+
+kj::Promise<void> ServerImpl::accept_loop(kj::ConnectionReceiver& listener, Token token) {
+    return listener.accept().then([this, &listener, token](kj::Own<kj::AsyncIoStream>&& stream) {
+        if (connections_ != nullptr) {
+            const std::uint64_t id = connections_->next++;
+            auto& one = connections_->live[id];
+            one.stream = kj::mv(stream);
+            one.rpc = kj::heap<capnp::TwoPartyServer>(
+                kj::heap<AuthenticatorImpl>(*this, token, id));
+            one.watch = one.rpc->accept(*one.stream)
+                            .then([this, id]() { forget_connection(id); },
+                                  [this, id](kj::Exception&&) { forget_connection(id); })
+                            .eagerlyEvaluate(nullptr);
+        }
+        return accept_loop(listener, token);
+    });
+}
+
+// Not erased here: this runs inside the connection's own watch promise, which
+// the entry holds.
+void ServerImpl::forget_connection(std::uint64_t connection) {
+    if (sends_ == nullptr) {
+        return;
+    }
+    sends_->add(kj::evalLater([this, connection]() {
+        if (connections_ != nullptr) {
+            connections_->live.erase(connection);
+        }
+    }));
+}
+
+// WHAT A SESSION ENDING TAKES WITH IT, since 2026-11-03: nothing, unless it was
+// the lease holder's last claiming session. Then the lease ends without a
+// takeover and the receivers clients opened go with it, kept ones excepted.
+// Receivers a plugin or the trunk follower opened stay, because their opener
+// is still running. A session of a lease that was taken over is in no lease
+// and ends nothing; its receivers already belong to the new holder.
 //
-// Not another session's, including one this session retuned or subscribed to:
-// creation is the only thing that confers ownership, because it is the only
-// thing a client does exactly once per receiver. Not a kept one, which is what
-// keep is for. Not one the host process added, which has no creator here. And
-// not the engine-wide state two sessions share, the detection threshold and
-// the RDS region among them, for the reason the schema gives on
-// setRdsRegion.
+// Until 2026-11-03 a session took the receivers IT created with it, which
+// made a phone's receivers vanish under the desktop and the reverse; with one
+// user there is nobody for a receiver to belong to but that user.
 //
-// The subscriptions this session held on OTHER receivers need nothing from
-// here. Each is a capability that died with the session's connection, and its
-// own destructor has already ended it by the time this runs, or will.
+// The subscriptions this session held need nothing from here. Each is a
+// capability that died with the session's connection, and its own destructor
+// has already ended it by the time this runs, or will.
 //
-// WHY A DESTRUCTOR AND NOT A DISCONNECT HANDLER. capnp 1.4.0's TwoPartyServer
-// offers no per-connection hook, as AuthenticatorImpl's note says. It does
-// release every capability a connection exported when the connection goes,
-// however it goes, so the Session's destructor is the one event that
+// WHY A DESTRUCTOR. A connection releases every capability it exported when it
+// goes, however it goes, so the Session's destructor is the one event that
 // happens exactly once for every way a client can leave, a crash included.
 void ServerImpl::end_session(std::uint64_t session) {
+    if (!lease_.has_value() || !lease_->sessions.contains(session)) {
+        return;
+    }
+    lease_->sessions.erase(session);
+    if (!lease_->sessions.empty()) {
+        return;
+    }
+    lease_.reset();
+
     std::vector<std::uint32_t> doomed;
     for (const auto& [id, owner] : vrx_owners_) {
-        if (owner.session == session && !owner.keep) {
+        if (owner.client && !owner.keep) {
             doomed.push_back(id);
         }
     }
@@ -5003,8 +5282,8 @@ void ServerImpl::end_session(std::uint64_t session) {
         // closed source can have done already, and in that case the server's
         // own state is the only thing left to take down.
         static_cast<void>(engine_.remove_vrx(vrx));
-        after_vrx_removed(vrx, "the session that created this receiver ended, and it was not "
-                               "created with keep");
+        after_vrx_removed(vrx, "the lease holder's last session ended, and this receiver was "
+                               "not created with keep");
     }
 }
 

@@ -254,11 +254,11 @@ public:
     }
     // Takes the JSON not yet sent, so a replacement can send it first.
     [[nodiscard]] std::deque<std::string> take_texts();
-    // Brings subscriptions into line with receivers the session already owns
+    // Brings subscriptions into line with receivers the session already knows
     // without a command having added them.
     void resync();
-    // Re-sends the current source and HLS events, for a socket that resumed
-    // this session and has seen neither.
+    // Re-sends the current source, receiver and HLS events, for a socket that
+    // resumed this session and has seen none of them.
     void announce_state();
 
     [[nodiscard]] StreamCounters counters() const { return counters_; }
@@ -386,8 +386,18 @@ private:
     };
     std::optional<FrameMark> first_seen_;
 
-    // Receivers this phone has owned and not yet reported gone.
-    std::set<std::uint64_t> known_owned_;
+    // Receivers the phone has been told of and not yet told are gone.
+    std::set<std::uint64_t> known_;
+    // Each receiver as the engine last described it and who opened it, so a
+    // resumed socket can be sent the whole list again.
+    struct Described {
+        rpc::VrxStatus status;
+        std::string opened_by;
+    };
+    std::map<std::uint64_t, Described> described_;
+    void send_receiver(std::uint64_t vrx);
+    // The "vrxList" snapshot: every receiver the engine has now.
+    void send_receiver_list();
 
     std::set<std::uint64_t> audio_subscribed_;
     std::map<std::uint64_t, AudioPath> audio_;

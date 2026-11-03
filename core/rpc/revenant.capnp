@@ -3129,7 +3129,37 @@ interface Authenticator {
     # returns another, independent one. The caller has already proved it holds
     # the token and a second capability grants it nothing it did not have.
     # Dropping either Session leaves the other and its subscriptions alone.
-    login @0 (token :Data) -> (session :Session);
+    #
+    # THE LEASE, since 2026-11-03. The engine serves one user at a time
+    # (docs/superpowers/specs/2026-11-03-single-user-engine-design.md). mode
+    # says what this login wants of it:
+    #
+    #   claim     take the lease if it is free, or join it if the holder is
+    #             the same holder text; otherwise refused with the message
+    #             "in use: <holder> since <ISO 8601 local time>", which
+    #             clients parse.
+    #   takeOver  take the lease whoever holds it. The previous holder's
+    #             receiver-event subscribers are sent leaseLost and its
+    #             connections are closed. Receivers stay.
+    #   observe   no lease. The session may call info, listSources and
+    #             leaseStatus; everything else is refused with "observing
+    #             only". For probes and an idle gateway.
+    #
+    # holder is a short description of who is asking, shown to the next
+    # client that is refused. Empty is "unknown client", which is also what an
+    # older client that sends neither field is: mode's default is claim.
+    #
+    # The lease ends when the last claiming session of its holder goes, which
+    # includes every connection carrying one closing, or on a takeover. Never
+    # on a timer. Ending without a takeover removes the receivers clients
+    # opened without keep; a takeover keeps every receiver.
+    login @0 (token :Data, holder :Text, mode :LoginMode) -> (session :Session);
+}
+
+enum LoginMode {
+    claim @0;
+    takeOver @1;
+    observe @2;
 }
 
 interface Session {
@@ -3175,6 +3205,13 @@ interface Session {
     # lifetime rule decides what happens when a session ENDS, and a receiver
     # is engine-wide state in every other respect, for the reason
     # setRdsRegion states.
+    #
+    # SUPERSEDED 2026-11-03 by the lease on Authenticator.login. A receiver no
+    # longer goes with the session that created it: every session of the
+    # lease holder shares every receiver, and a receiver created here without
+    # keep is removed when the LEASE ends without a takeover. A session
+    # dropping while its holder still has another session leaves it alone.
+    # creatorSession and ownerKind still say who opened it, as provenance.
     addVrx @4 (params :VrxParams, keep :Bool) -> (id :UInt64);
     removeVrx @5 (id :UInt64) -> ();
     setVrxParams @6 (id :UInt64, params :VrxParams) -> ();
@@ -4044,6 +4081,12 @@ interface Session {
                                   receiver :DecodedReceiver)
         -> (subscription :DecodedSubscription, rateGranted :UInt64,
             tap :UInt64);
+
+    # Who holds the engine's lease, if anyone. since is the time it was
+    # taken, ISO 8601 local time with its UTC offset, and empty when held is
+    # false. One of the three calls an observe session may make, so a probe or
+    # an idle gateway can say who is using the radio without taking it.
+    leaseStatus @50 () -> (held :Bool, holder :Text, since :Text);
 }
 
 struct TimeShiftLimits {
@@ -4505,6 +4548,12 @@ interface VrxEventReceiver {
     # this client asked for. Sent when the subscriber fell too far behind,
     # and the answer to it is to subscribe again.
     ended @1 (reason :Text) -> ();
+
+    # This session's lease was taken over by newHolder, as that client
+    # described itself at login. Sent to every receiver-event subscriber of
+    # the evicted holder, after which the engine closes the holder's
+    # connections. The receivers stay: the new holder inherits them.
+    leaseLost @2 (newHolder :Text) -> ();
 }
 
 # Dropping this ends the subscription.

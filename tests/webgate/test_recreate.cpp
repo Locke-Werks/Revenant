@@ -87,7 +87,8 @@ struct RestartRig {
         config.clock = [this] { return fake_now; };
         hub = std::make_unique<PhoneHub>(
             strand, config, revenant::webgate::HubTiming{},
-            [this]() -> revenant::Expected<std::unique_ptr<rpc::Client>> {
+            [this](rpc::LoginMode, const std::string&)
+                -> revenant::Expected<std::unique_ptr<rpc::Client>> {
                 // No engine between the two harnesses: what a refused
                 // connect looks like to the hub.
                 if (!harness) {
@@ -199,12 +200,20 @@ TEST_CASE("an engine restart recreates each phone's receivers", "[gpu][webgate][
     REQUIRE(ups.size() == 1);
     INFO(ups.front());
     CHECK(contains(ups.front(), R"("recreated":[{"old":)" + std::to_string(first)));
-    CHECK(contains(ups.front(), R"("lost":[])"));
+    // The other phone's receiver may be listed lost here, if this session had
+    // heard of it: that phone rebuilds its own, so this one does not.
+    CHECK_FALSE(contains(ups.front(), R"({"vrx":)" + std::to_string(first) + ","));
+    CHECK_FALSE(contains(ups.front(), R"({"vrx":)" + std::to_string(second) + ","));
     CHECK(texts_with(socket, R"("state":"waiting")", mark).size() == 1);
 
     auto* session = rig.hub->session(id);
     REQUIRE(session != nullptr);
-    const auto owned = session->owned_ids();
+    std::vector<std::uint64_t> owned;
+    for (const auto vrx : session->receiver_ids()) {
+        if (session->recreatable(vrx)) {
+            owned.push_back(vrx);
+        }
+    }
     REQUIRE(owned.size() == 2);
     CHECK(session->min_confidence() == 0.3);
     REQUIRE(session->audio_vrx().has_value());
@@ -268,7 +277,7 @@ TEST_CASE("a receiver the new engine refuses is reported lost", "[gpu][webgate][
     const auto removed = texts_with(socket, R"("event":"vrxRemoved")", mark);
     REQUIRE(removed.size() == 1);
     CHECK(contains(removed.front(), R"("vrx":)" + std::to_string(vrx)));
-    CHECK(rig.hub->session(id)->owned_ids().empty());
+    CHECK(rig.hub->session(id)->receiver_ids().empty());
     CHECK(rig.engine_ids().empty());
 }
 
@@ -289,7 +298,7 @@ TEST_CASE("a link that comes back without a restart recreates nothing",
     const auto ups = texts_with(socket, R"("state":"up")", mark);
     REQUIRE(ups.size() == 1);
     CHECK_FALSE(contains(ups.front(), "recreated"));
-    CHECK(rig.hub->session(id)->owns(vrx));
+    CHECK(rig.hub->session(id)->has_receiver(vrx));
     CHECK(rig.engine_ids() == std::vector<std::uint64_t>{vrx});
 }
 
@@ -312,7 +321,7 @@ TEST_CASE("a restart the link never reported is recovered on a tick", "[gpu][web
     INFO(ups.front());
     CHECK(contains(ups.front(), R"("state":"up")"));
     CHECK(contains(ups.front(), R"({"old":)" + std::to_string(vrx) + R"(,"new":)"));
-    REQUIRE(rig.hub->session(id)->owned_ids().size() == 1);
+    REQUIRE(rig.hub->session(id)->receiver_ids().size() == 1);
     const auto ids = rig.engine_ids();
     REQUIRE(ids.size() == 1);
     const auto status = rig.harness->client().vrx_status(ids.front());
@@ -342,7 +351,7 @@ TEST_CASE("a rebuild that cannot connect yet is retried", "[gpu][webgate][recrea
     rig.tick();
     CHECK(texts_with(socket, "recreated", mark).empty());
     CHECK(texts_with(socket, R"("event":"vrxRemoved")", mark).empty());
-    CHECK(rig.hub->session(id)->owns(vrx));
+    CHECK(rig.hub->session(id)->has_receiver(vrx));
 
     // The engine is reachable again: the next tick rebuilds the session.
     rig.open_engine(kCenter);
@@ -351,5 +360,5 @@ TEST_CASE("a rebuild that cannot connect yet is retried", "[gpu][webgate][recrea
     REQUIRE(ups.size() == 1);
     CHECK(contains(ups.front(), R"("lost":[])"));
     CHECK(rig.engine_ids().size() == 1);
-    CHECK(rig.hub->session(id)->owned_ids().size() == 1);
+    CHECK(rig.hub->session(id)->receiver_ids().size() == 1);
 }

@@ -271,7 +271,7 @@ TEST_CASE("this session's receiver is announced as it is added, retuned and remo
     CHECK(events[2].kind == rpc::VrxEventKind::Removed);
 }
 
-TEST_CASE("another session's receiver is announced as theirs and goes when they do",
+TEST_CASE("another session's receiver is announced as theirs and stays when they leave",
           "[gpu][rpc][vrx-events]") {
     REVENANT_NEEDS_GPU();
 
@@ -303,13 +303,18 @@ TEST_CASE("another session's receiver is announced as theirs and goes when they 
         // Destroyed without removing anything, as a crashed window would be.
     }
 
-    const auto removed = log->wait_for(rpc::VrxEventKind::Removed, vrx);
+    // The lease is still held by this client, so the receiver stays: since
+    // 2026-11-03 a session leaving takes nothing with it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     INFO(log->describe());
+    CHECK(about(log->events(), vrx).size() == 1);
+
+    REQUIRE(harness.client().remove_vrx(vrx).has_value());
+    const auto removed = log->wait_for(rpc::VrxEventKind::Removed, vrx);
     REQUIRE(removed.has_value());
     // Still theirs as it goes: the owner is the record's before it was erased.
     CHECK(removed->owner == rpc::VrxOwnerKind::OtherSession);
-    CHECK(removed->reason.find("session that created this receiver ended") !=
-          std::string::npos);
+    CHECK(removed->reason.find("the receiver was removed") != std::string::npos);
 }
 
 TEST_CASE("an RDS companion is never announced", "[gpu][rpc][vrx-events]") {

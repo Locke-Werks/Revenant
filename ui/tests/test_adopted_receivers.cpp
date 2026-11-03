@@ -30,13 +30,13 @@ using revenant::ui::receiver_under;
 using revenant::ui::ReceiverRack;
 using revenant::ui::RecentlyAdopted;
 
-// Rejects a rack that takes in another operator's receivers, which is this
-// window listening over their shoulder, or the engine's own, or this
-// session's a second time under a key it did not issue.
-TEST_CASE("only a plugin's receivers are adopted")
+// Rejects a rack that hides receivers another session of the one user opened,
+// or takes in the engine's own, or this session's a second time under a key it
+// did not issue.
+TEST_CASE("a plugin's and another session's receivers are adopted")
 {
     CHECK(rack_adopts(VrxOwnerKind::Plugin));
-    CHECK_FALSE(rack_adopts(VrxOwnerKind::OtherSession));
+    CHECK(rack_adopts(VrxOwnerKind::OtherSession));
     CHECK_FALSE(rack_adopts(VrxOwnerKind::Engine));
     CHECK_FALSE(rack_adopts(VrxOwnerKind::ThisSession));
 }
@@ -101,68 +101,79 @@ TEST_CASE("a strip is named RX and its slot, or the plugin and its slot")
     CHECK(rack_entry_label(RackEntry{}) == "RX 1");
 }
 
-// Rejects any focus path that lands on an adopted entry: the pane retunes
-// whatever it holds, and this receiver is the plugin's.
-TEST_CASE("focus never lands on an adopted entry")
+// Rejects a rack that keeps the operator off a receiver someone else opened:
+// with one user every receiver is theirs to focus, step to and remove.
+TEST_CASE("a receiver opened by another session is focused, stepped to and removed")
 {
     ReceiverRack rack;
     const auto a = *rack.add();
-    const auto call = *rack.add_adopted("p25trunk", 5);
+    const auto phone = *rack.add_adopted("RX", 5);
     const auto b = *rack.add();
 
-    CHECK_FALSE(rack_entry_focusable(*rack.find(call)));
-    CHECK(rack_entry_focusable(*rack.find(a)));
-
-    // Directly.
+    CHECK(rack_entry_focusable(*rack.find(phone)));
     REQUIRE(rack.focus(a));
-    CHECK_FALSE(rack.focus(call));
-    CHECK(rack.focused() == a);
+    CHECK(rack.neighbour(1) == phone);
+    REQUIRE(rack.focus(phone));
+    CHECK(rack.focused() == phone);
 
-    // Next and previous step over it, both ways and around the end.
-    CHECK(rack.neighbour(1) == b);
-    CHECK(rack.neighbour(-1) == b);
-    REQUIRE(rack.focus(b));
-    CHECK(rack.neighbour(1) == a);
+    // Focus changes nothing about where it came from: the engine's events
+    // still find it, and a reconnection still leaves it to the replay.
+    CHECK(rack.find(phone)->adopted);
+    CHECK(rack.find_adopted(5) == rack.find(phone));
+    CHECK_FALSE(rack_entry_rejoins(*rack.find(phone)));
 
-    // One focusable entry and an adopted one is nothing to step to.
-    rack.remove(b);
-    CHECK(rack.neighbour(1) == 0);
+    // Removed like any other, and focus moves on.
+    CHECK(rack.remove(phone) == b);
+    CHECK(rack.find(phone) == nullptr);
+
+    // One never focused is removed the same way, leaving focus where it was.
+    const auto call = *rack.add_adopted("trunk", 9);
+    CHECK(rack.remove(call) == b);
+    CHECK(rack.find(call) == nullptr);
 }
 
-// Rejects a removal that hands the focus to the trunk call beside the
-// receiver that went, in either direction.
-TEST_CASE("removing the focused receiver steps over adopted entries")
+// Rejects a focused trunk call that outlives the engine's Removed event, which
+// left one dead strip per call clicked, and focus left on an entry that went.
+TEST_CASE("a focused trunk receiver the engine removes leaves and moves focus")
 {
     ReceiverRack rack;
     const auto a = *rack.add();
+    const auto call = *rack.add_adopted("trunk", 21);
     const auto b = *rack.add();
-    const auto call = *rack.add_adopted("p25trunk", 5);
-    const auto c = *rack.add();
+    REQUIRE(rack.focus(call));
 
-    // b goes, the call takes its place, and c is the next one focus may have.
-    REQUIRE(rack.focus(b));
-    CHECK(rack.remove(b) == c);
-
-    // c was the last, so focus goes up, past the call, to a.
-    CHECK(rack.remove(c) == a);
-
-    // a goes and only the call is left: nothing is focused.
-    CHECK(rack.remove(a) == 0);
-    CHECK(rack.focused() == 0);
-    CHECK(rack.find(call) != nullptr);
+    // What drop_adopted_entry does for the pane's entry: find it by engine
+    // id, as the Removed event names it, and remove it.
+    const RackEntry* found = rack.find_adopted(21);
+    REQUIRE(found != nullptr);
+    CHECK(found->key == call);
+    CHECK(rack.remove(found->key) == b);
+    CHECK(rack.focused() == b);
+    CHECK(rack.find_adopted(21) == nullptr);
+    CHECK(rack.find(a) != nullptr);
 }
 
-// Rejects a click inside a trunk call's band that focuses the call. Such a
-// click is a click on the span, which retunes the focused receiver there.
-TEST_CASE("a click inside an adopted band is not a focus")
+// Rejects a reconnection that recreates a focused plugin receiver, an orphan
+// nobody follows and the plugin never closes.
+TEST_CASE("a lost connection drops a focused adopted entry and does not recreate it")
 {
-    const std::vector<RackBand> bands{
-        {1, 851'000'000.0, 851'012'500.0, true},
-        {2, 851'006'000.0, 851'007'000.0, false},  // an adopted narrow one
-    };
-    CHECK(receiver_under(bands, 851'006'500.0, 0) == 1);
-    CHECK(receiver_under(bands, 851'006'500.0, 1) == 0);
+    ReceiverRack rack;
+    const auto a = *rack.add();
+    const auto call = *rack.add_adopted("trunk", 30);
+    REQUIRE(rack.focus(call));
+    CHECK_FALSE(rack_entry_rejoins(*rack.find(call)));
+
+    const std::vector<RackEntry> gone = rack.drop_adopted();
+    REQUIRE(gone.size() == 1);
+    CHECK(gone.front().key == call);
+    CHECK(rack.focused() == 0);
+    REQUIRE(rack.size() == 1);
+    CHECK(rack.find(a) != nullptr);
+    for (const RackEntry& e : rack.entries()) {
+        CHECK(rack_entry_rejoins(e));
+    }
 }
+
 
 // Rejects a reconnection that asks the new engine for the plugin's receivers,
 // which makes receivers nobody owns and the plugin never closes, and one that

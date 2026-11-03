@@ -76,7 +76,7 @@ inline constexpr std::string_view kOps[] = {
     "setGainAuto",  "listSources",   "openSource",  "setView",
     "audio",        "keepListening", "setTranscription", "setVrxTranscribe",
     "setDetection", "resume",       "pong",        "listDecoders",
-    "setDecoders",
+    "setDecoders",  "takeOver",
 };
 
 // The events the gateway sends, exactly these.

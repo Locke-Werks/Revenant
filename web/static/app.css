@@ -578,3 +578,35 @@ html:has(.app), html:has(.app) body {
   width: max-content;
   max-width: calc(100vw - 16px);
 }
+
+/* The engine is another client's, or was taken from this phone. It covers the
+   whole app: nothing underneath works until the phone holds the engine. */
+.lease {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: calc(env(safe-area-inset-top) + 24px) 24px calc(env(safe-area-inset-bottom) + 24px);
+  background: var(--bg);
+  color: var(--fg);
+  text-align: center;
+  font-family: var(--sans);
+}
+.lease[hidden] { display: none; }
+.lease-title { margin: 0; font-size: 1.25rem; font-weight: 600; }
+.lease-detail { margin: 0; color: var(--muted); max-width: 32ch; overflow-wrap: anywhere; }
+.lease-take {
+  min-height: var(--hit);
+  padding: 0 28px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font: 600 1rem var(--sans);
+}
+.lease-take:disabled { opacity: 0.6; }
+.lease-error { margin: 0; min-height: 1.4em; color: var(--warn); font-size: 0.85rem; max-width: 32ch; }

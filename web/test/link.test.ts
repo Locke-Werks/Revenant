@@ -19,10 +19,12 @@ class FakeSocket implements SocketLike {
   close() {
     this.closedByApp = true;
   }
-  // Gateway side.
-  open() {
+  // Gateway side. A gateway says first thing whether this phone holds the
+  // engine; lease null sends nothing, for the cases about that.
+  open(lease: Record<string, unknown> | null = { event: "lease", state: "held", holder: "phone test via webgate" }) {
     this.readyState = 1;
     this.onopen?.({});
+    if (lease !== null) this.json(lease);
   }
   drop() {
     this.readyState = 3;
@@ -339,4 +341,75 @@ test("a resume that times out keeps the token and reconnects", async () => {
   assert.equal(store.getItem(RESUME_KEY), "tok-keep");
   timers.advance(500);
   assert.equal(sockets.length, 2);
+});
+
+const IN_USE = {
+  event: "lease",
+  state: "inUse",
+  holder: "Revenant desktop on VALKYRIE",
+  since: "2026-11-03T09:14:00-07:00",
+  message: "in use: Revenant desktop on VALKYRIE since 2026-11-03T09:14:00-07:00",
+};
+
+test("not ready until the gateway says the lease is this phone's", () => {
+  const { link, cur, ready } = rig();
+  link.start();
+  cur().open(null);
+  assert.equal(link.ready, false);
+  cur().json({ event: "lease", state: "held", holder: "phone test via webgate" });
+  assert.equal(link.ready, true);
+  assert.deepEqual(ready, [false]);
+});
+
+test("an engine in use leaves the link unready with only takeOver allowed", async () => {
+  const { link, cur, ready, store } = rig();
+  const leases: unknown[] = [];
+  link.on("lease", (e) => leases.push(e.state));
+  link.start();
+  cur().open(IN_USE);
+  assert.equal(link.ready, false);
+  assert.equal(link.lease?.holder, "Revenant desktop on VALKYRIE");
+  await assert.rejects(link.request("tune", {}), /not connected/);
+
+  const p = link.takeOver();
+  assert.equal(cur().last().op, "takeOver");
+  // The gateway seats a fresh session on this socket, then answers.
+  cur().json({ event: "lease", state: "held", holder: "phone test via webgate" });
+  cur().json({ event: "hello", resume: "tok-taken" });
+  cur().json({ id: cur().last().id, ok: true, result: { held: true } });
+  assert.deepEqual(await p, { held: true });
+  assert.equal(link.ready, true);
+  assert.equal(link.lease, null);
+  assert.deepEqual(ready, [false]);
+  assert.deepEqual(leases, ["inUse", "held"]);
+  assert.equal(store.getItem(RESUME_KEY), "tok-taken");
+});
+
+test("an in-use answer before a resume reply keeps the resume in flight", async () => {
+  const { link, cur, sockets, ready } = rig("tok-old");
+  link.start();
+  cur().open(IN_USE);
+  assert.equal(cur().sent[0]!.op, "resume");
+  cur().json({ id: cur().sent[0]!.id, ok: false, error: "resume: no session with that token; this is a new session" });
+  await tick();
+  // The socket stays: the phone is shown who holds the engine, not reconnected.
+  assert.equal(sockets.length, 1);
+  assert.equal(link.ready, false);
+  assert.deepEqual(ready, []);
+  assert.equal(link.lease?.state, "inUse");
+});
+
+test("a lease lost while ready goes down and says who took it", async () => {
+  const { link, cur } = rig();
+  let downs = 0;
+  link.on("down", () => void downs++);
+  link.start();
+  cur().open();
+  const p = link.request("tune", { vrx: 1, hz: 1 });
+  cur().json({ event: "lease", state: "lost", holder: "Revenant desktop on VALKYRIE" });
+  await assert.rejects(p, /connection lost/);
+  assert.equal(link.ready, false);
+  assert.equal(downs, 1);
+  assert.equal(link.lease?.state, "lost");
+  assert.equal(link.lease?.holder, "Revenant desktop on VALKYRIE");
 });
