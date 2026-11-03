@@ -87,8 +87,9 @@ public:
     // Ticks every session's streams and destroys expired detached sessions.
     void tick();
 
-    // Broadcasts the link state. On Up, every session whose engine
-    // connection died (the engine restarted) is rebuilt on a new one: each
+    // Broadcasts the link state. On Up, and on later ticks while Up (see
+    // recover_dead_sessions), every session whose engine connection died
+    // (the engine restarted) is rebuilt on a new one: each
     // receiver it owned is added again from its last params at the same
     // absolute frequency, with its transcription choice, and its audio, HLS
     // and other subscriptions follow. That session's link event then carries
@@ -118,6 +119,9 @@ private:
         std::optional<std::uint64_t> connection;
         std::chrono::steady_clock::time_point detached_at{};
         std::optional<std::chrono::steady_clock::time_point> last_hls;
+        // When tick() last asked this session's client whether its engine
+        // connection still works.
+        std::chrono::steady_clock::time_point last_probe{};
     };
     struct Connection {
         PhoneSocket* socket = nullptr;
@@ -131,9 +135,17 @@ private:
     void resume(std::uint64_t id, Connection& connection, const Command& command);
     [[nodiscard]] Resident* find_token(std::string_view token) const;
     // Rebuilds a resident on a fresh engine connection when its own one is
-    // dead, adding "recreated" and "lost" to fields. False when its
-    // connection was still alive and nothing was done.
+    // dead, and sends that session's link event with "recreated" and "lost"
+    // in fields. False when nothing was rebuilt: the connection still works,
+    // or no new connection could be had, in which case the session keeps
+    // its receivers' params and tick() tries again.
     bool recreate(Resident& resident, JsonObject& fields);
+
+    // Up and new_session set: each session's client is probed about once a
+    // second, and one whose engine connection is gone is rebuilt. Catches a
+    // restart the link never reported (back within one probe) and retries a
+    // rebuild that could not get a connection.
+    void recover_dead_sessions(std::chrono::steady_clock::time_point now);
 
     Strand& strand_;
     StreamsConfig base_;

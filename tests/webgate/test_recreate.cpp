@@ -77,15 +77,35 @@ struct RestartRig {
     ManualStrand strand;
     HlsRegistry registry;
     std::unique_ptr<PhoneHub> hub;
+    Clock::time_point fake_now = Clock::now();
 
     RestartRig()
     {
         open_engine(kCenter);
         StreamsConfig config;
         config.hls = &registry;
-        hub = std::make_unique<PhoneHub>(strand, config, revenant::webgate::HubTiming{},
-                                         [this] { return harness->connect_another(); });
+        config.clock = [this] { return fake_now; };
+        hub = std::make_unique<PhoneHub>(
+            strand, config, revenant::webgate::HubTiming{},
+            [this]() -> revenant::Expected<std::unique_ptr<rpc::Client>> {
+                // No engine between the two harnesses: what a refused
+                // connect looks like to the hub.
+                if (!harness) {
+                    return std::unexpected(revenant::Error{
+                        "nothing is listening", 0, revenant::ErrorCategory::Unreachable});
+                }
+                return harness->connect_another();
+            });
         hub->link_state(LinkState::Up, "");
+    }
+
+    // Moves the clock past the probe interval and ticks, as the gateway's
+    // timer does.
+    void tick()
+    {
+        fake_now += std::chrono::seconds(2);
+        hub->tick();
+        strand.run_pending();
     }
 
     ~RestartRig() { hub.reset(); }
@@ -269,4 +289,65 @@ TEST_CASE("a link that comes back without a restart recreates nothing",
     CHECK_FALSE(contains(ups.front(), "recreated"));
     CHECK(rig.hub->session(id)->owns(vrx));
     CHECK(rig.engine_ids() == std::vector<std::uint64_t>{vrx});
+}
+
+TEST_CASE("a restart the link never reported is recovered on a tick", "[gpu][webgate][recreate]")
+{
+    REVENANT_NEEDS_GPU();
+    RestartRig rig;
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    const auto vrx = rig.add(id, socket, 1, kCenter + 100'000);
+
+    // Down and back between two probes of the link: no Waiting, no Up.
+    const auto mark = socket.sent.size();
+    rig.harness.reset();
+    rig.open_engine(kCenter);
+    rig.tick();
+
+    const auto ups = texts_with(socket, R"("recreated":[{"old":)", mark);
+    REQUIRE(ups.size() == 1);
+    INFO(ups.front());
+    CHECK(contains(ups.front(), R"("state":"up")"));
+    CHECK(contains(ups.front(), R"({"old":)" + std::to_string(vrx) + R"(,"new":)"));
+    REQUIRE(rig.hub->session(id)->owned_ids().size() == 1);
+    const auto ids = rig.engine_ids();
+    REQUIRE(ids.size() == 1);
+    const auto status = rig.harness->client().vrx_status(ids.front());
+    REQUIRE(status.has_value());
+    CHECK(status->params.center == 100'000);
+
+    // A working session is left alone by later ticks.
+    rig.tick();
+    CHECK(texts_with(socket, R"("recreated")", mark).size() == 1);
+    CHECK(rig.engine_ids() == ids);
+}
+
+TEST_CASE("a rebuild that cannot connect yet is retried", "[gpu][webgate][recreate]")
+{
+    REVENANT_NEEDS_GPU();
+    RestartRig rig;
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    const auto vrx = rig.add(id, socket, 1, kCenter + 100'000);
+
+    // The link says Up while no engine takes a new session.
+    const auto mark = socket.sent.size();
+    rig.harness.reset();
+    rig.hub->link_state(LinkState::Waiting, "the engine stopped");
+    rig.hub->link_state(LinkState::Up, "");
+    rig.strand.run_pending();
+    rig.tick();
+    CHECK(texts_with(socket, "recreated", mark).empty());
+    CHECK(texts_with(socket, R"("event":"vrxRemoved")", mark).empty());
+    CHECK(rig.hub->session(id)->owns(vrx));
+
+    // The engine is reachable again: the next tick rebuilds the session.
+    rig.open_engine(kCenter);
+    rig.tick();
+    const auto ups = texts_with(socket, R"("recreated":[{"old":)", mark);
+    REQUIRE(ups.size() == 1);
+    CHECK(contains(ups.front(), R"("lost":[])"));
+    CHECK(rig.engine_ids().size() == 1);
+    CHECK(rig.hub->session(id)->owned_ids().size() == 1);
 }

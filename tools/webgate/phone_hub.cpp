@@ -42,6 +42,34 @@ namespace {
     return out;
 }
 
+constexpr auto kProbeInterval = std::chrono::seconds(1);
+
+// A call on a client whose connection has gone fails at once with
+// Disconnected; anything else (an engine that answered with an error) means
+// the connection works.
+[[nodiscard]] bool connection_dead(rpc::Client& client)
+{
+    const auto info = client.info();
+    return !info && info.error().category == ErrorCategory::Disconnected;
+}
+
+[[nodiscard]] std::string lost_entry(std::uint64_t vrx, const std::string& reason)
+{
+    return JsonObject().add_u64("vrx", vrx).add_string("reason", reason).str();
+}
+
+[[nodiscard]] std::string json_array(const std::vector<std::string>& items)
+{
+    std::string out = "[";
+    for (const auto& item : items) {
+        if (out.size() > 1) {
+            out += ',';
+        }
+        out += item;
+    }
+    return out + "]";
+}
+
 }  // namespace
 
 std::string link_event(LinkState state, const std::string& detail)
@@ -231,6 +259,24 @@ void PhoneHub::tick()
     for (const auto& token : expired) {
         residents_.erase(token);
     }
+
+    recover_dead_sessions(t);
+}
+
+void PhoneHub::recover_dead_sessions(std::chrono::steady_clock::time_point t)
+{
+    if (link_state_ != LinkState::Up || !new_session_) {
+        return;
+    }
+    for (auto& [token, resident] : residents_) {
+        if (t - resident->last_probe < kProbeInterval) {
+            continue;
+        }
+        resident->last_probe = t;
+        JsonObject fields;
+        fields.add_string("state", state_name(link_state_)).add_string("detail", link_detail_);
+        static_cast<void>(recreate(*resident, fields));
+    }
 }
 
 void PhoneHub::link_state(LinkState state, std::string detail)
@@ -245,6 +291,7 @@ void PhoneHub::link_state(LinkState state, std::string detail)
         if (!(rising && new_session_ && recreate(*resident, fields))) {
             resident->streams->send_event(text);
         }
+        resident->last_probe = now();
     }
 }
 
@@ -254,35 +301,18 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
     // missed probe) leaves this session's connection working, and its
     // receivers still exist: nothing to rebuild.
     auto& old_session = *resident.session;
-    if (old_session.client().info()) {
+    if (!connection_dead(old_session.client())) {
         return false;
     }
 
-    auto lose_all = [&](const std::string& reason) {
-        std::string lost = "[";
-        for (const auto vrx : old_session.owned_ids()) {
-            if (lost.size() > 1) {
-                lost += ',';
-            }
-            lost += JsonObject().add_u64("vrx", vrx).add_string("reason", reason).str();
-        }
-        lost += ']';
-        fields.add_raw("recreated", "[]").add_raw("lost", lost);
-        resident.streams->send_event(event("link", fields));
-        for (const auto vrx : old_session.owned_ids()) {
-            resident.streams->send_event(event(
-                "vrxRemoved", JsonObject().add_u64("vrx", vrx).add_string("reason", reason)));
-            old_session.forget(vrx);
-        }
-        resident.streams->resync();
-    };
-
     auto client = new_session_();
     if (!client) {
-        // Nothing to rebuild on. The session stays as it is, dead, and the
-        // phone hears why; reconnecting its socket gives it a fresh one.
-        lose_all(client.error().message);
-        return true;
+        // Nothing to rebuild on yet. The session keeps its receivers' params
+        // and tick() tries again a second later; the phone hears about its
+        // receivers when they are back.
+        std::fprintf(stderr, "revenant-webgate: rebuilding a phone session: %s\n",
+                     client.error().message.c_str());
+        return false;
     }
 
     auto fresh = std::make_unique<PhoneSession>(std::move(*client));
@@ -300,11 +330,21 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
         new_center = info->source_center;
     }
 
-    std::string recreated = "[";
-    std::string lost = "[";
+    std::vector<std::string> recreated;
+    std::vector<std::string> lost;
     std::vector<std::pair<std::uint64_t, std::string>> removed;
     for (const auto old_id : old_session.owned_ids()) {
-        rpc::VrxParams params = *old_session.last_params(old_id);
+        const auto* last = old_session.last_params(old_id);
+        if (last == nullptr) {
+            // owned_ids and last_params read the same map, so this cannot
+            // happen; if it ever does, the phone hears it was lost rather
+            // than the gateway dereferencing nothing.
+            const std::string reason = "the gateway kept no parameters for this receiver";
+            lost.push_back(lost_entry(old_id, reason));
+            removed.emplace_back(old_id, reason);
+            continue;
+        }
+        rpc::VrxParams params = *last;
         if (old_center && new_center) {
             params.center = *old_center + params.center - *new_center;
         }
@@ -319,13 +359,7 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
             }
         }
         if (!added) {
-            if (lost.size() > 1) {
-                lost += ',';
-            }
-            lost += JsonObject()
-                        .add_u64("vrx", old_id)
-                        .add_string("reason", added.error().message)
-                        .str();
+            lost.push_back(lost_entry(old_id, added.error().message));
             removed.emplace_back(old_id, added.error().message);
             continue;
         }
@@ -334,14 +368,9 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
         if (old_session.audio_vrx() == old_id) {
             fresh->set_audio_vrx(*added);
         }
-        if (recreated.size() > 1) {
-            recreated += ',';
-        }
-        recreated += JsonObject().add_u64("old", old_id).add_u64("new", *added).str();
+        recreated.push_back(JsonObject().add_u64("old", old_id).add_u64("new", *added).str());
     }
-    recreated += ']';
-    lost += ']';
-    fields.add_raw("recreated", recreated).add_raw("lost", lost);
+    fields.add_raw("recreated", json_array(recreated)).add_raw("lost", json_array(lost));
 
     // Unsent JSON (a "waiting" link event, say) goes out ahead of anything
     // the new streams say. The old streams go before the old session: they

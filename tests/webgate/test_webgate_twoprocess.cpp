@@ -12,7 +12,7 @@
 // repeats, so the CW decoder ends a line at its 80 character limit, not on
 // idle. Seed 4 keys at 30 WPM, which puts that line about 26 s into the
 // source; the engine runs at eight times realtime, so it arrives about 3.5 s
-// after audio starts (measured 6.5 s at four times), well inside the 10 s
+// after audio starts (measured 6.5 s at four times), well inside the 30 s
 // the case allows. At 12 WPM (seed 7) the same line takes 64 s of source.
 //
 // Every wait is bounded. The engine and gateway are in a job object that
@@ -333,10 +333,29 @@ private:
     return std::stoull(reply.substr(at + 6));
 }
 
+// Removes the directory when it goes. Declared first in Rig so a REQUIRE
+// that fails in Rig's constructor, after which ~Rig never runs, still
+// cleans up through this member's destructor.
+class TempDir {
+public:
+    TempDir() : path_(fresh_directory()) {}
+    ~TempDir()
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(path_, ec);
+    }
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+    [[nodiscard]] const std::filesystem::path& path() const { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
 // An engine and a gateway in a directory of their own.
 class Rig {
 public:
-    Rig() : dir_(fresh_directory()), io_(kj::setupAsyncIo())
+    Rig() : dir_(temp_.path()), io_(kj::setupAsyncIo())
     {
         std::filesystem::create_directories(dir_ / "web");
         start_engine(0);
@@ -355,10 +374,9 @@ public:
 
     ~Rig()
     {
+        // The children hold files in the directory; they go before it does.
         gateway_.reset();
         engine_.reset();
-        std::error_code ec;
-        std::filesystem::remove_all(dir_, ec);
     }
 
     Rig(const Rig&) = delete;
@@ -480,6 +498,7 @@ public:
     [[nodiscard]] std::uint16_t engine_port() const { return engine_port_; }
 
 private:
+    TempDir temp_;
     std::filesystem::path dir_;
     kj::AsyncIoContext io_;
     kj::HttpHeaderTable table_;
@@ -526,11 +545,13 @@ TEST_CASE("phone round trip", "[webgate][twoprocess]")
     phone->command(3, "audio", R"({"vrx":)" + std::to_string(vrx) + "}");
 
     const auto decoded = [&] { return !phone->with(R"("event":"decoded")").empty(); };
-    const bool all = rig.wait(
-        [&] { return phone->spectrum >= 1 && phone->opus >= 10 && decoded(); }, 10s);
-    INFO("spectrum frames " << phone->spectrum << ", opus frames " << phone->opus
-                            << ", decoded " << decoded());
-    CHECK(all);
+    const bool streaming =
+        rig.wait([&] { return phone->spectrum >= 1 && phone->opus >= 10; }, 10s);
+    INFO("spectrum frames " << phone->spectrum << ", opus frames " << phone->opus);
+    CHECK(streaming);
+    // A window of its own: the line normally lands about 3.5 s after audio
+    // starts (header), and a loaded box slows the engine below its pace.
+    CHECK(rig.wait(decoded, 30s));
     CHECK(contains(phone->reply(3), R"("ok":true)"));
     if (decoded()) {
         INFO(phone->with(R"("event":"decoded")").front());
