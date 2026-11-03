@@ -11,6 +11,42 @@ gateway.
 The phone is a remote control, not a port of the desktop UI. Compute stays on
 the engine machine; the phone renders and plays audio.
 
+It is an installed web app, not a page to browse to. The browser is how it
+gets onto the phone once; after that it is opened from its home screen icon,
+runs full screen with no browser chrome, and behaves like an app.
+
+## Installed app
+
+- Web app manifest: `display: standalone`, portrait-first with landscape
+  allowed, theme and background colours matching the desktop, `start_url`
+  and `scope` at `/`.
+- Its own icon, generated as part of the build like every Revenant program,
+  shipped as `assets/revenant-remote.png` at 512 px plus the
+  `apple-touch-icon` sizes iOS wants (180 px). Apple splash images for the
+  current iPhone sizes.
+- `apple-mobile-web-app-capable` and `apple-mobile-web-app-status-bar-style`
+  so iOS launches it standalone with the status bar over the app's own
+  colour; safe-area insets respected for the notch and home indicator.
+- Service worker caching the app shell (HTML, JS, WASM, icons), versioned by
+  build, so the app opens instantly and, off the LAN or with webgate down,
+  shows its own "Revenant is not reachable" screen with a retry instead of a
+  Safari error page. Streams and control are never cached.
+- Installed from `https://<hostname>.local:17700/`, not from an IP. iOS
+  resolves mDNS `.local` names, so the icon survives the box's address
+  changing. The certificate's SANs carry `<hostname>.local` for this reason.
+- First visit in Safari shows an install screen (Share, Add to Home Screen)
+  instead of the app; the app itself only runs standalone. A query flag
+  overrides this for development.
+- Nothing is stored on the phone beyond the shell and UI preferences (active
+  receiver, view, sheet state) in `localStorage`.
+
+Risk to prove first: background audio from an `<audio>` element in an iOS
+home screen app has behaved differently from the same page in Safari across
+iOS versions. The first milestone is a throwaway standalone app that plays an
+HLS stream from webgate, locked, for ten minutes on the owner's iPhone. If
+standalone mode kills it, keep-listening is redesigned before anything else
+is built on it.
+
 ## Decisions
 
 - LAN only. No authentication on the phone side. Anyone on the LAN who can
@@ -50,7 +86,7 @@ both.
 | Unit | Does | Depends on |
 | --- | --- | --- |
 | `engine_link` | Connects to the engine, reconnects with backoff, starts a local engine with `--no-source` inside a Job object when none answers and `revenant-engine.exe` is beside it | the launch rules, moved out of `ui/models/engine_start.h` into a shared library both use |
-| `certs` | First run: creates a CA. Each start: issues a server certificate whose SANs are the hostname and every current LAN IPv4/IPv6 address, reissuing from the same CA when that set changed. Builds the iOS `.mobileconfig` | OpenSSL |
+| `certs` | First run: creates a CA. Each start: issues a server certificate whose SANs are the hostname, `<hostname>.local`, and every current LAN IPv4/IPv6 address, reissuing from the same CA when that set changed. Builds the iOS `.mobileconfig` | OpenSSL |
 | `http` | TLS listener on 17700 serving the static app and the WebSocket upgrade; plain listener on 17701 serving `/ca` and a redirect | kj-http, kj-tls |
 | `session` | One per WebSocket. Owns an engine `Session` and the receivers it made; ends them when the socket closes | `engine_link` |
 | `protocol` | JSON control messages to and from `Session` calls; binary frame encoding | none |
@@ -77,7 +113,7 @@ frames whose first byte is a type tag.
 
 ### Spectrum
 
-- Phone sends `setView {centerHz, spanHz, widthPx}` on connect and on pan,
+- App sends `setView {centerHz, spanHz, widthPx}` on connect and on pan,
   zoom or rotation.
 - webgate subscribes with `everyNth` chosen for about 20 frames a second at
   the source's real block rate.
