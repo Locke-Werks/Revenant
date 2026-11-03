@@ -27,6 +27,10 @@ struct ReducedFrame {
     View view;
 };
 
+// Widest row reduce() will produce. View::width_px beyond this is capped, and
+// the returned view reports the capped value.
+inline constexpr std::uint32_t kMaxWidthPx = 8192;
+
 // decode: db = offset_db + px * scale_db, so px 0 is the floor.
 //
 // A pixel covering several bins takes their maximum, never the mean: a
