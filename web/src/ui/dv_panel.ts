@@ -27,7 +27,8 @@ const SHOWN_ROWS = 60;
 
 export class DvPanel {
   readonly el: HTMLElement;
-  private readonly autoBtn: HTMLButtonElement;
+  // Mounted by the app into the Tune tab; see the constructor.
+  readonly autoBtn: HTMLButtonElement;
   private readonly followRow: HTMLElement;
   private readonly followBtn: HTMLButtonElement;
   private readonly maxSel: HTMLSelectElement;
@@ -44,10 +45,15 @@ export class DvPanel {
   constructor(private readonly deps: DvPanelDeps) {
     this.el = document.createElement("section");
     this.el.className = "panel dv";
+    // Auto DV lives in the Tune tab, not here: this tab only shows once a DV
+    // receiver exists, and Auto DV is what creates them (owner, 2026-11-03).
+    this.autoBtn = document.createElement("button");
+    this.autoBtn.type = "button";
+    this.autoBtn.className = "btn toggle";
+    this.autoBtn.id = "dv-auto";
+    this.autoBtn.setAttribute("aria-pressed", "false");
+    this.autoBtn.textContent = "Auto DV";
     this.el.innerHTML = `
-<div class="row">
-  <button type="button" class="btn toggle" id="dv-auto" aria-pressed="false">Auto DV</button>
-</div>
 <div class="row" id="dv-follow-row" hidden>
   <button type="button" class="btn toggle" id="dv-follow" aria-pressed="false">Follow trunk</button>
   <label for="dv-max">Followers</label>
@@ -61,7 +67,6 @@ export class DvPanel {
 <h2>Talkgroups</h2>
 <table class="dv-table"><thead><tr><th>Last</th><th>Talkgroup</th><th>Radio</th><th>Calls</th><th>State</th></tr></thead>
 <tbody id="dv-groups"></tbody></table>`;
-    this.autoBtn = this.el.querySelector("#dv-auto")!;
     this.followRow = this.el.querySelector("#dv-follow-row")!;
     this.followBtn = this.el.querySelector("#dv-follow")!;
     this.maxSel = this.el.querySelector("#dv-max")!;

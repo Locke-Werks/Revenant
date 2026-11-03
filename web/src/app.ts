@@ -409,10 +409,11 @@ export function mountApp(root: HTMLElement): AppHandle {
     select: (vrx) => receivers.select(vrx),
   });
   sheet.dvHost.append(dvPanel.el);
+  sheet.alwaysHost.append(dvPanel.autoBtn);
   const syncDv = () => {
     const list = receivers.list.list();
-    // Auto DV on with nothing found yet still shows the tab, so it can be
-    // turned off where it was turned on.
+    // Auto DV on with nothing found yet still shows the tab, so the empty call
+    // tables say it is listening; the switch itself is always in Tune.
     sheet!.setDvShown(hasDvReceiver(list) || dvState.autoDv);
     const id = receivers.list.active;
     const r = id === null ? undefined : receivers.list.get(id);

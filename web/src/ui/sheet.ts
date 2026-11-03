@@ -45,6 +45,9 @@ export class Sheet {
   readonly signalsHost: HTMLElement;
   readonly radioHost: HTMLElement;
   readonly dvHost: HTMLElement;
+  // Controls in the Tune tab that do not depend on a selected receiver, such
+  // as Auto DV, which has to be reachable before any receiver exists.
+  readonly alwaysHost: HTMLElement;
   private dvShown = false;
   private readonly panels: Record<SheetTab, HTMLElement>;
   private tab: SheetTab = "tune";
@@ -97,6 +100,7 @@ export class Sheet {
       <button type="button" class="btn danger" id="sh-remove">Remove receiver</button>
     </div>
   </section>
+  <div class="row" id="sh-always"></div>
   <p class="hint" id="sh-hint">Tap the waterfall to listen there; press and hold to add another receiver.</p>
   <p class="panel-status" id="sh-speech-line"></p>
   <div id="sh-extra"></div>
@@ -121,6 +125,7 @@ export class Sheet {
     this.signalsHost = this.el.querySelector("#sh-tab-signals")!;
     this.radioHost = this.el.querySelector("#sh-tab-radio")!;
     this.dvHost = this.el.querySelector("#sh-tab-dv")!;
+    this.alwaysHost = this.el.querySelector("#sh-always")!;
     const panels: Record<SheetTab, HTMLElement> = {
       tune: this.el.querySelector("#sh-tab-tune")!,
       signals: this.signalsHost,
