@@ -227,9 +227,12 @@ when       = "gateway_at_signin"
 # service would hold both against whoever is logged in. The engine is started
 # by the desktop, or by the phone gateway when a phone connects and nothing
 # else has one running; the gateway runs per sign-in session, not as a
-# service, and stops the engine it started once no phone holds it. Two people
-# signed in at once each get a gateway; the engine's port and lease are what
-# arbitrate between them, as they do between the desktop and a phone.
+# service, and stops the engine it started once no phone holds it. With two
+# people signed in at once, the first one's gateway holds ports 17700 and
+# 17701 and the second one's fails to bind them and exits, saying so in its
+# log: phones reach the first person's gateway, signed in or disconnected.
+# The engine's port and lease arbitrate the radio, as they do between the
+# desktop and a phone.
 #
 # NO FIREWALL RULE FOR THE PHONE GATEWAY.
 #
@@ -253,11 +256,13 @@ when       = "gateway_at_signin"
 #
 # ONE PROGRAM, TWO PHASES: STOPPING THE PHONE GATEWAY.
 #
-# `revenant-webgate.exe --stop` sets Global\Revenant-webgate-stop, which every
-# running gateway watches, and waits up to 10 s for each revenant-webgate.exe
-# on the machine to exit (tools/webgate/host.h). A gateway exiting ends any
-# engine it started, by its Job object, so the engine's files are released
-# too; an engine somebody else started is still the preflight's to refuse.
+# `revenant-webgate.exe --stop` sets each running gateway's own stop event,
+# in that gateway's session, after checking the event's owner is that
+# gateway's account, then waits up to 10 s for each revenant-webgate.exe on
+# the machine to exit and terminates any still running (tools/webgate/host.h).
+# A gateway exiting, or terminated, ends any engine it started through its Job
+# object, so the engine's files are released too; an engine somebody else
+# started is still the preflight's to refuse.
 #
 # pre_install, so it runs before any file is swapped. That phase places this
 # one binary first and runs it from the install directory, so it must load
@@ -269,9 +274,9 @@ when       = "gateway_at_signin"
 # what --stop needs: the signal is the same name in every version that has it.
 #
 # as = "installer", not "user". Gateways run in every signed-in user's
-# session, and only the elevated installer may wait on another account's
-# process. The event is Global\ with a DACL that lets Administrators set it,
-# which is what carries the signal across sessions and integrity levels.
+# session, and only the elevated installer may open another account's
+# process and its session's event; each event's DACL grants Administrators
+# set and wait, and nobody but the gateway's own account besides.
 #
 # vital on install: a gateway still running when the files are replaced keeps
 # the old image, and its engine the old engine. Refusing is the better

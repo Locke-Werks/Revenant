@@ -68,21 +68,36 @@ private:
 // a running gateway, and the gateway runs at sign-in with no window to close,
 // so the installer's pre_install hook runs `revenant-webgate.exe --stop`.
 //
-// One manual-reset event, Global\Revenant-webgate-stop, which every gateway
-// opens and waits on. Global because the hook runs elevated in the
-// installer's session while gateways run in every signed-in user's session,
-// and a Local\ name would reach only the installer's own. The DACL lets
-// SYSTEM, Administrators and the creating account set it and everyone else
-// only wait on it, so one user cannot stop another's gateway; the low
-// integrity label lets a gateway at medium integrity open an event an
-// elevated --stop created first.
-inline constexpr std::string_view kStopEventName = "Global\\Revenant-webgate-stop";
+// ONE EVENT PER GATEWAY, NOT ONE FOR THE MACHINE. Each gateway creates
+// Local\Revenant-webgate-stop-<pid> in its own session's namespace, with a
+// DACL granting set and wait to its own account, Administrators and SYSTEM
+// only. So no other user can stop it, and nobody can squat a machine-wide
+// name to stop every gateway at start or to make --stop fail. A name that
+// already exists when the gateway creates it is somebody else's, and the
+// gateway does not watch it.
+//
+// --stop finds each revenant-webgate.exe, opens its event through that
+// process's session (Session\<n>\...), checks the event's owner is that
+// process's account (or Administrators or SYSTEM) so an impostor is ignored,
+// sets it, and waits. A gateway still running at the end of the wait is
+// terminated: its engine's Job object closes with it (KILL_ON_JOB_CLOSE), so
+// the engine goes too. Elevated, from the installer, that reaches every
+// session; unelevated it reaches only the caller's own gateways.
+inline constexpr std::string_view kStopEventPrefix = "Revenant-webgate-stop-";
 
-// Watches the stop signal on a thread of its own and calls on_stop once when
-// it is set. Destroying it ends the watch without calling.
+// The name a gateway with this pid creates, in the Local\ namespace.
+[[nodiscard]] std::string stop_event_name(std::string_view prefix, std::uint32_t pid);
+
+// Whether an event whose owner is owner may be trusted as the stop event of a
+// process running as process_user. Both are SIDs.
+[[nodiscard]] bool stop_event_owner_acceptable(void* owner, void* process_user);
+
+// Watches this process's stop event on a thread of its own and calls on_stop
+// once when it is set. Destroying it ends the watch without calling.
 class StopWatch {
 public:
-    StopWatch(std::function<void()> on_stop, std::string name = std::string(kStopEventName));
+    StopWatch(std::function<void()> on_stop,
+              std::string prefix = std::string(kStopEventPrefix));
     ~StopWatch();
     StopWatch(const StopWatch&) = delete;
     StopWatch& operator=(const StopWatch&) = delete;
@@ -97,13 +112,18 @@ private:
     std::thread thread_;
 };
 
-// --stop: sets the signal, waits up to wait for every other
-// revenant-webgate.exe on the machine to exit, then clears it so the next
-// sign-in's gateway starts normally. 0 when none remain; 1 when one is still
-// running or could not be waited on (a gateway of another account, when not
-// elevated); 2 when the signal could not be set. Messages go to stdout.
+enum class StopSignal : std::uint8_t { Set, NoEvent, Impostor };
+
+// Sets the stop event of the gateway with this pid, after the owner check.
+[[nodiscard]] StopSignal signal_gateway(std::uint32_t pid,
+                                        std::string_view prefix = kStopEventPrefix);
+
+// --stop: signals every other process named image, waits up to wait for them
+// to exit, then terminates those still running. 0 when none remain; 1 when
+// one could not be reached (another account's, when not elevated) or would
+// not die. Messages go to stdout.
 [[nodiscard]] int stop_running_gateways(std::chrono::milliseconds wait,
-                                        std::string name = std::string(kStopEventName),
+                                        std::string prefix = std::string(kStopEventPrefix),
                                         std::wstring image = L"revenant-webgate.exe");
 
 // Takes over stdout and stderr; see the top of this file. Construct first

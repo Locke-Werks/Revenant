@@ -18,6 +18,7 @@
 #endif
 #include <windows.h>
 
+#include <aclapi.h>
 #include <sddl.h>
 #include <tlhelp32.h>
 
@@ -47,7 +48,11 @@ void RotatingLog::append(std::string_view text)
         // rename over an existing file is a replace on Windows through
         // std::filesystem, so the older file is simply the one before this.
         std::filesystem::rename(path_, previous_path(), ignored);
-        size_ = 0;
+        // Only on a rename that happened: a reader holding the file without
+        // delete sharing makes it fail, and the size is then still the file's.
+        if (!ignored) {
+            size_ = 0;
+        }
     }
     // Opened per write so the file can be read, renamed or deleted while the
     // gateway runs. Writes are a line or a few at a time, so the open is cheap
@@ -89,30 +94,86 @@ std::string instance_name(std::uint16_t port)
 
 namespace {
 
-// See kStopEventName for why each part is there. 0x100000 is SYNCHRONIZE.
-constexpr const wchar_t* kStopEventSddl =
-    L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;0x100000;;;WD)S:(ML;;NW;;;LW)";
+// SYNCHRONIZE | EVENT_MODIFY_STATE: wait and set, nothing else.
+constexpr DWORD kStopAccess = SYNCHRONIZE | EVENT_MODIFY_STATE;
 
-[[nodiscard]] HANDLE open_stop_event(const std::string& name)
+[[nodiscard]] std::wstring widen(std::string_view text)
 {
-    const std::wstring wide(name.begin(), name.end());
-    PSECURITY_DESCRIPTOR descriptor = nullptr;
-    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(kStopEventSddl, SDDL_REVISION_1,
-                                                             &descriptor, nullptr) == 0) {
-        descriptor = nullptr;
+    return std::wstring(text.begin(), text.end());
+}
+
+// The account a token runs as, as a string SID, or empty.
+[[nodiscard]] std::wstring token_user_sid(HANDLE token)
+{
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<std::uint8_t> buffer(size);
+    if (size == 0 ||
+        GetTokenInformation(token, TokenUser, buffer.data(), size, &size) == 0) {
+        return {};
     }
-    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
-    HANDLE event = CreateEventW(descriptor != nullptr ? &attributes : nullptr, TRUE, FALSE,
-                                wide.c_str());
-    if (event == nullptr) {
-        // Exists, made by an account whose DACL gives this one SYNCHRONIZE
-        // and nothing else.
-        event = OpenEventW(SYNCHRONIZE, FALSE, wide.c_str());
+    LPWSTR text = nullptr;
+    if (ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid, &text) ==
+        0) {
+        return {};
     }
-    if (descriptor != nullptr) {
-        LocalFree(descriptor);
+    std::wstring out(text);
+    LocalFree(text);
+    return out;
+}
+
+// The DACL this process's stop event is created with. See kStopEventPrefix.
+[[nodiscard]] std::wstring own_stop_sddl()
+{
+    HANDLE token = nullptr;
+    std::wstring user;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) != 0) {
+        user = token_user_sid(token);
+        CloseHandle(token);
     }
-    return event;
+    std::wstring sddl = L"D:P(A;;0x100002;;;SY)(A;;0x100002;;;BA)";
+    if (!user.empty()) {
+        sddl += L"(A;;0x100002;;;" + user + L")";
+    }
+    return sddl;
+}
+
+// Best effort: lets an elevated --stop open gateways of other accounts,
+// whose process DACLs name only their own user and SYSTEM.
+void enable_debug_privilege()
+{
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token) ==
+        0) {
+        return;
+    }
+    TOKEN_PRIVILEGES privileges{};
+    privileges.PrivilegeCount = 1;
+    if (LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &privileges.Privileges[0].Luid) != 0) {
+        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr);
+    }
+    CloseHandle(token);
+}
+
+// The account process runs as, as a binary SID, or empty.
+[[nodiscard]] std::vector<std::uint8_t> process_user(HANDLE process)
+{
+    HANDLE token = nullptr;
+    if (OpenProcessToken(process, TOKEN_QUERY, &token) == 0) {
+        return {};
+    }
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<std::uint8_t> buffer(size);
+    std::vector<std::uint8_t> sid;
+    if (size != 0 && GetTokenInformation(token, TokenUser, buffer.data(), size, &size) != 0) {
+        PSID user = reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid;
+        const auto* bytes = static_cast<const std::uint8_t*>(user);
+        sid.assign(bytes, bytes + GetLengthSid(user));
+    }
+    CloseHandle(token);
+    return sid;
 }
 
 [[nodiscard]] bool usable(HANDLE handle)
@@ -123,10 +184,48 @@ constexpr const wchar_t* kStopEventSddl =
 
 }  // namespace
 
-StopWatch::StopWatch(std::function<void()> on_stop, std::string name)
+std::string stop_event_name(std::string_view prefix, std::uint32_t pid)
 {
-    HANDLE event = open_stop_event(name);
+    return std::string(prefix) + std::to_string(pid);
+}
+
+bool stop_event_owner_acceptable(void* owner, void* process_user_sid)
+{
+    if (owner == nullptr || IsValidSid(owner) == 0) {
+        return false;
+    }
+    if (process_user_sid != nullptr && IsValidSid(process_user_sid) != 0 &&
+        EqualSid(owner, process_user_sid) != 0) {
+        return true;
+    }
+    // An elevated gateway's objects are owned by Administrators, not by its
+    // user; SYSTEM owns what a service creates.
+    return IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0 ||
+           IsWellKnownSid(owner, WinLocalSystemSid) != 0;
+}
+
+StopWatch::StopWatch(std::function<void()> on_stop, std::string prefix)
+{
+    const std::wstring name =
+        L"Local\\" + widen(stop_event_name(prefix, GetCurrentProcessId()));
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            own_stop_sddl().c_str(), SDDL_REVISION_1, &descriptor, nullptr) == 0) {
+        return;
+    }
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
+    HANDLE event = CreateEventW(&attributes, TRUE, FALSE, name.c_str());
+    const DWORD created = GetLastError();
+    LocalFree(descriptor);
     if (event == nullptr) {
+        return;
+    }
+    if (created == ERROR_ALREADY_EXISTS) {
+        // A pid names one live process, so an event under this one's name
+        // that already exists was made by somebody else, ahead of it.
+        std::fprintf(stderr, "revenant-webgate: a stop event under this gateway's name already "
+                             "exists and is not its own; not watching it\n");
+        CloseHandle(event);
         return;
     }
     HANDLE quit = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -160,22 +259,53 @@ StopWatch::~StopWatch()
     }
 }
 
-int stop_running_gateways(std::chrono::milliseconds wait, std::string name, std::wstring image)
+StopSignal signal_gateway(std::uint32_t pid, std::string_view prefix)
 {
-    HANDLE event = open_stop_event(name);
-    if (event == nullptr || SetEvent(event) == 0) {
-        std::printf("revenant-webgate --stop: could not signal running gateways (error %lu)\n",
-                    GetLastError());
-        if (event != nullptr) {
-            CloseHandle(event);
-        }
-        return 2;
+    DWORD session = 0;
+    if (ProcessIdToSessionId(pid, &session) == 0) {
+        return StopSignal::NoEvent;
     }
+    // Session\<n>\ reaches that session's Local\ namespace from any session.
+    const std::wstring name =
+        L"Session\\" + std::to_wstring(session) + L"\\" + widen(stop_event_name(prefix, pid));
+    HANDLE event = OpenEventW(kStopAccess | READ_CONTROL, FALSE, name.c_str());
+    if (event == nullptr) {
+        return StopSignal::NoEvent;
+    }
+
+    std::vector<std::uint8_t> user;
+    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        user = process_user(process);
+        CloseHandle(process);
+    }
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    const DWORD read = GetSecurityInfo(event, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
+                                       &owner, nullptr, nullptr, nullptr, &descriptor);
+    const bool trusted =
+        read == ERROR_SUCCESS &&
+        stop_event_owner_acceptable(owner, user.empty() ? nullptr : user.data());
+    if (descriptor != nullptr) {
+        LocalFree(descriptor);
+    }
+    if (!trusted) {
+        CloseHandle(event);
+        return StopSignal::Impostor;
+    }
+    SetEvent(event);
+    CloseHandle(event);
+    return StopSignal::Set;
+}
+
+int stop_running_gateways(std::chrono::milliseconds wait, std::string prefix, std::wstring image)
+{
+    enable_debug_privilege();
 
     // Every gateway on the machine but this one, found by image name, which
     // is what the installer's files are held open by.
     std::vector<HANDLE> running;
     int unreachable = 0;
+    int impostors = 0;
     const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot != INVALID_HANDLE_VALUE) {
         PROCESSENTRY32W entry{};
@@ -186,35 +316,44 @@ int stop_running_gateways(std::chrono::milliseconds wait, std::string name, std:
                 _wcsicmp(entry.szExeFile, image.c_str()) != 0) {
                 continue;
             }
-            if (HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, entry.th32ProcessID)) {
-                running.push_back(process);
-            } else {
+            HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE,
+                                         entry.th32ProcessID);
+            if (process == nullptr) {
                 ++unreachable;
+                continue;
             }
+            if (signal_gateway(entry.th32ProcessID, prefix) == StopSignal::Impostor) {
+                ++impostors;
+            }
+            running.push_back(process);
         }
         CloseHandle(snapshot);
     }
 
     const auto until = std::chrono::steady_clock::now() + wait;
+    int terminated = 0;
     int remaining = 0;
     for (HANDLE process : running) {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
             until - std::chrono::steady_clock::now());
         const DWORD ms = left.count() > 0 ? static_cast<DWORD>(left.count()) : 0;
         if (WaitForSingleObject(process, ms) != WAIT_OBJECT_0) {
-            ++remaining;
+            // No event (a version from before --stop), an impostor's, or a
+            // gateway that did not finish. Its engine's Job closes with it.
+            TerminateProcess(process, 1);
+            if (WaitForSingleObject(process, 5'000) == WAIT_OBJECT_0) {
+                ++terminated;
+            } else {
+                ++remaining;
+            }
         }
         CloseHandle(process);
     }
 
-    // Cleared, or a gateway started after this (the next sign-in) would see
-    // the old signal and exit at once. The event lives only while a handle
-    // to it does, so this matters only while some gateway still holds one.
-    ResetEvent(event);
-    CloseHandle(event);
-
-    std::printf("revenant-webgate --stop: %zu stopped, %d still running, %d not reachable\n",
-                running.size() - static_cast<std::size_t>(remaining), remaining, unreachable);
+    std::printf("revenant-webgate --stop: %zu exited, %d terminated, %d still running, %d not "
+                "reachable, %d impostor events ignored\n",
+                running.size() - static_cast<std::size_t>(terminated + remaining), terminated,
+                remaining, unreachable, impostors);
     return remaining == 0 && unreachable == 0 ? 0 : 1;
 }
 
@@ -248,7 +387,9 @@ OutputTee::OutputTee(std::filesystem::path log_path) : log_(std::move(log_path))
     }
 
     int fds[2] = {-1, -1};
-    if (_pipe(fds, 64 * 1024, _O_BINARY) != 0) {
+    // Not inheritable: a child holding the write end would keep the reader
+    // from ever seeing end of file, and the destructor's join would hang.
+    if (_pipe(fds, 64 * 1024, _O_BINARY | _O_NOINHERIT) != 0) {
         return;
     }
     read_fd_ = fds[0];
@@ -256,6 +397,10 @@ OutputTee::OutputTee(std::filesystem::path log_path) : log_(std::move(log_path))
     std::fflush(stderr);
     _dup2(fds[1], _fileno(stdout));
     _dup2(fds[1], _fileno(stderr));
+    // _dup2 makes inheritable copies whatever the original was.
+    for (const int fd : {_fileno(stdout), _fileno(stderr)}) {
+        SetHandleInformation(reinterpret_cast<HANDLE>(_get_osfhandle(fd)), HANDLE_FLAG_INHERIT, 0);
+    }
     _close(fds[1]);
     // Unbuffered, so a line reaches the log when it is written and not when
     // a buffer fills, and stdout and stderr interleave in the order written.
