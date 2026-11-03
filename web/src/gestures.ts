@@ -10,6 +10,10 @@ export const TAP_SLOP_PX = 10;
 export const LONG_PRESS_MS = 500;
 
 export interface GestureSink {
+  // One finger moves the active receiver by this much; dragEnd is the release.
+  dragTune(dHz: number): void;
+  dragEnd(): void;
+  // Two fingers move the view.
   pan(dHz: number): void;
   zoom(factor: number, anchorHz: number): void;
   tap(hz: number): void;
@@ -31,6 +35,10 @@ export class GestureClassifier {
   // Once a gesture moves, pinches, or long-presses it can no longer be a tap,
   // until every finger has lifted.
   private spent = false;
+  // A second finger has touched since the first went down: the survivor of a
+  // pinch must not turn into a receiver drag.
+  private multi = false;
+  private dragging = false;
   private timer: unknown = null;
 
   constructor(
@@ -44,6 +52,7 @@ export class GestureClassifier {
     if (this.pts.size === 1) {
       this.start = { x, y };
       this.spent = false;
+      this.multi = false;
       this.timer = this.timers.setTimeout(() => {
         this.timer = null;
         if (this.pts.size === 1 && !this.spent && this.start) {
@@ -53,6 +62,8 @@ export class GestureClassifier {
       }, LONG_PRESS_MS);
     } else {
       this.spent = true;
+      this.multi = true;
+      this.endDrag();
       this.cancelTimer();
     }
   }
@@ -62,16 +73,22 @@ export class GestureClassifier {
     if (!p) return;
 
     if (this.pts.size === 1) {
+      if (this.multi) {
+        p.x = x;
+        p.y = y;
+        return;
+      }
       if (!this.spent && this.start && Math.hypot(x - this.start.x, y - this.start.y) < TAP_SLOP_PX) return;
       if (!this.spent) {
         this.spent = true;
         this.cancelTimer();
       }
-      // Dragging right brings lower frequencies into view.
-      const dHz = this.hzAt(p.x) - this.hzAt(x);
+      // The receiver goes where the finger goes: right is up in frequency.
+      const dHz = this.hzAt(x) - this.hzAt(p.x);
       p.x = x;
       p.y = y;
-      if (dHz !== 0) this.sink.pan(dHz);
+      this.dragging = true;
+      if (dHz !== 0) this.sink.dragTune(dHz);
       return;
     }
 
@@ -107,6 +124,7 @@ export class GestureClassifier {
     this.pts.delete(id);
     if (this.pts.size > 0) return;
     this.cancelTimer();
+    this.endDrag();
     if (!this.spent && this.start) this.sink.tap(this.hzAt(this.start.x));
     this.spent = false;
     this.start = null;
@@ -124,6 +142,12 @@ export class GestureClassifier {
     const a = it.next().value;
     const b = it.next().value;
     return [a ? { id: a[0], p: a[1] } : undefined, b ? { id: b[0], p: b[1] } : undefined];
+  }
+
+  private endDrag(): void {
+    if (!this.dragging) return;
+    this.dragging = false;
+    this.sink.dragEnd();
   }
 
   private cancelTimer(): void {

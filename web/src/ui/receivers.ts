@@ -278,6 +278,7 @@ export class ReceiverController {
   // Receivers with a setMode or setBandwidth in flight. A tap tuning one
   // would land on an id about to be removed.
   private replacing = new Set<number>();
+  private tuneSeq = 0;
   private goneFns = new Set<(vrx: number) => void>();
   private remapFns = new Set<(pairs: { old: number; new: number }[]) => void>();
 
@@ -320,9 +321,39 @@ export class ReceiverController {
       return;
     }
     if (this.replacing.has(active)) return;
+    // Supersedes any drag reply still in flight.
+    this.tuneSeq++;
     this.call("tune", { vrx: active, hz: Math.round(hz) }).then((r) => {
       if (r) this.nowPlaying(r);
     });
+  }
+
+  // A drag shows the active receiver at hz at once; the engine's answer comes
+  // later and replaces it. Returns the receiver, or null when there is none to
+  // drag or it is mid-replace.
+  preview(hz: number): Receiver | null {
+    const vrx = this.list.active;
+    if (vrx === null || this.replacing.has(vrx)) return null;
+    return this.list.upsert({ vrx, hz: Math.round(hz) });
+  }
+
+  // One tune of a drag. Replies arrive out of step with the finger, so only
+  // the newest request's reply is applied; an older one would pull the marker
+  // back behind the finger.
+  tuneDragged(hz: number): void {
+    const vrx = this.list.active;
+    if (vrx === null || this.replacing.has(vrx)) return;
+    const seq = ++this.tuneSeq;
+    this.deps.link.request("tune", { vrx, hz: Math.round(hz) }).then(
+      (reply) => {
+        if (seq !== this.tuneSeq) return;
+        const r = this.fromReply(reply);
+        if (r) this.nowPlaying(r);
+      },
+      (e: unknown) => {
+        if (seq === this.tuneSeq) this.deps.toast(errorText(e));
+      },
+    );
   }
 
   // Long press: another receiver there, which becomes the one heard.

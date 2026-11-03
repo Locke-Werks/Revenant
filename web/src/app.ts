@@ -4,7 +4,9 @@
 import { HlsPlayer, silentWavUrl } from "./audio/hls_player";
 import { browserMediaSession, KeepListening } from "./audio/keep_listening";
 import { browserLiveAudioDeps, LiveAudio } from "./audio/live";
+import { parseDetections, snapTap, type Detection } from "./detections";
 import { attachGestures } from "./gestures";
+import { TuneLimiter } from "./tune_limiter";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
 import { SpectrumTrace } from "./spectrum_trace";
 import { clampView, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
@@ -366,9 +368,54 @@ export function mountApp(root: HTMLElement): AppHandle {
   // Gestures bind to the wrapper, which outlives a canvas swapped for the 2D
   // fallback. Coordinates are CSS pixels, so the view is scaled to CSS width.
   const hzAt = (x: number) => (view ? pxToHz({ ...view, widthPx: body.clientWidth || 1 }, x) : Number.NaN);
+  // Latest list from the engine; empty until the first event.
+  let detections: Detection[] = [];
+  link.on("detections", (e) => {
+    detections = parseDetections(e);
+  });
+
+  const tuneLimiter = new TuneLimiter(
+    (hz) => receivers.tuneDragged(hz),
+    () => performance.now(),
+    (fn, ms) => {
+      const h = window.setTimeout(fn, ms);
+      return () => window.clearTimeout(h);
+    },
+  );
+  // Where the finger has taken the receiver; null between drags.
+  let dragHz: number | null = null;
+  // The view follows only once the receiver is this close to an edge, so a
+  // small nudge does not slide the picture under the finger.
+  const EDGE_FRACTION = 0.1;
+
   attachGestures(
     body,
     {
+      dragTune: (dHz) => {
+        if (!Number.isFinite(dHz)) return;
+        if (dragHz === null) {
+          const id = receivers.list.active;
+          const r = id === null ? undefined : receivers.list.get(id);
+          if (!r) return;
+          dragHz = r.hz;
+        }
+        dragHz = Math.max(1, dragHz + dHz);
+        // The marker and chip move now; the engine confirms through status.
+        if (!receivers.preview(dragHz)) return;
+        tuneLimiter.set(dragHz);
+        if (view) {
+          const lo = view.centerHz - view.spanHz / 2;
+          const hi = view.centerHz + view.spanHz / 2;
+          const margin = view.spanHz * EDGE_FRACTION;
+          if (dragHz < lo + margin) apply(panBy(view, dragHz - (lo + margin)));
+          else if (dragHz > hi - margin) apply(panBy(view, dragHz - (hi - margin)));
+        }
+        requestDraw();
+      },
+      dragEnd: () => {
+        dragHz = null;
+        tuneLimiter.flush();
+      },
       pan: (dHz) => {
         if (view && Number.isFinite(dHz)) apply(panBy(view, dHz));
       },
@@ -376,7 +423,7 @@ export function mountApp(root: HTMLElement): AppHandle {
         if (view && Number.isFinite(anchorHz)) apply(zoomAt(view, factor, anchorHz));
       },
       tap: (hz) => {
-        if (Number.isFinite(hz)) receivers.tap(hz);
+        if (Number.isFinite(hz)) receivers.tap(snapTap(hz, detections));
       },
       longPress: (hz) => {
         if (Number.isFinite(hz)) receivers.longPress(hz);
