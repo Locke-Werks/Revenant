@@ -4,10 +4,13 @@ add_executable(test_webgate
     test_static_files.cpp
     test_hls.cpp
     test_http.cpp
+    ../reference/gpu_fixture.cpp
+    test_engine_link.cpp
 )
 
 target_link_libraries(test_webgate PRIVATE
     revenant_webgate_lib
+    revenant_rpc_fixture
     Catch2::Catch2WithMain
 )
 

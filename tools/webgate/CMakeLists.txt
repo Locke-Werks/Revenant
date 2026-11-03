@@ -21,6 +21,7 @@ add_library(revenant_webgate_lib STATIC
     audio_hls.cpp
     hls_playlist.cpp
     http.cpp
+    engine_link.cpp
 )
 
 target_include_directories(revenant_webgate_lib PUBLIC "${CMAKE_SOURCE_DIR}")
@@ -30,6 +31,7 @@ target_include_directories(revenant_webgate_lib PUBLIC "${CMAKE_SOURCE_DIR}")
 target_link_libraries(revenant_webgate_lib
     PUBLIC
         revenant_rpc_client
+        revenant_launch
         OpenSSL::SSL
         OpenSSL::Crypto
         CapnProto::kj-http
