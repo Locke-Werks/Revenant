@@ -695,7 +695,7 @@ TEST_CASE("a receiver removed elsewhere is reported to its phone", "[gpu][webgat
         }
     }
     CHECK(reported);
-    CHECK_FALSE(rig.session->owns(vrx));
+    CHECK_FALSE(rig.session->has_receiver(vrx));
     CHECK_FALSE(rig.session->audio_vrx().has_value());
 }
 

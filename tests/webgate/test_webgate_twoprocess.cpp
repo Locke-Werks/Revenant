@@ -482,16 +482,39 @@ public:
             .wait(io_.waitScope);
     }
 
-    // A client of the rig's engine, for asking it what receivers exist.
+    // A client of the rig's engine, for asking it what receivers exist. It
+    // joins whatever lease the phones hold, under the holder's own text: the
+    // engine serves one user, so a client under any other name would be
+    // refused, and an observer may not list receivers.
     [[nodiscard]] std::unique_ptr<rpc::Client> engine_client()
     {
         const auto token = rpc::load_token((dir_ / "token").string());
         INFO((token ? std::string() : token.error().message));
         REQUIRE(token.has_value());
-        auto client = rpc::Client::connect("127.0.0.1", engine_port_, *token);
+        std::string holder = "twoprocess test";
+        if (const auto lease = engine_lease(); lease.held) {
+            holder = lease.holder;
+        }
+        auto client =
+            rpc::Client::connect("127.0.0.1", engine_port_, *token, rpc::LoginMode::Claim, holder);
         INFO((client ? std::string() : client.error().message));
         REQUIRE(client.has_value());
         return std::move(*client);
+    }
+
+    // Who holds the rig's engine, read without holding it.
+    [[nodiscard]] rpc::LeaseStatus engine_lease()
+    {
+        const auto token = rpc::load_token((dir_ / "token").string());
+        REQUIRE(token.has_value());
+        auto client = rpc::Client::connect("127.0.0.1", engine_port_, *token,
+                                           rpc::LoginMode::Observe, "twoprocess test");
+        INFO((client ? std::string() : client.error().message));
+        REQUIRE(client.has_value());
+        const auto lease = (*client)->lease_status();
+        INFO((lease ? std::string() : lease.error().message));
+        REQUIRE(lease.has_value());
+        return *lease;
     }
 
     [[nodiscard]] Child& engine() { return *engine_; }
@@ -562,36 +585,37 @@ TEST_CASE("phone round trip", "[webgate][twoprocess]")
         CHECK(std::ranges::find(ids, vrx) != ids.end());
     }
 
-    // Gone from the engine once the session's linger (500 ms here) is over.
+    // Once the session's linger (500 ms here) is over the phone lets go of
+    // the engine, and the engine removes what was opened under the lease.
+    // This client is in the same lease, so it goes too.
     phone.reset();
-    const bool removed = rig.wait(
-        [&] {
-            const auto ids = engine_ids(*engine);
-            return std::ranges::find(ids, vrx) == ids.end();
-        },
-        10s);
-    CHECK(removed);
+    engine.reset();
+    CHECK(rig.wait([&] { return !rig.engine_lease().held; }, 10s));
+    auto after = rig.engine_client();
+    CHECK(std::ranges::find(engine_ids(*after), vrx) == engine_ids(*after).end());
 }
 
-TEST_CASE("two phones keep their own receivers", "[webgate][twoprocess]")
+TEST_CASE("two phones at one address share the engine", "[webgate][twoprocess]")
 {
     Rig rig;
-    auto engine = rig.engine_client();
     auto first = rig.phone();
     auto second = rig.phone();
     const auto mine = add_cw(rig, *first, 1);
     const auto theirs = add_cw(rig, *second, 1);
     REQUIRE(mine != theirs);
+    auto engine = rig.engine_client();
 
+    // One user: a session leaving removes nothing while the lease is held.
     first.reset();
-    const bool only = rig.wait([&] { return engine_ids(*engine) == std::vector{theirs}; }, 10s);
-    INFO("engine has " << engine_ids(*engine).size() << " receivers");
-    CHECK(only);
+    rig.pause(1500ms);
+    auto ids = engine_ids(*engine);
+    std::ranges::sort(ids);
+    CHECK(ids == std::vector{std::min(mine, theirs), std::max(mine, theirs)});
 
-    // And the second phone still drives its own.
-    second->command(2, "audio", R"({"vrx":)" + std::to_string(theirs) + "}");
+    // And the second phone drives the receiver the first one opened.
+    second->command(2, "audio", R"({"vrx":)" + std::to_string(mine) + "}");
     CHECK(rig.wait([&] { return second->opus >= 10; }, 10s));
-    CHECK(engine_ids(*engine) == std::vector{theirs});
+    CHECK(contains(second->reply(2), R"("ok":true)"));
 }
 
 TEST_CASE("engine restart recreates the phone's receivers", "[webgate][twoprocess]")

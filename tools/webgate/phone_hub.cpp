@@ -70,7 +70,47 @@ constexpr auto kProbeInterval = std::chrono::seconds(1);
     return out + "]";
 }
 
+[[nodiscard]] std::string lease_held_event(const std::string& holder)
+{
+    return event("lease", JsonObject().add_string("state", "held").add_string("holder", holder));
+}
+
+[[nodiscard]] std::string lease_lost_event(const std::string& holder)
+{
+    return event("lease", JsonObject().add_string("state", "lost").add_string("holder", holder));
+}
+
+[[nodiscard]] std::string taken_over_sentence(const std::string& holder)
+{
+    return "Taken over by " + holder;
+}
+
 }  // namespace
+
+std::string phone_holder(std::string_view peer)
+{
+    return "phone " + std::string(peer.empty() ? "at an unknown address" : peer) + " via webgate";
+}
+
+std::optional<LeaseRefusal> parse_lease_refusal(std::string_view message)
+{
+    // The client may put its own words in front of the engine's.
+    constexpr std::string_view kMark = "in use: ";
+    constexpr std::string_view kSince = " since ";
+    const auto at = message.find(kMark);
+    if (at == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const std::string_view rest = message.substr(at + kMark.size());
+    // rfind, because a holder's own text may contain " since ".
+    const auto since = rest.rfind(kSince);
+    if (since == std::string_view::npos) {
+        return std::nullopt;
+    }
+    return LeaseRefusal{std::string(rest.substr(0, since)),
+                        std::string(rest.substr(since + kSince.size())),
+                        std::string(message.substr(at))};
+}
 
 std::string link_event(LinkState state, const std::string& detail)
 {
@@ -89,6 +129,7 @@ PhoneHub::PhoneHub(Strand& strand, StreamsConfig base, HubTiming timing, NewSess
 
 PhoneHub::~PhoneHub()
 {
+    *alive_ = false;
     clear();
 }
 
@@ -116,32 +157,194 @@ bool PhoneHub::make_room()
     return true;
 }
 
-std::uint64_t PhoneHub::connect(PhoneSocket& socket, std::unique_ptr<rpc::Client> client)
+PhoneHub::Resident& PhoneHub::seat(std::uint64_t id, std::unique_ptr<rpc::Client> client,
+                                   std::string holder)
 {
     static_cast<void>(make_room());
     auto resident = std::make_unique<Resident>();
     resident->token = new_token();
+    resident->holder = std::move(holder);
     resident->session = std::make_unique<PhoneSession>(std::move(client));
+    auto& connection = connections_.at(id);
     resident->streams =
-        std::make_unique<PhoneStreams>(*resident->session, &socket, strand_, base_);
-
-    const auto id = next_connection_++;
+        std::make_unique<PhoneStreams>(*resident->session, connection.socket, strand_, base_);
     resident->connection = id;
-    Resident* raw = resident.get();
+    Resident& raw = *resident;
     residents_.emplace(resident->token, std::move(resident));
-    const auto t = now();
-    connections_[id] = Connection{&socket, raw, false, t, t};
+    watch_lease(raw);
 
-    raw->streams->send_event(event("hello", JsonObject().add_string("resume", raw->token)));
-    raw->streams->start();
-    raw->streams->send_event(link_event(link_state_, link_detail_));
+    // Anything the connection was still sending of its own goes first.
+    for (auto& text : connection.outbox) {
+        raw.streams->send_event(std::move(text));
+    }
+    connection.outbox.clear();
+    connection.resident = &raw;
+    connection.refusal.clear();
+    raw.streams->send_event(lease_held_event(raw.holder));
+    raw.streams->send_event(event("hello", JsonObject().add_string("resume", raw.token)));
+    raw.streams->start();
+    raw.streams->send_event(link_event(link_state_, link_detail_));
+    return raw;
+}
+
+std::uint64_t PhoneHub::connect(PhoneSocket& socket, std::unique_ptr<rpc::Client> client,
+                                std::string holder)
+{
+    const auto id = next_connection_++;
+    const auto t = now();
+    Connection connection;
+    connection.socket = &socket;
+    connection.last_heard = t;
+    connection.last_ping = t;
+    connection.holder = holder;
+    connections_[id] = std::move(connection);
+    seat(id, std::move(client), std::move(holder));
     return id;
+}
+
+std::uint64_t PhoneHub::connect_refused(PhoneSocket& socket, std::string holder,
+                                        const std::string& refusal)
+{
+    const auto id = next_connection_++;
+    const auto t = now();
+    Connection connection;
+    connection.socket = &socket;
+    connection.last_heard = t;
+    connection.last_ping = t;
+    connection.holder = std::move(holder);
+    const auto parsed = parse_lease_refusal(refusal);
+    connection.refusal = parsed ? parsed->message : refusal;
+    connections_[id] = std::move(connection);
+
+    JsonObject fields;
+    fields.add_string("state", "inUse");
+    fields.add_string("holder", parsed ? parsed->holder : std::string());
+    fields.add_string("since", parsed ? parsed->since : std::string());
+    fields.add_string("message", parsed ? parsed->message : refusal);
+    send_bare(id, event("lease", fields));
+    send_bare(id, link_event(link_state_, link_detail_));
+    return id;
+}
+
+Expected<std::uint64_t> PhoneHub::admit(PhoneSocket& socket, const std::string& holder)
+{
+    if (!new_session_) {
+        Error none;
+        none.message = "this gateway has no engine connection to give";
+        return std::unexpected(none);
+    }
+    auto client = new_session_(rpc::LoginMode::Claim, holder);
+    if (client) {
+        return connect(socket, std::move(*client), holder);
+    }
+    if (parse_lease_refusal(client.error().message)) {
+        return connect_refused(socket, holder, client.error().message);
+    }
+    return std::unexpected(client.error());
+}
+
+void PhoneHub::send_bare(std::uint64_t id, std::string json)
+{
+    const auto it = connections_.find(id);
+    if (it == connections_.end()) {
+        return;
+    }
+    if (it->second.resident != nullptr) {
+        it->second.resident->streams->send_event(std::move(json));
+        return;
+    }
+    it->second.outbox.push_back(std::move(json));
+    flush(id);
+}
+
+void PhoneHub::flush(std::uint64_t id)
+{
+    const auto it = connections_.find(id);
+    if (it == connections_.end() || it->second.resident != nullptr || it->second.outbox.empty()) {
+        return;
+    }
+    auto& connection = it->second;
+    // One send at a time, as kj requires; the next goes when this one is done.
+    // By id, because the connection may be gone or seated by then.
+    if (connection.socket->busy()) {
+        connection.socket->when_idle([this, id] { flush(id); });
+        return;
+    }
+    OutgoingMessage message;
+    message.kind = OutgoingMessage::Kind::Text;
+    message.text = std::move(connection.outbox.front());
+    connection.outbox.pop_front();
+    connection.socket->send(std::move(message), [this, id] { flush(id); });
+}
+
+void PhoneHub::watch_lease(Resident& resident)
+{
+    // Arrives on the client's own thread, so it only posts. The session's
+    // address names which resident it was: a rebuilt session is a new
+    // client with its own callback, and the old one's late notice must not
+    // take the new one down.
+    const PhoneSession* session = resident.session.get();
+    std::weak_ptr<bool> alive = alive_;
+    std::string token = resident.token;
+    resident.session->client().on_lease_lost(
+        [this, alive, session, token](const std::string& new_holder) {
+            strand_.post([this, alive, session, token, new_holder] {
+                const auto live = alive.lock();
+                if (!live || !*live) {
+                    return;
+                }
+                const auto it = residents_.find(token);
+                if (it == residents_.end() || it->second->session.get() != session) {
+                    return;
+                }
+                lose(token, new_holder);
+            });
+        });
+}
+
+void PhoneHub::lose(const std::string& token, const std::string& holder)
+{
+    const auto it = residents_.find(token);
+    if (it == residents_.end()) {
+        return;
+    }
+    Resident& resident = *it->second;
+    if (resident.connection) {
+        const auto id = *resident.connection;
+        if (const auto c = connections_.find(id); c != connections_.end()) {
+            // Whatever the streams had not sent yet still goes, ahead of the
+            // news, so nothing the phone was told arrives after it.
+            auto pending = resident.streams->take_texts();
+            resident.streams->detach();
+            auto& connection = c->second;
+            connection.resident = nullptr;
+            connection.holder = resident.holder;
+            connection.refusal = taken_over_sentence(holder);
+            for (auto& text : pending) {
+                connection.outbox.push_back(std::move(text));
+            }
+            connection.outbox.push_back(lease_lost_event(holder));
+            flush(id);
+        }
+    }
+    std::fprintf(stderr, "revenant-webgate: %s lost the engine to %s\n", resident.holder.c_str(),
+                 holder.c_str());
+    residents_.erase(it);
+}
+
+void PhoneHub::settle_losses()
+{
+    auto losses = std::move(pending_losses_);
+    pending_losses_.clear();
+    for (const auto& [token, holder] : losses) {
+        lose(token, holder);
+    }
 }
 
 void PhoneHub::text(std::uint64_t id, std::string_view text)
 {
     const auto it = connections_.find(id);
-    if (it == connections_.end() || it->second.resident == nullptr) {
+    if (it == connections_.end()) {
         return;
     }
     auto& connection = it->second;
@@ -155,14 +358,48 @@ void PhoneHub::text(std::uint64_t id, std::string_view text)
 
     if (command && command->op == "resume") {
         if (!first) {
-            connection.resident->streams->send_event(
-                error_reply(command->id, "resume: only as the first command on a connection"));
+            send_bare(id, error_reply(command->id, "resume: only as the first command on a connection"));
             return;
         }
         resume(id, connection, *command);
         return;
     }
+    if (command && command->op == "takeOver") {
+        take_over(id, connection, *command);
+        return;
+    }
+    if (connection.resident == nullptr) {
+        // Refused or taken over: nothing to run a command on, and the reason
+        // is the engine's.
+        if (command) {
+            send_bare(id, error_reply(command->id, connection.refusal));
+        } else if (const auto peeked = peek_id(text)) {
+            send_bare(id, error_reply(*peeked, command.error().message));
+        }
+        return;
+    }
     connection.resident->streams->on_text(text);
+}
+
+void PhoneHub::take_over(std::uint64_t id, Connection& connection, const Command& command)
+{
+    if (connection.resident != nullptr) {
+        // Already this phone's; nothing to take.
+        send_bare(id, ok_reply(command.id, JsonObject().add_bool("held", true).str()));
+        return;
+    }
+    if (!new_session_) {
+        send_bare(id, error_reply(command.id, "takeOver: this gateway has no engine connection to give"));
+        return;
+    }
+    auto client = new_session_(rpc::LoginMode::TakeOver, connection.holder);
+    if (!client) {
+        send_bare(id, error_reply(command.id, client.error().message));
+        return;
+    }
+    std::fprintf(stderr, "revenant-webgate: %s took the engine over\n", connection.holder.c_str());
+    Resident& resident = seat(id, std::move(*client), connection.holder);
+    resident.streams->send_event(ok_reply(command.id, JsonObject().add_bool("held", true).str()));
 }
 
 void PhoneHub::resume(std::uint64_t id, Connection& connection, const Command& command)
@@ -170,15 +407,15 @@ void PhoneHub::resume(std::uint64_t id, Connection& connection, const Command& c
     Resident* fresh = connection.resident;
     const auto token = command.get_string("token");
     if (!token) {
-        fresh->streams->send_event(error_reply(command.id, token.error().message));
+        send_bare(id, error_reply(command.id, token.error().message));
         return;
     }
     Resident* old = find_token(*token);
     if (old == nullptr || old == fresh) {
         // Expired or never issued. The phone keeps the fresh session it was
-        // greeted with and rebuilds from there.
-        fresh->streams->send_event(error_reply(
-            command.id, "resume: no session with that token; this is a new session"));
+        // greeted with, or the refusal it was given, and rebuilds from there.
+        send_bare(id, error_reply(command.id,
+                                  "resume: no session with that token; this is a new session"));
         return;
     }
     if (old->connection) {
@@ -193,11 +430,23 @@ void PhoneHub::resume(std::uint64_t id, Connection& connection, const Command& c
         disconnect(previous);
     }
 
-    residents_.erase(fresh->token);  // nothing of the fresh one is wanted
+    if (fresh != nullptr) {
+        residents_.erase(fresh->token);  // nothing of the fresh one is wanted
+    }
     connection.resident = old;
+    connection.refusal.clear();
     old->connection = id;
     old->last_hls.reset();
     old->streams->attach(*connection.socket);
+    for (auto& text : connection.outbox) {
+        old->streams->send_event(std::move(text));
+    }
+    connection.outbox.clear();
+    // A connection that was refused told the phone the engine was in use;
+    // the token says this phone holds it after all.
+    if (fresh == nullptr) {
+        old->streams->send_event(lease_held_event(old->holder));
+    }
     old->streams->send_event(
         ok_reply(command.id, JsonObject().add_bool("resumed", true).str()));
     old->streams->send_event(link_event(link_state_, link_detail_));
@@ -252,14 +501,19 @@ void PhoneHub::tick()
     const auto t = now();
 
     std::vector<std::uint64_t> silent;
+    std::vector<std::uint64_t> pinged;
     for (auto& [id, connection] : connections_) {
         if (t - connection.last_heard > timing_.silence_limit) {
             silent.push_back(id);
-        } else if (t - connection.last_ping >= timing_.ping_interval &&
-                   connection.resident != nullptr) {
+        } else if (t - connection.last_ping >= timing_.ping_interval) {
             connection.last_ping = t;
-            connection.resident->streams->send_event(event("ping"));
+            pinged.push_back(id);
         }
+    }
+    // Outside the walk: a bare connection's send may complete at once and
+    // look the connection up again.
+    for (const auto id : pinged) {
+        send_bare(id, event("ping"));
     }
     for (const auto id : silent) {
         connections_.at(id).socket->close();
@@ -275,7 +529,7 @@ void PhoneHub::tick()
         // Keep listening extends the base linger while HLS is being fetched;
         // it never shortens it. A session with nothing to keep goes sooner.
         const bool empty = !resident->session->keep_listening() &&
-                           resident->session->owned_ids().empty();
+                           resident->session->receiver_ids().empty();
         bool expire = t - resident->detached_at >
                       (empty ? timing_.empty_linger : timing_.detached_linger);
         if (expire && resident->session->keep_listening()) {
@@ -308,6 +562,7 @@ void PhoneHub::recover_dead_sessions(std::chrono::steady_clock::time_point t)
         fields.add_string("state", state_name(link_state_)).add_string("detail", link_detail_);
         static_cast<void>(recreate(*resident, fields));
     }
+    settle_losses();
 }
 
 void PhoneHub::link_state(LinkState state, std::string detail)
@@ -324,6 +579,7 @@ void PhoneHub::link_state(LinkState state, std::string detail)
         }
         resident->last_probe = now();
     }
+    settle_losses();
 }
 
 bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
@@ -336,8 +592,15 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
         return false;
     }
 
-    auto client = new_session_();
+    // The same holder, so the rebuilt session takes the lease back for the
+    // phone that had it. A claim refused here means someone else took the
+    // engine while it was down, and the phone hears that it lost it.
+    auto client = new_session_(rpc::LoginMode::Claim, resident.holder);
     if (!client) {
+        if (const auto refusal = parse_lease_refusal(client.error().message)) {
+            pending_losses_.emplace_back(resident.token, refusal->holder);
+            return false;
+        }
         // Nothing to rebuild on yet. The session keeps its receivers' params
         // and tick() tries again a second later; the phone hears about its
         // receivers when they are back.
@@ -365,10 +628,20 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
     std::vector<std::string> recreated;
     std::vector<std::string> lost;
     std::vector<std::pair<std::uint64_t, std::string>> removed;
-    for (const auto old_id : old_session.owned_ids()) {
+    for (const auto old_id : old_session.receiver_ids()) {
+        if (!old_session.recreatable(old_id)) {
+            // Opened by another session, a plugin or the engine: whatever
+            // opened it opens it again on the new engine, and a second copy
+            // would be a duplicate.
+            const std::string reason =
+                "the engine restarted, and this receiver was opened elsewhere";
+            lost.push_back(lost_entry(old_id, reason));
+            removed.emplace_back(old_id, reason);
+            continue;
+        }
         const auto* last = old_session.last_params(old_id);
         if (last == nullptr) {
-            // owned_ids and last_params read the same map, so this cannot
+            // receiver_ids and last_params read the same map, so this cannot
             // happen; if it ever does, the phone hears it was lost rather
             // than the gateway dereferencing nothing.
             const std::string reason = "the gateway kept no parameters for this receiver";
@@ -395,7 +668,7 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
             removed.emplace_back(old_id, added.error().message);
             continue;
         }
-        fresh->adopt(*added, params);
+        fresh->learn(*added, params);
         fresh->set_transcribe_choice(*added, choice);
         if (const auto* chosen = old_session.decoder_choice(old_id)) {
             fresh->set_decoders(*added, *chosen);
@@ -426,6 +699,7 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
     resident.streams.reset();
     resident.session = std::move(fresh);
     resident.streams = std::move(streams);
+    watch_lease(resident);
     if (resident.connection) {
         if (const auto it = connections_.find(*resident.connection); it != connections_.end()) {
             resident.streams->attach(*it->second.socket);

@@ -1,6 +1,7 @@
 #include "tools/webgate/http.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <format>
@@ -95,6 +96,43 @@ kj::Promise<void> respond(kj::HttpService::Response& response, const kj::HttpHea
     return std::string(host);
 }
 
+// The client's address as text, read off the stream's sockaddr by hand rather
+// than through inet_ntop: the socket headers bring windows.h, whose DELETE
+// macro breaks kj's HttpMethod in this file. Family numbers are Windows' and
+// Linux's (AF_INET 2, AF_INET6 23 or 10); the address sits at offset 4 in a
+// sockaddr_in and 8 in a sockaddr_in6 on both. Empty when the stream cannot
+// say, which a test's in-memory stream cannot.
+[[nodiscard]] std::string peer_address(kj::AsyncIoStream& stream)
+{
+    alignas(8) std::array<unsigned char, 128> raw{};
+    auto length = static_cast<kj::uint>(raw.size());
+    try {
+        stream.getpeername(reinterpret_cast<struct sockaddr*>(raw.data()), &length);
+    } catch (const kj::Exception&) {
+        return {};
+    }
+    const unsigned family = static_cast<unsigned>(raw[0]) | (static_cast<unsigned>(raw[1]) << 8U);
+    if (family == 2 && length >= 8) {
+        return std::format("{}.{}.{}.{}", raw[4], raw[5], raw[6], raw[7]);
+    }
+    if ((family == 23 || family == 10) && length >= 24) {
+        const unsigned char* a = raw.data() + 8;
+        // An IPv4 client on a dual-stack socket arrives as ::ffff:a.b.c.d.
+        const bool mapped = std::all_of(a, a + 10, [](unsigned char b) { return b == 0; }) &&
+                            a[10] == 0xFF && a[11] == 0xFF;
+        if (mapped) {
+            return std::format("{}.{}.{}.{}", a[12], a[13], a[14], a[15]);
+        }
+        std::string out;
+        for (int i = 0; i < 16; i += 2) {
+            const unsigned group = (static_cast<unsigned>(a[i]) << 8U) | a[i + 1];
+            out += std::format("{}{:x}", i == 0 ? "" : ":", group);
+        }
+        return out;
+    }
+    return {};
+}
+
 }  // namespace
 
 struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
@@ -106,9 +144,11 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
     void taskFailed(kj::Exception&&) override {}
 
     // Serves https.
+    // One per connection, so a WebSocket knows which address it came from.
     class SecureService final : public kj::HttpService {
     public:
-        explicit SecureService(Impl& impl_ref) : impl(impl_ref) {}
+        SecureService(Impl& impl_ref, std::string peer_text)
+            : impl(impl_ref), peer(std::move(peer_text)) {}
 
         kj::Promise<void> request(kj::HttpMethod method, kj::StringPtr url,
                                   const kj::HttpHeaders& headers,
@@ -128,7 +168,7 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
                                    "origin not allowed\n");
                 }
                 kj::HttpHeaders out(impl.table);
-                return impl.owner.on_websocket(response.acceptWebSocket(out));
+                return impl.owner.on_websocket(response.acceptWebSocket(out), peer);
             }
             if (method != kj::HttpMethod::GET && method != kj::HttpMethod::HEAD) {
                 return respond(response, impl.table, 405, "text/plain; charset=utf-8",
@@ -215,6 +255,7 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
         }
 
         Impl& impl;
+        std::string peer;
     };
 
     // Serves plain http.
@@ -339,7 +380,6 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
     kj::Own<kj::TlsContext> tls;
     kj::Own<kj::ConnectionReceiver> secure_receiver;
     kj::Own<kj::ConnectionReceiver> plain_receiver;
-    SecureService secure_service{*this};
     PlainService plain_service{*this};
     kj::Own<kj::HttpServer> secure_server;
     kj::Own<kj::HttpServer> plain_server;
@@ -396,8 +436,12 @@ Status HttpServer::listen() {
 
     kj::HttpServerSettings settings;
     settings.webSocketCompressionMode = kj::HttpServerSettings::NO_COMPRESSION;
-    s.secure_server = kj::heap<kj::HttpServer>(s.io.provider->getTimer(), s.table,
-                                               s.secure_service, settings);
+    s.secure_server = kj::heap<kj::HttpServer>(
+        s.io.provider->getTimer(), s.table,
+        [&s](kj::AsyncIoStream& stream) -> kj::Own<kj::HttpService> {
+            return kj::heap<Impl::SecureService>(s, peer_address(stream));
+        },
+        settings);
     s.plain_server = kj::heap<kj::HttpServer>(s.io.provider->getTimer(), s.table,
                                               s.plain_service, kj::HttpServerSettings{});
     s.origin_hosts = certificate_sans(s.config.certs.server_crt());

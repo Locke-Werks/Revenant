@@ -16,6 +16,7 @@ add_executable(test_webgate
     test_decoders.cpp
     ../reference/gpu_fixture.cpp
     test_engine_link.cpp
+    test_lease.cpp
 )
 
 target_link_libraries(test_webgate PRIVATE

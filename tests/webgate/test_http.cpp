@@ -227,7 +227,7 @@ TEST_CASE("the ws endpoint refuses a foreign Origin", "[webgate][http]") {
     Fixture fixture;
     kj::AsyncIoContext io = kj::setupAsyncIo();
     HttpServer server(io, fixture.config());
-    server.on_websocket = [](kj::Own<kj::WebSocket> ws) {
+    server.on_websocket = [](kj::Own<kj::WebSocket> ws, std::string) {
         // Stay open until the client goes away, or the reply races the close.
         auto* raw = ws.get();
         return raw->send(kj::StringPtr("hello"))

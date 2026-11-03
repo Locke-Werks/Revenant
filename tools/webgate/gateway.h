@@ -65,8 +65,9 @@ public:
     Gateway& operator=(const Gateway&) = delete;
 
     // HttpServer::on_websocket. The socket lives until the promise settles;
-    // its session detaches then rather than dying (phone_hub.h).
-    [[nodiscard]] kj::Promise<void> accept(kj::Own<kj::WebSocket> socket);
+    // its session detaches then rather than dying (phone_hub.h). peer is the
+    // phone's address, which names it in the engine's lease.
+    [[nodiscard]] kj::Promise<void> accept(kj::Own<kj::WebSocket> socket, std::string peer);
 
     // EngineLink::on_state. Any thread.
     void on_link_state(LinkState state, std::string detail);

@@ -169,7 +169,7 @@ void Gateway::shutdown()
     }
 }
 
-kj::Promise<void> Gateway::accept(kj::Own<kj::WebSocket> socket)
+kj::Promise<void> Gateway::accept(kj::Own<kj::WebSocket> socket, std::string peer)
 {
     if (!hub_.make_room()) {
         // Every session is a phone that is connected right now; evicting one
@@ -180,9 +180,14 @@ kj::Promise<void> Gateway::accept(kj::Own<kj::WebSocket> socket)
             .catch_([](kj::Exception&&) {});
     }
     // Blocks the loop for one loopback connect. A phone's session is its own
-    // engine Session, so it cannot share the link's connection.
-    auto client = new_session_();
-    if (!client) {
+    // engine Session, claiming the lease as this phone, so it cannot share
+    // the link's observing connection. A claim the lease refuses still
+    // connects: the phone is shown who holds the engine and offered Take
+    // over (phone_hub.h).
+    const std::string holder = phone_holder(peer);
+    auto client = new_session_(rpc::LoginMode::Claim, holder);
+    const bool refused = !client && parse_lease_refusal(client.error().message).has_value();
+    if (!client && !refused) {
         auto text = kj::heap<std::string>(link_event(last_state_, client.error().message));
         auto sending = socket->send(kj::ArrayPtr<const char>(text->data(), text->size()));
         auto& ws = *socket;
@@ -193,7 +198,9 @@ kj::Promise<void> Gateway::accept(kj::Own<kj::WebSocket> socket)
     }
 
     auto connection = kj::heap<Connection>(*this, kj::mv(socket));
-    connection->id = hub_.connect(connection->adapter, std::move(*client));
+    connection->id = refused
+                         ? hub_.connect_refused(connection->adapter, holder, client.error().message)
+                         : hub_.connect(connection->adapter, std::move(*client), holder);
     auto& ref = *connection;
     return receive(ref).catch_([](kj::Exception&&) {}).attach(kj::mv(connection));
 }

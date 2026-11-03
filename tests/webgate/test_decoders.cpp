@@ -83,7 +83,8 @@ struct Rig {
         }
         hub = std::make_unique<PhoneHub>(
             strand, config, revenant::webgate::HubTiming{},
-            [this]() -> revenant::Expected<std::unique_ptr<rpc::Client>> {
+            [this](rpc::LoginMode, const std::string&)
+                -> revenant::Expected<std::unique_ptr<rpc::Client>> {
                 if (!harness) {
                     return std::unexpected(revenant::Error{
                         "nothing is listening", 0, revenant::ErrorCategory::Unreachable});
@@ -224,7 +225,8 @@ TEST_CASE("setDecoders replaces a receiver's set and refuses what its mode canno
     }
     CHECK(contains(rig.set(id, socket, vrx, R"(["p25p1"])"), "does not read a nfm receiver"));
     CHECK(contains(rig.set(id, socket, vrx, R"(["nonesuch"])"), "no decoder called"));
-    CHECK(contains(rig.set(id, socket, 999'999, "[]"), "not one of yours"));
+    // An id the engine never had: refused in the engine's words.
+    CHECK(contains(rig.set(id, socket, 999'999, "[]"), R"("ok":false)"));
     CHECK(contains(rig.send(id, socket, "setDecoders", R"({"vrx":)" + std::to_string(vrx) + "}"),
                    "names"));
 
@@ -300,10 +302,10 @@ TEST_CASE("an engine restart re-applies each receiver's decoders", "[gpu][webgat
     auto* streams = rig.hub->streams(id);
     REQUIRE(session != nullptr);
     REQUIRE(streams != nullptr);
-    REQUIRE(session->owned_ids().size() == 3);
+    REQUIRE(session->receiver_ids().size() == 3);
     auto& client = rig.harness->client();
     int seen = 0;
-    for (const auto vrx : session->owned_ids()) {
+    for (const auto vrx : session->receiver_ids()) {
         const auto status = client.vrx_status(vrx);
         REQUIRE(status.has_value());
         INFO(status->params.center);
@@ -608,8 +610,8 @@ TEST_CASE("a receiver recreated by an engine restart is set to RBDS again", "[gp
     tick(rig, std::chrono::seconds(1));
     auto* session = rig.hub->session(id);
     REQUIRE(session != nullptr);
-    REQUIRE(session->owned_ids().size() == 1);
+    REQUIRE(session->receiver_ids().size() == 1);
     REQUIRE(fake.regions.size() == 2);
-    CHECK(fake.regions[1].first == session->owned_ids().front());
+    CHECK(fake.regions[1].first == session->receiver_ids().front());
     CHECK(fake.regions[1].second == rpc::RdsRegion::Rbds);
 }

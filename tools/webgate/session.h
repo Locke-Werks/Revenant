@@ -1,10 +1,16 @@
 // One connected phone, as far as the engine is concerned.
 //
 // A PhoneSession owns the phone's own rpc::Client, which is its own engine
-// Session, and remembers what the phone asked for so the socket layer (Task
-// 10) can act on it. The engine's vrx_ids() lists every session's receivers,
-// so independence between phones is by ownership: this object tracks the ids
-// it created itself and its destructor removes those and no others.
+// Session, and remembers what the phone asked for so the socket layer can act
+// on it.
+//
+// SINGLE USER. The engine serves one user at a time (docs/superpowers/specs/
+// 2026-11-03-single-user-engine-design.md), so every receiver the engine has
+// is this phone's to see and control, whoever opened it: another session, an
+// engine plugin, the trunk follower. The session's receiver set is the
+// engine's whole list as the receiver events last reported it, plus what the
+// phone itself just added. Nothing is removed when a session ends; the engine
+// decides receiver lifetime by the lease.
 //
 // THREADS. Not synchronised, and does not need to be: every access is on one
 // strand, which in the gateway is the kj event loop thread.
@@ -41,11 +47,7 @@ namespace revenant::webgate {
 class PhoneSession {
 public:
     explicit PhoneSession(std::unique_ptr<rpc::Client> client);
-
-    // Removes the receivers this session created, ignoring failures: the
-    // engine may already have dropped them (a retune, or the link going down),
-    // and a destructor has nowhere to report to.
-    ~PhoneSession();
+    ~PhoneSession() = default;
 
     PhoneSession(const PhoneSession&) = delete;
     PhoneSession& operator=(const PhoneSession&) = delete;
@@ -65,15 +67,25 @@ public:
     [[nodiscard]] Status remove_receiver(std::uint64_t vrx);
     [[nodiscard]] Expected<rpc::VrxStatus> receiver_status(std::uint64_t vrx);
 
-    // ---- Receivers this phone created ----
-    [[nodiscard]] bool owns(std::uint64_t vrx) const { return owned_.contains(vrx); }
-    [[nodiscard]] std::vector<std::uint64_t> owned_ids() const;
+    // ---- Every receiver the engine has ----
+    // THE set of receivers the phone works on: streams, audio, HLS, decoders
+    // and RDS all iterate this and nothing narrower. Restart recreation walks
+    // it too and rebuilds the recreatable ones.
+    [[nodiscard]] std::vector<std::uint64_t> receiver_ids() const;
+    [[nodiscard]] bool has_receiver(std::uint64_t vrx) const { return receivers_.contains(vrx); }
 
-    // The params last sent for a receiver, kept so a receiver the engine
-    // dropped can be recreated. Null when the id is not owned.
+    // The params last seen for a receiver, kept so one the engine dropped can
+    // be recreated. Null when the session has not heard of the id.
     [[nodiscard]] const rpc::VrxParams* last_params(std::uint64_t vrx) const;
 
-    void adopt(std::uint64_t vrx, const rpc::VrxParams& params);
+    // A receiver the engine reported, or one this session just added.
+    // opened_here is whether this session opened it. Provenance only, never
+    // a permission: it decides which receivers this session adds again after
+    // an engine restart, since another session rebuilds its own and a plugin
+    // reopens its own, and two copies of one receiver are no use to anyone.
+    void learn(std::uint64_t vrx, const rpc::VrxParams& params, bool opened_here = true);
+    // Whether the phone should add this receiver again after an engine restart.
+    [[nodiscard]] bool recreatable(std::uint64_t vrx) const;
     void remember(std::uint64_t vrx, const rpc::VrxParams& params);
     void forget(std::uint64_t vrx);
 
@@ -112,7 +124,11 @@ public:
 
 private:
     std::unique_ptr<rpc::Client> client_;
-    std::map<std::uint64_t, rpc::VrxParams> owned_;
+    struct Known {
+        rpc::VrxParams params;
+        bool opened_here = true;
+    };
+    std::map<std::uint64_t, Known> receivers_;
     std::map<std::uint64_t, rpc::TranscribeChoice> transcribe_;
     std::map<std::uint64_t, std::vector<std::string>> decoders_;
     std::optional<View> view_;

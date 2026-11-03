@@ -80,14 +80,16 @@ Expected<rpc::Token> EngineLink::resolve_token() const
     return rpc::load_token(*path);
 }
 
-Expected<std::unique_ptr<rpc::Client>> EngineLink::new_session()
+Expected<std::unique_ptr<rpc::Client>> EngineLink::new_session(rpc::LoginMode mode,
+                                                               std::string_view holder)
 {
     auto token = resolve_token();
     if (!token) {
         return std::unexpected(token.error());
     }
     return rpc::Client::connect(config_.address, config_.port,
-                                std::span<const std::uint8_t>(token->data(), token->size()));
+                                std::span<const std::uint8_t>(token->data(), token->size()),
+                                mode, holder);
 }
 
 void EngineLink::publish(LinkState state, std::string detail)
@@ -162,7 +164,9 @@ void EngineLink::supervise(const std::stop_token& stop)
             // place that finds out. The Client is destroyed before another is
             // made: its loop thread is joined by that destructor and nothing
             // else.
-            if (auto alive = client_->running(); !alive) {
+            // lease_status, not running: the link observes, and an observer
+            // may ask only info, listSources and leaseStatus.
+            if (auto alive = client_->lease_status(); !alive) {
                 std::unique_ptr<rpc::Client> gone;
                 lock.lock();
                 gone = std::move(client_);
@@ -172,7 +176,10 @@ void EngineLink::supervise(const std::stop_token& stop)
                 continue;
             }
         } else if (std::chrono::steady_clock::now() >= not_before) {
-            Expected<std::unique_ptr<rpc::Client>> connection = new_session();
+            // Observe, so an idle gateway holds no lease and the desktop can
+            // start while it runs. Phones claim on their own connections.
+            Expected<std::unique_ptr<rpc::Client>> connection =
+                new_session(rpc::LoginMode::Observe, kLinkHolder);
             if (connection) {
                 lock.lock();
                 client_ = std::move(*connection);
