@@ -954,11 +954,44 @@ test("a drag past the band's edge recentres the radio, holding tunes until it an
   const r = await edgeRig();
   r.ctl.preview(99_310_000);
   r.ctl.tuneDragged(99_310_000);
-  // 25% in from the top edge: centre 0.6 MHz below the receiver.
-  assert.deepEqual(r.link.last(), { op: "setCenter", args: { hz: 98_710_000 }, timeoutMs: undefined });
+  // 25% in from the trailing edge: centre 0.6 MHz above the receiver.
+  assert.deepEqual(r.link.last(), { op: "setCenter", args: { hz: 99_910_000 }, timeoutMs: undefined });
   r.ctl.tuneDragged(99_400_000);
   assert.equal(r.link.sent.length, 2);
-  r.link.reply({ grantedHz: 98_710_000, removed: [] });
+  r.link.reply({ grantedHz: 99_910_000, removed: [] });
+  await flush();
+  assert.deepEqual(r.link.last(), { op: "tune", args: { vrx: 1, hz: 99_400_000 }, timeoutMs: undefined });
+});
+
+test("after a recentre the next drag steps have room and move no radio", async () => {
+  const r = await edgeRig();
+  r.ctl.tuneDragged(99_310_000);
+  r.link.reply({ grantedHz: 99_910_000, removed: [] });
+  await flush();
+  r.link.reply(status(1, 99_310_000));
+  await flush();
+  r.ctl.tuneDragged(99_500_000);
+  r.ctl.tuneDragged(100_500_000);
+  assert.deepEqual(r.link.sent.map((s) => s.op), ["addVrx", "setCenter", "tune", "tune", "tune"]);
+});
+
+test("a drag whose receiver the recentre removed sends nothing more and ends cleanly", async () => {
+  const r = await edgeRig();
+  r.ctl.preview(99_310_000);
+  r.ctl.tuneDragged(99_310_000);
+  r.link.reply({ grantedHz: 99_910_000, removed: [1] });
+  r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 1, reason: "outside the new span" });
+  await flush();
+  r.ctl.tuneDragged(99_400_000);
+  r.ctl.endDrag();
+  assert.deepEqual(r.link.sent.map((s) => s.op), ["addVrx", "setCenter"]);
+});
+
+test("picking a signal outside the band recentres before tuning", async () => {
+  const r = await edgeRig();
+  r.ctl.tuneFit(99_400_000, 12_500);
+  assert.equal(r.link.last().op, "setCenter");
+  r.link.reply({ grantedHz: 100_000_000, removed: [] });
   await flush();
   assert.deepEqual(r.link.last(), { op: "tune", args: { vrx: 1, hz: 99_400_000 }, timeoutMs: undefined });
 });

@@ -13,7 +13,8 @@ export interface TuneRange {
 }
 
 // Where the receiver lands after a recentre, as a fraction of the span in
-// from the edge it was travelling towards.
+// from the edge it came from, so most of the span lies ahead of it and the
+// next recentre is far off.
 export const RECENTRE_FRACTION = 0.25;
 
 // The usable part of the band: the source's own edges, narrowed to where the
@@ -62,14 +63,14 @@ export function clampToRanges(hz: number, ranges: TuneRange[] | null): number {
   return best;
 }
 
-// The centre that puts hz RECENTRE_FRACTION of the span in from the edge it
-// was heading for. The span keeps its width and its offsets from the centre.
+// The centre that puts hz RECENTRE_FRACTION of the span in from the trailing
+// edge, leaving the rest ahead in the direction of travel. The span keeps its width and its offsets from the centre.
 export function recentreFor(span: Span, centerHz: number, hz: number, ranges: TuneRange[] | null): number {
   const width = span.highHz - span.lowHz;
   const mid = (span.lowHz + span.highHz) / 2;
   const up = hz >= mid;
   // Where the carrier sits relative to the usable span's middle afterwards.
-  const fromMid = (up ? 1 : -1) * (0.5 - RECENTRE_FRACTION) * width;
+  const fromMid = (up ? -1 : 1) * (0.5 - RECENTRE_FRACTION) * width;
   const newMid = hz - fromMid;
   return Math.round(clampToRanges(newMid + (centerHz - mid), ranges));
 }

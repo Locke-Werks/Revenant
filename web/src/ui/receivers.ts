@@ -463,6 +463,14 @@ export class ReceiverController {
     if (active === null || this.replacing.has(active)) return;
     void this.deps.audio.unlock();
     this.tuneSeq++;
+    const was = this.list.get(active)!;
+    this.placed(hz, was, (to, dropped) => {
+      if (dropped.includes(active) || !this.list.has(active)) return;
+      this.fitAt(active, to, bandwidthHz);
+    });
+  }
+
+  private fitAt(active: number, hz: number, bandwidthHz: number): void {
     this.call("tune", { vrx: active, hz: Math.round(hz) }).then((r) => {
       if (!r) return;
       this.nowPlaying(r);
