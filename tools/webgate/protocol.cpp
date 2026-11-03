@@ -193,6 +193,28 @@ Expected<bool> Command::get_bool(std::string_view key) const {
     return fail("argument " + std::string(key) + " must be true or false");
 }
 
+Expected<std::vector<std::string>> Command::get_string_list(std::string_view key) const {
+    auto v = arg(*this, key);
+    if (!v) return std::unexpected(v.error());
+    const auto bad = [&] {
+        return fail("argument " + std::string(key) + " must be an array of at most " +
+                    std::to_string(kMaxListItems) + " strings of at most " +
+                    std::to_string(kMaxListItemBytes) + " bytes");
+    };
+    if (v->which() != JsonValue::ARRAY) return bad();
+    const auto items = v->getArray();
+    if (items.size() > kMaxListItems) return bad();
+    std::vector<std::string> out;
+    out.reserve(items.size());
+    for (auto item : items) {
+        if (item.which() != JsonValue::STRING) return bad();
+        const auto s = view_of(item.getString());
+        if (s.size() > kMaxListItemBytes) return bad();
+        out.emplace_back(s);
+    }
+    return out;
+}
+
 Expected<Command> parse_command(std::string_view text) {
     if (text.size() > kMaxCommandBytes) {
         return fail("command too large: " + std::to_string(text.size()) + " bytes, limit " +

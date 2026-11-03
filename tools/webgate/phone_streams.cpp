@@ -33,8 +33,23 @@ constexpr auto kSourcePollInterval = std::chrono::seconds(1);
 // A busy band must not flood the socket, so the strongest are kept.
 constexpr std::size_t kMaxDetections = 200;
 
-// Analog and digital-family labels name a modulation. A protocol label names
-// what is carried on top of one, which the phone has no use for here.
+// Analog and digital-family labels name a modulation; a protocol label names
+// what rides on one, the more specific answer, so every kind goes out and
+// labelKind says which it is.
+[[nodiscard]] std::string_view label_kind_name(rpc::LabelKind kind)
+{
+    switch (kind) {
+    case rpc::LabelKind::AnalogModulation:
+    case rpc::LabelKind::DigitalFamily:
+        return "modulation";
+    case rpc::LabelKind::Protocol:
+        return "protocol";
+    case rpc::LabelKind::Unknown:
+        break;
+    }
+    return "";
+}
+
 [[nodiscard]] std::string detections_event(const std::vector<const rpc::Detection*>& items)
 {
     std::string array = "[";
@@ -50,10 +65,10 @@ constexpr std::size_t kMaxDetections = 200;
                      .add_double("snrDb", d->snr_2500_db)
                      .add_double("confidence", d->confidence)
                      .add_string("state", d->state == rpc::TrackState::Held ? "held" : "live")
-                     .add_string("label", d->label.kind == rpc::LabelKind::AnalogModulation ||
-                                                  d->label.kind == rpc::LabelKind::DigitalFamily
-                                              ? std::string_view(d->label.name)
-                                              : std::string_view())
+                     .add_string("label", d->label.kind == rpc::LabelKind::Unknown
+                                              ? std::string_view()
+                                              : std::string_view(d->label.name))
+                     .add_string("labelKind", label_kind_name(d->label.kind))
                      .add_double("labelConfidence", d->label.confidence)
                      .add_u64("lastSeen", d->last_seen)
                      .str();
@@ -188,8 +203,10 @@ PhoneStreams::~PhoneStreams()
     for (const auto vrx : audio_subscribed_) {
         client.unsubscribe_audio(vrx);
     }
-    for (const auto vrx : decoded_tried_) {
-        client.unsubscribe_decoded(vrx, "");
+    for (const auto& [vrx, names] : decoded_) {
+        for (const auto& name : names) {
+            client.unsubscribe_decoded(vrx, name);
+        }
     }
     client.unsubscribe_vrx_events();
     client.unsubscribe_transcripts();
@@ -931,26 +948,61 @@ void PhoneStreams::reconcile_audio()
 void PhoneStreams::reconcile_decoded()
 {
     auto& client = session_.client();
-    for (auto it = decoded_tried_.begin(); it != decoded_tried_.end();) {
-        if (!session_.owns(*it)) {
-            client.unsubscribe_decoded(*it, "");
-            it = decoded_tried_.erase(it);
+    for (auto it = decoded_.begin(); it != decoded_.end();) {
+        if (!session_.owns(it->first)) {
+            for (const auto& name : it->second) {
+                client.unsubscribe_decoded(it->first, name);
+            }
+            decoded_applied_.erase(it->first);
+            it = decoded_.erase(it);
         } else {
             ++it;
         }
     }
+    std::erase_if(decoded_applied_, [this](const auto& entry) { return !session_.owns(entry.first); });
 
-    auto inbox = inbox_;
     for (const auto vrx : session_.owned_ids()) {
-        if (decoded_tried_.contains(vrx)) {
+        auto wanted = session_.decoders(vrx);
+        if (const auto it = decoded_applied_.find(vrx); it != decoded_applied_.end() && it->second == wanted) {
             continue;
         }
-        decoded_tried_.insert(vrx);
-        // An empty decoder name asks for the one named after the receiver's
-        // mode. Analog modes have none and are refused, which is the answer:
-        // nothing to decode.
-        const auto subscribed = client.subscribe_decoded(
-            vrx, "",
+        auto& running = decoded_[vrx];
+        for (auto it = running.begin(); it != running.end();) {
+            if (std::ranges::find(wanted, *it) == wanted.end()) {
+                client.unsubscribe_decoded(vrx, *it);
+                it = running.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (const auto& name : wanted) {
+            if (running.contains(name)) {
+                continue;
+            }
+            if (const auto granted = subscribe_decoder(vrx, name)) {
+                running.insert(name);
+            } else {
+                queue_text(event("vrxStatus", JsonObject()
+                                                  .add_u64("vrx", vrx)
+                                                  .add_string("decoder", name)
+                                                  .add_string("decoderError", granted.error().message)));
+            }
+        }
+        decoded_applied_[vrx] = std::move(wanted);
+    }
+}
+
+std::set<std::string> PhoneStreams::decoding(std::uint64_t vrx) const
+{
+    const auto it = decoded_.find(vrx);
+    return it == decoded_.end() ? std::set<std::string>{} : it->second;
+}
+
+Status PhoneStreams::subscribe_decoder(std::uint64_t vrx, const std::string& name)
+{
+    auto inbox = inbox_;
+    const auto subscribed = session_.client().subscribe_decoded(
+            vrx, name,
             [inbox](const rpc::DecodedMessage& m) {
                 put_item(inbox, [m](PhoneStreams& self) {
                     self.queue_text(event("decoded", JsonObject()
@@ -962,9 +1014,24 @@ void PhoneStreams::reconcile_decoded()
                                                          .add_raw("fields", fields_json(m.fields))));
                 });
             },
-            {});
-        static_cast<void>(subscribed);
+            [inbox, vrx, name](const std::string& reason) {
+                // The decoder stopped on its own (it refused the rate it was
+                // fed, say). It is left out of the running set so the phone's
+                // next change of set can try it again, and the phone is told.
+                put_item(inbox, [vrx, name, reason](PhoneStreams& self) {
+                    if (const auto it = self.decoded_.find(vrx); it != self.decoded_.end()) {
+                        it->second.erase(name);
+                    }
+                    self.queue_text(event("vrxStatus", JsonObject()
+                                                           .add_u64("vrx", vrx)
+                                                           .add_string("decoder", name)
+                                                           .add_string("decoderError", reason)));
+                });
+            });
+    if (!subscribed) {
+        return std::unexpected(subscribed.error());
     }
+    return {};
 }
 
 void PhoneStreams::handle_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk)

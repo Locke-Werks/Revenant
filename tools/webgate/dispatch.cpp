@@ -117,7 +117,18 @@ constexpr ModeName kModes[] = {
     return info->source_center;
 }
 
-[[nodiscard]] std::string vrx_json(const rpc::VrxStatus& status, std::int64_t center)
+[[nodiscard]] std::string string_array(const std::vector<std::string>& items)
+{
+    std::vector<std::string> quoted;
+    quoted.reserve(items.size());
+    for (const auto& item : items) {
+        quoted.push_back(json_string(item));
+    }
+    return join(quoted);
+}
+
+[[nodiscard]] std::string vrx_json(const rpc::VrxStatus& status, std::int64_t center,
+                                   const std::vector<std::string>& decoders)
 {
     JsonObject out;
     out.add_u64("vrx", status.id)
@@ -129,7 +140,8 @@ constexpr ModeName kModes[] = {
         .add_i64("grantedHighHz", status.placement.granted_high)
         .add_bool("clamped", status.placement.bandwidth_clamped)
         .add_string("transcribe", choice_name(status.transcribe))
-        .add_bool("transcribing", status.transcribing);
+        .add_bool("transcribing", status.transcribing)
+        .add_raw("decoders", string_array(decoders));
     if (!status.placement.clamp_reason.empty()) {
         out.add_string("clampReason", status.placement.clamp_reason);
     }
@@ -224,13 +236,13 @@ constexpr ModeName kModes[] = {
                                          rpc::TranscribeChoice transcribe, std::int64_t center)
 {
     if (const auto status = session.receiver_status(id)) {
-        return vrx_json(*status, center);
+        return vrx_json(*status, center, session.decoders(id));
     }
     rpc::VrxStatus guess;
     guess.id = id;
     guess.params = sent;
     guess.transcribe = transcribe;
-    std::string body = vrx_json(guess, center);
+    std::string body = vrx_json(guess, center, session.decoders(id));
     body.pop_back();
     body += ",\"statusUnavailable\":true}";
     return body;
@@ -284,7 +296,7 @@ template <class Change>
     if (!after) {
         return std::unexpected(after.error());
     }
-    return vrx_json(*after, *center);
+    return vrx_json(*after, *center, session.decoders(*vrx));
 }
 
 // ---- Operations ------------------------------------------------------------
@@ -382,7 +394,7 @@ template <class Edit>
     if (params.demod == before->params.demod && params.bandwidth == before->params.bandwidth &&
         params.passband_low == before->params.passband_low &&
         params.passband_high == before->params.passband_high) {
-        return vrx_json(*before, *center);
+        return vrx_json(*before, *center, session.decoders(*old_id));
     }
 
     const auto new_id = session.client().add_vrx(params);
@@ -412,7 +424,18 @@ template <class Edit>
         return roll_back(removed.error());
     }
     const bool had_audio = session.audio_vrx() == *old_id;
+    // A decoder reads one mode's output, so a choice only survives a new
+    // width; a new mode starts from that mode's default.
+    std::optional<std::vector<std::string>> kept_decoders;
+    if (params.demod == before->params.demod) {
+        if (const auto* chosen = session.decoder_choice(*old_id)) {
+            kept_decoders = *chosen;
+        }
+    }
     session.forget(*old_id);
+    if (kept_decoders) {
+        session.set_decoders(*new_id, std::move(*kept_decoders));
+    }
     if (had_audio) {
         session.set_audio_vrx(*new_id);
     }
@@ -700,12 +723,109 @@ template <class Edit>
     if (!status) {
         return std::unexpected(status.error());
     }
-    return vrx_json(*status, *center);
+    return vrx_json(*status, *center, session.decoders(*vrx));
+}
+
+[[nodiscard]] Result op_list_decoders(PhoneSession& session, const Command&)
+{
+    const auto decoders = session.client().decoders();
+    if (!decoders) {
+        return std::unexpected(decoders.error());
+    }
+    std::vector<std::string> items;
+    items.reserve(decoders->size());
+    for (const auto& d : *decoders) {
+        items.push_back(JsonObject()
+                            .add_string("name", d.name)
+                            .add_string("description", d.description)
+                            .add_string("input", d.input == rpc::DecoderInput::ComplexBaseband
+                                                     ? "complexBaseband"
+                                                     : "realAudio")
+                            .add_raw("modes", string_array(d.modes))
+                            .str());
+    }
+    JsonObject out;
+    out.add_raw("decoders", join(items));
+    // Which digital voice modes will actually play. P25 has its vocoder built
+    // in; D-STAR and DMR need a plugin, and with none the engine plays silence
+    // without saying why, so the phone has to be told here. An engine that
+    // does not report plugins gets null: unknown, which is not "none".
+    if (const auto plugins = session.client().vocoder_plugins()) {
+        std::vector<std::string> voice{"p25p1"};
+        for (const auto& file : plugins->files) {
+            if (!file.loaded) {
+                continue;
+            }
+            for (const auto& offer : file.offers) {
+                for (const auto& mode : offer.modes) {
+                    if (std::ranges::find(voice, mode) == voice.end()) {
+                        voice.push_back(mode);
+                    }
+                }
+            }
+        }
+        out.add_raw("voiceModes", string_array(voice));
+    } else {
+        out.add_null("voiceModes");
+    }
+    return out.str();
+}
+
+[[nodiscard]] Result op_set_decoders(PhoneSession& session, const Command& command)
+{
+    const auto vrx = owned_vrx(session, command);
+    if (!vrx) {
+        return std::unexpected(vrx.error());
+    }
+    auto names = command.get_string_list("names");
+    if (!names) {
+        return std::unexpected(names.error());
+    }
+    std::vector<std::string> unique;
+    for (auto& name : *names) {
+        if (name.empty()) {
+            return fail("names: a decoder name cannot be empty");
+        }
+        if (std::ranges::find(unique, name) == unique.end()) {
+            unique.push_back(std::move(name));
+        }
+    }
+    const auto* params = session.last_params(*vrx);
+    if (params == nullptr) {
+        return fail("vrx: receiver " + std::to_string(*vrx) + " is not one of yours");
+    }
+    const std::string mode(mode_name(params->demod));
+    if (!unique.empty()) {
+        const auto known = session.client().decoders();
+        if (!known) {
+            return std::unexpected(known.error());
+        }
+        // Checked here so the phone hears the refusal as the reply; the engine
+        // would refuse the same at subscribe time, where only an event can say it.
+        for (const auto& name : unique) {
+            const auto it = std::ranges::find(*known, name, &rpc::DecoderInfo::name);
+            if (it == known->end()) {
+                return fail("names: the engine has no decoder called \"" + name + "\"");
+            }
+            if (!it->modes.empty() && std::ranges::find(it->modes, mode) == it->modes.end()) {
+                std::string reads;
+                for (const auto& m : it->modes) {
+                    reads += (reads.empty() ? "" : ", ") + m;
+                }
+                return fail("names: " + name + " does not read a " + mode + " receiver (it reads " +
+                            reads + ")");
+            }
+        }
+    }
+    session.set_decoders(*vrx, unique);
+    return JsonObject().add_u64("vrx", *vrx).add_raw("decoders", string_array(unique)).str();
 }
 
 [[nodiscard]] Result run(PhoneSession& session, const Command& command)
 {
     const std::string_view op = command.op;
+    if (op == "listDecoders") return op_list_decoders(session, command);
+    if (op == "setDecoders") return op_set_decoders(session, command);
     if (op == "addVrx") return op_add_vrx(session, command);
     if (op == "removeVrx") return op_remove_vrx(session, command);
     if (op == "tune") return op_tune(session, command);

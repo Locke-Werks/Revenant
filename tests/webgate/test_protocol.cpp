@@ -141,13 +141,29 @@ TEST_CASE("Argument getters name the key on a type or range error", "[webgate][p
 }
 
 TEST_CASE("Every named op parses and the list is exact", "[webgate][protocol]") {
-    CHECK(std::size(wg::kOps) == 19);
+    CHECK(std::size(wg::kOps) == 21);
     for (auto op : wg::kOps) {
         auto c = wg::parse_command(R"({"id":1,"op":")" + std::string(op) + R"("})");
         INFO(op);
         CHECK(c.has_value());
     }
     CHECK(std::size(wg::kEvents) == 13);
+}
+
+TEST_CASE("get_string_list reads an array of strings and refuses anything else",
+          "[webgate][protocol]") {
+    auto c = wg::parse_command(
+        R"({"id":1,"op":"setDecoders","args":{"ok":["a","b"],"none":[],"mixed":["a",1],)"
+        R"("s":"a","long":[")" + std::string(wg::kMaxListItemBytes + 1, 'x') + R"("]}})");
+    REQUIRE(c.has_value());
+    CHECK(c->get_string_list("ok").value() == std::vector<std::string>{"a", "b"});
+    CHECK(c->get_string_list("none").value().empty());
+    for (auto* key : {"mixed", "s", "long", "absent"}) {
+        INFO(key);
+        auto r = c->get_string_list(key);
+        REQUIRE_FALSE(r.has_value());
+        CHECK(contains(r.error().message, key));
+    }
 }
 
 TEST_CASE("parse_command refuses an unknown op and names it", "[webgate][protocol]") {

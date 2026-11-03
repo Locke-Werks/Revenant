@@ -248,6 +248,26 @@ longest ago; it is refused only when all 16 are connected right now.
   `--session-linger-ms` sets the 30 second figure. At most 16 sessions exist at once: a connection past
   that evicts the oldest detached session, or is closed with code 1013 and a
   reason saying too many phones are connected when every session is attached.
+- `listDecoders` (no arguments) answers `{decoders, voiceModes}`. Each decoder
+  is `{name, description, input, modes}`, from `Session.decoders`: `input` is
+  `complexBaseband` or `realAudio`, and `modes` lists the receiver modes it
+  reads (empty from an engine too old to say). `voiceModes` lists the digital
+  voice modes whose voice will play: `p25p1` always, plus whatever a loaded
+  vocoder plugin serves (`dstar`, `dmr`). It is `null` when the engine does not
+  report plugins, which means unknown rather than none.
+- `setDecoders {vrx, names}` replaces the receiver's whole decoder set; `[]`
+  decodes nothing. A name the engine lacks, or one that does not read the
+  receiver's mode, is refused in the reply. Until a phone sets one, a `p25p1`,
+  `dstar`, `tetra` or `dmr` receiver decodes with its mode's own decoder and
+  any other mode with none. The set is kept per receiver in the session, so it
+  outlives a resume and is re-applied when an engine restart recreates the
+  receiver. A new width keeps it; a new mode goes back to that mode's default.
+  Every receiver reply carries the set in force as `decoders`. When the engine
+  refuses or ends a subscription anyway, a `vrxStatus` event carries
+  `{vrx, decoder, decoderError}` with the engine's sentence.
+- `detections` items carry `labelKind`, `modulation` or `protocol`, beside
+  `label`. Protocol labels (P25, POCSAG and so on) used to be blanked; they go
+  out now because they are the more specific answer.
 
 ## Cost to the engine
 

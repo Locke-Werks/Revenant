@@ -60,6 +60,11 @@ inline constexpr std::size_t kOpusHeaderSize = 1 + 8 + 4;
 // messages; anything bigger is a bug or an attack.
 inline constexpr std::size_t kMaxCommandBytes = 64 * 1024;
 
+// Bounds on a string list argument (setDecoders names). The engine has a few
+// dozen decoders with short names, so these only stop nonsense.
+inline constexpr std::size_t kMaxListItems = 64;
+inline constexpr std::size_t kMaxListItemBytes = 64;
+
 // The gateway sends a "ping" event this often; the app treats a socket silent
 // for two of these as dead. web/src/protocol.ts carries the same number.
 inline constexpr std::int64_t kPingIntervalMs = 15'000;
@@ -70,7 +75,8 @@ inline constexpr std::string_view kOps[] = {
     "setBandwidth", "setSquelch",    "setCenter",   "setGain",
     "setGainAuto",  "listSources",   "openSource",  "setView",
     "audio",        "keepListening", "setTranscription", "setVrxTranscribe",
-    "setDetection", "resume",       "pong",
+    "setDetection", "resume",       "pong",        "listDecoders",
+    "setDecoders",
 };
 
 // The events the gateway sends, exactly these.
@@ -100,7 +106,10 @@ inline constexpr std::string_view kOps[] = {
 // state, label, labelConfidence, lastSeen}]}, the engine's live and held
 // tracks near the phone's view, sent each poll while a view is set. id is the
 // track id as a decimal string (a UInt64 does not survive a JSON number);
-// state is "live" or "held"; label is a modulation name or empty.
+// state is "live" or "held"; label is the classifier's name for it or empty,
+// and labelKind says what that name is: "modulation" (analog or digital
+// family) or "protocol". A protocol label is kept because it is the more
+// specific answer, and the phone shows whichever the engine settled on.
 //
 // "display" is the desktop's colours for the phone's waterfall and trace,
 // {waterfall, spectrum, trace, background}; display_sync.h has the shape. It
@@ -151,6 +160,9 @@ struct Command {
     [[nodiscard]] Expected<double> get_double(std::string_view key) const;
     [[nodiscard]] Expected<std::string> get_string(std::string_view key) const;
     [[nodiscard]] Expected<bool> get_bool(std::string_view key) const;
+    // An array of strings, each at most kMaxListItemBytes, at most
+    // kMaxListItems of them.
+    [[nodiscard]] Expected<std::vector<std::string>> get_string_list(std::string_view key) const;
 };
 
 // Never throws. Refuses text over kMaxCommandBytes, malformed JSON, a value

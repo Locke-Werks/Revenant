@@ -7,7 +7,7 @@
 //   addVrx, tune, setMode, setBandwidth, setSquelch, setVrxTranscribe
 //        -> {"vrx", "hz", "mode", "bandwidthHz", "squelchDbfs", "grantedLowHz",
 //            "grantedHighHz", "clamped", "clampReason"?, "transcribe",
-//            "transcribing"}
+//            "transcribing", "decoders":[names]}
 //        setMode and setBandwidth add "replaced": <old id>, because the engine
 //        will not change a demodulator or filter width in place, so the
 //        receiver is recreated under a NEW id. tune and setSquelch keep the id.
@@ -26,6 +26,10 @@
 //   setTranscription   -> {"enabled", "modelState", "modelName", "bytesDone",
 //                          "bytesTotal", "detail", "backend", "receivers",
 //                          "queued", "transcribed", "dropped"}
+//   listDecoders       -> {"decoders":[{name, description, input, modes[]}],
+//                          "voiceModes":[modes whose voice plays] | null}
+//   setDecoders        -> {"vrx", "decoders":[names]}, the receiver's whole
+//                         set, which replaces the last; [] decodes nothing
 //
 // Modes are lowercase: raw am nfm wfm usb lsb dsb cw p25p1 dstar tetra dmr sam.
 

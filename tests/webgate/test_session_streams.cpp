@@ -882,11 +882,11 @@ TEST_CASE("detections event shape, labels and ids", "[gpu][webgate][streams]")
     CHECK(contains(text, R"("label":"NFM")"));
     CHECK(contains(text, R"("labelConfidence":0.9)"));
     CHECK(contains(text, R"("lastSeen":5000)"));
-    // A held track, and a protocol label is not a modulation.
+    CHECK(contains(text, R"("labelKind":"modulation")"));
+    // A held track, and a protocol label goes out too, marked as one.
     CHECK(contains(text, R"("id":"7")"));
     CHECK(contains(text, R"("state":"held")"));
-    CHECK_FALSE(contains(text, "P25"));
-    CHECK(contains(text, R"("label":"")"));
+    CHECK(contains(text, R"("label":"P25","labelKind":"protocol")"));
 }
 
 TEST_CASE("detections drop merged and pending tracks and those far from the view",

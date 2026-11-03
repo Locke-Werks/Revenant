@@ -246,6 +246,8 @@ public:
 
     // The segmenter serving this vrx, null when there is none.
     [[nodiscard]] HlsSegmenter* segmenter(std::uint64_t vrx) const;
+    // The decoders subscribed on a receiver right now, for tests.
+    [[nodiscard]] std::set<std::string> decoding(std::uint64_t vrx) const;
 
 private:
     struct Inbox;
@@ -295,6 +297,7 @@ private:
     void reconcile_hls();
     void reconcile_audio();
     void reconcile_decoded();
+    [[nodiscard]] Status subscribe_decoder(std::uint64_t vrx, const std::string& name);
     void handle_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk);
     void handle_vrx_event(const rpc::VrxEvent& event);
     void drop_hls(std::uint64_t vrx);
@@ -355,7 +358,11 @@ private:
     std::map<std::uint64_t, AudioPath> audio_;
     std::map<std::uint64_t, Hls> hls_;
     std::optional<std::uint64_t> announced_hls_;
-    std::set<std::uint64_t> decoded_tried_;
+    // Per receiver: the decoder set last applied, and which of it the engine
+    // took. A set is applied once; a refusal is reported and not retried
+    // until the phone changes the set or the receiver is recreated.
+    std::map<std::uint64_t, std::vector<std::string>> decoded_applied_;
+    std::map<std::uint64_t, std::set<std::string>> decoded_;
     bool vrx_events_resubscribed_ = false;
 
     // The desktop's scale state for this phone, and the display event it was

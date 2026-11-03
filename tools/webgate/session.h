@@ -29,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "core/rpc/client.h"
@@ -81,6 +82,17 @@ public:
     [[nodiscard]] rpc::TranscribeChoice transcribe_choice(std::uint64_t vrx) const;
     void set_transcribe_choice(std::uint64_t vrx, rpc::TranscribeChoice choice);
 
+    // The decoders the phone wants on a receiver. Until it picks, a digital
+    // voice receiver gets its mode's own decoder, which is what carries its
+    // talkgroup and encryption flags, and an analog one gets none, because a
+    // decoder costs engine CPU on every chunk and most analog listening has
+    // nothing to decode. The choice is kept beside the params so a receiver
+    // recreated after an engine restart decodes what it did before.
+    [[nodiscard]] std::vector<std::string> decoders(std::uint64_t vrx) const;
+    // Null while the phone has made no choice for the receiver.
+    [[nodiscard]] const std::vector<std::string>* decoder_choice(std::uint64_t vrx) const;
+    void set_decoders(std::uint64_t vrx, std::vector<std::string> names);
+
     // ---- Requested stream state ----
     // Recorded by dispatch. Task 10 wires the actual spectrum and audio
     // streams to these; until then they are only state.
@@ -102,6 +114,7 @@ private:
     std::unique_ptr<rpc::Client> client_;
     std::map<std::uint64_t, rpc::VrxParams> owned_;
     std::map<std::uint64_t, rpc::TranscribeChoice> transcribe_;
+    std::map<std::uint64_t, std::vector<std::string>> decoders_;
     std::optional<View> view_;
     std::optional<std::uint64_t> audio_vrx_;
     bool keep_listening_ = false;

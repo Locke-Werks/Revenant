@@ -397,6 +397,9 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
         }
         fresh->adopt(*added, params);
         fresh->set_transcribe_choice(*added, choice);
+        if (const auto* chosen = old_session.decoder_choice(old_id)) {
+            fresh->set_decoders(*added, *chosen);
+        }
         if (old_session.audio_vrx() == old_id) {
             fresh->set_audio_vrx(*added);
         }

@@ -59,6 +59,7 @@ void PhoneSession::forget(std::uint64_t vrx)
 {
     owned_.erase(vrx);
     transcribe_.erase(vrx);
+    decoders_.erase(vrx);
     if (audio_vrx_ == vrx) {
         audio_vrx_.reset();
     }
@@ -68,6 +69,43 @@ rpc::TranscribeChoice PhoneSession::transcribe_choice(std::uint64_t vrx) const
 {
     const auto it = transcribe_.find(vrx);
     return it == transcribe_.end() ? rpc::TranscribeChoice::Auto : it->second;
+}
+
+std::vector<std::string> PhoneSession::decoders(std::uint64_t vrx) const
+{
+    if (const auto* chosen = decoder_choice(vrx)) {
+        return *chosen;
+    }
+    const auto* params = last_params(vrx);
+    if (params == nullptr) {
+        return {};
+    }
+    // Each digital voice mode has a decoder of the same name in the engine.
+    switch (params->demod) {
+    case rpc::Demod::P25p1:
+        return {"p25p1"};
+    case rpc::Demod::Dstar:
+        return {"dstar"};
+    case rpc::Demod::Tetra:
+        return {"tetra"};
+    case rpc::Demod::Dmr:
+        return {"dmr"};
+    default:
+        return {};
+    }
+}
+
+const std::vector<std::string>* PhoneSession::decoder_choice(std::uint64_t vrx) const
+{
+    const auto it = decoders_.find(vrx);
+    return it == decoders_.end() ? nullptr : &it->second;
+}
+
+void PhoneSession::set_decoders(std::uint64_t vrx, std::vector<std::string> names)
+{
+    if (owned_.contains(vrx)) {
+        decoders_[vrx] = std::move(names);
+    }
 }
 
 void PhoneSession::set_transcribe_choice(std::uint64_t vrx, rpc::TranscribeChoice choice)
