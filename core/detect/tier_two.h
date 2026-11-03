@@ -10,15 +10,32 @@
 //
 // THE SCHEDULE, WHICH IS A CHOICE MADE HERE
 //
-// Oldest unclassified first, and not round robin. A track that has never been
-// probed outranks every track that has, and among those the one born first
-// goes first. Round robin was the alternative and it spends the pool on
-// tracks already answered: a steady station reprobed every cycle is a
-// receiver not looking at the track born a second ago. After that, a track
-// that was probed and came back without a family it may drive with waits
-// TierTwoConfig::reprobe_seconds before it is eligible again, oldest answer
-// first. A track that has a family is not probed again at all: a transmission
-// does not change modulation halfway through, and the pool is small.
+// Strongest and on-screen unclassified first, with age as the guard against
+// starving anything. The order, first key first:
+//
+//   1. Starved: a track that has been eligible for TierTwoConfig::starve_seconds
+//      without being looked at goes ahead of everything, longest wait first.
+//   2. Refinement last: a track that already has a family, see pick().
+//   3. Viewed: a track inside a span a client is looking at, set_viewed().
+//   4. Novelty: never probed before a re-look.
+//   5. Strength: higher snr_2500_db first.
+//   6. Age: born first, or for a re-look asked longest ago, then the id.
+//
+// WHAT THIS USED TO SAY: "Oldest unclassified first, and not round robin. A
+// track that has never been probed outranks every track that has, and among
+// those the one born first goes first." Measured on 2026-11-03: a cold engine
+// at a display's -0.5 dB threshold had about twenty tracks at 3.7 s, mostly
+// noise born at the same decision as the stations, and oldest-first spent the
+// pool's first cycles on them; the first label came at 26.7 s. A strong
+// track is the one a probe can answer and the one an operator looks at, so it
+// goes first; the starvation bound keeps a weak one from waiting for ever.
+//
+// Not round robin: a steady station reprobed every cycle is a receiver not
+// looking at the track born a second ago. A track that was probed and came
+// back without a family it may drive with waits
+// TierTwoConfig::reprobe_seconds before it is eligible again. A track that
+// has a family is not probed again except to refine it: a transmission does
+// not change modulation halfway through, and the pool is small.
 //
 // Only Live tracks. A Held one has no transmission to collect and a Merged
 // one is inside another track's band, where a probe would characterise the
@@ -110,6 +127,17 @@ struct TierTwoConfig {
     // one it has already asked about.
     double reprobe_seconds = 10.0;
 
+    // How long an eligible track may wait for its look before it goes ahead
+    // of every stronger or viewed one. For a track never probed the wait is
+    // counted from its birth, for a re-look from when it became due again.
+    //
+    // WHY 15 s. THIS FILE'S CHOICE, not a measured bar: a pool of four at the
+    // 2 s dwell gets through about twenty tracks in ten seconds, so a bound
+    // of one and a half such cycles lets strength and the view decide nearly
+    // every pick while still putting the weakest track in front of a probe
+    // within a quarter of a minute.
+    double starve_seconds = 15.0;
+
     // Tracks whose occupied bands come within this of each other are one
     // emitter, through LineGroupConfig::edge_gap_hz. Zero probes every track
     // on its own, which is what tier two did before it.
@@ -137,6 +165,12 @@ struct TierTwoConfig {
     // and nothing yet has measured a cluster of independent carriers. The HF
     // corpus is where that measurement belongs; docs/detection.md, "Voice".
     double emitter_min_fill = 0.6;
+};
+
+// A stretch of spectrum a client has on screen, absolute hertz, low to high.
+struct ViewedSpan {
+    dsp::Hertz low = 0;
+    dsp::Hertz high = 0;
 };
 
 // One emitter tier two is following: a LineGrouper group, by its id, its
@@ -264,11 +298,24 @@ public:
     // track in it and in in_flight is not eligible; one in it and not in
     // flight is eligible again reprobe_seconds after that decision, unless it
     // has a family.
+    //
+    // The order is the one the header states. `viewed` is the spans clients
+    // are looking at, absolute hertz; a track whose band overlaps one is
+    // viewed.
     [[nodiscard]] static std::vector<std::uint64_t> pick(
         std::span<const Track> tracks,
         const std::unordered_map<std::uint64_t, dsp::SampleIndex>& attempts,
         std::span<const std::uint64_t> in_flight, std::size_t free, dsp::SampleIndex now,
-        dsp::SampleRate source_rate, double reprobe_seconds);
+        dsp::SampleRate source_rate, double reprobe_seconds, double starve_seconds = 15.0,
+        std::span<const ViewedSpan> viewed = {});
+
+    // The spans clients are looking at, absolute hertz, replacing the last
+    // set. Empty, the default, ranks on strength and novelty alone.
+    //
+    // NOTHING FEEDS THIS YET. No RPC carries a client's view: subscribeSpectrum
+    // sends the whole span and a display zooms on its own side. It is here so
+    // that a call carrying one needs only to pass it through.
+    void set_viewed(std::span<const ViewedSpan> spans) { viewed_.assign(spans.begin(), spans.end()); }
 
     // THE IDENTIFICATION SCHEDULE, which runs on what the one above leaves.
     // A narrow track, no wider than engine::kProbeIdentifyNarrowHz, that has
@@ -331,6 +378,7 @@ private:
     TierTwoStats stats_{};
 
     std::vector<std::uint64_t> in_flight_;
+    std::vector<ViewedSpan> viewed_;
     std::unordered_map<std::uint64_t, dsp::SampleIndex> attempts_;
     std::unordered_map<std::uint64_t, engine::ProbeStatus> statuses_;
     std::unordered_map<std::uint64_t, std::uint32_t> identify_dwells_;

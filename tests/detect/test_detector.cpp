@@ -2405,6 +2405,70 @@ TEST_CASE("tier two probes the oldest unclassified live track first", "[detect][
     }
 }
 
+// REJECTS: a schedule that hands the pool to the oldest track while a
+// stronger or viewed one waits, that re-looks before a first look, or that
+// lets a weak track wait past the starvation bound. The 2026-11-03 change,
+// docs/detection.md "Which detection tier two looks at first".
+TEST_CASE("tier two looks at viewed, strong and new tracks first, and starves none",
+          "[detect][tier-two]") {
+    constexpr dsp::SampleRate kPickRate = 1'000'000;
+    const auto track = [](std::uint64_t id, dsp::SampleIndex born, double snr,
+                          dsp::Hertz center) {
+        detect::Track out;
+        out.id = id;
+        out.state = detect::TrackState::Live;
+        out.first_seen = born;
+        out.snr_2500_db = snr;
+        out.center = center;
+        out.bandwidth = 2'000;
+        return out;
+    };
+
+    SECTION("strong before weak, whatever their age") {
+        const std::vector<detect::Track> tracks = {
+            track(1, 1'000'000, 3.0, 100'000), track(2, 2'000'000, 30.0, 200'000),
+            track(3, 3'000'000, 12.0, 300'000)};
+        CHECK(detect::TierTwo::pick(tracks, {}, {}, 8, 5'000'000, kPickRate, 10.0) ==
+              std::vector<std::uint64_t>{2, 3, 1});
+    }
+    SECTION("viewed before unviewed, even when weaker") {
+        const std::vector<detect::Track> tracks = {
+            track(1, 1'000'000, 30.0, 100'000), track(2, 2'000'000, 5.0, 500'000)};
+        const detect::ViewedSpan view[] = {{450'000, 550'000}};
+        CHECK(detect::TierTwo::pick(tracks, {}, {}, 8, 5'000'000, kPickRate, 10.0, 15.0, view) ==
+              std::vector<std::uint64_t>{2, 1});
+    }
+    SECTION("a never-probed track before a stronger re-look") {
+        const std::vector<detect::Track> tracks = {
+            track(1, 1'000'000, 30.0, 100'000), track(2, 2'000'000, 5.0, 200'000)};
+        const std::unordered_map<std::uint64_t, dsp::SampleIndex> attempts = {{1, 1'000'000}};
+        CHECK(detect::TierTwo::pick(tracks, attempts, {}, 8, 12'000'000, kPickRate, 10.0) ==
+              std::vector<std::uint64_t>{2, 1});
+    }
+    SECTION("a track eligible past the bound goes ahead of stronger and viewed ones") {
+        const std::vector<detect::Track> tracks = {
+            track(1, 1'000'000, 3.0, 100'000), track(2, 15'000'000, 30.0, 500'000)};
+        const detect::ViewedSpan view[] = {{450'000, 550'000}};
+        // At 15.9 s the weak track has waited 14.9 s, inside the bound.
+        CHECK(detect::TierTwo::pick(tracks, {}, {}, 8, 15'900'000, kPickRate, 10.0, 15.0, view) ==
+              std::vector<std::uint64_t>{2, 1});
+        // At 16 s it has waited 15 s and goes first.
+        CHECK(detect::TierTwo::pick(tracks, {}, {}, 1, 16'000'000, kPickRate, 10.0, 15.0, view) ==
+              std::vector<std::uint64_t>{1});
+    }
+    SECTION("a re-look starves from when it fell due, not from its last look") {
+        const std::vector<detect::Track> tracks = {
+            track(1, 0, 3.0, 100'000), track(2, 20'000'000, 30.0, 200'000)};
+        // 1 was looked at 2 s in and fell due at 12 s. At 26 s it has waited
+        // 14 s and the new strong track goes first; at 27 s it is starved.
+        const std::unordered_map<std::uint64_t, dsp::SampleIndex> attempts = {{1, 2'000'000}};
+        CHECK(detect::TierTwo::pick(tracks, attempts, {}, 1, 26'000'000, kPickRate, 10.0) ==
+              std::vector<std::uint64_t>{2});
+        CHECK(detect::TierTwo::pick(tracks, attempts, {}, 1, 27'000'000, kPickRate, 10.0) ==
+              std::vector<std::uint64_t>{1});
+    }
+}
+
 // REJECTS: an identification schedule that spends the long dwell on a wide
 // track, on one never probed, on one already identified, or on one that has
 // had detect::kIdentifyDwells. WHAT THIS USED TO SAY at its end: "or twice on

@@ -20,6 +20,52 @@ namespace {
            finding.voice_sideband != characterise::VoiceSideband::Unknown;
 }
 
+// A unit's place in the classification schedule, compared field by field in
+// the order the header states. A starved unit carries only its wait, so
+// starved units go longest wait first whatever else they are.
+struct Rank {
+    int starved = 1;  // 0 when starved, so it sorts first
+    int refine = 0;
+    int unviewed = 0;
+    int probed = 0;
+    double weakness = 0.0;  // minus the SNR, so the strongest sorts first
+    dsp::SampleIndex key = 0;
+    std::uint64_t id = 0;
+
+    [[nodiscard]] bool operator<(const Rank& other) const {
+        return std::tie(starved, refine, unviewed, probed, weakness, key, id) <
+               std::tie(other.starved, other.refine, other.unviewed, other.probed,
+                        other.weakness, other.key, other.id);
+    }
+};
+
+[[nodiscard]] bool in_view(std::span<const ViewedSpan> viewed, dsp::Hertz low, dsp::Hertz high) {
+    return std::any_of(viewed.begin(), viewed.end(), [&](const ViewedSpan& span) {
+        return low <= span.high && high >= span.low;
+    });
+}
+
+// `waiting_since` is when the unit became eligible: its birth when never
+// probed, and its last look plus the retry interval for a re-look.
+[[nodiscard]] Rank rank_of(int refine, int probed, bool viewed, double snr_db,
+                           dsp::SampleIndex key, dsp::SampleIndex waiting_since,
+                           dsp::SampleIndex now, dsp::SampleIndex starve_samples,
+                           std::uint64_t id) {
+    Rank rank;
+    rank.id = id;
+    if (refine == 0 && now - waiting_since >= starve_samples) {
+        rank.starved = 0;
+        rank.key = waiting_since;
+        return rank;
+    }
+    rank.refine = refine;
+    rank.unviewed = viewed ? 0 : 1;
+    rank.probed = probed;
+    rank.weakness = std::isfinite(snr_db) ? -snr_db : 0.0;
+    rank.key = key;
+    return rank;
+}
+
 }  // namespace
 
 std::vector<Track> fold_emitters(std::span<const Track> tracks,
@@ -126,6 +172,10 @@ Expected<TierTwo> TierTwo::create(const TierTwoConfig& config) {
         return fail(std::format("reprobe_seconds must be zero or more, got {}",
                                 config.reprobe_seconds));
     }
+    if (!std::isfinite(config.starve_seconds) || config.starve_seconds < 0.0) {
+        return fail(std::format("starve_seconds must be zero or more, got {}",
+                                config.starve_seconds));
+    }
     if (config.emitter_gap_hz < 0) {
         return fail(std::format("emitter_gap_hz must be zero or more, got {}",
                                 config.emitter_gap_hz));
@@ -147,18 +197,29 @@ Expected<TierTwo> TierTwo::create(const TierTwoConfig& config) {
     return out;
 }
 
-std::vector<std::uint64_t> TierTwo::pick(
+namespace {
+
+// Every eligible track with its rank, unsorted. pick() and step() share it so
+// a line on its own and an emitter are ordered by one rule.
+[[nodiscard]] std::vector<Rank> rank_tracks(
     std::span<const Track> tracks,
     const std::unordered_map<std::uint64_t, dsp::SampleIndex>& attempts,
-    std::span<const std::uint64_t> in_flight, std::size_t free, dsp::SampleIndex now,
-    dsp::SampleRate source_rate, double reprobe_seconds) {
+    std::span<const std::uint64_t> in_flight, dsp::SampleIndex now,
+    dsp::SampleRate source_rate, double reprobe_seconds, double starve_seconds,
+    std::span<const ViewedSpan> viewed) {
     const auto reprobe_samples =
         static_cast<dsp::SampleIndex>(reprobe_seconds * static_cast<double>(source_rate));
+    const auto starve_samples =
+        static_cast<dsp::SampleIndex>(starve_seconds * static_cast<double>(source_rate));
+    const auto ranked = [&](int refine, int probed, const Track& track, dsp::SampleIndex key,
+                            dsp::SampleIndex waiting_since) {
+        const dsp::Hertz half = track.bandwidth / 2;
+        return rank_of(refine, probed,
+                       in_view(viewed, track.center - half, track.center + half),
+                       track.snr_2500_db, key, waiting_since, now, starve_samples, track.id);
+    };
 
-    // (never probed first, then the key, then the id so the order is total).
-    // The key is the birth for a track never probed and the last submission
-    // for one that has been, and oldest goes first in both.
-    std::vector<std::tuple<int, dsp::SampleIndex, std::uint64_t>> eligible;
+    std::vector<Rank> eligible;
     for (const Track& track : tracks) {
         if (track.state != TrackState::Live) {
             continue;
@@ -181,26 +242,39 @@ std::vector<std::uint64_t> TierTwo::pick(
             if (now < since + kRefineReprobeFactor * reprobe_samples) {
                 continue;
             }
-            eligible.emplace_back(2, since, track.id);
+            eligible.push_back(ranked(1, 0, track, since, since));
             continue;
         }
         if (tried == attempts.end()) {
-            eligible.emplace_back(0, track.first_seen, track.id);
+            eligible.push_back(ranked(0, 0, track, track.first_seen, track.first_seen));
             continue;
         }
         if (now < tried->second + reprobe_samples) {
             continue;
         }
-        eligible.emplace_back(1, tried->second, track.id);
+        eligible.push_back(
+            ranked(0, 1, track, tried->second, tried->second + reprobe_samples));
     }
+    return eligible;
+}
 
+}  // namespace
+
+std::vector<std::uint64_t> TierTwo::pick(
+    std::span<const Track> tracks,
+    const std::unordered_map<std::uint64_t, dsp::SampleIndex>& attempts,
+    std::span<const std::uint64_t> in_flight, std::size_t free, dsp::SampleIndex now,
+    dsp::SampleRate source_rate, double reprobe_seconds, double starve_seconds,
+    std::span<const ViewedSpan> viewed) {
+    std::vector<Rank> eligible = rank_tracks(tracks, attempts, in_flight, now, source_rate,
+                                             reprobe_seconds, starve_seconds, viewed);
     std::sort(eligible.begin(), eligible.end());
     std::vector<std::uint64_t> out;
-    for (const auto& entry : eligible) {
+    for (const Rank& entry : eligible) {
         if (out.size() >= free) {
             break;
         }
-        out.push_back(std::get<2>(entry));
+        out.push_back(entry.id);
     }
     return out;
 }
@@ -519,34 +593,24 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
     }
 
     // One unit per line on its own and one per emitter, ordered together by
-    // the rule pick() states: never probed first, oldest first, then by the
-    // last submission. An emitter's age is the decision its group formed.
+    // the rule the header states. An emitter is ranked on its anchor's SNR,
+    // its whole extent against the view, and the decision its group formed as
+    // its birth.
     struct Unit {
-        int probed = 0;
-        dsp::SampleIndex key = 0;
+        Rank rank;
         std::uint64_t tag = 0;
         const LineGroup* group = nullptr;
     };
     std::vector<Unit> units;
-    {
-        const std::vector<std::uint64_t> singles = pick(alone, attempts_, in_flight_, alone.size(),
-                                                        now, config_.source_rate,
-                                                        config_.reprobe_seconds);
-        for (const std::uint64_t id : singles) {
-            const auto found = std::find_if(alone.begin(), alone.end(),
-                                            [id](const Track& track) { return track.id == id; });
-            const auto tried = attempts_.find(id);
-            // A refinement probe ranks behind every first probe and retry.
-            const int probed = found->classification != Classification::Unknown ? 2
-                               : tried == attempts_.end()                         ? 0
-                                                                                  : 1;
-            units.push_back(Unit{.probed = probed,
-                                 .key = tried == attempts_.end() ? found->first_seen : tried->second,
-                                 .tag = id});
-        }
+    for (const Rank& rank : rank_tracks(alone, attempts_, in_flight_, now, config_.source_rate,
+                                        config_.reprobe_seconds, config_.starve_seconds,
+                                        viewed_)) {
+        units.push_back(Unit{.rank = rank, .tag = rank.id});
     }
     const auto reprobe_samples = static_cast<dsp::SampleIndex>(
         config_.reprobe_seconds * static_cast<double>(config_.source_rate));
+    const auto starve_samples = static_cast<dsp::SampleIndex>(
+        config_.starve_seconds * static_cast<double>(config_.source_rate));
     if (grouper_.has_value()) {
         for (const LineGroup& group : grouper_->groups()) {
             if (!is_emitter(group) || group_findings_.contains(group.id)) {
@@ -568,16 +632,18 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
             if (tried != group_attempts_.end() && now < tried->second + reprobe_samples) {
                 continue;
             }
-            units.push_back(Unit{.probed = tried == group_attempts_.end() ? 0 : 1,
-                                 .key = tried == group_attempts_.end() ? group.formed
-                                                                       : tried->second,
-                                 .tag = group.anchor,
-                                 .group = &group});
+            const bool fresh = tried == group_attempts_.end();
+            const dsp::SampleIndex key = fresh ? group.formed : tried->second;
+            units.push_back(Unit{
+                .rank = rank_of(0, fresh ? 0 : 1, in_view(viewed_, group.low_edge, group.high_edge),
+                                anchor->snr_2500_db, key, fresh ? key : key + reprobe_samples, now,
+                                starve_samples, group.anchor),
+                .tag = group.anchor,
+                .group = &group});
         }
     }
-    std::sort(units.begin(), units.end(), [](const Unit& a, const Unit& b) {
-        return std::tie(a.probed, a.key, a.tag) < std::tie(b.probed, b.key, b.tag);
-    });
+    std::sort(units.begin(), units.end(),
+              [](const Unit& a, const Unit& b) { return a.rank < b.rank; });
     if (units.size() > free) {
         units.resize(free);
     }
