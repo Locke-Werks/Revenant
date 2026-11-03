@@ -103,12 +103,27 @@ TEST_CASE("SANs cover hostname, .local and every address", "[webgate][certs]") {
     const CertPaths paths = dir.paths();
 
     REQUIRE(revenant::webgate::ensure_certificates(
-                paths, HostNames{"radio", {"192.168.1.20", "fe80::1"}})
+                paths, HostNames{"radio", {"192.168.1.20", "10.0.0.5"}})
                 .has_value());
 
     const auto sans = sorted(revenant::webgate::certificate_sans(paths.server_crt()));
-    const auto expected = sorted({"radio", "radio.local", "192.168.1.20", "fe80::1"});
+    const auto expected = sorted({"radio", "radio.local", "192.168.1.20", "10.0.0.5"});
     CHECK(sans == expected);
+}
+
+TEST_CASE("an IPv6 address is never put in the certificate", "[webgate][certs]") {
+    TempDir dir;
+    const CertPaths paths = dir.paths();
+
+    REQUIRE(revenant::webgate::ensure_certificates(
+                paths, HostNames{"radio", {"192.168.1.20", "fe80::1", "2001:db8::1"}})
+                .has_value());
+    CHECK(sorted(revenant::webgate::certificate_sans(paths.server_crt())) ==
+          sorted({"radio", "radio.local", "192.168.1.20"}));
+
+    for (const std::string& name : revenant::webgate::current_host_names().addresses) {
+        CHECK(name.find(':') == std::string::npos);
+    }
 }
 
 TEST_CASE("unchanged names do not reissue", "[webgate][certs]") {

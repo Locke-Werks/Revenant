@@ -295,7 +295,12 @@ struct CaMaterial {
     for (const std::string& address : names.addresses) {
         const std::string canonical = canonical_ip(address);
         if (canonical.empty()) {
-            return fail(std::format("{} is not an IPv4 or IPv6 address", address));
+            return fail(std::format("{} is not an IP address", address));
+        }
+        // The gateway is IPv4 only, so an IPv6 name would be a name nothing
+        // can reach, and a reissue each time the adapter's address rotates.
+        if (canonical.find(':') != std::string::npos) {
+            continue;
         }
         out.push_back(canonical);
     }
@@ -399,7 +404,7 @@ HostNames current_host_names() {
                             GAA_FLAG_SKIP_DNS_SERVER;
     for (int attempt = 0; attempt < 3 && rc == ERROR_BUFFER_OVERFLOW; ++attempt) {
         buffer.resize(size);
-        rc = GetAdaptersAddresses(AF_UNSPEC, flags, nullptr,
+        rc = GetAdaptersAddresses(AF_INET, flags, nullptr,
                                   reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &size);
     }
     if (rc != NO_ERROR) {
@@ -422,13 +427,6 @@ HostNames current_host_names() {
             if (sa->sa_family == AF_INET) {
                 const auto* in = reinterpret_cast<const sockaddr_in*>(sa);
                 inet_ntop(AF_INET, &in->sin_addr, text.data(), text.size());
-            } else if (sa->sa_family == AF_INET6) {
-                const auto* in6 = reinterpret_cast<const sockaddr_in6*>(sa);
-                if (IN6_IS_ADDR_LINKLOCAL(&in6->sin6_addr) ||
-                    IN6_IS_ADDR_LOOPBACK(&in6->sin6_addr)) {
-                    continue;
-                }
-                inet_ntop(AF_INET6, &in6->sin6_addr, text.data(), text.size());
             } else {
                 continue;
             }

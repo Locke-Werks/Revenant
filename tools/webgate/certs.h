@@ -27,18 +27,17 @@ struct CertPaths {
     [[nodiscard]] std::filesystem::path server_crt() const { return dir / "server.crt"; }
 };
 
-// What the server certificate has to answer to. addresses are textual IPv4 or
-// IPv6.
+// What the server certificate has to answer to. addresses are textual IPv4;
+// the gateway does not use IPv6, so an IPv6 address given here is ignored.
 struct HostNames {
     std::string hostname;
     std::vector<std::string> addresses;
 };
 
 // The machine's DNS host name and the addresses of every adapter that is up and
-// is not loopback. IPv6 link-local and tentative addresses are left out: a
-// phone cannot dial a link-local literal without a scope id, and a tentative
-// one is gone again before the certificate is used, so each only makes the
-// certificate reissue for nothing.
+// is not loopback. IPv4 only. Tentative addresses are left out: one is gone
+// again before the certificate is used, so it only makes the certificate
+// reissue for nothing.
 [[nodiscard]] HostNames current_host_names();
 
 // Creates the CA when it is missing and issues a server certificate when there
