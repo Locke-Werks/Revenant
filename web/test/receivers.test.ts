@@ -753,8 +753,18 @@ test("a drag tune for a receiver that is gone is not sent", async () => {
 // ---- Signals tab ---------------------------------------------------------------
 
 function det(id: string, snrDb: number, extra: Partial<Detection> = {}): Detection {
-  return { id, centerHz: 146_520_000, bandwidthHz: 8_000, snrDb, confidence: 0.9, state: "live", label: "", labelKind: "", labelConfidence: 0, lastSeen: 0, ...extra };
+  return { id, centerHz: 146_520_000, bandwidthHz: 8_000, snrDb, confidence: 0.9, state: "live", label: "NFM", labelKind: "modulation", labelConfidence: 0.8, lastSeen: 0, ...extra };
 }
+
+test("signal rows list only detections with a modulation or protocol", () => {
+  const rows = signalRows([
+    det("1", 5),
+    det("2", 5, { label: "", labelKind: "" }),
+    det("3", 5, { label: "P25", labelKind: "protocol" }),
+    det("4", 5, { label: "  " }),
+  ]);
+  assert.deepEqual(rows.map((d) => d.id), ["1", "3"]);
+});
 
 test("signal rows run lowest frequency first, ties by id", () => {
   const rows = signalRows([
@@ -889,7 +899,7 @@ test("a spawn with no decoder, or one the receiver already has, sends no setDeco
 
 test("a signal wider than every choice gets the widest", () => {
   const { calls, deps } = pickRig();
-  pickSignal(det("1", 10, { bandwidthHz: 900_000 }), deps);
+  pickSignal(det("1", 10, { bandwidthHz: 900_000, label: "", labelKind: "" }), deps);
   assert.equal(calls[1], "spawn 146520000 wfm 200000");
 });
 
