@@ -219,7 +219,7 @@ export function showInsets(doc: Document, win: Window): void {
       `wider than screen at open: ${wideBefore.join("; ") || "none"}`,
       `wider than screen now: ${overWide(doc, win.screen.width).join("; ") || "none"}`,
       `widest during load: ${wideAtLoad(win)}`,
-      `--short-fix ${doc.documentElement.style.getPropertyValue("--short-fix") || "unset"}  deficit ${((Math.max(win.screen.width, win.screen.height) / (vv?.scale || 1)) - win.innerHeight).toFixed(1)} (portrait)`,
+      `--top-clear ${win.getComputedStyle(root).getPropertyValue("--top-clear").trim() || "unset"}  --short-fix ${doc.documentElement.style.getPropertyValue("--short-fix") || "unset"}  deficit ${((Math.max(win.screen.width, win.screen.height) / (vv?.scale || 1)) - win.innerHeight).toFixed(1)} (portrait)`,
       `short-viewport reload: ${shortReloadText(win)}`,
       `last launch without ruler: ${previousLaunch(win)}`,
       `viewport re-pins: ${repins(win)}`,
