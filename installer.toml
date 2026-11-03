@@ -78,7 +78,7 @@ https://github.com/Locke-Werks/Revenant/releases.
 # What the person installing gets asked
 # ---------------------------------------------------------------------------
 #
-# One option. Each one is a checkbox, a command-line switch, a manifest key and
+# Two options. Each one is a checkbox, a command-line switch, a manifest key and
 # a thing to keep spelled the same across versions, so the bar for adding
 # another is that the product genuinely wants it either way.
 #
@@ -92,6 +92,16 @@ id      = "desktop_shortcut"
 label   = "Put a Revenant shortcut on the desktop"
 detail  = "The Start Menu entry is created either way."
 default = false
+
+# The phone gateway at sign-in. On by default because the owner asked for it,
+# 2026-11-03: "gateway should start at windows login." It costs nothing idle:
+# the gateway starts no engine until a phone connects and stops the one it
+# started once no phone holds it (docs/webgate.md, "Cold start").
+[[options]]
+id      = "gateway_at_signin"
+label   = "Start the Revenant phone gateway when anyone signs in"
+detail  = "Runs in the background with no window. The radio and GPU are used only while a phone is connected."
+default = true
 
 # ---------------------------------------------------------------------------
 # Whether the machine qualifies
@@ -189,22 +199,48 @@ target = '{InstallDir}\revenant-ui.exe'
 name   = "Revenant"
 when   = "desktop_shortcut"
 
-# NO SERVICE. The engine holds a GPU context and a radio, and a machine-wide
-# service would hold both against whoever is logged in. It is started by a
-# person, or by a scheduled task they write, until there is a design for
-# multi-user arbitration.
+[[actions]]
+type   = "shortcut"
+target = '{InstallDir}\revenant-webgate.exe'
+name   = "Revenant phone gateway"
+
+# THE PHONE GATEWAY AT SIGN-IN, AND WHY HKLM RUN.
 #
-# NO FIREWALL RULE FOR THE PHONE GATEWAY, AND NO START MENU ENTRY FOR IT.
+# HKLM\...\Run starts the program at every user's sign-in, as that user, in
+# their session. That is the shape the gateway needs: it reads the signed-in
+# person's engine token and desktop settings under their own %LOCALAPPDATA%
+# and HKCU, and its single-instance mutex is per session (Local\). HKCU\...\Run
+# is not an option from here: this installer runs elevated, and under
+# over-the-shoulder UAC HKCU is the administrator's hive, not the person's.
+# The value is the quoted path, because Program Files has a space in it.
+# Captured before writing and removed on uninstall like every action.
+[[actions]]
+type       = "registry_write"
+hive       = "HKLM"
+key        = 'Software\Microsoft\Windows\CurrentVersion\Run'
+name       = "Revenant phone gateway"
+value      = '"{InstallDir}\revenant-webgate.exe"'
+value_type = "sz"
+when       = "gateway_at_signin"
+
+# NO SERVICE. The engine holds a GPU context and a radio, and a machine-wide
+# service would hold both against whoever is logged in. The engine is started
+# by the desktop, or by the phone gateway when a phone connects and nothing
+# else has one running; the gateway runs per sign-in session, not as a
+# service, and stops the engine it started once no phone holds it. Two people
+# signed in at once each get a gateway; the engine's port and lease are what
+# arbitrate between them, as they do between the desktop and a phone.
+#
+# NO FIREWALL RULE FOR THE PHONE GATEWAY.
 #
 # revenant-webgate.exe and its web/ directory ride in the payload beside the
 # engine, and it listens on 0.0.0.0:17700 and 17701. Forge has no firewall
 # action, and a hook can only run a digest-pinned payload member, so adding a
 # rule would mean shipping and signing a helper exe whose only job is to run
-# netsh. The gateway is started by a person on purpose, so the first start
-# raises Windows' own "allow access" prompt, which offers Private networks by
-# default; docs/webgate.md gives the netsh line for a machine where that
-# prompt was dismissed or never appears. It is started from a terminal, like
-# the engine, until it has a launcher of its own.
+# netsh. The gateway's first start, at the next sign-in or from the Start
+# menu, raises Windows' own "allow access" prompt, which offers Private
+# networks by default; docs/webgate.md gives the netsh line for a machine
+# where that prompt was dismissed or never appears.
 #
 # NO FILE ASSOCIATIONS. The file source reads SigMF and RIFF WAV recordings, and
 # .wav belongs to whatever a person already plays audio with. Registering it,
