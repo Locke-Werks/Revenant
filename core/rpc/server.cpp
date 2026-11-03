@@ -422,6 +422,7 @@ void release_engine(const engine::Engine& engine) {
             return kj::Exception::Type::UNIMPLEMENTED;
         case ErrorCategory::Unreachable:
         case ErrorCategory::Unauthenticated:
+        case ErrorCategory::TimedOut:
         case ErrorCategory::Unclassified:
             break;
     }

@@ -94,6 +94,14 @@ struct HubTiming {
     // leave a TCP connection open with nobody on the other end.
     std::chrono::milliseconds ping_interval{kPingIntervalMs};
     std::chrono::milliseconds silence_limit{45'000};
+
+    // The engine polls in tick() run on the event loop. Each tick's polls
+    // share one CallDeadline of poll_deadline that waits at most once, and
+    // after a tick whose poll timed out the next poll waits
+    // stalled_poll_interval, so a stalled engine leaves the loop free to
+    // serve HTTP and pings for most of the time.
+    std::chrono::milliseconds poll_deadline = rpc::kPollDeadline;
+    std::chrono::milliseconds stalled_poll_interval{2'000};
 };
 
 // Where a session gets an engine connection: on connect, on take over and
@@ -108,6 +116,20 @@ using NewSession = std::function<Expected<std::unique_ptr<rpc::Client>>(
 using ClaimRunner = std::function<void(
     rpc::LoginMode mode, std::string holder,
     std::function<void(Expected<std::unique_ptr<rpc::Client>>)> done)>;
+
+// Runs work on a thread other than the event loop, then runs what it returns
+// on the hub's strand. For the commands dispatch.h says run off the loop,
+// whose engine calls may wait up to rpc::kSlowCallDeadline. Empty means the
+// hub runs them in place, capped like every other command.
+using WorkRunner = std::function<void(std::function<std::function<void()>()> work)>;
+
+// What any command run on the event loop may wait for the engine: cheap calls
+// on a healthy engine, so a stalled one costs the loop this and no more.
+inline constexpr std::chrono::milliseconds kLoopCommandDeadline{2'000};
+
+// How many commands one phone may have waiting behind a slow command. The
+// app sends a handful at most; beyond this they are refused as busy.
+inline constexpr std::size_t kMaxHeldCommands = 64;
 
 // The holder text a phone's sessions log in with, from its address.
 [[nodiscard]] std::string phone_holder(std::string_view peer);
@@ -188,12 +210,20 @@ public:
     // first connection.
     void set_claim_runner(ClaimRunner runner) { claim_runner_ = std::move(runner); }
 
+    // Slow commands run through this when set; see WorkRunner. Set before the
+    // first connection.
+    void set_work_runner(WorkRunner runner) { work_runner_ = std::move(runner); }
+
     // For tests and the gateway.
     [[nodiscard]] std::size_t sessions() const { return residents_.size(); }
     [[nodiscard]] PhoneSession* session(std::uint64_t connection) const;
     [[nodiscard]] PhoneStreams* streams(std::uint64_t connection) const;
     [[nodiscard]] std::string token(std::uint64_t connection) const;
     [[nodiscard]] bool holds(const std::string& token) const { return residents_.contains(token); }
+    // Whether the last poll turn timed out, and how many have. For tests and
+    // the log.
+    [[nodiscard]] bool engine_stalled() const { return engine_stalled_; }
+    [[nodiscard]] std::uint64_t polls_timed_out() const { return polls_timed_out_; }
     // The cache every phone of this hub shares.
     [[nodiscard]] const FrameLevelsCache& frame_levels() const { return *base_.frame_levels; }
 
@@ -217,6 +247,10 @@ private:
         // The link event of a change that went to the rebuild instead, sent
         // plain if the rebuild fails.
         bool link_owed = false;
+        // A slow command is out on the work runner with this session's
+        // Client. Its polls and probe are skipped meanwhile: they would only
+        // queue behind it on that Client and hold the loop doing so.
+        unsigned slow_in_flight = 0;
     };
     struct Connection {
         PhoneSocket* socket = nullptr;
@@ -235,6 +269,10 @@ private:
         // that arrived meanwhile, replayed once it lands.
         std::optional<std::uint64_t> taking_over;
         std::deque<std::string> held;
+        // A slow command on the work runner, and the commands that arrived
+        // meanwhile, run in order once its reply is in.
+        bool slow = false;
+        std::deque<std::string> slow_held;
     };
 
     [[nodiscard]] std::chrono::steady_clock::time_point now() const;
@@ -273,6 +311,19 @@ private:
     // restart the link never reported (back within one probe) and retries a
     // rebuild that could not get a connection.
     void recover_dead_sessions(std::chrono::steady_clock::time_point now);
+
+    // Sends a slow command to the work runner. See WorkRunner.
+    void run_slow(std::uint64_t id, Connection& connection, const Command& command);
+    // Its reply, on the strand. The connection and the session may be gone.
+    void slow_done(std::uint64_t id, const std::string& token, const Command& command,
+                   std::string reply, bool stalled);
+    WorkRunner work_runner_;
+
+    // A poll turn finished; timed_out when any call in it did.
+    void note_poll(bool timed_out, std::chrono::steady_clock::time_point now);
+    bool engine_stalled_ = false;
+    std::chrono::steady_clock::time_point next_stalled_poll_{};
+    std::uint64_t polls_timed_out_ = 0;
 
     Strand& strand_;
     StreamsConfig base_;

@@ -97,6 +97,24 @@ constexpr int kRateTickMs = 250;
                      static_cast<double>(value.denominator);
 }
 
+// How many liveness probes in a row may time out before the engine counts as
+// gone. One is an engine stalled under load, which comes back; tearing every
+// receiver and subscription down for it would cost more than the stall.
+constexpr unsigned kProbeTimeoutsDown = 3;
+
+// Whether a probe's answer means the engine is gone, counting timeouts.
+[[nodiscard]] bool probe_says_gone(const Expected<bool>& alive, unsigned& timeouts) {
+    if (alive) {
+        timeouts = 0;
+        return false;
+    }
+    if (rpc::timed_out(alive.error()) && ++timeouts < kProbeTimeoutsDown) {
+        return false;
+    }
+    timeouts = 0;
+    return true;
+}
+
 }  // namespace
 
 EngineLink::EngineLink(QObject* parent) : QObject(parent)
@@ -475,7 +493,7 @@ void EngineLink::supervise()
             if (probe && std::chrono::steady_clock::now() >= retry_after_) {
                 static_cast<void>(attempt_connect());
             }
-        } else if (auto alive = client_->running(); !alive) {
+        } else if (auto alive = client_->running(); probe_says_gone(alive, probe_timeouts_)) {
             // The engine went away. core/rpc/client.cpp keeps the event loop
             // running through a lost connection and fails every later call,
             // so this is the only place that finds out, and the Client has

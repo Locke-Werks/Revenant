@@ -60,6 +60,7 @@
 #include "tools/webgate/desktop_settings.h"
 #include "tools/webgate/hls_playlist.h"
 #include "tools/webgate/phone_mix.h"
+#include "tools/webgate/protocol.h"
 #include "tools/webgate/display_sync.h"
 #include "tools/webgate/dv_feed.h"
 #include "tools/webgate/session.h"
@@ -254,6 +255,11 @@ public:
     // One text frame from the phone. The reply is queued before any event
     // the command caused.
     void on_text(std::string_view text);
+
+    // The reply to a command already dispatched elsewhere (the hub runs the
+    // slow ones on a worker; see dispatch.h runs_off_loop), and the refreshes
+    // the command calls for, exactly as on_text would have done them.
+    void on_reply(const Command& command, std::string reply);
 
     // Periodic work: notices a source opened, closed or retuned by someone
     // else, and ends segmenters whose linger has run out. The gateway calls

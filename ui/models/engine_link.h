@@ -3557,6 +3557,11 @@ private:
     // immediate and what a successful connection resets it to.
     std::chrono::steady_clock::time_point retry_after_{};
 
+    // Consecutive liveness probes that timed out (rpc::CallDeadline). A busy
+    // engine is not a gone one, so only several in a row drop the
+    // connection. Supervisor thread only.
+    unsigned probe_timeouts_ = 0;
+
     // Qt thread only.
     rpc::SpectrumFrame display_;
     rpc::EngineInfo info_;

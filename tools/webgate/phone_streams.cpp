@@ -490,7 +490,13 @@ void PhoneStreams::on_text(std::string_view text)
         }
         return;
     }
-    queue_text(dispatch(session_, *command));
+    on_reply(*command, dispatch(session_, *command));
+}
+
+void PhoneStreams::on_reply(const Command& reply_to, std::string reply)
+{
+    const Command* command = &reply_to;
+    queue_text(std::move(reply));
 
     for (const auto vrx : session_.receiver_ids()) {
         known_.insert(vrx);

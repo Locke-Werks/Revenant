@@ -24,6 +24,7 @@ add_executable(test_webgate
     test_cold_start.cpp
     test_cold_claim.cpp
     test_dv_feed.cpp
+    test_engine_stall.cpp
 )
 
 target_link_libraries(test_webgate PRIVATE

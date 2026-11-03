@@ -454,10 +454,51 @@ the gateway cannot be reached; see the next two items.
 
 **Background and live audio stop, the app still shows the link up.** The
 engine is hung rather than dead: it holds the connection open but does not
-answer. The gateway has no timeout on engine calls yet, so Keep listening and
-live audio stay silent until the engine answers again or its process exits,
-after which the gateway recovers on its own. End `revenant-engine.exe` in Task
-Manager if it does not come back.
+answer. Keep listening and live audio stay silent until the engine answers
+again or its process exits, after which the gateway recovers on its own. End
+`revenant-engine.exe` in Task Manager if it does not come back. The gateway
+itself keeps serving the page and its pings meanwhile; see Engine calls have
+deadlines.
+
+### Engine calls have deadlines
+
+Every engine call the gateway makes gives up after a deadline (docs/rpc.md,
+Call deadlines). On 2026-11-03 a call made from the gateway's event loop never
+returned while the engine was under heavy GPU load, and the whole gateway
+stopped answering: HTTPS timed out, the phone showed "not reachable", the
+socket sat in CLOSE_WAIT.
+
+- **Polls** (source state, detections, transcription status, RDS, trunk
+  status, the session probe) share one 2 s deadline per 250 ms tick, and the
+  first that times out fails the rest of that tick at once. After a timed-out
+  poll the next one waits 2 s, so a stalled engine blocks the event loop for at
+  most 2 s in every 4 s, and pings go out before any poll. The log says
+  `the engine did not answer a poll within 2.0 s` once when a streak starts and
+  `the engine is answering polls again` when it ends.
+- **Slow commands** (listSources, openSource, setTranscription, listDecoders),
+  whose engine calls may take up to 60 s, run on a worker thread with the
+  session's Client, never on the event loop. That phone's later commands wait
+  behind it in order and its polls are skipped until the reply, which arrives
+  as an error at the deadline if the engine does not answer. The held
+  commands then replay under one shared 2 s wait, and none at all when the
+  slow command timed out, so they fail at once. At most 64 are held; past that
+  a command is answered `busy: ...; try again`. Shutting the gateway down can
+  wait for a slow command's worker, up to its 60 s deadline.
+- addVrx and setCalibration run on the loop under the 2 s cap, though the
+  engine allows them 15 s. On a GPU busy with speech to text the phone may be
+  told one failed while the engine finishes it anyway; the receiver list the
+  phone gets next shows what is really there.
+- **Every other command** runs on the event loop, waits once, and for at most
+  2 s. A command the engine does not answer gets an error reply,
+  `... the engine did not answer within 2 s`, and the session is usable
+  afterwards. Seating a session, link changes and rebuilds have the same cap.
+- **Liveness**: the link's probe may time out twice in a row; the third
+  consecutive timeout is treated as the engine gone and takes the reconnect
+  path.
+
+The polls and the quick commands still run on the event loop, bounded by the
+2 s caps above. Moving the polls to a worker would take the engine off the
+loop entirely and is not done yet.
 
 **"Revenant is not reachable".** The app opened but the gateway did not answer
 within 4 seconds. Check that `revenant-webgate.exe` is running, that the phone

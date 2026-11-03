@@ -12,8 +12,9 @@
 //
 // A Client owns a thread running the Cap'n Proto event loop. Every method
 // here is synchronous from the caller's point of view: it hands work to that
-// loop and waits. Calls are serialised, so two threads may call a Client
-// without tearing, though they will queue.
+// loop and waits, for no longer than its deadline (CALL DEADLINES, below).
+// Calls are serialised, so two threads may call a Client without tearing,
+// though they will queue, and time spent queued counts against the deadline.
 //
 // The one exception is the spectrum callback, which is invoked ON the event
 // loop thread. It must not call back into the same Client, and it must
@@ -34,6 +35,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -48,6 +50,103 @@
 #include "core/rpc/types.h"
 
 namespace revenant::rpc {
+
+// CALL DEADLINES
+//
+// Every call made through a Client gives up after a deadline and fails with
+// ErrorCategory::TimedOut, "<call>: the engine did not answer within N s".
+// Until 2026-11-03 a call waited for as long as the engine took, and an
+// engine whose RPC thread stalled under load parked the webgate's event loop
+// with it: no HTTP, no pings, a phone showing "not reachable" while both
+// processes were alive.
+//
+// The pending call is cancelled on its own loop (Cap'n Proto sends the
+// engine a Finish), so a late answer is dropped and the Client stays usable:
+// the next call is an ordinary call.
+//
+// kCallDeadline is the default. The calls that legitimately take longer
+// (list_sources paying a libusb timeout per absent dongle, open_source and close_source on a slow dongle, set_transcription loading a
+// model, the capture catalog, search and occupancy reads over a long
+// recording, start_timeshift_replay, the vocoder and engine plugin scans,
+// set_plugin_receivers, and subscribe_decoded and its wideband twin, which may
+// load a vocoder plugin the first time) get kSlowCallDeadline. add_vrx and
+// set_calibration wait on a GPU that may be busy with speech to text and get
+// kGpuCallDeadline. A CallDeadline in scope on the calling thread overrides
+// all three.
+inline constexpr std::chrono::milliseconds kCallDeadline{5'000};
+inline constexpr std::chrono::milliseconds kGpuCallDeadline{15'000};
+inline constexpr std::chrono::milliseconds kSlowCallDeadline{60'000};
+
+// What a periodic poll should wait: a poll that misses a turn is retried on
+// the next, so waiting long buys nothing but a stalled caller.
+inline constexpr std::chrono::milliseconds kPollDeadline{2'000};
+
+// Given to a CallDeadline, keeps the deadline that would apply without it (an
+// enclosing scope's, else each call's own kCallDeadline, kGpuCallDeadline or
+// kSlowCallDeadline) and changes only the poll behaviour below. Zero, by
+// contrast, means no deadline at all.
+inline constexpr std::chrono::milliseconds kOwnDeadline{-1};
+
+// Overrides the deadline of every call this thread makes while it is in
+// scope, on any Client. Scopes nest and the innermost wins.
+//
+// A POLL SCOPE (poll = true) ALSO WAITS AT MOST ONCE. After one call inside
+// it has timed out, every later call inside it fails at once with TimedOut
+// rather than waiting its own deadline. A tick that makes a dozen polls of a
+// stalled engine then costs one deadline and not a dozen.
+class CallDeadline {
+public:
+    explicit CallDeadline(std::chrono::milliseconds deadline, bool poll = false);
+    ~CallDeadline();
+
+    CallDeadline(const CallDeadline&) = delete;
+    CallDeadline& operator=(const CallDeadline&) = delete;
+    CallDeadline(CallDeadline&&) = delete;
+    CallDeadline& operator=(CallDeadline&&) = delete;
+
+    // Whether a call inside this scope has timed out.
+    [[nodiscard]] bool timed_out() const { return timed_out_; }
+
+    // The innermost scope on this thread, or null. For core/rpc/client.cpp.
+    [[nodiscard]] static CallDeadline* current();
+
+    [[nodiscard]] std::chrono::milliseconds deadline() const { return deadline_; }
+    [[nodiscard]] bool poll() const { return poll_; }
+    void mark_timed_out() { timed_out_ = true; }
+
+    // The deadline this scope imposes: its own, or for kOwnDeadline the
+    // nearest enclosing scope's that is not kOwnDeadline, or fallback.
+    [[nodiscard]] std::chrono::milliseconds effective(std::chrono::milliseconds fallback) const {
+        for (const CallDeadline* s = this; s != nullptr; s = s->outer_) {
+            if (s->deadline_ != kOwnDeadline) {
+                return s->deadline_;
+            }
+        }
+        return fallback;
+    }
+
+    // Whether this scope or any scope around it is a poll scope that has
+    // already timed out, so "waits at most once" holds across nesting.
+    [[nodiscard]] bool poll_spent() const {
+        for (const CallDeadline* s = this; s != nullptr; s = s->outer_) {
+            if (s->poll_ && s->timed_out_) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    std::chrono::milliseconds deadline_;
+    bool poll_;
+    bool timed_out_ = false;
+    CallDeadline* outer_;
+};
+
+// Whether a failure is a call deadline passing, rather than an answer.
+[[nodiscard]] inline bool timed_out(const Error& error) {
+    return error.category == ErrorCategory::TimedOut;
+}
 
 class Client {
 public:

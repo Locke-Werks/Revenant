@@ -2239,6 +2239,50 @@ not on the machine, and `REVENANT_REQUIRE_WHISPER=1` makes that a failure.
 `revenant-engine --transcribe` turns the switch on at startup, for a headless
 engine that should transcribe without a client asking.
 
+## Call deadlines
+
+Every `rpc::Client` call fails after a deadline with
+`ErrorCategory::TimedOut` and the message `<call>: the engine did not answer
+within N s`. Until 2026-11-03 a call waited as long as the engine took, and an
+engine whose RPC thread stalled under load stalled every caller with it, the
+phone gateway's event loop included.
+
+| Calls | Deadline |
+| --- | --- |
+| Everything not listed below (`rpc::kCallDeadline`) | 5 s |
+| `add_vrx`, `set_calibration`: they wait on a GPU that may be busy with speech to text (`rpc::kGpuCallDeadline`) | 15 s |
+| `list_sources`, `open_source`, `close_source`, `set_transcription`, `capture_catalog`, `capture_search`, `capture_occupancy`, `start_timeshift_replay`, `vocoder_plugins`, `engine_plugins`, `set_plugin_receivers`, `subscribe_decoded`, `subscribe_wideband_decoded` (`rpc::kSlowCallDeadline`) | 60 s |
+| Periodic polls, by the caller's choice (`rpc::kPollDeadline`) | 2 s |
+
+How it works: `on_loop` races the call's promise against the loop's timer with
+`exclusiveJoin`. When the timer wins the call's promise is dropped, Cap'n Proto
+sends the engine a Finish, and an answer arriving later is discarded, so the
+Client is left as it was and the next call is ordinary. Time spent queued
+behind another caller's call counts against the deadline too.
+
+`rpc::CallDeadline` overrides the deadline for every call its thread makes
+while in scope. With `poll = true` the scope also waits at most once: after one
+call inside it times out, the rest fail at once with TimedOut, so a tick of a
+dozen polls against a stalled engine costs one deadline. `rpc::kOwnDeadline`
+keeps the deadline that would apply without the scope (an enclosing scope's,
+else the call's own) and changes only that. A spent poll scope anywhere around
+a call makes it fail at once, and a timeout in a nested scope marks the outer
+one. A call that could not even start because another caller's call holds the
+Client says `still queued after N s behind another call the engine has not
+answered`.
+
+The desktop uses the same Client and so the same deadlines; nothing under
+`ui/` opens a scope.
+
+TimedOut is not Disconnected. The connection may be fine and the engine busy,
+so a poll skips a turn, and a supervisor decides how many in a row mean gone
+(the webgate's liveness probe takes three). The category is raised by the
+client alone and never crosses the wire.
+
+Tested by `tests/rpc/test_rpc_deadline.cpp` and
+`tests/webgate/test_engine_stall.cpp`, against `tests/rpc/stall_engine.h`, an
+engine stand-in that stops answering on cue.
+
 ## Backpressure
 
 Decided in `core/rpc/server.h` rather than discovered later.

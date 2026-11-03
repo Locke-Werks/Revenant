@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "tools/webgate/dispatch.h"
 #include "tools/webgate/protocol.h"
 
 namespace revenant::webgate {
@@ -165,6 +166,9 @@ bool PhoneHub::make_room()
 PhoneHub::Resident& PhoneHub::seat(std::uint64_t id, std::unique_ptr<rpc::Client> client,
                                    std::string holder)
 {
+    // Seating subscribes and reads the engine's state, on the event loop;
+    // see text() for why it waits once.
+    const rpc::CallDeadline once(kLoopCommandDeadline, true);
     static_cast<void>(make_room());
     auto resident = std::make_unique<Resident>();
     resident->token = new_token();
@@ -355,6 +359,12 @@ void PhoneHub::settle_losses()
 
 void PhoneHub::text(std::uint64_t id, std::string_view text)
 {
+    // A command on the event loop waits once, and for kLoopCommandDeadline at
+    // most: the first call the engine does not answer fails the command with
+    // an error reply, and the rest of what it would have asked fails at once.
+    // The commands that may legitimately take longer go to the work runner
+    // below instead.
+    const rpc::CallDeadline once(kLoopCommandDeadline, true);
     const auto it = connections_.find(id);
     if (it == connections_.end()) {
         return;
@@ -369,6 +379,22 @@ void PhoneHub::text(std::uint64_t id, std::string_view text)
         // Replayed in order once the takeOver lands, against the session it
         // brings or the refusal it ends in.
         connection.held.emplace_back(text);
+        return;
+    }
+    if (connection.slow) {
+        // Behind a slow command, in order: a phone that opens a source and
+        // then adds a receiver means the receiver to land on the new source.
+        // Capped, so a phone cannot grow the queue without bound while the
+        // engine is stalled; past the cap a command is refused at once.
+        if (connection.slow_held.size() >= kMaxHeldCommands) {
+            if (command) {
+                send_bare(id, error_reply(command->id,
+                                          "busy: waiting for an earlier command the engine has "
+                                          "not answered yet; try again"));
+            }
+            return;
+        }
+        connection.slow_held.emplace_back(text);
         return;
     }
     const bool first = !connection.commanded;
@@ -396,7 +422,76 @@ void PhoneHub::text(std::uint64_t id, std::string_view text)
         }
         return;
     }
+    if (command && work_runner_ && runs_off_loop(command->op)) {
+        run_slow(id, connection, *command);
+        return;
+    }
     connection.resident->streams->on_text(text);
+}
+
+void PhoneHub::run_slow(std::uint64_t id, Connection& connection, const Command& command)
+{
+    Resident& resident = *connection.resident;
+    connection.slow = true;
+    ++resident.slow_in_flight;
+    // The Client is shared so it outlives a session destroyed while this
+    // runs; the work touches nothing else of the hub's.
+    work_runner_([this, id, token = resident.token, command,
+                  client = resident.session->shared_client(), alive = alive_]() {
+        // A poll scope of its own so the command waits once; whether it
+        // timed out goes back with the reply.
+        const rpc::CallDeadline own(rpc::kOwnDeadline, true);
+        std::string reply = dispatch_off_loop(*client, command);
+        const bool stalled = own.timed_out();
+        return std::function<void()>(
+            [this, id, token, command, alive, stalled, reply = std::move(reply)]() mutable {
+                if (*alive) {
+                    slow_done(id, token, command, std::move(reply), stalled);
+                }
+            });
+    });
+}
+
+void PhoneHub::slow_done(std::uint64_t id, const std::string& token, const Command& command,
+                         std::string reply, bool stalled)
+{
+    Resident* resident = find_token(token);
+    if (resident != nullptr && resident->slow_in_flight > 0) {
+        --resident->slow_in_flight;
+    }
+    const auto it = connections_.find(id);
+    if (it == connections_.end()) {
+        // The phone left; the reply has nobody to go to.
+        return;
+    }
+    auto& connection = it->second;
+    connection.slow = false;
+    // One scope for the reply's refreshes and every held command replayed
+    // below, so together they wait once: text() opens its own scope inside
+    // this one, and a spent poll scope around a call fails it at once. When
+    // the engine just failed to answer the slow command it starts spent, so
+    // nothing here waits at all.
+    rpc::CallDeadline once(kLoopCommandDeadline, true);
+    if (stalled) {
+        once.mark_timed_out();
+    }
+    if (resident != nullptr && connection.resident == resident) {
+        resident->streams->on_reply(command, std::move(reply));
+    } else {
+        send_bare(id, std::move(reply));
+    }
+    // Replayed through text(), which holds the rest again if one of them is
+    // slow too. The connection is looked up afresh each time: a replayed
+    // command can end it.
+    while (true) {
+        const auto again = connections_.find(id);
+        if (again == connections_.end() || again->second.slow || again->second.slow_held.empty()) {
+            return;
+        }
+        const std::string next = std::move(again->second.slow_held.front());
+        again->second.slow_held.pop_front();
+        text(id, next);
+    }
 }
 
 void PhoneHub::take_over(std::uint64_t id, Connection& connection, const Command& command)
@@ -579,9 +674,20 @@ void PhoneHub::tick()
         disconnect(id);
     }
 
+    // Every poll this tick shares one deadline, and the first that times out
+    // makes the rest fail at once: these calls run on the event loop that
+    // serves HTTP and the sockets, so a stalled engine costs one kPollDeadline
+    // per poll turn and not one per call. While the engine is stalled the
+    // polls back off to stalled_poll_interval, which keeps the loop free for
+    // most of each interval. Pings went out above, before any of this.
+    const bool poll_now = !engine_stalled_ || t >= next_stalled_poll_;
+    rpc::CallDeadline poll(timing_.poll_deadline, true);
+
     std::vector<std::string> expired;
     for (auto& [token, resident] : residents_) {
-        resident->streams->tick();
+        if (poll_now && resident->slow_in_flight == 0) {
+            resident->streams->tick();
+        }
         if (resident->connection) {
             continue;
         }
@@ -604,7 +710,33 @@ void PhoneHub::tick()
         residents_.erase(token);
     }
 
-    recover_dead_sessions(t);
+    if (poll_now) {
+        recover_dead_sessions(t);
+        note_poll(poll.timed_out(), t);
+    }
+}
+
+void PhoneHub::note_poll(bool timed_out, std::chrono::steady_clock::time_point t)
+{
+    // Logged once per streak, at its start and its end: a stalled engine
+    // polled four times a second would otherwise fill the log.
+    if (timed_out) {
+        ++polls_timed_out_;
+        next_stalled_poll_ = t + timing_.stalled_poll_interval;
+        if (!engine_stalled_) {
+            engine_stalled_ = true;
+            std::fprintf(stderr,
+                         "revenant-webgate: the engine did not answer a poll within %.1f s; "
+                         "polling every %.1f s until it does\n",
+                         static_cast<double>(timing_.poll_deadline.count()) / 1000.0,
+                         static_cast<double>(timing_.stalled_poll_interval.count()) / 1000.0);
+        }
+        return;
+    }
+    if (engine_stalled_) {
+        engine_stalled_ = false;
+        std::fprintf(stderr, "revenant-webgate: the engine is answering polls again\n");
+    }
 }
 
 void PhoneHub::recover_dead_sessions(std::chrono::steady_clock::time_point t)
@@ -613,7 +745,7 @@ void PhoneHub::recover_dead_sessions(std::chrono::steady_clock::time_point t)
         return;
     }
     for (auto& [token, resident] : residents_) {
-        if (t - resident->last_probe < kProbeInterval) {
+        if (resident->slow_in_flight != 0 || t - resident->last_probe < kProbeInterval) {
             continue;
         }
         resident->last_probe = t;
@@ -626,6 +758,7 @@ void PhoneHub::recover_dead_sessions(std::chrono::steady_clock::time_point t)
 
 void PhoneHub::link_state(LinkState state, std::string detail)
 {
+    const rpc::CallDeadline once(kLoopCommandDeadline, true);
     const bool rising = state == LinkState::Up && link_state_ != LinkState::Up;
     link_state_ = state;
     link_detail_ = std::move(detail);
@@ -649,7 +782,9 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
     // missed probe) leaves this session's connection working, and its
     // receivers still exist: nothing to rebuild.
     auto& old_session = *resident.session;
-    if (!connection_dead(old_session.client())) {
+    // A slow command holds this Client; asking it now would wait behind that
+    // on the loop. The next probe after the reply asks instead.
+    if (resident.slow_in_flight != 0 || !connection_dead(old_session.client())) {
         return false;
     }
 
@@ -680,6 +815,7 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
 
 void PhoneHub::rebuilt(const std::string& token, Expected<std::unique_ptr<rpc::Client>> client)
 {
+    const rpc::CallDeadline once(kLoopCommandDeadline, true);
     Resident* resident = find_token(token);
     if (resident == nullptr) {
         // Expired or taken over while the connect ran. Dropping the Client

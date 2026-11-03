@@ -353,6 +353,21 @@ void EngineLink::supervise(const std::stop_token& stop)
             // lease_status, not running: the link observes, and an observer
             // may ask only info, listSources and leaseStatus.
             auto alive = client_->lease_status();
+            // A probe the engine did not answer in time is an engine that is
+            // busy, not yet one that is gone: under heavy GPU load its RPC
+            // thread can stall for seconds and come back. Only
+            // kProbeTimeoutsDown in a row take the reconnect path; any answer
+            // resets the count.
+            if (!alive && rpc::timed_out(alive.error()) &&
+                ++probe_timeouts_ < kProbeTimeoutsDown) {
+                std::fprintf(stderr, "revenant-webgate: liveness probe %u of %u timed out: %s\n",
+                             probe_timeouts_, kProbeTimeoutsDown, alive.error().message.c_str());
+                lock.lock();
+                wake_.wait_for(lock, stop, config_.poll_interval, [this] { return poked_; });
+                poked_ = false;
+                continue;
+            }
+            probe_timeouts_ = 0;
             if (!alive) {
                 std::unique_ptr<rpc::Client> gone;
                 lock.lock();

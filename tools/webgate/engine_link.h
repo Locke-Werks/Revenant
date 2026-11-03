@@ -77,6 +77,11 @@ inline constexpr std::chrono::milliseconds kIdleStopGrace{10'000};
 // GPU and longer on a loaded one.
 inline constexpr std::chrono::milliseconds kDemandWait{20'000};
 
+// How many liveness probes in a row may time out (rpc::kCallDeadline each)
+// before the link calls the engine gone and reconnects. One is a busy engine;
+// three, at poll_interval apart, is over fifteen seconds of no answer.
+inline constexpr unsigned kProbeTimeoutsDown = 3;
+
 // The process half of starting an engine, so tests can stand an in-process
 // engine in for revenant-engine.exe. The default is launch::EngineLauncher.
 class EngineProcess {
@@ -294,6 +299,7 @@ private:
     std::optional<std::chrono::steady_clock::time_point> last_demand_;  // guarded by mutex_
     std::uint32_t idle_stops_ = 0;           // guarded by mutex_
     IdleStop idle_;                          // supervisor only
+    unsigned probe_timeouts_ = 0;            // supervisor only, consecutive
 
     std::jthread supervisor_;
 };
