@@ -15,7 +15,12 @@
 
 html, body {
   margin: 0;
-  height: 100%;
+  /* As tall as the glass. On a cold launch an installed app's layout
+     viewport can come up a status bar short and iOS sizes it from the
+     document, so the document asks for the large viewport outright. Exact,
+     not a minimum, so there is nothing to scroll past it. */
+  height: 100vh;
+  height: 100lvh;
   background: var(--bg);
   color: var(--fg);
   font: 16px/1.4 var(--sans);
