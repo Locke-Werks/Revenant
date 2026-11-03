@@ -22,7 +22,7 @@ public:
     KjPhoneSocket(const KjPhoneSocket&) = delete;
     KjPhoneSocket& operator=(const KjPhoneSocket&) = delete;
 
-    void send(OutgoingMessage message, std::function<void()> done) override
+    void do_send(OutgoingMessage message, std::function<void()> done) override
     {
         if (broken_) {
             return;

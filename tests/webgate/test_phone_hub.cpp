@@ -269,7 +269,7 @@ TEST_CASE("resume of an expired token fails cleanly", "[gpu][webgate][hub]")
     const auto reply = reply_to(second, 1);
     INFO(reply);
     CHECK(contains(reply, R"("ok":false)"));
-    CHECK(contains(reply, "no detached session"));
+    CHECK(contains(reply, "no session with that token"));
     CHECK(rig.hub->sessions() == 1);
 
     // The fresh session it was greeted with works.
@@ -286,4 +286,73 @@ TEST_CASE("resume is refused after the first command", "[gpu][webgate][hub]")
     rig.text(id, R"({"id":1,"op":"setView","args":{"centerHz":0,"spanHz":1000,"widthPx":10}})");
     rig.text(id, R"({"id":2,"op":"resume","args":{"token":"00"}})");
     CHECK(contains(reply_to(socket, 2), "only as the first command"));
+}
+
+TEST_CASE("resume waits for a send already in flight on the socket", "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    HubRig rig;
+    FakeSocket first;
+    const auto id = rig.connect(first);
+    const auto token = rig.hub->token(id);
+    rig.hub->disconnect(id);
+
+    // The fresh session's hello is still going out when resume arrives.
+    FakeSocket second;
+    second.hold();
+    const auto again = rig.connect(second);
+    REQUIRE(second.busy());
+    rig.text(again, R"({"id":1,"op":"resume","args":{"token":")" + token + "\"}}");
+    CHECK(second.concurrent_sends == 0);
+    CHECK(reply_to(second, 1).empty());
+
+    second.release();
+    rig.strand.run_pending();
+    CHECK(second.concurrent_sends == 0);
+    CHECK(contains(reply_to(second, 1), R"("resumed":true)"));
+}
+
+TEST_CASE("resume takes a session from a socket that is still attached", "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    HubRig rig;
+    FakeSocket first;
+    const auto id = rig.connect(first);
+    const auto token = rig.hub->token(id);
+    const auto vrx = rig.listen(id, first, true);
+
+    FakeSocket second;
+    const auto again = rig.connect(second);
+    rig.text(again, R"({"id":1,"op":"resume","args":{"token":")" + token + "\"}}");
+    CHECK(contains(reply_to(second, 1), R"("ok":true)"));
+    CHECK(first.closed);
+    CHECK(rig.hub->sessions() == 1);
+    CHECK(rig.hub->session(id) == nullptr);
+    CHECK(rig.hub->session(again)->owns(vrx));
+}
+
+TEST_CASE("a silent socket is pinged, then closed after 45 s", "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    HubRig rig;
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    const auto token = rig.hub->token(id);
+
+    rig.advance(seconds(16));
+    bool pinged = false;
+    for (const auto& m : socket.sent) {
+        pinged = pinged || contains(m.text, R"({"event":"ping"})");
+    }
+    CHECK(pinged);
+
+    // A pong keeps it alive.
+    rig.text(id, R"({"id":5,"op":"pong"})");
+    rig.advance(seconds(40));
+    CHECK_FALSE(socket.closed);
+
+    rig.advance(seconds(6));
+    CHECK(socket.closed);
+    CHECK(rig.hub->session(id) == nullptr);
+    CHECK(rig.hub->holds(token));
 }

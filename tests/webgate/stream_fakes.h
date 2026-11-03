@@ -47,8 +47,14 @@ private:
 // flight": its done is kept until release().
 class FakeSocket final : public PhoneSocket {
 public:
-    void send(OutgoingMessage message, std::function<void()> done) override
+protected:
+    void do_send(OutgoingMessage message, std::function<void()> done) override
     {
+        // A second send while one is outstanding is what kj refuses with
+        // "another message send is already in progress".
+        if (waiting) {
+            concurrent_sends += 1;
+        }
         sent.push_back(std::move(message));
         if (held) {
             waiting = std::move(done);
@@ -57,6 +63,7 @@ public:
         }
     }
 
+public:
     void close() override { closed = true; }
 
     void hold() { held = true; }
@@ -83,6 +90,7 @@ public:
     std::vector<OutgoingMessage> sent;
     bool held = false;
     bool closed = false;
+    int concurrent_sends = 0;
     std::function<void()> waiting;
 };
 

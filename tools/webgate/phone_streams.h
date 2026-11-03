@@ -80,14 +80,44 @@ struct OutgoingMessage {
 // again after the previous message's done has run. done runs on the strand,
 // possibly before send() returns. A failed send never runs done; the socket
 // closes itself and the receive side reports the end.
+//
+// The socket, not the stream, owns whether a send is in flight. A session
+// that resumes onto a socket the fresh session was still writing to must wait
+// for that write: kj allows one send at a time and throws on a second.
 class PhoneSocket {
 public:
     virtual ~PhoneSocket() = default;
-    virtual void send(OutgoingMessage message, std::function<void()> done) = 0;
+
+    void send(OutgoingMessage message, std::function<void()> done)
+    {
+        busy_ = true;
+        do_send(std::move(message), [this, done = std::move(done)] {
+            busy_ = false;
+            auto idle = std::move(idle_);
+            idle_ = nullptr;
+            done();
+            if (idle) {
+                idle();
+            }
+        });
+    }
+
+    [[nodiscard]] bool busy() const { return busy_; }
+
+    // Runs once, after the send in flight completes. Replaces an earlier one.
+    void when_idle(std::function<void()> callback) { idle_ = std::move(callback); }
 
     // Ends the connection. The receive side then sees it end and detaches the
     // session, which is how an overflowing or broken socket is handled.
     virtual void close() = 0;
+
+protected:
+    // complete is called when the message has gone; never for a failed send.
+    virtual void do_send(OutgoingMessage message, std::function<void()> complete) = 0;
+
+private:
+    bool busy_ = false;
+    std::function<void()> idle_;
 };
 
 struct StreamsConfig {

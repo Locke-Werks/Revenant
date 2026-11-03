@@ -246,8 +246,8 @@ void PhoneStreams::subscribe_vrx_events()
                 // say so where an operator and the phone can both see it.
                 std::fprintf(stderr, "revenant-webgate: receiver events ended again: %s\n",
                              reason.c_str());
-                self.queue_text(event("vrxStatus",
-                                      JsonObject().add_string("eventsEnded", reason)));
+                self.queue_text(
+                    event("vrxEventsEnded", JsonObject().add_string("reason", reason)));
             });
         });
     static_cast<void>(subscribed);
@@ -500,6 +500,18 @@ void PhoneStreams::attach(PhoneSocket& socket)
     socket_ = &socket;
     ++socket_generation_;
     in_flight_ = false;
+    if (socket.busy()) {
+        // Another session's last write is still going out on this socket.
+        in_flight_ = true;
+        socket.when_idle([this, alive = alive_, gen = socket_generation_] {
+            if (!*alive || gen != socket_generation_) {
+                return;
+            }
+            in_flight_ = false;
+            pump();
+        });
+        return;
+    }
     pump();
 }
 

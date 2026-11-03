@@ -42,6 +42,14 @@ namespace revenant::webgate {
 struct HubTiming {
     std::chrono::milliseconds detached_linger{30'000};
     std::chrono::milliseconds hls_idle{60'000};
+
+    // Liveness. kj does not expose WebSocket protocol pings, so the gateway
+    // sends a "ping" event and the app answers with a "pong" command; any
+    // message from the phone counts as hearing from it. A socket silent for
+    // silence_limit is closed, which detaches its session: an iOS lock can
+    // leave a TCP connection open with nobody on the other end.
+    std::chrono::milliseconds ping_interval{15'000};
+    std::chrono::milliseconds silence_limit{45'000};
 };
 
 class PhoneHub {
@@ -58,8 +66,10 @@ public:
     std::uint64_t connect(PhoneSocket& socket, std::unique_ptr<rpc::Client> client);
 
     // One text frame. "resume" is handled here: allowed only as a
-    // connection's first command, it swaps the fresh session for the detached
-    // one holding the token. Everything else goes to the session's streams.
+    // connection's first command, it swaps the fresh session for the one
+    // holding the token, taking it from another connection if one still has
+    // it (that socket is closed). "pong" only marks the phone as alive.
+    // Everything else goes to the session's streams.
     void text(std::uint64_t connection, std::string_view text);
 
     // The socket is gone. Its session detaches and starts expiring.
@@ -99,10 +109,13 @@ private:
         PhoneSocket* socket = nullptr;
         Resident* resident = nullptr;
         bool commanded = false;
+        std::chrono::steady_clock::time_point last_heard{};
+        std::chrono::steady_clock::time_point last_ping{};
     };
 
     [[nodiscard]] std::chrono::steady_clock::time_point now() const;
     void resume(std::uint64_t id, Connection& connection, const Command& command);
+    [[nodiscard]] Resident* find_token(std::string_view token) const;
 
     Strand& strand_;
     StreamsConfig base_;

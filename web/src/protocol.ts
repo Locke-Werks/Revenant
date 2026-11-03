@@ -38,6 +38,7 @@ export const OPS = [
   "setTranscription",
   "setVrxTranscribe",
   "resume",
+  "pong",
 ] as const;
 export type Op = (typeof OPS)[number];
 
@@ -51,6 +52,8 @@ export const EVENTS = [
   "vrxRemoved",
   "hls",
   "hello",
+  "ping",
+  "vrxEventsEnded",
 ] as const;
 export type EventName = (typeof EVENTS)[number];
 

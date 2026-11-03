@@ -76,7 +76,8 @@ std::uint64_t PhoneHub::connect(PhoneSocket& socket, std::unique_ptr<rpc::Client
     resident->connection = id;
     Resident* raw = resident.get();
     residents_.emplace(resident->token, std::move(resident));
-    connections_[id] = Connection{&socket, raw, false};
+    const auto t = now();
+    connections_[id] = Connection{&socket, raw, false, t, t};
 
     raw->streams->send_event(event("hello", JsonObject().add_string("resume", raw->token)));
     raw->streams->start();
@@ -91,10 +92,15 @@ void PhoneHub::text(std::uint64_t id, std::string_view text)
         return;
     }
     auto& connection = it->second;
+    connection.last_heard = now();
+    auto command = parse_command(text);
+    if (command && command->op == "pong") {
+        return;
+    }
     const bool first = !connection.commanded;
     connection.commanded = true;
 
-    if (auto command = parse_command(text); command && command->op == "resume") {
+    if (command && command->op == "resume") {
         if (!first) {
             connection.resident->streams->send_event(
                 error_reply(command->id, "resume: only as the first command on a connection"));
@@ -114,17 +120,26 @@ void PhoneHub::resume(std::uint64_t id, Connection& connection, const Command& c
         fresh->streams->send_event(error_reply(command.id, token.error().message));
         return;
     }
-    const auto found = residents_.find(*token);
-    if (found == residents_.end() || found->second.get() == fresh ||
-        found->second->connection.has_value()) {
-        // Expired, never issued, or attached elsewhere. The phone keeps the
-        // fresh session it was greeted with and rebuilds from there.
+    Resident* old = find_token(*token);
+    if (old == nullptr || old == fresh) {
+        // Expired or never issued. The phone keeps the fresh session it was
+        // greeted with and rebuilds from there.
         fresh->streams->send_event(error_reply(
-            command.id, "resume: no detached session with that token; this is a new session"));
+            command.id, "resume: no session with that token; this is a new session"));
         return;
     }
+    if (old->connection) {
+        // Still attached to a socket nobody reads: the usual state after an
+        // iOS lock, where the TCP connection lingers without a FIN. The token
+        // is proof of ownership, so the old socket is closed and the session
+        // comes here.
+        const auto previous = *old->connection;
+        if (const auto prev = connections_.find(previous); prev != connections_.end()) {
+            prev->second.socket->close();
+        }
+        disconnect(previous);
+    }
 
-    Resident* old = found->second.get();
     residents_.erase(fresh->token);  // nothing of the fresh one is wanted
     connection.resident = old;
     old->connection = id;
@@ -133,6 +148,25 @@ void PhoneHub::resume(std::uint64_t id, Connection& connection, const Command& c
     old->streams->send_event(
         ok_reply(command.id, JsonObject().add_bool("resumed", true).str()));
     old->streams->send_event(link_event(link_state_, link_detail_));
+}
+
+PhoneHub::Resident* PhoneHub::find_token(std::string_view token) const
+{
+    // Every entry is compared in full, with no early exit, so the time taken
+    // says nothing about how close a guess was.
+    Resident* match = nullptr;
+    for (const auto& [key, resident] : residents_) {
+        unsigned diff = key.size() == token.size() ? 0U : 1U;
+        const std::size_t n = std::min(key.size(), token.size());
+        for (std::size_t i = 0; i < n; ++i) {
+            diff |= static_cast<unsigned>(static_cast<unsigned char>(key[i]) ^
+                                          static_cast<unsigned char>(token[i]));
+        }
+        if (diff == 0U) {
+            match = resident.get();
+        }
+    }
+    return match;
 }
 
 void PhoneHub::disconnect(std::uint64_t id)
@@ -162,6 +196,22 @@ void PhoneHub::hls_fetched(std::uint64_t vrx)
 void PhoneHub::tick()
 {
     const auto t = now();
+
+    std::vector<std::uint64_t> silent;
+    for (auto& [id, connection] : connections_) {
+        if (t - connection.last_heard > timing_.silence_limit) {
+            silent.push_back(id);
+        } else if (t - connection.last_ping >= timing_.ping_interval &&
+                   connection.resident != nullptr) {
+            connection.last_ping = t;
+            connection.resident->streams->send_event(event("ping"));
+        }
+    }
+    for (const auto id : silent) {
+        connections_.at(id).socket->close();
+        disconnect(id);
+    }
+
     std::vector<std::string> expired;
     for (auto& [token, resident] : residents_) {
         resident->streams->tick();
