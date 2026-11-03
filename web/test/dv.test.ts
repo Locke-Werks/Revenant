@@ -129,22 +129,49 @@ test("the phone's switches are saved and re-sent on every ready", () => {
   const a = replayRig(null);
   a.replay.ready([]);
   assert.deepEqual(a.sent, []);
-  a.replay.setAutoDv(true);
   a.replay.setFollow(3, 851_012_500, true, 4);
   a.replay.setRules({ allow: "100", deny: "", priority: "" });
 
   // A relaunched page on a fresh session, where receiver ids have changed.
   const b = replayRig(a.stored());
   b.replay.ready([]);
-  assert.deepEqual(b.sent, ["autoDv true", "rules 100"]);
+  assert.deepEqual(b.sent, ["rules 100"]);
   b.replay.receivers([
     { vrx: 20, hz: 851_012_500 + 300, mode: "p25p1" },
     { vrx: 21, hz: 851_012_500, mode: "nfm" },
   ]);
-  assert.deepEqual(b.sent, ["autoDv true", "rules 100", "follow 20 true 4"]);
+  assert.deepEqual(b.sent, ["rules 100", "follow 20 true 4"]);
   // Once only.
   b.replay.receivers([{ vrx: 20, hz: 851_012_500, mode: "p25p1" }]);
-  assert.equal(b.sent.length, 3);
+  assert.equal(b.sent.length, 2);
+
+  // Auto DV alone is replayed too.
+  const c = replayRig(null);
+  c.replay.setAutoDv(true);
+  const d = replayRig(c.stored());
+  d.replay.ready([]);
+  assert.deepEqual(d.sent, ["autoDv true"]);
+});
+
+test("Auto DV and trunk following are exclusive: one on turns the other off", () => {
+  const r = replayRig(null);
+  r.replay.setFollow(3, 851_000_000, true, 2);
+  r.replay.setAutoDv(true);
+  assert.deepEqual(r.sent, ["follow 3 true 2", "follow 3 false 2", "autoDv true"]);
+  assert.equal(r.replay.state.follow, null);
+  assert.equal(r.replay.state.autoDv, true);
+
+  r.replay.setFollow(3, 851_000_000, true, 2);
+  assert.deepEqual(r.sent.slice(3), ["autoDv false", "follow 3 true 2"]);
+  assert.equal(r.replay.state.autoDv, false);
+  assert.ok(r.replay.state.follow !== null);
+});
+
+test("a store saved with both on comes back as Auto DV only", () => {
+  const r = replayRig(JSON.stringify({ autoDv: true, follow: { hz: 851_000_000, maxFollowers: 2 } }));
+  r.replay.ready([{ vrx: 5, hz: 851_000_000, mode: "p25p1" }]);
+  assert.deepEqual(r.sent, ["autoDv true"]);
+  assert.equal(readDvMemory(r.stored()).follow, null);
 });
 
 test("follow already on at the gateway is not sent again", () => {

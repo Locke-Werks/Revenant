@@ -265,6 +265,9 @@ export interface DvSend {
 export class DvReplay {
   private memory: DvMemory;
   private followPending = false;
+  // The control channel receiver following was last switched on for, so
+  // Auto DV can switch it off.
+  private followVrx: number | null = null;
 
   constructor(
     private readonly send: DvSend,
@@ -280,6 +283,8 @@ export class DvReplay {
 
   ready(receivers: readonly { vrx: number; hz: number; mode: string }[]): void {
     this.memory = readDvMemory(this.load());
+    // Saved by a build before the two were exclusive: Auto DV wins.
+    if (this.memory.autoDv && this.memory.follow) this.store({ ...this.memory, follow: null });
     if (this.memory.autoDv) this.send.autoDv(true);
     if (this.memory.rules) this.send.rules(this.memory.rules);
     this.followPending = this.memory.follow !== null;
@@ -297,16 +302,30 @@ export class DvReplay {
     const vrx = controlAt(f.hz, list);
     if (vrx === null) return;
     this.followPending = false;
+    this.followVrx = vrx;
     this.send.follow(vrx, true, f.maxFollowers);
   }
 
+  // Auto DV and trunk following are exclusive (owner, 2026-11-03: "xor"):
+  // switching one on switches the other off, visibly, rather than holding it
+  // paused to come back later.
   setAutoDv(on: boolean): void {
+    if (on && this.memory.follow) {
+      this.followPending = false;
+      if (this.followVrx !== null) this.send.follow(this.followVrx, false, this.memory.follow.maxFollowers);
+      this.store({ ...this.memory, follow: null });
+    }
     this.store({ ...this.memory, autoDv: on });
     this.send.autoDv(on);
   }
 
   setFollow(vrx: number, hz: number, on: boolean, maxFollowers: number): void {
+    if (on && this.memory.autoDv) {
+      this.store({ ...this.memory, autoDv: false });
+      this.send.autoDv(false);
+    }
     this.followPending = false;
+    this.followVrx = on ? vrx : null;
     this.store({ ...this.memory, follow: on ? { hz, maxFollowers } : null, maxFollowers });
     this.send.follow(vrx, on, maxFollowers);
   }

@@ -130,7 +130,7 @@ export class DvPanel {
 
   private renderSwitches(): void {
     this.autoBtn.setAttribute("aria-pressed", String(this.dv.autoDv));
-    this.autoBtn.title = "A receiver for every digital voice signal detected; trunk following is held off while it is on, as on the desktop";
+    this.autoBtn.title = "A receiver for every digital voice signal detected. Turns trunk following off: Auto DV ignores control channels, so the two do not run together";
     const target = followTarget(this.active, this.dv);
     this.followRow.hidden = target === null;
     this.followBtn.setAttribute("aria-pressed", String(this.dv.follow !== null));
