@@ -317,4 +317,51 @@ ApplicationWindow {
             }
         }
     }
+
+    // The single-user lease. Opaque and on top, and it takes every click and
+    // key, because the controls under it belong to a session the engine has
+    // refused.
+    Rectangle {
+        id: leaseNotice
+        anchors.fill: parent
+        z: 1000
+        visible: engineLink.leaseNotice !== ""
+        color: Theme.background
+        focus: visible
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.AllButtons
+            onWheel: wheel => wheel.accepted = true
+        }
+        Keys.onPressed: event => event.accepted = true
+
+        ColumnLayout {
+            anchors.centerIn: parent
+            spacing: 16
+
+            Label {
+                Layout.alignment: Qt.AlignHCenter
+                text: engineLink.leaseNotice
+                color: Theme.ink
+                font.pixelSize: Theme.sizeFigure
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
+                Layout.maximumWidth: leaseNotice.width - 80
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                spacing: 12
+                Button {
+                    text: engineLink.leaseAction
+                    onClicked: engineLink.takeOverLease()
+                }
+                Button {
+                    text: "Quit"
+                    onClicked: Qt.quit()
+                }
+            }
+        }
+    }
 }

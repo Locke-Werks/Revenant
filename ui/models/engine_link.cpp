@@ -469,6 +469,9 @@ void EngineLink::supervise()
         // is the epoch, which is always in the past, so the first attempt is
         // not delayed.
         if (client_ == nullptr) {
+            if (lease_take_over_now_.exchange(false)) {
+                retry_after_ = {};
+            }
             if (probe && std::chrono::steady_clock::now() >= retry_after_) {
                 static_cast<void>(attempt_connect());
             }
@@ -731,14 +734,62 @@ bool EngineLink::attempt_connect()
         return false;
     }
 
-    auto client = rpc::Client::connect(address_.toStdString(), port_, *token);
-    if (!client) {
-        hold_off(client.error());
-        publish(false, describe_failure(client.error(), endpoint_));
+    if (lease_holder_.empty()) {
+        const char* computer = std::getenv("COMPUTERNAME");
+        lease_holder_ = desktop_holder(computer != nullptr ? computer : "");
+    }
+
+    // Through the gate, so a refusal becomes the full-window notice and a
+    // takeover stops this loop logging in until the operator says Take back.
+    std::unique_ptr<rpc::Client> made;
+    std::optional<Error> failed;
+    LoginOutcome outcome = LoginOutcome::Skipped;
+    {
+        const std::lock_guard<std::mutex> lock(lease_mutex_);
+        outcome = lease_login(
+            lease_gate_, lease_holder_,
+            [&](rpc::LoginMode mode, std::string_view holder) -> std::optional<std::string> {
+                auto client = rpc::Client::connect(address_.toStdString(), port_, *token, mode,
+                                                   holder);
+                if (!client) {
+                    failed = client.error();
+                    return client.error().message;
+                }
+                made = std::move(*client);
+                return std::nullopt;
+            });
+    }
+    if (outcome != LoginOutcome::Failed) {
+        post_lease();
+    }
+    if (outcome == LoginOutcome::Skipped) {
         return false;
     }
-    client_ = std::move(*client);
+    if (outcome == LoginOutcome::Refused) {
+        // Tried again now and then, so the window comes up by itself once
+        // the holder leaves, without a login a second against the engine.
+        retry_after_ = std::chrono::steady_clock::now() + kRefusedCredentialInterval;
+        publish(false, QString{});
+        return false;
+    }
+    if (outcome == LoginOutcome::Failed) {
+        hold_off(*failed);
+        publish(false, describe_failure(*failed, endpoint_));
+        return false;
+    }
+    client_ = std::move(made);
     retry_after_ = {};
+
+    // Delivered on the event loop thread through the receiver-event
+    // subscription; the engine closes this connection shortly after, and the
+    // gate keeps the supervisor from claiming again.
+    client_->on_lease_lost([this](const std::string& new_holder) {
+        {
+            const std::lock_guard<std::mutex> lock(lease_mutex_);
+            lease_gate_.on_lease_lost(new_holder);
+        }
+        post_lease();
+    });
 
     auto info = client_->info();
     if (!info) {
@@ -926,6 +977,40 @@ void EngineLink::publish(bool connected, QString error)
         handover_error_ = std::move(error);
     }
     QMetaObject::invokeMethod(this, [this] { adopt(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::post_lease()
+{
+    QString notice;
+    QString action;
+    {
+        const std::lock_guard<std::mutex> lock(lease_mutex_);
+        notice = QString::fromStdString(lease_gate_.notice());
+        action = QString::fromStdString(lease_gate_.action());
+    }
+    QMetaObject::invokeMethod(
+        this,
+        [this, notice, action] {
+            if (notice == lease_notice_ && action == lease_action_) {
+                return;
+            }
+            lease_notice_ = notice;
+            lease_action_ = action;
+            emit leaseChanged();
+        },
+        Qt::QueuedConnection);
+}
+
+void EngineLink::takeOverLease()
+{
+    {
+        const std::lock_guard<std::mutex> lock(lease_mutex_);
+        lease_gate_.take_over();
+        lease_take_over_now_ = true;
+    }
+    // The supervisor reads retry_after_ on its own thread only, so this wakes
+    // it and the takeover goes on its next probe pass, within a second.
+    supervisor_wake_.notify_all();
 }
 
 void EngineLink::note_running(bool running)

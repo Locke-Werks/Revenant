@@ -171,6 +171,7 @@
 #include "models/detector_scope.h"
 #include "models/detector_settings.h"
 #include "models/label_tune.h"
+#include "models/lease_gate.h"
 #include "models/mode_choice.h"
 #include "models/radio_memory.h"
 #include "models/receiver_gone.h"
@@ -1375,6 +1376,12 @@ class EngineLink : public QObject {
     // release is something a person asks for having read what it will do.
     Q_PROPERTY(QString strandedReceiverText READ strandedReceiverText
                    NOTIFY strandedReceiversChanged)
+
+    // The single-user lease, models/lease_gate.h. leaseNotice is non-empty
+    // while the window is refused or taken over, and Main.qml then covers
+    // everything with it.
+    Q_PROPERTY(QString leaseNotice READ leaseNotice NOTIFY leaseChanged)
+    Q_PROPERTY(QString leaseAction READ leaseAction NOTIFY leaseChanged)
 
     // ------------------------------------------------------------------
     // RDS on the receiver the detail pane is on
@@ -2913,6 +2920,13 @@ public:
 
     [[nodiscard]] QString strandedReceiverText() const { return stranded_text_; }
 
+    [[nodiscard]] QString leaseNotice() const { return lease_notice_; }
+    [[nodiscard]] QString leaseAction() const { return lease_action_; }
+
+    // Take over from the refusal screen, or Take back from the taken-over
+    // screen: the next login evicts the holder.
+    Q_INVOKABLE void takeOverLease();
+
     // Removes every receiver the engine holds except the one this window is
     // on, if any. Asked for explicitly, never on a timer and never at startup.
     Q_INVOKABLE void releaseStrandedReceivers();
@@ -3297,6 +3311,8 @@ signals:
     // The engine's receiver inventory changed, or this window's place in it
     // did.
     void strandedReceiversChanged();
+
+    void leaseChanged();
 
     // The source's tuning surface changed: the range came back on a new
     // connection, a retune was granted, or one was refused. Separate from
@@ -3832,6 +3848,19 @@ private:
     // Qt thread only.
     std::vector<qulonglong> engine_receiver_ids_;
     QString stranded_text_;
+
+    // The lease. lease_gate_ is written by the supervisor, the event loop
+    // thread (lease lost) and the Qt thread (take over), under lease_mutex_;
+    // the two strings are the Qt thread's copy for QML.
+    std::mutex lease_mutex_;
+    LeaseGate lease_gate_;
+    std::string lease_holder_;
+    QString lease_notice_;
+    QString lease_action_;
+    // Any thread. Posts the gate's notice to the Qt thread.
+    void post_lease();
+    // Set by Take over so the supervisor skips the refusal backoff.
+    std::atomic<bool> lease_take_over_now_{false};
 
     // The supervisor's copy of the same, guarded by receiver_mutex_, plus the
     // operator's request to release what this window does not hold.
