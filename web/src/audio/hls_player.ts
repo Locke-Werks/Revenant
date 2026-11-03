@@ -13,6 +13,8 @@
 
 export interface MediaLike {
   src: string;
+  currentTime: number;
+  readonly seekable: { readonly length: number; end(i: number): number };
   readonly paused: boolean;
   play(): Promise<void>;
   pause(): void;
@@ -44,6 +46,10 @@ export const PROBE_EVERY_MS = 500;
 export const PROBE_GIVE_UP_MS = 20_000;
 export const RETRY_AFTER_MS = 1_000;
 export const MAX_RETRIES = 5;
+// Playing but the clock not moving this long is a stream that died quietly
+// (Safari does not always raise an error for a live playlist that stops).
+export const STALL_MS = 6_000;
+export const WATCH_EVERY_MS = 1_000;
 
 export class HlsPlayer {
   private url: string | null = null;
@@ -60,15 +66,21 @@ export class HlsPlayer {
   private gen = 0;
   private statusNow: HlsStatus = { kind: "idle" };
   private listeners: ((s: HlsStatus) => void)[] = [];
+  private watch: unknown = null;
+  private lastTime = -1;
+  private stillFor = 0;
+  private failed: () => void = () => {};
 
   constructor(private readonly deps: HlsPlayerDeps) {
     deps.media.addEventListener("playing", () => {
       if (this.wanted && this.url !== null && this.loaded === this.url) {
         this.retries = 0;
         this.set({ kind: "playing" });
+        this.startWatch();
       }
     });
     const failed = () => {
+      this.stopWatch();
       if (!this.wanted || this.url === null || this.loaded !== this.url) return;
       if (this.retries >= MAX_RETRIES) {
         this.set({ kind: "failed", error: "the background stream stopped and did not come back" });
@@ -84,6 +96,12 @@ export class HlsPlayer {
     deps.media.addEventListener("error", failed);
     // A live stream that ends was cut off at the gateway.
     deps.media.addEventListener("ended", failed);
+    this.failed = failed;
+    // stalled fires on ordinary buffering too; it only counts once the
+    // clock has also stood still for a while.
+    deps.media.addEventListener("stalled", () => {
+      if (this.statusNow.kind === "playing" && this.stillFor >= STALL_MS / 2) failed();
+    });
   }
 
   get status(): HlsStatus {
@@ -116,7 +134,9 @@ export class HlsPlayer {
 
   // The gateway's hls event: a URL, or null with the reason it has none.
   setUrl(url: string | null, error?: string): void {
-    if (url === this.url && error === undefined) return;
+    // The same URL again after a failure is the gateway re-announcing a
+    // stream that is back: start over.
+    if (url === this.url && error === undefined && this.statusNow.kind !== "failed") return;
     this.url = url;
     this.gen++;
     this.cancel();
@@ -138,19 +158,37 @@ export class HlsPlayer {
       this.set({ kind: "starting" });
       return;
     }
+    const m = this.deps.media;
+    if (this.loaded === this.url) {
+      // Paused at a cut: jump to the live edge and play the element that is
+      // already activated, which iOS allows without a gesture. A fresh load
+      // only if that is refused.
+      const gen = this.gen;
+      this.set({ kind: "starting" });
+      if (m.seekable.length > 0) m.currentTime = m.seekable.end(m.seekable.length - 1);
+      m.play().catch(() => {
+        if (gen === this.gen) this.begin();
+      });
+      return;
+    }
     this.begin();
   }
 
-  // Part of a cut to live. The element is emptied rather than paused, so the
-  // next play() starts at the live edge instead of minutes in the past.
+  // Part of a cut to live: paused with the stream kept, see play().
   pause(): void {
-    this.stop();
+    this.wanted = false;
+    this.gen++;
+    this.cancel();
+    this.stopWatch();
+    this.deps.media.pause();
+    this.set({ kind: "idle" });
   }
 
   stop(): void {
     this.wanted = false;
     this.gen++;
     this.cancel();
+    this.stopWatch();
     const m = this.deps.media;
     m.pause();
     if (this.loaded !== null && this.loaded !== this.deps.silence) {
@@ -193,6 +231,29 @@ export class HlsPlayer {
         });
     };
     attempt();
+  }
+
+  private startWatch(): void {
+    this.stopWatch();
+    this.lastTime = this.deps.media.currentTime;
+    const tick = () => {
+      this.watch = this.deps.setTimeout(tick, WATCH_EVERY_MS);
+      const t = this.deps.media.currentTime;
+      if (t !== this.lastTime) {
+        this.lastTime = t;
+        this.stillFor = 0;
+        return;
+      }
+      this.stillFor += WATCH_EVERY_MS;
+      if (this.stillFor >= STALL_MS) this.failed();
+    };
+    this.watch = this.deps.setTimeout(tick, WATCH_EVERY_MS);
+  }
+
+  private stopWatch(): void {
+    if (this.watch !== null) this.deps.clearTimeout(this.watch);
+    this.watch = null;
+    this.stillFor = 0;
   }
 
   private schedule(fn: () => void, ms: number): void {

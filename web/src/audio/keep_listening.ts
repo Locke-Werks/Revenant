@@ -76,6 +76,7 @@ export class KeepListening {
   // HLS is heard, so turning keep listening on is never a gap.
   private holdWhenHlsPlays = false;
   private now: NowPlaying | null = null;
+  private primeWait: (() => void) | null = null;
 
   constructor(private readonly deps: KeepListeningDeps) {
     this.handoff = new Handoff((c) => this.run(c));
@@ -84,9 +85,9 @@ export class KeepListening {
     deps.hls.onStatus((s) => this.onHlsStatus(s));
     deps.link.on("hls", (e) => this.onHls(e));
     deps.link.on("ready", () => {
-      // A refused resume lands on a fresh session with keep listening off;
-      // a resumed one does not mind hearing it again.
-      if (this.gatewayWants()) this.request(true);
+      // A refused resume lands on a fresh session with keep listening off,
+      // and a change made while down was never sent: say what is wanted now.
+      this.request(this.gatewayWants());
     });
     deps.link.on("link", (e) => {
       for (const r of e.recreated ?? []) if (r.old === this.following) this.following = r.new;
@@ -95,7 +96,8 @@ export class KeepListening {
       }
     });
     deps.link.on("vrxRemoved", (e) => {
-      if (typeof e.vrx !== "number" || e.vrx !== this.following || this.handoff.state === "Live") return;
+      if (typeof e.vrx !== "number" || e.vrx !== this.following) return;
+      if (!this.handoff.keepListening && this.handoff.state === "Live") return;
       const reason = typeof e.reason === "string" && e.reason !== "" ? e.reason : "removed";
       this.clearGrace();
       this.grace = deps.setTimeout(() => {
@@ -127,6 +129,12 @@ export class KeepListening {
     this.following = vrx;
     this.deps.ui.message(null);
     this.deps.hls.unlock();
+    if (this.handoff.keepListening) {
+      // Already on, but HLS failed or was refused (the lock screen's play
+      // after a stall): try the stream again.
+      if (this.handoff.state !== "Live" && !this.deps.hls.playing) this.deps.hls.play();
+      return;
+    }
     this.handoff.keepListeningOn();
     this.deps.ui.keep(this.handoff.keepListening);
   }
@@ -141,9 +149,7 @@ export class KeepListening {
   goLive(): void {
     const resumed = this.deps.live.resume();
     this.handoff.goLiveTap();
-    void resumed.then((ok) => {
-      if (!ok) this.handoff.resumeResult(false);
-    });
+    void resumed.then((ok) => this.handoff.resumeResult(ok));
   }
 
   visibility(hidden: boolean): void {
@@ -169,10 +175,23 @@ export class KeepListening {
         this.updateMedia();
         return;
       case "pauseHls":
+        // Paused, not emptied: the next hide can seek this already-activated
+        // element to the live edge without a gesture.
+        this.holdWhenHlsPlays = false;
+        hls.pause();
+        this.updateMedia();
+        return;
       case "stopHls":
         this.holdWhenHlsPlays = false;
         hls.stop();
         this.updateMedia();
+        return;
+      case "restoreLive":
+        this.stopPriming();
+        this.holdWhenHlsPlays = false;
+        live.release();
+        live.fadeIn(0);
+        void live.resume();
         return;
       case "startLive":
         return this.prime();
@@ -197,6 +216,7 @@ export class KeepListening {
   }
 
   private prime(): void {
+    this.stopPriming();
     const gen = ++this.primeGen;
     this.holdWhenHlsPlays = false;
     const { link, live } = this.deps;
@@ -223,8 +243,9 @@ export class KeepListening {
     if (link.ready) {
       go();
     } else {
-      const off = link.on("ready", () => {
-        off();
+      this.primeWait = link.on("ready", () => {
+        this.primeWait?.();
+        this.primeWait = null;
         go();
       });
     }
@@ -232,6 +253,9 @@ export class KeepListening {
 
   private stopPriming(): void {
     this.primeGen++;
+    // One pending wait at most, however often the page is shown and hidden.
+    this.primeWait?.();
+    this.primeWait = null;
     if (this.poll !== null) this.deps.clearTimeout(this.poll);
     this.poll = null;
   }
@@ -247,7 +271,7 @@ export class KeepListening {
     this.deps.link.request("keepListening", { on }).catch((e: unknown) => {
       if (!on) return;
       this.deps.ui.message(`Keep listening was refused: ${e instanceof Error ? e.message : String(e)}`);
-      this.fallBack();
+      this.failHls();
     });
   }
 
@@ -271,16 +295,15 @@ export class KeepListening {
     }
     if (s.kind === "failed" && this.handoff.state !== "Live") {
       this.deps.ui.message(`Background audio failed: ${s.error}`);
-      this.fallBack();
+      this.failHls();
     }
     this.updateMedia();
   }
 
-  // HLS cannot play. In the foreground live takes over; with the phone
-  // locked there is nothing to hand to, and the message says why.
-  private fallBack(): void {
-    if (this.deps.hidden()) return;
-    this.handoff.keepListeningOff();
+  // HLS cannot play. In the foreground live is made audible at once; with
+  // the phone locked there is nothing to hand to, and the message says why.
+  private failHls(): void {
+    this.handoff.hlsFailed();
     this.deps.ui.keep(this.handoff.keepListening);
   }
 

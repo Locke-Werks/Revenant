@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { HlsPlayer, PROBE_EVERY_MS, type MediaLike } from "../src/audio/hls_player";
+import { HlsPlayer, PROBE_EVERY_MS, RETRY_AFTER_MS, STALL_MS, type MediaLike } from "../src/audio/hls_player";
 import { KeepListening, REPLACE_GRACE_MS, type KeepLink, type LivePath, type MediaSessionLike } from "../src/audio/keep_listening";
 import type { JsonValue } from "../src/protocol";
 
@@ -39,10 +39,18 @@ async function flush(): Promise<void> {
 class FakeMedia implements MediaLike {
   src = "";
   paused = true;
+  currentTime = 0;
+  seekEnd = 0;
+  refuse = false;
+  get seekable() {
+    const end = this.seekEnd;
+    return { length: end > 0 ? 1 : 0, end: () => end };
+  }
   plays: string[] = [];
   unloads = 0;
   private fns = new Map<string, (() => void)[]>();
   play(): Promise<void> {
+    if (this.refuse) return Promise.reject(new Error("NotAllowedError"));
     this.plays.push(this.src);
     this.paused = false;
     return Promise.resolve();
@@ -326,4 +334,188 @@ test("glue: the lock screen shows frequency and mode", async () => {
   await g.clock.advance(0);
   g.media.fire("playing");
   assert.equal(g.states.at(-1), "playing");
+});
+
+// ---- Fix round 1 -------------------------------------------------------------
+
+async function playingHls(g: ReturnType<typeof glue>): Promise<void> {
+  g.keep.on();
+  g.link.emit("hls", { event: "hls", vrx: 4, url: "/hls/4/live.m3u8" });
+  await g.clock.advance(0);
+  g.media.fire("playing");
+}
+
+test("glue: a lock-screen pause gives live back at full level", async () => {
+  const g = glue();
+  await playingHls(g);
+  g.setHidden(true);
+  g.live.log.length = 0;
+  g.keep.off();
+  assert.deepEqual(g.live.log, ["release", "fadeIn 0", "resume"]);
+  assert.equal(g.media.src, "");
+});
+
+test("glue: a removed receiver gives live back from Priming too", async () => {
+  const g = glue();
+  await playingHls(g);
+  g.setHidden(true);
+  g.setHidden(false);
+  await g.clock.advance(0);
+  g.live.log.length = 0;
+  g.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 4, reason: "gone" });
+  await g.clock.advance(REPLACE_GRACE_MS);
+  assert.deepEqual(g.live.log, ["release", "fadeIn 0", "resume"]);
+  assert.equal(g.keep.state, "Live");
+});
+
+test("glue: removal in Live with keep listening on still stops it with a reason", async () => {
+  const g = glue();
+  await playingHls(g);
+  g.setHidden(true);
+  g.setHidden(false);
+  g.live.ready = true;
+  await g.clock.advance(100);
+  assert.equal(g.keep.state, "Live");
+  g.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 4, reason: "gone" });
+  await g.clock.advance(REPLACE_GRACE_MS);
+  assert.equal(g.ui.keep, false);
+  assert.match(g.ui.message ?? "", /gone/);
+});
+
+test("glue: a Go live tap whose resume fails brings the pill back", async () => {
+  const g = glue();
+  await playingHls(g);
+  g.setHidden(true);
+  g.live.resumeOk = false;
+  g.setHidden(false);
+  await g.clock.advance(0);
+  g.live.ready = true;
+  g.keep.goLive();
+  await g.clock.advance(100);
+  assert.equal(g.keep.state, "NeedsTap");
+  assert.equal(g.ui.goLive, true);
+  assert.equal(g.media.paused, false);
+});
+
+test("hls: a clock that stops while playing is a failure and retries", async () => {
+  const clock = new Clock();
+  const { media, hls } = player(clock, () => true);
+  hls.setUrl("/hls/4/live.m3u8");
+  hls.play();
+  await clock.advance(0);
+  media.fire("playing");
+  await clock.advance(STALL_MS);
+  assert.equal(hls.status.kind, "starting");
+  await clock.advance(RETRY_AFTER_MS);
+  assert.equal(media.plays.length, 2);
+});
+
+test("hls: stalled counts only once the clock has also stopped", async () => {
+  const clock = new Clock();
+  const { media, hls } = player(clock, () => true);
+  hls.setUrl("/hls/4/live.m3u8");
+  hls.play();
+  await clock.advance(0);
+  media.fire("playing");
+  media.fire("stalled");
+  assert.equal(hls.status.kind, "playing");
+  await clock.advance(STALL_MS / 2);
+  media.fire("stalled");
+  assert.equal(hls.status.kind, "starting");
+});
+
+test("glue: lock-screen play after HLS failed starts the stream again", async () => {
+  const g = glue();
+  await playingHls(g);
+  g.setHidden(true);
+  for (let i = 0; i < 7; i++) {
+    g.media.fire("error");
+    await g.clock.advance(RETRY_AFTER_MS);
+  }
+  assert.equal(g.hls.status.kind, "failed");
+  const plays = g.media.plays.length;
+  g.keep.on();
+  await g.clock.advance(0);
+  assert.ok(g.media.plays.length > plays);
+});
+
+test("glue: the cut pauses the element and the next hide seeks it to the live edge", async () => {
+  const g = glue();
+  await playingHls(g);
+  g.setHidden(true);
+  g.setHidden(false);
+  g.live.ready = true;
+  await g.clock.advance(100);
+  assert.equal(g.media.src, "/hls/4/live.m3u8");
+  assert.equal(g.media.paused, true);
+  g.media.seekEnd = 42;
+  g.setHidden(true);
+  await g.clock.advance(0);
+  assert.equal(g.media.currentTime, 42);
+  assert.equal(g.media.paused, false);
+});
+
+test("glue: a refused play while hidden says why", async () => {
+  const g = glue();
+  await playingHls(g);
+  g.setHidden(true);
+  g.setHidden(false);
+  g.live.ready = true;
+  await g.clock.advance(100);
+  g.media.refuse = true;
+  g.setHidden(true);
+  await g.clock.advance(PROBE_EVERY_MS);
+  assert.match(g.ui.message ?? "", /refused to play/);
+});
+
+test("glue: HLS failing while priming makes live audible at once", async () => {
+  const g = glue();
+  await playingHls(g);
+  g.setHidden(true);
+  g.setHidden(false);
+  await g.clock.advance(0);
+  g.live.log.length = 0;
+  g.link.emit("hls", { event: "hls", vrx: 4, url: null, error: "encoder died" });
+  assert.deepEqual(g.live.log, ["release", "fadeIn 0", "resume"]);
+  assert.equal(g.keep.state, "Live");
+});
+
+test("glue: ready sends the wanted state, off included", () => {
+  const g = glue();
+  g.link.emit("ready", { resumed: false });
+  assert.deepEqual(g.link.requests, [{ on: false }]);
+});
+
+test("hls: the same URL announced after a failure starts again", async () => {
+  const clock = new Clock();
+  const { media, hls } = player(clock, () => true);
+  hls.play();
+  hls.setUrl(null, "down");
+  hls.setUrl("/hls/4/live.m3u8");
+  await clock.advance(0);
+  media.fire("error");
+  for (let i = 0; i < 6; i++) {
+    await clock.advance(RETRY_AFTER_MS);
+    media.fire("error");
+  }
+  assert.equal(hls.status.kind, "failed");
+  const plays = media.plays.length;
+  hls.setUrl("/hls/4/live.m3u8");
+  await clock.advance(0);
+  assert.equal(media.plays.length, plays + 1);
+});
+
+test("glue: showing and hiding while the link is down leaves one wait", async () => {
+  const g = glue();
+  await playingHls(g);
+  g.link.ready = false;
+  for (let i = 0; i < 5; i++) {
+    g.setHidden(true);
+    g.setHidden(false);
+  }
+  g.live.log.length = 0;
+  g.link.ready = true;
+  g.link.emit("ready", { resumed: true });
+  await g.clock.advance(0);
+  assert.deepEqual(g.live.log.filter((x) => x === "release"), ["release"]);
 });

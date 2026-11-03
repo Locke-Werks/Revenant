@@ -66,7 +66,7 @@ test("resume then ready cuts too", () => {
   assert.deepEqual(m.take(), ["fadeCut", "pauseHls", "hideBehindBanner"]);
 });
 
-test("refused resume shows Go live; the tap cuts once live is ready", () => {
+test("refused resume shows Go live; the tap cuts once its resume succeeds", () => {
   const m = machine();
   m.h.keepListeningOn();
   m.h.hidden();
@@ -78,8 +78,25 @@ test("refused resume shows Go live; the tap cuts once live is ready", () => {
   m.h.liveReady();
   assert.deepEqual(m.take(), []);
   m.h.goLiveTap();
-  assert.deepEqual(m.take(), ["hideGoLive", "fadeCut", "pauseHls", "hideBehindBanner"]);
+  assert.deepEqual(m.take(), ["hideGoLive"]);
+  assert.equal(m.h.state, "Priming");
+  m.h.resumeResult(true);
+  assert.deepEqual(m.take(), ["fadeCut", "pauseHls", "hideBehindBanner"]);
   assert.equal(m.h.state, "Live");
+});
+
+test("a tap whose resume fails brings the pill back with HLS playing", () => {
+  const m = machine();
+  m.h.keepListeningOn();
+  m.h.hidden();
+  m.h.visible();
+  m.h.resumeResult(false);
+  m.h.liveReady();
+  m.h.goLiveTap();
+  m.take();
+  m.h.resumeResult(false);
+  assert.deepEqual(m.take(), ["showGoLive"]);
+  assert.equal(m.h.state, "NeedsTap");
 });
 
 test("a tap before live has filled waits for it", () => {
@@ -92,8 +109,31 @@ test("a tap before live has filled waits for it", () => {
   m.h.goLiveTap();
   assert.deepEqual(m.take(), ["hideGoLive"]);
   assert.equal(m.h.state, "Priming");
+  m.h.resumeResult(true);
+  assert.deepEqual(m.take(), []);
   m.h.liveReady();
   assert.deepEqual(m.take(), ["fadeCut", "pauseHls", "hideBehindBanner"]);
+});
+
+test("HLS failing in the foreground makes live audible at once", () => {
+  const m = machine();
+  m.h.keepListeningOn();
+  m.take();
+  m.h.hlsFailed();
+  assert.deepEqual(m.take(), ["stopHls", "restoreLive", "hideBehindBanner", "hlsOff"]);
+  assert.equal(m.h.state, "Live");
+  assert.equal(m.h.keepListening, false);
+});
+
+test("HLS failing while hidden changes nothing until the page shows", () => {
+  const m = machine();
+  m.h.keepListeningOn();
+  m.h.hidden();
+  m.take();
+  m.h.hlsFailed();
+  assert.deepEqual(m.take(), []);
+  m.h.visible();
+  assert.deepEqual(m.take(), ["startLive"]);
 });
 
 test("keep listening off in the foreground cuts to live before HLS stops", () => {
@@ -113,7 +153,7 @@ test("keep listening off from the lock screen stops HLS", () => {
   m.h.hidden();
   m.take();
   m.h.keepListeningOff();
-  assert.deepEqual(m.take(), ["stopHls", "hideBehindBanner", "hlsOff"]);
+  assert.deepEqual(m.take(), ["stopHls", "restoreLive", "hideBehindBanner", "hlsOff"]);
   assert.equal(m.h.state, "Live");
 });
 
@@ -137,7 +177,7 @@ test("a lost receiver stops everything and says nothing is left", () => {
   m.h.resumeResult(false);
   m.take();
   m.h.receiverGone();
-  assert.deepEqual(m.take(), ["hideGoLive", "stopLive", "stopHls", "hideBehindBanner", "hlsOff"]);
+  assert.deepEqual(m.take(), ["hideGoLive", "stopHls", "restoreLive", "hideBehindBanner", "hlsOff"]);
   assert.equal(m.h.state, "Live");
   assert.equal(m.h.keepListening, false);
 });
@@ -153,7 +193,8 @@ type Input =
   | "resumeOk"
   | "resumeRefused"
   | "goLiveTap"
-  | "receiverGone";
+  | "receiverGone"
+  | "hlsFailed";
 
 const INPUTS: Input[] = [
   "keepListeningOn",
@@ -165,6 +206,7 @@ const INPUTS: Input[] = [
   "resumeRefused",
   "goLiveTap",
   "receiverGone",
+  "hlsFailed",
 ];
 
 function apply(h: Handoff, i: Input): void {
@@ -186,9 +228,11 @@ function* sequences(n: number): Generator<Input[]> {
   for (const head of sequences(n - 1)) for (const i of INPUTS) yield [...head, i];
 }
 
-test("no sequence of four inputs pauses HLS before live is ready, or goes quiet by itself", () => {
+const WALK = 6;
+
+test("no sequence of six inputs pauses HLS before live is ready, or goes quiet by itself", () => {
   let walked = 0;
-  for (const seq of sequences(4)) {
+  for (const seq of sequences(WALK)) {
     walked++;
     const cmds: HandoffCommand[] = [];
     const h = new Handoff((c) => cmds.push(c));
@@ -199,12 +243,12 @@ test("no sequence of four inputs pauses HLS before live is ready, or goes quiet 
     let resumed = false;
     for (const input of seq) {
       cmds.length = 0;
-      // A goLiveTap is itself a successful resume, if the machine was asking.
       const before = h.state;
       apply(h, input);
       if (input === "liveReady" && (before === "Priming" || before === "NeedsTap")) filled = true;
       if (input === "resumeOk" && before === "Priming") resumed = true;
-      if (input === "goLiveTap" && before === "NeedsTap") resumed = true;
+      // The tap's own resume is reported as resumeOk or resumeRefused, so
+      // the tap itself proves nothing.
       for (const c of cmds) {
         const where = `${seq.join(",")} at ${input}: ${cmds.join(",")}`;
         switch (c) {
@@ -215,6 +259,9 @@ test("no sequence of four inputs pauses HLS before live is ready, or goes quiet 
             break;
           case "stopLive":
             liveOn = false;
+            break;
+          case "restoreLive":
+            liveOn = true;
             break;
           case "playHls":
             hls = true;
@@ -229,7 +276,7 @@ test("no sequence of four inputs pauses HLS before live is ready, or goes quiet 
             break;
           case "stopHls":
             assert.ok(
-              input === "receiverGone" || (input === "keepListeningOff" && !h.isVisible),
+              input === "receiverGone" || input === "hlsFailed" || (input === "keepListeningOff" && !h.isVisible),
               `HLS stopped with no reason the user can see: ${where}`,
             );
             hls = false;
@@ -242,7 +289,9 @@ test("no sequence of four inputs pauses HLS before live is ready, or goes quiet 
       assert.ok(!(hls && liveOn), `both paths playing: ${seq.join(",")} at ${input}`);
       if (h.keepListening && !h.isVisible) assert.ok(hls, `keep listening hidden but HLS silent: ${seq.join(",")}`);
       if (h.state !== "Live") assert.ok(hls, `state ${h.state} without HLS: ${seq.join(",")}`);
+      // Live is the resting state: whatever left HLS must have given live back.
+      if (h.state === "Live") assert.ok(liveOn, `Live with live held: ${seq.join(",")}`);
     }
   }
-  assert.equal(walked, INPUTS.length ** 4);
+  assert.equal(walked, INPUTS.length ** WALK);
 });

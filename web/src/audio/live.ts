@@ -156,6 +156,9 @@ export class LiveAudio {
   stop(): void {
     ++this.gen;
     this.wanted = null;
+    // A stopped path is not held: the next start must be heard.
+    this.held = false;
+    this.setLevel(1, 0);
     const vrx = this.active;
     this.clear();
     if (vrx !== null) void this.deps.link.request("audio", { vrx, on: false }).catch(() => {});

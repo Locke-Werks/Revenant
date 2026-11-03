@@ -31,6 +31,9 @@ export type HandoffCommand =
   | "stopLive"
   // Unmute live with a short ramp.
   | "fadeCut"
+  // HLS stopped without a cut: live takes frames again at full level at
+  // once. Without it a held live path would stay silent with no reason given.
+  | "restoreLive"
   | "showGoLive"
   | "hideGoLive"
   | "showBehindBanner"
@@ -80,10 +83,8 @@ export class Handoff {
           this.prime();
         } else {
           // Off from the lock screen: the user asked for quiet.
-          this.emit("stopHls");
-          this.emit("hideBehindBanner");
+          this.leaveHls();
           this.emit("hlsOff");
-          this.st = "Live";
         }
         return;
       case "Priming":
@@ -141,29 +142,44 @@ export class Handoff {
   // The pill. The glue resumes live inside this tap, since that is the
   // gesture a refused resume was waiting for; if it still fails it reports
   // resumeResult(false) and the pill comes back.
+  // The tap's resume can still fail, so nothing is assumed: the glue reports
+  // its outcome as resumeResult like any other.
   goLiveTap(): void {
     if (this.st !== "NeedsTap") return;
-    this.resumed = true;
-    if (this.ready) {
-      this.cut();
-      return;
-    }
+    this.resumed = null;
     this.emit("hideGoLive");
     this.st = "Priming";
   }
 
-  // The receiver HLS was following is gone (removed, or lost in an engine
-  // restart). Nothing is left to play on either path.
-  receiverGone(): void {
-    const wasHls = this.st !== "Live";
+  // HLS cannot play (the gateway has no stream, or it stalled and retries
+  // ran out). In the foreground live is the only thing left, so it is made
+  // audible at once even if its buffer is still filling: a partial buffer
+  // beats a failed stream. With the phone locked nothing can take over; the
+  // glue says why, and showing the page primes live as usual.
+  hlsFailed(): void {
+    if (this.st === "Live" || !this.shown) return;
     if (this.st === "NeedsTap") this.emit("hideGoLive");
-    if (this.st === "Priming" || this.st === "NeedsTap") this.emit("stopLive");
-    if (wasHls) {
-      this.emit("stopHls");
-      this.emit("hideBehindBanner");
-    }
+    this.leaveHls();
     if (this.keep) this.emit("hlsOff");
     this.keep = false;
+  }
+
+  // The receiver HLS was following is gone (removed, or lost in an engine
+  // restart). Nothing is left to play on either path.
+  // Live is restored too: it is idle now, but must not stay held when the
+  // user picks another receiver.
+  receiverGone(): void {
+    if (this.st === "NeedsTap") this.emit("hideGoLive");
+    if (this.st !== "Live") this.leaveHls();
+    if (this.keep) this.emit("hlsOff");
+    this.keep = false;
+  }
+
+  // Out of HLS with no cut.
+  private leaveHls(): void {
+    this.emit("stopHls");
+    this.emit("restoreLive");
+    this.emit("hideBehindBanner");
     this.st = "Live";
   }
 
