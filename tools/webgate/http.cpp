@@ -1,10 +1,14 @@
 #include "tools/webgate/http.h"
 
+#include <algorithm>
+#include <cctype>
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <kj/compat/tls.h>
 
@@ -35,6 +39,7 @@ constexpr std::string_view kSetupPage =
         case 200: return "OK";
         case 301: return "Moved Permanently";
         case 400: return "Bad Request";
+        case 403: return "Forbidden";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
         case 503: return "Service Unavailable";
@@ -117,6 +122,10 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
                     return respond(response, impl.table, 503, "text/plain; charset=utf-8",
                                    "no session handler\n");
                 }
+                if (!impl.origin_allowed(headers)) {
+                    return respond(response, impl.table, 403, "text/plain; charset=utf-8",
+                                   "origin not allowed\n");
+                }
                 kj::HttpHeaders out(impl.table);
                 return impl.owner.on_websocket(response.acceptWebSocket(out));
             }
@@ -184,6 +193,47 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
         Impl& impl;
     };
 
+    // A browser sends Origin on every WebSocket upgrade and a script cannot
+    // forge it, so this is what stops an arbitrary page in a LAN browser from
+    // opening a session. Absent means not a browser (curl, a native client).
+    // Present must be https, on this server's port, at a name the certificate
+    // carries.
+    [[nodiscard]] bool origin_allowed(const kj::HttpHeaders& headers) const {
+        std::optional<std::string> origin;
+        headers.forEach([&](kj::StringPtr name, kj::StringPtr value) {
+            std::string key(name.cStr(), name.size());
+            std::ranges::transform(key, key.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (key == "origin") {
+                origin = std::string(value.cStr(), value.size());
+            }
+        });
+        if (!origin) {
+            return true;
+        }
+        constexpr std::string_view scheme = "https://";
+        if (origin->rfind(scheme, 0) != 0) {
+            return false;
+        }
+        std::string authority = origin->substr(scheme.size());
+        unsigned port = 443;
+        if (const std::size_t colon = authority.find(':'); colon != std::string::npos) {
+            const std::string digits = authority.substr(colon + 1);
+            if (digits.empty() || digits.size() > 5 ||
+                !std::ranges::all_of(digits, [](unsigned char c) { return std::isdigit(c); })) {
+                return false;
+            }
+            port = static_cast<unsigned>(std::stoul(digits));
+            authority.resize(colon);
+        }
+        std::ranges::transform(authority, authority.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return port == https_port &&
+               std::ranges::find(origin_hosts, authority) != origin_hosts.end();
+    }
+
     kj::Promise<void> accept_secure() {
         return secure_receiver->accept().then([this](kj::Own<kj::AsyncIoStream> stream) {
             tasks.add(tls->wrapServer(kj::mv(stream))
@@ -205,15 +255,17 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
     ServerConfig config;
     HttpServer& owner;
     kj::HttpHeaderTable table;
-    kj::TaskSet tasks;
-
     bool listening = false;
+    // Lowercased SAN names the certificate answers to; an Origin must be one.
+    std::vector<std::string> origin_hosts;
     std::uint16_t https_port = 0;
     std::uint16_t http_port = 0;
 
-    // Declaration order is destruction order in reverse: connections first,
-    // then the servers that run them, then the TLS context they use, then the
-    // key material that context points at.
+    // Members are destroyed in reverse declaration order, so this list runs
+    // from what outlives everything to what goes first. `tasks` is last on
+    // purpose: live connections and handshakes touch the servers, receivers
+    // and TLS context on teardown, so they have to be gone before those are.
+    // The key material sits first because the TLS context points at it.
     kj::Own<kj::TlsKeypair> keypair;
     kj::Own<kj::TlsContext> tls;
     kj::Own<kj::ConnectionReceiver> secure_receiver;
@@ -222,6 +274,7 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
     PlainService plain_service{*this};
     kj::Own<kj::HttpServer> secure_server;
     kj::Own<kj::HttpServer> plain_server;
+    kj::TaskSet tasks;
 };
 
 HttpServer::HttpServer(kj::AsyncIoContext& io, ServerConfig config)
@@ -278,6 +331,12 @@ Status HttpServer::listen() {
                                                s.secure_service, settings);
     s.plain_server = kj::heap<kj::HttpServer>(s.io.provider->getTimer(), s.table,
                                               s.plain_service, kj::HttpServerSettings{});
+    s.origin_hosts = certificate_sans(s.config.certs.server_crt());
+    for (std::string& host : s.origin_hosts) {
+        std::ranges::transform(host, host.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+    }
     s.listening = true;
     return {};
 }

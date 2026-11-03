@@ -77,6 +77,16 @@ struct Reply {
     std::string body;
 };
 
+// Fixed bytes: a test client has no use for real masking entropy.
+class FixedEntropy final : public kj::EntropySource {
+public:
+    void generate(kj::ArrayPtr<kj::byte> buffer) override {
+        for (auto& b : buffer) {
+            b = 0x5a;
+        }
+    }
+};
+
 [[nodiscard]] kj::Promise<Reply> fetch(kj::HttpClient& client, kj::HttpHeaderTable& table,
                                        kj::StringPtr path) {
     kj::HttpHeaders headers(table);
@@ -143,8 +153,29 @@ TEST_CASE("serves over TLS and redirects plain HTTP", "[webgate][http]") {
 
         const Reply reply = fetch(*client, table, "/x").wait(io.waitScope);
         CHECK(reply.status == 301);
-        CHECK(reply.location.rfind("https://", 0) == 0);
-        CHECK(reply.location.find("/x") != std::string::npos);
+        CHECK(reply.location ==
+              "https://radio:" + std::to_string(server.https_port()) + "/x");
+    }
+
+    SECTION("a hostile Host header is not reflected into Location") {
+        auto address =
+            network.parseAddress("127.0.0.1", server.http_port()).wait(io.waitScope);
+        auto stream = address->connect().wait(io.waitScope);
+        const kj::StringPtr request =
+            "GET /x HTTP/1.1\r\nHost: evil.com/ x\r\nConnection: close\r\n\r\n";
+        stream->write(request.begin(), request.size()).wait(io.waitScope);
+        std::string text;
+        char buffer[512];
+        for (;;) {
+            const size_t got = stream->tryRead(buffer, 1, sizeof(buffer)).wait(io.waitScope);
+            if (got == 0) {
+                break;
+            }
+            text.append(buffer, got);
+        }
+        CHECK(text.rfind("HTTP/1.1 400", 0) == 0);
+        CHECK(text.find("Location") == std::string::npos);
+        CHECK(text.find("evil.com") == std::string::npos);
     }
 
     SECTION("/ca returns the profile") {
@@ -158,4 +189,108 @@ TEST_CASE("serves over TLS and redirects plain HTTP", "[webgate][http]") {
         CHECK(reply.content_type == "application/x-apple-aspen-config");
         CHECK(reply.body.find("<plist") != std::string::npos);
     }
+}
+
+TEST_CASE("destroying the server with connections open is safe", "[webgate][http]") {
+    Fixture fixture;
+    kj::AsyncIoContext io = kj::setupAsyncIo();
+    kj::HttpHeaderTable table;
+    auto& network = io.provider->getNetwork();
+
+    // Declared before the server so they are still open when it is destroyed.
+    kj::Own<kj::AsyncIoStream> keepalive_stream;
+    kj::Own<kj::AsyncIoStream> silent;
+    kj::Own<kj::HttpClient> keepalive;
+
+    {
+        HttpServer server(io, fixture.config());
+        REQUIRE(server.listen().has_value());
+        auto running = server.run().eagerlyEvaluate([](kj::Exception&&) {});
+
+        auto address =
+            network.parseAddress("127.0.0.1", server.http_port()).wait(io.waitScope);
+        keepalive_stream = address->connect().wait(io.waitScope);
+        keepalive = kj::newHttpClient(table, *keepalive_stream);
+        CHECK(fetch(*keepalive, table, "/").wait(io.waitScope).status == 200);
+
+        // A client stalled before its TLS hello holds an accept task open too.
+        auto silent_address =
+            network.parseAddress("127.0.0.1", server.https_port()).wait(io.waitScope);
+        silent = silent_address->connect().wait(io.waitScope);
+        io.waitScope.poll();
+    }
+    SUCCEED("server destroyed with a keep-alive connection and a pending handshake");
+}
+
+TEST_CASE("/ws refuses a foreign Origin", "[webgate][http]") {
+    Fixture fixture;
+    kj::AsyncIoContext io = kj::setupAsyncIo();
+    HttpServer server(io, fixture.config());
+    server.on_websocket = [](kj::Own<kj::WebSocket> ws) {
+        // Stay open until the client goes away, or the reply races the close.
+        auto* raw = ws.get();
+        return raw->send(kj::StringPtr("hello"))
+            .then([raw]() { return raw->receive(); })
+            .then([](kj::WebSocket::Message&&) {})
+            .catch_([](kj::Exception&&) {})
+            .attach(kj::mv(ws));
+    };
+    REQUIRE(server.listen().has_value());
+    auto running = server.run().eagerlyEvaluate([](kj::Exception&&) {});
+
+    const std::string ca_pem = slurp(fixture.certs().ca_crt());
+    kj::TlsContext::Options options;
+    options.useSystemTrustStore = false;
+    auto builder = kj::heapArrayBuilder<kj::TlsCertificate>(1);
+    builder.add(kj::StringPtr(ca_pem.c_str()));
+    kj::Array<kj::TlsCertificate> trusted = builder.finish();
+    options.trustedCertificates = trusted;
+    kj::TlsContext tls(kj::mv(options));
+
+    kj::HttpHeaderTable table;
+    auto& network = io.provider->getNetwork();
+
+    FixedEntropy entropy;
+    const auto open = [&](const char* origin) {
+        auto address =
+            network.parseAddress("127.0.0.1", server.https_port()).wait(io.waitScope);
+        auto stream = address->connect().wait(io.waitScope);
+        auto secure = tls.wrapClient(kj::mv(stream), "radio").wait(io.waitScope);
+        kj::HttpClientSettings client_settings;
+        client_settings.entropySource = entropy;
+        auto client = kj::newHttpClient(table, *secure, client_settings);
+        kj::HttpHeaders headers(table);
+        headers.set(kj::HttpHeaderId::HOST, "radio");
+        if (origin != nullptr) {
+            headers.add("Origin", origin);
+        }
+        auto response = client->openWebSocket("/ws", headers).wait(io.waitScope);
+        struct Result {
+            unsigned status;
+            std::string first_message;
+        } result{response.statusCode, {}};
+        if (response.webSocketOrBody.is<kj::Own<kj::WebSocket>>()) {
+            auto& ws = response.webSocketOrBody.get<kj::Own<kj::WebSocket>>();
+            auto message = ws->receive().wait(io.waitScope);
+            if (message.is<kj::String>()) {
+                result.first_message = message.get<kj::String>().cStr();
+            }
+        }
+        return result;
+    };
+
+    const std::string own =
+        "https://radio:" + std::to_string(server.https_port());
+    const auto matching = open(own.c_str());
+    CHECK(matching.status == 101);
+    CHECK(matching.first_message == "hello");
+
+    const auto none = open(nullptr);
+    CHECK(none.status == 101);
+
+    CHECK(open("https://evil.example").status == 403);
+    CHECK(open("http://radio").status == 403);
+    CHECK(open(("https://radio:" + std::to_string(server.https_port() + 1)).c_str()).status ==
+          403);
+    CHECK(open("null").status == 403);
 }

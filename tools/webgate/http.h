@@ -16,6 +16,8 @@
 #include <memory>
 #include <string>
 
+// Do not include <windows.h> before this header: its DELETE macro breaks
+// kj::HttpMethod.
 #include <kj/async-io.h>
 #include <kj/compat/http.h>
 
