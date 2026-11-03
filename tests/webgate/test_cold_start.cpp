@@ -486,31 +486,86 @@ TEST_CASE("the stop event's owner must be the gateway's account or an administra
     CHECK_FALSE(stop_event_owner_acceptable(other.data(), nullptr));
 }
 
+namespace {
+
+[[nodiscard]] std::filesystem::path this_exe()
+{
+    std::wstring buffer(32768, L'\0');
+    buffer.resize(GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size())));
+    return std::filesystem::path(buffer);
+}
+
+[[nodiscard]] bool running_elevated()
+{
+    HANDLE token = nullptr;
+    REQUIRE(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) != 0);
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    const bool yes = GetTokenInformation(token, TokenElevation, &elevation, sizeof elevation,
+                                         &size) != 0 &&
+                     elevation.TokenIsElevated != 0;
+    CloseHandle(token);
+    return yes;
+}
+
+// A stand-in gateway with an image name of its own, so a case can never
+// touch a real one: ping, copied into dir, run long, with no stop event.
+struct FakeGateway {
+    std::wstring image;
+    std::filesystem::path path;
+    PROCESS_INFORMATION child{};
+
+    FakeGateway(const std::filesystem::path& dir, std::wstring_view tag)
+    {
+        image = L"revenant-stop-fake-" + std::wstring(tag) + L"-" +
+                std::to_wstring(GetCurrentProcessId()) + L".exe";
+        path = dir / image;
+        std::filesystem::copy_file("C:\\Windows\\System32\\PING.EXE", path,
+                                   std::filesystem::copy_options::overwrite_existing);
+        std::wstring command = L"\"" + path.wstring() + L"\" -n 120 127.0.0.1";
+        STARTUPINFOW startup{};
+        startup.cb = sizeof startup;
+        REQUIRE(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
+                               CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child) != 0);
+        CloseHandle(child.hThread);
+    }
+
+    ~FakeGateway()
+    {
+        if (WaitForSingleObject(child.hProcess, 0) != WAIT_OBJECT_0) {
+            TerminateProcess(child.hProcess, 1);
+            WaitForSingleObject(child.hProcess, 5'000);
+        }
+        CloseHandle(child.hProcess);
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+    }
+
+    [[nodiscard]] bool gone() const { return WaitForSingleObject(child.hProcess, 0) == WAIT_OBJECT_0; }
+};
+
+}  // namespace
+
 TEST_CASE("--stop terminates a gateway that does not answer its event", "[webgate][coldstart]")
 {
-    // A stand-in with an image name of its own, so the case can never touch
-    // a real gateway: ping, copied, run long, with no stop event at all.
-    const std::wstring image = L"revenant-stop-fake-" + std::to_wstring(GetCurrentProcessId()) +
-                               L".exe";
-    const auto path = std::filesystem::temp_directory_path() / image;
-    std::filesystem::copy_file("C:\\Windows\\System32\\PING.EXE", path,
-                               std::filesystem::copy_options::overwrite_existing);
-    std::wstring command = L"\"" + path.wstring() + L"\" -n 120 127.0.0.1";
-    STARTUPINFOW startup{};
-    startup.cb = sizeof startup;
-    PROCESS_INFORMATION child{};
-    REQUIRE(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                           nullptr, nullptr, &startup, &child) != 0);
-    CloseHandle(child.hThread);
+    // Beside this executable, which stands for the installation --stop runs
+    // from, so it is terminated whether or not the case runs elevated.
+    FakeGateway fake(this_exe().parent_path(), L"here");
+    CHECK(revenant::webgate::stop_running_gateways(300ms, test_prefix("fallback"), fake.image) ==
+          0);
+    CHECK(fake.gone());
+}
 
-    CHECK(revenant::webgate::stop_running_gateways(300ms, test_prefix("fallback"), image) == 0);
-    CHECK(WaitForSingleObject(child.hProcess, 0) == WAIT_OBJECT_0);
-    if (WaitForSingleObject(child.hProcess, 0) != WAIT_OBJECT_0) {
-        TerminateProcess(child.hProcess, 1);
+TEST_CASE("an elevated --stop leaves another installation's gateway running",
+          "[webgate][coldstart]")
+{
+    if (!running_elevated()) {
+        SKIP("the directory rule applies only to an elevated --stop");
     }
-    CloseHandle(child.hProcess);
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
+    FakeGateway fake(std::filesystem::temp_directory_path(), L"elsewhere");
+    CHECK(revenant::webgate::stop_running_gateways(300ms, test_prefix("elsewhere"), fake.image) ==
+          0);
+    CHECK_FALSE(fake.gone());
 }
 
 TEST_CASE("a watcher ended normally does not report a stop", "[webgate][coldstart]")

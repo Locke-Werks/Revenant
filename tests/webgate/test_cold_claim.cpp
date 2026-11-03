@@ -283,6 +283,65 @@ TEST_CASE("a takeOver waiting for the engine does not hold up the hub",
     CHECK(rig.hub->session(*id) != nullptr);
 }
 
+TEST_CASE("a session rebuild after an engine restart connects off the loop",
+          "[gpu][webgate][coldstart]")
+{
+    REVENANT_NEEDS_GPU();
+    revenant::test::HarnessOptions options;
+    options.center_hz = 100'000'000;
+    options.connect_client = false;
+    auto engine = std::make_unique<revenant::test::Harness>();
+    REQUIRE(engine->open(options).has_value());
+
+    ManualStrand strand;
+    HlsRegistry registry;
+    revenant::webgate::StreamsConfig config;
+    config.hls = &registry;
+    std::atomic<int> loop_connects{0};
+    PhoneHub hub(strand, config, revenant::webgate::HubTiming{},
+                 [&](rpc::LoginMode mode, const std::string& holder) {
+                     ++loop_connects;
+                     return engine->connect_as(mode, holder);
+                 });
+    std::vector<std::pair<std::string, ClaimDone>> pending;
+    hub.set_claim_runner([&](rpc::LoginMode, std::string holder, ClaimDone done) {
+        pending.emplace_back(std::move(holder), std::move(done));
+    });
+    hub.link_state(revenant::webgate::LinkState::Up, "");
+
+    FakeSocket phone;
+    const auto id = hub.admit(phone, "phone 10.1.10.57 via webgate");
+    REQUIRE(id.has_value());
+    strand.run_pending();
+    const int admitted_connects = loop_connects.load();
+
+    // The engine goes and comes back: the phone's connection is dead.
+    engine.reset();
+    engine = std::make_unique<revenant::test::Harness>();
+    REQUIRE(engine->open(options).has_value());
+    hub.link_state(revenant::webgate::LinkState::Waiting, "the engine went away");
+
+    const auto before = std::chrono::steady_clock::now();
+    hub.link_state(revenant::webgate::LinkState::Up, "connected to the engine");
+    hub.tick();
+    hub.tick();
+    strand.run_pending();
+    CHECK(std::chrono::steady_clock::now() - before < 50ms);
+
+    // Asked for on the runner, once, with nothing connected on the loop.
+    CHECK(pending.size() == 1);
+    CHECK(loop_connects == admitted_connects);
+    CHECK(sent_containing(phone, R"("event":"engine")"));
+
+    auto [holder, done] = std::move(pending.front());
+    pending.clear();
+    done(engine->connect_as(rpc::LoginMode::Claim, holder));
+    strand.run_pending();
+    CHECK(sent_containing(phone, R"("recreated")"));
+    CHECK(hub.session(*id) != nullptr);
+    hub.clear();
+}
+
 TEST_CASE("a phone gone before its takeOver lands leaves no session and no lease",
           "[gpu][webgate][coldstart]")
 {
