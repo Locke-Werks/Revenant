@@ -660,3 +660,31 @@ TEST_CASE("a recreate carries the receiver's transcribe choice", "[gpu][webgate]
     REQUIRE(status.has_value());
     CHECK(status->transcribe == revenant::rpc::TranscribeChoice::Off);
 }
+
+TEST_CASE("voiceModes is unknown when a loaded offer states no modes", "[webgate][dispatch]")
+{
+    using revenant::webgate::voice_modes;
+    namespace rpc = revenant::rpc;
+
+    rpc::VocoderPlugins none;
+    CHECK(voice_modes(none) == std::vector<std::string>{"p25p1"});
+
+    rpc::VocoderPlugins ambe;
+    rpc::VocoderPluginFile file;
+    file.loaded = true;
+    rpc::VocoderOfferInfo offer;
+    offer.modes = {"dmr"};
+    file.offers.push_back(offer);
+    ambe.files.push_back(file);
+    CHECK(voice_modes(ambe) == std::vector<std::string>{"p25p1", "dmr"});
+
+    // An engine older than the modes field: the plugin may well play DMR.
+    rpc::VocoderPlugins old = ambe;
+    old.files[0].offers[0].modes.clear();
+    CHECK_FALSE(voice_modes(old).has_value());
+
+    // A file that did not load offers nothing, whatever it lists.
+    rpc::VocoderPlugins refused = old;
+    refused.files[0].loaded = false;
+    CHECK(voice_modes(refused) == std::vector<std::string>{"p25p1"});
+}

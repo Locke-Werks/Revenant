@@ -35,8 +35,10 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/rpc/types.h"
 #include "tools/webgate/protocol.h"
@@ -58,6 +60,13 @@ namespace revenant::webgate {
 // One reply line (ok_reply or error_reply) for a parsed command. Engine error
 // text goes back verbatim. Bad arguments are refused with a sentence naming
 // the argument, without calling the engine.
+// The digital voice modes whose voice will play, as listDecoders reports
+// them: P25 always (its vocoder is built in), and every mode a loaded
+// plugin's offer serves. Null when that cannot be told: an engine older than
+// VocoderOfferInfo::modes reports loaded offers with no modes, and inferring
+// "no vocoder" from that would mark a working DMR receiver as silent.
+[[nodiscard]] std::optional<std::vector<std::string>> voice_modes(const rpc::VocoderPlugins& plugins);
+
 [[nodiscard]] std::string dispatch(PhoneSession& session, const Command& command);
 
 // For the socket layer: parses a text frame and dispatches it. A frame

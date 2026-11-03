@@ -746,25 +746,13 @@ template <class Edit>
     }
     JsonObject out;
     out.add_raw("decoders", join(items));
-    // Which digital voice modes will actually play. P25 has its vocoder built
-    // in; D-STAR and DMR need a plugin, and with none the engine plays silence
-    // without saying why, so the phone has to be told here. An engine that
-    // does not report plugins gets null: unknown, which is not "none".
-    if (const auto plugins = session.client().vocoder_plugins()) {
-        std::vector<std::string> voice{"p25p1"};
-        for (const auto& file : plugins->files) {
-            if (!file.loaded) {
-                continue;
-            }
-            for (const auto& offer : file.offers) {
-                for (const auto& mode : offer.modes) {
-                    if (std::ranges::find(voice, mode) == voice.end()) {
-                        voice.push_back(mode);
-                    }
-                }
-            }
-        }
-        out.add_raw("voiceModes", string_array(voice));
+    // Which digital voice modes will actually play. D-STAR and DMR need a
+    // plugin, and with none the engine plays silence without saying why, so
+    // the phone has to be told here. Null is unknown, which is not "none".
+    const auto plugins = session.client().vocoder_plugins();
+    const auto voice = plugins ? voice_modes(*plugins) : std::nullopt;
+    if (voice) {
+        out.add_raw("voiceModes", string_array(*voice));
     } else {
         out.add_null("voiceModes");
     }
@@ -847,6 +835,27 @@ template <class Edit>
 }
 
 }  // namespace
+
+std::optional<std::vector<std::string>> voice_modes(const rpc::VocoderPlugins& plugins)
+{
+    std::vector<std::string> voice{"p25p1"};
+    for (const auto& file : plugins.files) {
+        if (!file.loaded) {
+            continue;
+        }
+        for (const auto& offer : file.offers) {
+            if (offer.modes.empty()) {
+                return std::nullopt;
+            }
+            for (const auto& mode : offer.modes) {
+                if (std::ranges::find(voice, mode) == voice.end()) {
+                    voice.push_back(mode);
+                }
+            }
+        }
+    }
+    return voice;
+}
 
 std::string transcription_status_event(const rpc::TranscriptionStatus& status)
 {
