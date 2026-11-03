@@ -254,6 +254,12 @@ public:
     // for free by declaring it after.
     [[nodiscard]] Expected<std::unique_ptr<rpc::Client>> connect_another();
 
+    // A client logging in with a lease mode and holder of the caller's
+    // choosing, for the lease cases. connect_another is a claim with no
+    // holder, so every client the other cases make joins one lease.
+    [[nodiscard]] Expected<std::unique_ptr<rpc::Client>> connect_as(rpc::LoginMode mode,
+                                                                    std::string_view holder);
+
     // The same, with a token of the caller's choosing, for the cases that are
     // about the login itself. A span rather than a Token so that a case can
     // hand over nothing at all, or the wrong number of bytes, and see which

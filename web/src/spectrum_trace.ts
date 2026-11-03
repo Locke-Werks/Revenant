@@ -173,12 +173,13 @@ export class SpectrumTrace {
       const top = fontPx + 2;
       ctx.globalAlpha = b.alpha * 1.5;
       ctx.fillRect(x0, top, x1 - x0, h - top);
-      ctx.globalAlpha = b.held ? 0.35 : 0.7;
+      const fade = b.fade ?? 1;
+      ctx.globalAlpha = (b.held ? 0.35 : 0.7) * fade;
       ctx.fillRect(Math.floor(x0), top, 1, h - top);
       ctx.fillRect(Math.max(Math.floor(x0) + 1, Math.ceil(x1) - 1), top, 1, h - top);
       const lx = at[i];
       if (b.label && lx !== null && lx !== undefined) {
-        ctx.globalAlpha = b.held ? 0.5 : 0.85;
+        ctx.globalAlpha = (b.held ? 0.5 : 0.85) * fade;
         ctx.fillStyle = "#b8c4d0";
         ctx.fillText(b.label, lx, 1);
       }

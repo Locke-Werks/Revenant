@@ -50,6 +50,7 @@ if(TARGET revenant_rpc_server)
         test_rpc_decode_sstv.cpp
         test_rpc_decode_wefax.cpp
         test_rpc_detect.cpp
+        test_rpc_lease.cpp
         test_rpc_lifetime.cpp
         test_rpc_vrx_events.cpp
         test_rpc_pace.cpp

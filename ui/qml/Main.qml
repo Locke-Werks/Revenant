@@ -115,7 +115,11 @@ ApplicationWindow {
     function placeReceiverWindow() {
         if (!receiverPlacement.ready)
             return
+        // Hidden behind a lease notice too, so no receiver control is usable
+        // while the engine is someone else's. The placement itself is kept,
+        // so the window comes back where it was.
         const wanted = receiverPlacement.poppedOut && receiverPlacement.shown
+                       && engineLink.leaseNotice === ""
         if (wanted && !receiverWindow.visible) {
             receiverWindow.show()
             receiverWindow.raise()
@@ -129,6 +133,11 @@ ApplicationWindow {
         function onPoppedOutChanged() { window.placeReceiverWindow() }
         function onShownChanged() { window.placeReceiverWindow() }
         function onReadyChanged() { window.placeReceiverWindow() }
+    }
+
+    Connections {
+        target: engineLink
+        function onLeaseChanged() { window.placeReceiverWindow() }
     }
 
     VrxWindow {
@@ -177,6 +186,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+Shift+B"
         context: Qt.ApplicationShortcut
+        enabled: UiRules.shortcutLive(true, engineLink.leaseNotice)
         onActivated: burstWindow.toggle()
     }
 
@@ -313,6 +323,64 @@ ApplicationWindow {
                 onWidthChanged: {
                     if (visible && split.resizing && split.beside)
                         receiverPlacement.dockWidth = width
+                }
+            }
+        }
+    }
+
+    // The single-user lease. Opaque and on top, and it takes every click and
+    // key, because the controls under it belong to a session the engine has
+    // refused.
+    // In the overlay layer, above any popup or menu, so one open when the
+    // notice appears is covered rather than left usable; the named ones are
+    // closed outright.
+    Rectangle {
+        id: leaseNotice
+        parent: Overlay.overlay
+        anchors.fill: parent
+        z: 1000000
+        visible: engineLink.leaseNotice !== ""
+        color: Theme.background
+        focus: visible
+        onVisibleChanged: {
+            if (!visible)
+                return
+            commandPalette.close()
+            burstWindow.hide()
+            forceActiveFocus()
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.AllButtons
+            onWheel: wheel => wheel.accepted = true
+        }
+        Keys.onPressed: event => event.accepted = true
+
+        ColumnLayout {
+            anchors.centerIn: parent
+            spacing: 16
+
+            Label {
+                Layout.alignment: Qt.AlignHCenter
+                text: engineLink.leaseNotice
+                color: Theme.ink
+                font.pixelSize: Theme.sizeFigure
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
+                Layout.maximumWidth: leaseNotice.width - 80
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                spacing: 12
+                Button {
+                    text: engineLink.leaseAction
+                    onClicked: engineLink.takeOverLease()
+                }
+                Button {
+                    text: "Quit"
+                    onClicked: Qt.quit()
                 }
             }
         }

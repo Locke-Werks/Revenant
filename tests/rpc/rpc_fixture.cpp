@@ -124,6 +124,12 @@ Expected<std::unique_ptr<rpc::Client>> Harness::connect_another() {
     return rpc::Client::connect("127.0.0.1", port_, token);
 }
 
+Expected<std::unique_ptr<rpc::Client>> Harness::connect_as(rpc::LoginMode mode,
+                                                           std::string_view holder) {
+    const rpc::Token token = test_token();
+    return rpc::Client::connect("127.0.0.1", port_, token, mode, holder);
+}
+
 Expected<std::unique_ptr<rpc::Client>> Harness::connect_with(
     std::span<const std::uint8_t> token) {
     return rpc::Client::connect("127.0.0.1", port_, token);

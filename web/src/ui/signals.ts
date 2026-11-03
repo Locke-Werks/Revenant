@@ -1,6 +1,7 @@
 // The Signals tab: the engine's detections as a list, and the confidence bar.
 
-import { fitBandwidth, labelText, sortForList, type Detection } from "../detections";
+import { fitBandwidth, labelText, lostClock, lostOpacity, sortForList, type Detection, type Listed } from "../detections";
+import type { DetectionBox } from "../markers";
 import { BANDWIDTHS_HZ, formatMHz, type Receiver } from "./receivers";
 
 // The gateway refuses a negative bar or one at 1.0 or above.
@@ -8,7 +9,7 @@ export const CONFIDENCE_MIN = 0;
 export const CONFIDENCE_MAX = 0.99;
 export const CONFIDENCE_SEND_MS = 250;
 
-export function signalRows(d: Detection[]): Detection[] {
+export function signalRows<T extends Detection>(d: readonly T[]): T[] {
   return sortForList(d);
 }
 
@@ -49,7 +50,7 @@ export class RowSet {
   private held = false;
   private pending: string[] | null = null;
 
-  apply(rows: Detection[], textOf: (d: Detection) => string): RowPlan {
+  apply<T extends Detection>(rows: readonly T[], textOf: (d: T) => string): RowPlan {
     const sorted = signalRows(rows);
     const next = new Map<string, string>();
     for (const d of sorted) next.set(d.id, textOf(d));
@@ -184,6 +185,19 @@ export function pickSignal(d: Detection, deps: PickDeps): void {
   deps.reveal(d.centerHz);
 }
 
+// A tap on the waterfall. One that lands in a drawn detection box, on this row
+// or an old one, does what the Signals row does: the user is aiming at the
+// signal, so a receiver is spawned or selected on it with its mode, width and
+// decoder. A miss retunes the active receiver as it always has.
+export function tapWaterfall(
+  box: Pick<DetectionBox, "detection"> | null,
+  deps: PickDeps,
+  retune: () => void,
+): void {
+  if (box?.detection) pickSignal(box.detection, deps);
+  else retune();
+}
+
 // The first value goes at once, later ones collapse to the newest and go when
 // the interval is up, so a drag of the slider is a few requests and ends on
 // the value the finger stopped at.
@@ -242,7 +256,7 @@ export class SignalsPanel {
   private readonly empty: HTMLElement;
   private readonly out: HTMLOutputElement;
   private readonly slider: HTMLInputElement;
-  private latest: Detection[] = [];
+  private latest: Listed[] = [];
   private visible = false;
   private readonly set = new RowSet();
   private readonly rows = new Map<string, RowEls>();
@@ -302,7 +316,8 @@ export class SignalsPanel {
     this.out.textContent = this.value().toFixed(2);
   }
 
-  update(d: Detection[]): void {
+  // Includes the lost signals still lingering; they tap like live ones.
+  update(d: Listed[]): void {
     this.latest = d;
     if (this.visible) this.render();
   }
@@ -315,9 +330,15 @@ export class SignalsPanel {
 
   render(): void {
     const clock = this.deps.clock();
-    const textOf = (d: Detection) => {
+    const textOf = (d: Listed) => {
       const name = labelText(d);
-      const ago = heardAgo(d.lastSeen, clock ? clock.index : null, clock ? clock.rateHz : 0);
+      // A lost signal's lastSeen stopped moving, so its age against the
+      // advancing clock would be right but stale-looking; the linger clock is
+      // the one that matches the fade.
+      const ago =
+        d.lostForMs !== undefined
+          ? `lost ${lostClock(d.lostForMs)}`
+          : heardAgo(d.lastSeen, clock ? clock.index : null, clock ? clock.rateHz : 0);
       const bw = d.bandwidthHz >= 1000 ? `${(d.bandwidthHz / 1000).toFixed(1)} kHz` : `${Math.round(d.bandwidthHz)} Hz`;
       const parts = [`${formatMHz(d.centerHz)} MHz`, name, bw, `${Math.round(d.snrDb)} dB`];
       if (d.state === "held") parts.push("held");
@@ -349,6 +370,9 @@ export class SignalsPanel {
       const t = textOf(d);
       if (r.btn.textContent !== t) r.btn.textContent = t;
       r.btn.classList.toggle("held", d.state === "held");
+      r.btn.classList.toggle("lost", d.lostForMs !== undefined);
+      const o = d.lostForMs === undefined ? "" : lostOpacity(d.lostForMs).toFixed(2);
+      if (r.btn.style.opacity !== o) r.btn.style.opacity = o;
     }
     this.place(plan.order);
     this.empty.hidden = this.rows.size > 0;

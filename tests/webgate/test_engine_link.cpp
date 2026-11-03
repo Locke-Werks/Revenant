@@ -273,20 +273,13 @@ TEST_CASE("new_session returns independent sessions", "[gpu][webgate][link]")
     INFO(revenant::test::message_of(kept));
     REQUIRE(kept.has_value());
 
-    // The first phone goes away: its receiver is reaped, the second's stays.
+    // The first phone goes away. Since the engine's lease (2026-11-03) a
+    // session leaving takes nothing while its holder has another session, so
+    // both receivers stay.
     first->reset();
-    bool reaped = false;
-    const auto deadline = std::chrono::steady_clock::now() + 10s;
-    while (std::chrono::steady_clock::now() < deadline) {
-        const auto ids = (*second)->vrx_ids();
-        REQUIRE(ids.has_value());
-        if (std::find(ids->begin(), ids->end(), *made) == ids->end()) {
-            reaped = true;
-            REQUIRE(std::find(ids->begin(), ids->end(), *kept) != ids->end());
-            break;
-        }
-        std::this_thread::sleep_for(10ms);
-    }
-    REQUIRE(reaped);
-
+    std::this_thread::sleep_for(500ms);
+    const auto ids = (*second)->vrx_ids();
+    REQUIRE(ids.has_value());
+    REQUIRE(std::find(ids->begin(), ids->end(), *made) != ids->end());
+    REQUIRE(std::find(ids->begin(), ids->end(), *kept) != ids->end());
 }

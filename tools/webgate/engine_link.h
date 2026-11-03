@@ -7,10 +7,12 @@
 // it goes.
 //
 // ONE SHARED CLIENT AND ONE PER PHONE. client() is the link's own connection,
-// for what the gateway asks the engine on its own account. Each phone gets its
-// own Client from new_session(), because a Client is a Session on the engine
-// and a Session owns its receivers: two phones sharing one would share their
-// receivers and each one's disconnect would remove the other's.
+// for what the gateway asks the engine on its own account. It logs in with
+// observe, so a gateway with no phone holds no lease and the desktop can start
+// while it runs; an observer may call only info, list_sources and
+// lease_status. Each phone gets its own Client from new_session(), logging in
+// with claim (or takeOver) under that phone's holder text, which is what the
+// engine's single-user lease is held by.
 //
 // THREADS. A supervisor thread owns connecting and the liveness probe.
 // on_state callbacks run on it, never under this object's lock, so a callback
@@ -30,6 +32,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include "core/error.h"
@@ -39,6 +42,9 @@
 #include "core/rpc/token.h"
 
 namespace revenant::webgate {
+
+// The holder text the link's own observing connection logs in with.
+inline constexpr std::string_view kLinkHolder = "revenant-webgate";
 
 enum class LinkState : std::uint8_t {
     // An engine this link started is coming up, or the first attempt is
@@ -114,10 +120,12 @@ public:
     // The link's own connection, null while not Up. See THREADS above.
     [[nodiscard]] rpc::Client* client();
 
-    // A connection of its own, so its own engine Session. Fails with the
-    // connect error, category included, when the engine is not there or the
-    // token is refused. Any thread.
-    [[nodiscard]] Expected<std::unique_ptr<rpc::Client>> new_session();
+    // A connection of its own, so its own engine Session, logged in with mode
+    // under holder. Fails with the connect error, category included, when the
+    // engine is not there or the token is refused; a claim the lease refuses
+    // fails with the engine's "in use: <holder> since <time>". Any thread.
+    [[nodiscard]] Expected<std::unique_ptr<rpc::Client>> new_session(
+        rpc::LoginMode mode = rpc::LoginMode::Claim, std::string_view holder = {});
 
     [[nodiscard]] LinkState state() const;
 

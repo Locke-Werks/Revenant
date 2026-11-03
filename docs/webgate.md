@@ -70,7 +70,7 @@ exits when the gateway does. An engine that is already running is used as it is.
 | `--state-dir DIR` | `%LOCALAPPDATA%\Revenant\webgate` | Where the certificates live |
 | `--web-root DIR` | `web` beside the exe | The phone app |
 | `--token-file PATH` | the engine's own default | The engine's token file |
-| `--session-linger-ms N` | 30000 | How long a phone's receivers survive a dropped connection (see below) |
+| `--session-linger-ms N` | 30000 | How long a phone's session, and its hold on the engine, survives a dropped connection (see below) |
 
 Both ports listen on `0.0.0.0`. The first start creates the certificate
 authority and a server certificate and prints the names the certificate covers:
@@ -155,10 +155,29 @@ keeps its rate and stereo; the companion costs one channel and about 4% more
 GPU than the listening receiver. With no channel free for it the phone just
 shows no RDS.
 
-Several phones can be connected at once, and with the desktop client. They share
-one radio, so changing the centre frequency from any of them moves the others,
-and a receiver that falls outside the new span is removed with the reason shown.
-Each phone owns its own receivers and they end with its session.
+### One user at a time
+
+The engine serves one user at a time
+(`docs/superpowers/specs/2026-11-03-single-user-engine-design.md`). The
+gateway's own connection to the engine only observes, so a gateway with no
+phone attached holds nothing and the desktop can start while it runs. A phone
+claims the engine as "phone <address> via webgate" when it connects.
+
+- If something else holds the engine (the desktop, another phone, a script),
+  the app shows "Revenant is in use by <holder> since <time>" with Take over.
+  Nothing else works until then. Take over ends the other client's use and
+  tells it why.
+- If something else takes the engine from the phone, the app shows "Taken over
+  by <holder>", its sound stops, and Take back takes it back.
+- The phone keeps the engine through a dropped connection for as long as its
+  session lingers (below). When the session expires the phone lets go, and
+  receivers opened from it are removed by the engine.
+- When the engine restarts, the gateway claims it again for the phone.
+
+The phone shows and controls every receiver the engine has, whoever opened it:
+the desktop before a takeover, an engine plugin, the trunk follower. Changing
+the centre frequency moves the one radio, and a receiver that falls outside the
+new span is removed with the reason shown.
 
 ### Display follows the desktop
 
@@ -224,8 +243,8 @@ levels them.
 ### What the phone hears
 
 The phone hears one mixed stream, as the desktop does: the receiver it is
-listening to plus every digital voice receiver (p25p1, dmr, dstar, tetra) the
-session has, while audio is on. Each is resampled to 48 kHz, the digital voice
+listening to plus every digital voice receiver (p25p1, dmr, dstar, tetra) on the
+engine, whoever opened it, while audio is on. Each is resampled to 48 kHz, the digital voice
 ones are boosted by `audio/voiceGainDb`, they are summed, and the desktop's soft
 limiter holds the sum under -1 dBFS (`tools/webgate/phone_mix.h`, reusing
 `ui/audio/mix_stages.h`). Silence between calls is a voice stream that sends
@@ -258,7 +277,8 @@ live audio and Keep listening, so both play the same thing.
   stalled by its own pushes, so the partial block it holds between chunks is
   kept. If the receiver being listened to stalls, or there is none, the voice
   streams are paced by the wall clock, one block per 20 ms, so the mix never
-  runs ahead of real time.- Live Opus packets are tagged with the receiver being listened to. Keep
+  runs ahead of real time.
+- Live Opus packets are tagged with the receiver being listened to. Keep
   listening has one playlist per session, `/hls/<id>/live.m3u8`; the `hls`
   event gives the id, and the URL stays the same when the listener moves to
   another receiver, so the player is not reloaded. An engine restart builds a
@@ -293,8 +313,8 @@ Limits:
   30 more seconds, so a quick lock and unlock does not rebuild it. With Keep
   listening on, a dropped phone's receivers are also kept until 60 seconds
   after its last fetch of the stream, if that is later than the linger above.
-- A phone that is abandoned leaves its receivers running for up to the linger
-  time.
+- A phone that is abandoned keeps the engine, and its receivers running, for up
+  to the linger time.
 
 ## Troubleshooting
 
@@ -367,13 +387,28 @@ longest ago; it is refused only when all 16 are connected right now.
   sends a `ping` event every 15 seconds and the app answers with a `pong`
   command; any message from the phone counts. A socket the gateway has heard
   nothing on for 45 seconds is closed, which detaches its session.
+- The engine lease. The gateway's link logs in with `observe` and holds no
+  lease. Each WebSocket opens its own engine session, logging in with `claim`
+  as `phone <address> via webgate`; the engine joins every claim under one
+  holder's exact text to one lease, so a phone's resumes and its rebuilt
+  sessions share its lease and a phone at another address does not. The first
+  event on every connection is `lease`. When the claim is refused the
+  connection stays open with no session: every command but `pong`, `resume`
+  and `takeOver` is answered with the engine's `in use: <holder> since <time>`.
+  `takeOver` logs in with `takeOver`, and the connection then gets a session
+  as if it had just connected (`lease` held, `hello`, `link`) before the
+  reply. A session whose lease another client takes is destroyed, its
+  connection is told with `lease` `lost`, and later commands are refused with
+  "Taken over by <holder>". `tools/webgate/phone_hub.h` has the whole of it.
 - Every WebSocket opens its own engine session. When the socket drops, the
   session detaches and lingers so the phone can resume it:
   - for 30 seconds;
   - with Keep listening on, also until 60 seconds after the last HLS request
     for one of its receivers, whichever is later.
 
-  `--session-linger-ms` sets the 30 second figure. At most 16 sessions exist at once: a connection past
+  `--session-linger-ms` sets the 30 second figure. The session's end closes
+  its engine connections, which ends the phone's lease; the gateway itself
+  removes no receivers. At most 16 sessions exist at once: a connection past
   that evicts the oldest detached session, or is closed with code 1013 and a
   reason saying too many phones are connected when every session is attached.
 - `listDecoders` (no arguments) answers `{decoders, voiceModes}`. Each decoder
@@ -393,7 +428,7 @@ longest ago; it is refused only when all 16 are connected right now.
   Every receiver reply carries the set in force as `decoders`. When the engine
   refuses or ends a subscription anyway, a `vrxStatus` event carries
   `{vrx, decoder, decoderError}` with the engine's sentence.
-- RDS needs no command. Every WFM receiver a phone owns is read about once a
+- RDS needs no command. Every WFM receiver the engine has is read about once a
   second and an `rds` event goes out when the station changes. A refusal
   ("no RDS here", no channel for the companion) sends nothing and is retried
   after 10 seconds.
@@ -429,6 +464,7 @@ clamped, clampReason?, transcribe, transcribing, decoders}`.
 | `listDecoders` | none | `{decoders, voiceModes}` |
 | `setDecoders` | `vrx`, `names` | `{vrx, decoders}` |
 | `resume` | `token`, only as the first command | `{resumed:true}`, then the session's state as events |
+| `takeOver` | none | `{held:true}`, after the new session's `lease`, `hello` and `link` |
 | `pong` | none | none; answers `ping` |
 
 `setDetection` is per session and kept across a resume; detections below the
@@ -440,15 +476,17 @@ bar are not sent.
 
 | event | fields | sent |
 | --- | --- | --- |
-| `hello` | `resume`, the token | on connect |
-| `link` | `state`, `detail`; after a restart `recreated`, `lost` | on connect and when the engine link changes |
+| `lease` | `state` (`held`, `inUse`, `lost`), `holder`; for `inUse` also `since`, `message` | first on every connection, and when the lease is taken over |
+| `hello` | `resume`, the token | on connect, after `lease` held |
+| `vrx` | a receiver reply plus `openedBy` (`this phone`, `another client`, a plugin's name, `the engine`) | for every receiver the engine has on connect and resume, and when one is added or changed |
+| `link` | `state`, `detail`; after a restart `recreated` (the receivers this phone opened) and `lost` (those it could not, and those opened elsewhere) | on connect and when the engine link changes |
 | `source` | `open`; open: `rateHz`, `centerHz`, `epoch`, `realtimeFactor`, `pacedBy`; with the spectrum on, `dataLowHz`, `dataHighHz` | when the stream, centre or pace changes |
 | `display` | `waterfall`, `spectrum`, `trace`, `background` | on connect, on resume, when the desktop's settings change |
 | `desktop` | `confidenceBar`, `radio`: `{uri, backend, device, params}`; each absent when the desktop has not saved it | on connect, on resume, when the desktop's settings change |
 | `detections` | `items`: `{id, centerHz, bandwidthHz, snrDb, confidence, state, label, labelKind, labelConfidence, lastSeen}` | every 500 ms while a view is set |
 | `rds` | `vrx`, `pi`, `callSign`, `ps`, `rt`, `pty`; `tp`, `ta`, `music` when stated | when a WFM receiver's station changes, and on resume |
 | `vrxStatus` | `vrx` and `audioError`, or `decoder` and `decoderError` | when audio or a decoder fails |
-| `vrxRemoved` | `vrx`, `reason` | when the engine removes a phone's receiver |
+| `vrxRemoved` | `vrx`, `reason` | when the engine removes a receiver |
 | `vrxEventsEnded` | `reason` | when removals can no longer be reported |
 | `decoded` | `vrx`, `decoder`, `kind`, `text`, `sequence`, `fields` | per decoded message |
 | `transcript` | `vrx`, `sequence`, `text`, `centerHz`, `lowHz`, `highHz`, `mode`, `confidence`, `sourceStart`, `sourceEnd` | per transcribed transmission |
@@ -471,8 +509,8 @@ In `rds`, `pi` is null until decoded, `ps` and `rt` are null until every
 segment has arrived, and `pty` is the programme type's long name. The gateway
 sets each phone WFM receiver to RBDS before its first read, and again when an
 engine restart recreates it, so `pty` names follow the North American table and
-`callSign` is derived from the PI. Phone receivers are not shared, so this
-resets no other client's decoder.
+`callSign` is derived from the PI. One user holds the engine, so this resets
+no one else's decoder.
 
 ## Cost to the engine
 

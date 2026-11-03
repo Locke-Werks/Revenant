@@ -35,6 +35,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -45,6 +46,21 @@
 #include "tools/webgate/session.h"
 
 namespace revenant::webgate {
+
+// A mode's wire name: "nfm", "cw", "p25p1" and so on.
+[[nodiscard]] std::string_view demod_name(rpc::Demod demod);
+
+// The "vrx" event: one receiver the engine has, whoever opened it, with the
+// fields of the addVrx result plus "openedBy" ("this phone", "another
+// client", the plugin's name, or "the engine"). Sent for every receiver when
+// a session starts or resumes and whenever one is added or changed.
+// The same receiver as a bare object, one item of the "vrxList" snapshot.
+[[nodiscard]] std::string receiver_json(const rpc::VrxStatus& status, std::int64_t center,
+                                        const std::vector<std::string>& decoders,
+                                        std::string_view opened_by);
+[[nodiscard]] std::string receiver_event(const rpc::VrxStatus& status, std::int64_t center,
+                                         const std::vector<std::string>& decoders,
+                                         std::string_view opened_by);
 
 // The "transcriptionStatus" event for the engine's speech state. Its fields
 // are those of the setTranscription result.

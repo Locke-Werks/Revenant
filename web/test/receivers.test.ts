@@ -63,6 +63,7 @@ import {
   heardAgo,
   modeForDetection,
   pickSignal,
+  tapWaterfall,
   receiverCovering,
   tuneForDetection,
   readConfidence,
@@ -755,10 +756,19 @@ function det(id: string, snrDb: number, extra: Partial<Detection> = {}): Detecti
   return { id, centerHz: 146_520_000, bandwidthHz: 8_000, snrDb, confidence: 0.9, state: "live", label: "", labelKind: "", labelConfidence: 0, lastSeen: 0, ...extra };
 }
 
-test("signal rows run strongest first, ties by id", () => {
-  const rows = signalRows([det("10", 5), det("9", 5), det("3", 20)]);
-  assert.deepEqual(rows.map((d) => d.id), ["3", "9", "10"]);
+test("signal rows run lowest frequency first, ties by id", () => {
+  const rows = signalRows([
+    det("10", 5),
+    det("9", 5),
+    det("3", 20, { centerHz: 146_600_000 }),
+    det("4", 1, { centerHz: 100_000_000 }),
+  ]);
+  assert.deepEqual(rows.map((d) => d.id), ["4", "9", "10", "3"]);
 });
+
+// A detection at a given MHz, so row order in the tests below reads off the
+// frequencies.
+const atMHz = (id: string, mhz: number, snrDb = 10) => det(id, snrDb, { centerHz: mhz * 1e6 });
 
 test("time since heard is read from sample indices at the source rate", () => {
   assert.equal(heardAgo(1_000_000, 1_000_000, 2_400_000), "now");
@@ -790,6 +800,32 @@ test("picking a signal spawns a receiver in its mode at the fitted width and rev
   const { calls, deps } = pickRig([{ vrx: 1, hz: 100_000_000, bandwidthHz: 200_000 }]);
   pickSignal(det("1", 10, { centerHz: 162_550_000, bandwidthHz: 9_000, label: "P25", labelKind: "protocol" }), deps);
   assert.deepEqual(calls, ["stop", "spawn 162550000 p25p1 0", "reveal 162550000"]);
+});
+
+test("tapping a lost row spawns on its last centre, mode and width", () => {
+  const { calls, deps } = pickRig();
+  pickSignal(
+    det("1", 10, { centerHz: 162_550_000, bandwidthHz: 9_000, label: "NFM", labelKind: "modulation", lostForMs: 42_000 } as Partial<Detection>),
+    deps,
+  );
+  assert.deepEqual(calls, ["stop", "spawn 162550000 nfm 10000", "reveal 162550000"]);
+});
+
+test("tapping a lost row selects a receiver already parked on it", () => {
+  const { calls, deps } = pickRig([{ vrx: 3, hz: 162_551_000, bandwidthHz: 12_500 }]);
+  pickSignal(det("1", 10, { centerHz: 162_550_000, bandwidthHz: 9_000, lostForMs: 5_000 } as Partial<Detection>), deps);
+  assert.deepEqual(calls, ["stop", "select 3", "reveal 162550000"]);
+});
+
+test("a waterfall tap in a detection box picks it, a miss retunes", () => {
+  const { calls, deps } = pickRig();
+  const d = det("1", 10, { centerHz: 146_520_000, bandwidthHz: 8_000, label: "NFM", labelKind: "modulation" });
+  tapWaterfall({ detection: d }, deps, () => calls.push("retune"));
+  assert.deepEqual(calls, ["stop", "spawn 146520000 nfm 10000", "reveal 146520000"]);
+  calls.length = 0;
+  tapWaterfall(null, deps, () => calls.push("retune"));
+  tapWaterfall({}, deps, () => calls.push("retune"));
+  assert.deepEqual(calls, ["retune", "retune"]);
 });
 
 test("an analogue FM pick is fitted to the shared width list", () => {
@@ -996,7 +1032,7 @@ const text = (d: Detection) => `${d.id}:${d.snrDb}`;
 
 test("first apply adds every row in list order", () => {
   const s = new RowSet();
-  const p = s.apply([det("1", 5), det("2", 20)], text);
+  const p = s.apply([atMHz("1", 146.6, 5), atMHz("2", 146.5, 20)], text);
   assert.deepEqual(p.added, ["2", "1"]);
   assert.deepEqual(p.order, ["2", "1"]);
   assert.deepEqual(p.removed, []);
@@ -1005,8 +1041,8 @@ test("first apply adds every row in list order", () => {
 
 test("a later apply reports added, removed and text-changed rows only", () => {
   const s = new RowSet();
-  s.apply([det("1", 5), det("2", 20), det("3", 1)], text);
-  const p = s.apply([det("1", 6), det("2", 20), det("4", 3)], text);
+  s.apply([atMHz("1", 146.5, 5), atMHz("2", 146.4, 20), atMHz("3", 146.7, 1)], text);
+  const p = s.apply([atMHz("1", 146.5, 6), atMHz("2", 146.4, 20), atMHz("4", 146.6, 3)], text);
   assert.deepEqual(p.added, ["4"]);
   assert.deepEqual(p.removed, ["3"]);
   assert.deepEqual(p.updated, ["1"]);
@@ -1015,10 +1051,10 @@ test("a later apply reports added, removed and text-changed rows only", () => {
 
 test("order is held while a pointer is down and applied on release", () => {
   const s = new RowSet();
-  s.apply([det("1", 20), det("2", 10)], text);
+  s.apply([atMHz("1", 146.3, 20), atMHz("2", 146.2, 10)], text);
   s.hold(true);
-  const p = s.apply([det("1", 5), det("2", 10), det("3", 30)], text);
-  assert.deepEqual(p.order, ["1", "2", "3"]);
+  const p = s.apply([atMHz("1", 146.3, 5), atMHz("2", 146.2, 10), atMHz("3", 146.1, 30)], text);
+  assert.deepEqual(p.order, ["2", "1", "3"]);
   assert.deepEqual(p.added, ["3"]);
   assert.deepEqual(p.updated, ["1"]);
   assert.deepEqual(s.hold(false), ["3", "2", "1"]);
@@ -1186,4 +1222,37 @@ test("a decoder the engine ended is reported by name", async () => {
   await listening(r, 1);
   r.link.emit("vrxStatus", { event: "vrxStatus", vrx: 1, decoder: "pocsag", decoderError: "the decoder refused 8000 S/s. It needs 22050." });
   assert.deepEqual(r.toasts, ["pocsag: the decoder refused 8000 S/s"]);
+});
+
+test("every receiver the engine has is listed, whoever opened it", async () => {
+  const r = rig();
+  r.link.emit("vrx", { event: "vrx", vrx: 7, hz: 162_550_000, mode: "nfm", bandwidthHz: 12_500, squelchDbfs: -80, openedBy: "another client" });
+  r.link.emit("vrx", { event: "vrx", vrx: 3, hz: 853_050_100, mode: "p25p1", bandwidthHz: 12_500, openedBy: "trunk follower" });
+  assert.deepEqual(r.chips(), ["3:853050100:p25p1", "7:162550000:nfm"]);
+  // A change the engine reports moves the chip.
+  r.link.emit("vrx", { event: "vrx", vrx: 7, hz: 162_400_000, mode: "nfm", openedBy: "another client" });
+  assert.deepEqual(r.chips(), ["3:853050100:p25p1", "7:162400000:nfm"]);
+  r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 7, reason: "removed by another client" });
+  assert.deepEqual(r.chips(), ["3:853050100:p25p1"]);
+});
+
+test("a vrx event cannot move the previewed frequency mid-drag", async () => {
+  const r = await dragRig();
+  r.ctl.preview(146_700_000);
+  r.link.emit("vrx", { event: "vrx", vrx: 1, hz: 146_520_000, mode: "nfm" });
+  assert.deepEqual(r.chips(), ["1:146700000:nfm"]);
+});
+test("a fresh session's snapshot replaces the list, so a receiver removed meanwhile goes", async () => {
+  const r = rig();
+  r.link.emit("vrx", { event: "vrx", vrx: 5, hz: 146_520_000, mode: "nfm" });
+  r.link.emit("vrx", { event: "vrx", vrx: 6, hz: 162_550_000, mode: "nfm" });
+  r.ctl.list.select(6);
+  // Taken over, then taken back: the new session lists only what exists now.
+  r.link.emit("lease", { event: "lease", state: "lost", holder: "Revenant desktop on VALKYRIE" });
+  r.link.emit("vrxList", { event: "vrxList", items: [{ vrx: 6, hz: 162_550_000, mode: "nfm" }] });
+  assert.deepEqual(r.chips(), ["6:162550000:nfm"]);
+  assert.equal(r.ctl.list.active, 6);
+  r.link.emit("vrxList", { event: "vrxList", items: [] });
+  assert.deepEqual(r.chips(), []);
+  assert.equal(r.ctl.list.active, null);
 });

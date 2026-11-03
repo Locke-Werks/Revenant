@@ -9,10 +9,9 @@
 // every receiver and who owns it, and this file says which of them the rack
 // takes in.
 //
-// WHAT ADOPTED MEANS. A strip like an auto DV receiver's: its own slot and
-// colour, heard, with mute, solo and gain, all of which act on this client's
-// mix and nothing else. It is never focused and never removed from here; see
-// RackEntry::adopted in models/receiver_rack.h for why.
+// WHAT ADOPTED MEANS. Where the receiver came from, not what may be done
+// with it: the operator focuses, tunes and removes it like any other. See
+// RackEntry::adopted in models/receiver_rack.h.
 
 #pragma once
 
@@ -28,16 +27,18 @@
 
 namespace revenant::ui {
 
-// Which owners' receivers the rack takes in. A plugin's only.
+// Which owners' receivers the rack takes in: a plugin's and another
+// session's. The engine serves one user (the single-user lease), so a
+// receiver the phone opened, or this window opened on an earlier connection,
+// is this operator's too.
 //
-// NOT THE ENGINE'S, which are its own business (a probe, a recording), and NOT
-// ANOTHER SESSION'S, which are another operator's receivers: hearing them here
-// would be listening over that person's shoulder, and a strip for each would
-// fill this rack with things its operator cannot touch. THIS SESSION'S are
-// already in the rack, under the keys this client gave them.
+// NOT THE ENGINE'S: an engine older than owner_kind reports Engine for every
+// receiver, this window's own among them, and adopting those would list each
+// one twice. THIS SESSION'S are already in the rack, under the keys this
+// client gave them.
 [[nodiscard]] constexpr bool rack_adopts(rpc::VrxOwnerKind owner)
 {
-    return owner == rpc::VrxOwnerKind::Plugin;
+    return owner == rpc::VrxOwnerKind::Plugin || owner == rpc::VrxOwnerKind::OtherSession;
 }
 
 // How long a removed adopted receiver's slot and name are kept for its

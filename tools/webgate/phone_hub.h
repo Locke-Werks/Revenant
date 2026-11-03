@@ -19,12 +19,33 @@
 // The owner chose 30 s over the earlier 10 min on 2026-11-03: a phone that is
 // put away without keep listening should not hold the radio's receivers for
 // minutes. Keep listening is how a locked phone keeps its session.
-// On expiry it is destroyed exactly as a disconnect used to destroy it: its
-// streams unsubscribe and its receivers are removed.
+// On expiry it is destroyed: its streams unsubscribe and its engine
+// connection closes, which ends the phone's lease. The gateway removes no
+// receivers; the engine removes the ones a client opened when the lease ends.
 //
 // At most max_residents sessions exist at once. A connection that would go
 // past that evicts the detached session that dropped longest ago; when every
 // session is attached the connection is refused (make_room says so).
+//
+// THE LEASE (docs/superpowers/specs/2026-11-03-single-user-engine-design.md).
+// The engine serves one user. Each phone session logs in to the engine as
+// "phone <ip> via webgate" (phone_holder); the engine joins every claim made
+// under the holder's exact text to one lease, so a phone's resumes and its
+// rebuilt sessions share its lease and a different phone does not.
+//   held     the phone's claim was granted. "lease" {"state":"held","holder"}
+//            is the first event on the connection, before "hello".
+//   inUse    the claim was refused. The connection stays open with no
+//            session: "lease" {"state":"inUse","holder","since","message"},
+//            then every command but pong, resume and takeOver is answered
+//            with the engine's refusal. "takeOver" logs in with takeOver,
+//            evicting the holder, and the connection gets a session as if
+//            it had just connected (hello, lease held, link), then the reply.
+//   lost     someone else took the lease over. The session is destroyed and
+//            the connection, if any, goes back to having none, with
+//            "lease" {"state":"lost","holder":<the new holder>}. takeOver
+//            from there takes it back.
+// The lease is released when the session is destroyed (its linger ends): its
+// engine connections close and the engine ends the lease.
 //
 // No kj here, so tests drive it with a fake socket, a manual strand and a
 // fake clock. Strand thread only, like PhoneStreams.
@@ -33,12 +54,15 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "core/rpc/client.h"
 #include "tools/webgate/engine_link.h"
@@ -67,8 +91,22 @@ struct HubTiming {
     std::chrono::milliseconds silence_limit{45'000};
 };
 
-// Where a session gets a fresh engine connection when the engine restarted.
-using NewSession = std::function<Expected<std::unique_ptr<rpc::Client>>()>;
+// Where a session gets an engine connection: on connect, on take over and
+// when the engine restarted. holder is the phone's lease holder text.
+using NewSession = std::function<Expected<std::unique_ptr<rpc::Client>>(
+    rpc::LoginMode mode, const std::string& holder)>;
+
+// The holder text a phone's sessions log in with, from its address.
+[[nodiscard]] std::string phone_holder(std::string_view peer);
+
+// The engine's refusal of a claim, "in use: <holder> since <time>", taken
+// apart. Null when message is not one.
+struct LeaseRefusal {
+    std::string holder;
+    std::string since;
+    std::string message;
+};
+[[nodiscard]] std::optional<LeaseRefusal> parse_lease_refusal(std::string_view message);
 
 class PhoneHub {
 public:
@@ -85,17 +123,28 @@ public:
     // attached to a socket, and the caller refuses the connection.
     [[nodiscard]] bool make_room();
 
-    // A new connection with a fresh session on client. Calls make_room
-    // first; the caller is expected to have checked it. Sends "hello" with the
-    // session's resume token, then the current link state. Returns the
-    // connection id the other calls take.
-    std::uint64_t connect(PhoneSocket& socket, std::unique_ptr<rpc::Client> client);
+    // A new connection with a fresh session on client, which logged in under
+    // holder. Calls make_room first; the caller is expected to have checked
+    // it. Sends "lease" held, "hello" with the session's resume token, then
+    // the current link state. Returns the connection id the other calls take.
+    std::uint64_t connect(PhoneSocket& socket, std::unique_ptr<rpc::Client> client,
+                          std::string holder = {});
+
+    // A new connection whose claim the engine refused with refusal (its
+    // message). No session; sends "lease" inUse. See THE LEASE above.
+    std::uint64_t connect_refused(PhoneSocket& socket, std::string holder,
+                                  const std::string& refusal);
+
+    // Logs in with claim under holder and connects, refused or not. Fails
+    // only when the engine could not be reached at all.
+    [[nodiscard]] Expected<std::uint64_t> admit(PhoneSocket& socket, const std::string& holder);
 
     // One text frame. "resume" is handled here: allowed only as a
     // connection's first command, it swaps the fresh session for the one
     // holding the token, taking it from another connection if one still has
-    // it (that socket is closed). "pong" only marks the phone as alive.
-    // Everything else goes to the session's streams.
+    // it (that socket is closed). "takeOver" is handled here too. "pong"
+    // only marks the phone as alive. Everything else goes to the session's
+    // streams, or is refused while the connection has none.
     void text(std::uint64_t connection, std::string_view text);
 
     // The socket is gone. Its session detaches and starts expiring.
@@ -134,6 +183,8 @@ public:
 private:
     struct Resident {
         std::string token;
+        // The lease holder text its engine connections log in with.
+        std::string holder;
         // Declared before streams so the streams go first: they unsubscribe
         // through the session's client.
         std::unique_ptr<PhoneSession> session;
@@ -151,10 +202,30 @@ private:
         bool commanded = false;
         std::chrono::steady_clock::time_point last_heard{};
         std::chrono::steady_clock::time_point last_ping{};
+        // While the connection has no session (refused, or taken over): the
+        // holder text a takeOver logs in with, the sentence every other
+        // command is refused with, and JSON waiting for the socket, which
+        // with no streams to send it has to be written here.
+        std::string holder;
+        std::string refusal;
+        std::deque<std::string> outbox;
     };
 
     [[nodiscard]] std::chrono::steady_clock::time_point now() const;
     void resume(std::uint64_t id, Connection& connection, const Command& command);
+    void take_over(std::uint64_t id, Connection& connection, const Command& command);
+    // A session for client under holder, put on connection id: lease held,
+    // hello, start, link event.
+    Resident& seat(std::uint64_t id, std::unique_ptr<rpc::Client> client, std::string holder);
+    // To the connection's session when it has one, else through its outbox.
+    void send_bare(std::uint64_t id, std::string json);
+    void flush(std::uint64_t id);
+    // The engine's leaseLost for the session, posted to the strand.
+    void watch_lease(Resident& resident);
+    // The resident lost the lease to holder: destroyed, and its connection
+    // told. Not inside a loop over residents_; see pending_losses_.
+    void lose(const std::string& token, const std::string& holder);
+    void settle_losses();
     [[nodiscard]] Resident* find_token(std::string_view token) const;
     // Rebuilds a resident on a fresh engine connection when its own one is
     // dead, and sends that session's link event with "recreated" and "lost"
@@ -178,6 +249,11 @@ private:
     std::uint64_t next_connection_ = 1;
     LinkState link_state_ = LinkState::Starting;
     std::string link_detail_;
+    // Tokens and new holders of residents found to have lost the lease while
+    // residents_ was being walked.
+    std::vector<std::pair<std::string, std::string>> pending_losses_;
+    // Cleared by the destructor, so a leaseLost posted after it does nothing.
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 };
 
 }  // namespace revenant::webgate

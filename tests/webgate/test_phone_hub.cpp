@@ -165,8 +165,11 @@ TEST_CASE("hello carries a resume token", "[gpu][webgate][hub]")
     REQUIRE_FALSE(socket.sent.empty());
     const auto token = rig.hub->token(id);
     CHECK(token.size() == 32);
-    CHECK(contains(socket.sent.front().text,
-                   R"({"event":"hello","resume":")" + token + "\"}"));
+    // The lease comes first, so the phone knows before anything else that the
+    // engine is its own.
+    CHECK(contains(socket.sent.front().text, R"("event":"lease","state":"held")"));
+    REQUIRE(socket.sent.size() >= 2);
+    CHECK(contains(socket.sent[1].text, R"({"event":"hello","resume":")" + token + "\"}"));
 }
 
 TEST_CASE("a new phone's detection bar starts at the desktop's", "[gpu][webgate][hub][desktop]")
@@ -221,7 +224,9 @@ TEST_CASE("keep listening outlives a dropped socket while HLS is fetched",
     rig.advance(seconds(2));
     CHECK_FALSE(rig.hub->holds(token));
     CHECK(rig.registry.find(hls_id) == nullptr);
-    CHECK_FALSE(rig.engine_has(vrx));
+    // The gateway removes nothing: the engine decides by the lease, which
+    // the harness's own client still holds.
+    CHECK(rig.engine_has(vrx));
 }
 
 TEST_CASE("keep listening with no fetches lasts until hls_idle", "[gpu][webgate][hub]")
@@ -259,7 +264,8 @@ TEST_CASE("a detached session without keep listening goes after 30 s", "[gpu][we
     CHECK(rig.engine_has(vrx));
     rig.advance(seconds(2));
     CHECK_FALSE(rig.hub->holds(token));
-    CHECK_FALSE(rig.engine_has(vrx));
+    // Still held by the harness's own client, so the receiver stays.
+    CHECK(rig.engine_has(vrx));
 }
 
 // Rejects a phone built from a config that missed the hub's cache: two
@@ -325,7 +331,7 @@ TEST_CASE("resume reattaches and the next frames go to the new socket", "[gpu][w
     CHECK(contains(reply, R"("ok":true)"));
     CHECK(rig.hub->sessions() == 1);
     CHECK(rig.hub->streams(again) == streams);
-    CHECK(rig.hub->session(again)->owns(vrx));
+    CHECK(rig.hub->session(again)->has_receiver(vrx));
     CHECK(rig.registry.find(streams->hls_id()) != nullptr);
 
     const auto opus_before = second.count(Kind::Opus);
@@ -443,7 +449,7 @@ TEST_CASE("resume takes a session from a socket that is still attached", "[gpu][
     CHECK(first.closed);
     CHECK(rig.hub->sessions() == 1);
     CHECK(rig.hub->session(id) == nullptr);
-    CHECK(rig.hub->session(again)->owns(vrx));
+    CHECK(rig.hub->session(again)->has_receiver(vrx));
 }
 
 TEST_CASE("a silent socket is pinged, then closed after 45 s", "[gpu][webgate][hub]")

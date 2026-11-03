@@ -251,19 +251,24 @@ constexpr ModeName kModes[] = {
 
 // ---- Receiver access -------------------------------------------------------
 
-// A phone may only touch receivers it created. The engine would let it: every
-// session's receivers are visible and settable, and that is the Qt client's
-// business, not a second phone's.
-[[nodiscard]] Expected<std::uint64_t> owned_vrx(PhoneSession& session, const Command& command,
-                                                std::string_view key = "vrx")
+// Any receiver the engine has: one user holds the engine, so whoever opened a
+// receiver it is that user's. An id the engine does not know is the engine's
+// to refuse, in its own words. The session learns of a receiver from the
+// engine's events, which may trail a command naming one just opened
+// elsewhere, so the id is learned here from the engine's own status.
+[[nodiscard]] Expected<std::uint64_t> receiver_arg(PhoneSession& session, const Command& command,
+                                                   std::string_view key = "vrx")
 {
     const auto vrx = command.get_u64(key);
     if (!vrx) {
         return std::unexpected(vrx.error());
     }
-    if (!session.owns(*vrx)) {
-        return fail(std::string(key) + ": receiver " + std::to_string(*vrx) +
-                    " is not one of yours");
+    if (!session.has_receiver(*vrx)) {
+        const auto status = session.client().vrx_status(*vrx);
+        if (!status) {
+            return std::unexpected(status.error());
+        }
+        session.learn(*vrx, status->params, status->owned_by_caller);
     }
     return *vrx;
 }
@@ -273,7 +278,7 @@ constexpr ModeName kModes[] = {
 template <class Change>
 [[nodiscard]] Result change_vrx(PhoneSession& session, const Command& command, Change&& change)
 {
-    const auto vrx = owned_vrx(session, command);
+    const auto vrx = receiver_arg(session, command);
     if (!vrx) {
         return std::unexpected(vrx.error());
     }
@@ -340,13 +345,13 @@ template <class Change>
     if (!id) {
         return std::unexpected(id.error());
     }
-    session.adopt(*id, params);
+    session.learn(*id, params);
     return status_or_sent(session, *id, params, rpc::TranscribeChoice::Auto, *center);
 }
 
 [[nodiscard]] Result op_remove_vrx(PhoneSession& session, const Command& command)
 {
-    const auto vrx = owned_vrx(session, command);
+    const auto vrx = receiver_arg(session, command);
     if (!vrx) {
         return std::unexpected(vrx.error());
     }
@@ -378,7 +383,7 @@ template <class Change>
 template <class Edit>
 [[nodiscard]] Result recreate_vrx(PhoneSession& session, const Command& command, Edit&& edit)
 {
-    const auto old_id = owned_vrx(session, command);
+    const auto old_id = receiver_arg(session, command);
     if (!old_id) {
         return std::unexpected(old_id.error());
     }
@@ -402,17 +407,17 @@ template <class Edit>
     if (!new_id) {
         return std::unexpected(new_id.error());
     }
-    session.adopt(*new_id, params);
+    session.learn(*new_id, params);
 
     // From here the engine holds two receivers. Anything that fails before the
     // old one is gone undoes the new one, so the phone still has exactly what
     // it had and the error is the engine's.
     const auto roll_back = [&](const Error& why) -> Result {
+        // If even that fails the new id stays listed: it is a real receiver
+        // the phone can still see and remove.
         if (session.client().remove_vrx(*new_id)) {
             session.forget(*new_id);
         }
-        // If even that fails the new id stays owned, so the session's
-        // destructor tries again rather than leaving it untracked.
         return std::unexpected(why);
     };
 
@@ -502,13 +507,13 @@ template <class Edit>
         return std::unexpected(granted.error());
     }
     // A retune removes receivers whose centre falls outside the new span, so
-    // the ones this phone thought it had may be gone.
+    // the ones this phone knew of may be gone.
     std::vector<std::string> removed;
     if (const auto ids = session.client().vrx_ids()) {
-        for (const auto owned : session.owned_ids()) {
-            if (std::ranges::find(*ids, owned) == ids->end()) {
-                session.forget(owned);
-                removed.push_back(std::to_string(owned));
+        for (const auto known : session.receiver_ids()) {
+            if (std::ranges::find(*ids, known) == ids->end()) {
+                session.forget(known);
+                removed.push_back(std::to_string(known));
             }
         }
     }
@@ -634,7 +639,7 @@ template <class Edit>
         }
         on = *value;
     }
-    const auto vrx = owned_vrx(session, command);
+    const auto vrx = receiver_arg(session, command);
     if (!vrx) {
         // Turning audio off for a receiver that is already gone is not worth
         // refusing.
@@ -694,7 +699,7 @@ template <class Edit>
 
 [[nodiscard]] Result op_set_vrx_transcribe(PhoneSession& session, const Command& command)
 {
-    const auto vrx = owned_vrx(session, command);
+    const auto vrx = receiver_arg(session, command);
     if (!vrx) {
         return std::unexpected(vrx.error());
     }
@@ -762,7 +767,7 @@ template <class Edit>
 
 [[nodiscard]] Result op_set_decoders(PhoneSession& session, const Command& command)
 {
-    const auto vrx = owned_vrx(session, command);
+    const auto vrx = receiver_arg(session, command);
     if (!vrx) {
         return std::unexpected(vrx.error());
     }
@@ -779,9 +784,10 @@ template <class Edit>
             unique.push_back(std::move(name));
         }
     }
+    // receiver_arg learned the id, so this is null only if that went wrong.
     const auto* params = session.last_params(*vrx);
     if (params == nullptr) {
-        return fail("vrx: receiver " + std::to_string(*vrx) + " is not one of yours");
+        return fail("vrx: receiver " + std::to_string(*vrx) + " is not known to the gateway");
     }
     const std::string mode(mode_name(params->demod));
     if (!unique.empty()) {
@@ -856,6 +862,26 @@ std::optional<std::vector<std::string>> voice_modes(const rpc::VocoderPlugins& p
         }
     }
     return voice;
+}
+
+std::string_view demod_name(rpc::Demod demod)
+{
+    return mode_name(demod);
+}
+
+std::string receiver_json(const rpc::VrxStatus& status, std::int64_t center,
+                          const std::vector<std::string>& decoders, std::string_view opened_by)
+{
+    std::string body = vrx_json(status, center, decoders);
+    body.pop_back();
+    body += ",\"openedBy\":" + json_string(opened_by) + "}";
+    return body;
+}
+
+std::string receiver_event(const rpc::VrxStatus& status, std::int64_t center,
+                           const std::vector<std::string>& decoders, std::string_view opened_by)
+{
+    return R"({"event":"vrx",)" + receiver_json(status, center, decoders, opened_by).substr(1);
 }
 
 std::string transcription_status_event(const rpc::TranscriptionStatus& status)

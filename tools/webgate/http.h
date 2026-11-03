@@ -60,7 +60,9 @@ public:
 
     // Handles one accepted WebSocket on /ws; the connection lives until the
     // returned promise settles. Set before run(). Without it /ws answers 503.
-    std::function<kj::Promise<void>(kj::Own<kj::WebSocket>)> on_websocket;
+    // peer is the client's address as text ("10.1.10.57"), empty when the
+    // stream could not say.
+    std::function<kj::Promise<void>(kj::Own<kj::WebSocket>, std::string peer)> on_websocket;
 
     // Which segmenter answers /hls/<vrx>/live.m3u8, init.mp4 and <seq>.m4s.
     // Register a receiver's segmenter here and remove it before destroying

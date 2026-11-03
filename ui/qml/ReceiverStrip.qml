@@ -3,10 +3,10 @@
 // that is not one of its controls focuses the receiver.
 //
 // AN ADOPTED STRIP, a receiver an engine plugin opened such as one of the
-// trunk tracker's voice calls, is named for the plugin, is heard, and keeps
-// mute, solo and gain, which act on this window's mix alone. It cannot be
-// focused or removed: the plugin owns it and closes it when the call ends.
-// models/adopted_receivers.h has the reasons.
+// trunk tracker's voice calls, or one a phone opened, is named for whoever
+// opened it and is otherwise like any other: the engine serves one user, so
+// it can be focused, tuned and removed. It leaves when the engine removes it,
+// focused or not. models/adopted_receivers.h.
 //
 // Everything shown comes from one entry of EngineLink::rackEntries, which
 // ui/models/rack_link.cpp builds; the rules behind mute, solo and the gain
@@ -40,11 +40,8 @@ Rectangle {
     // Behind the controls, so a press on a button is the button's.
     MouseArea {
         anchors.fill: parent
-        cursorShape: strip.focused || strip.adopted ? Qt.ArrowCursor : Qt.PointingHandCursor
-        onClicked: {
-            if (!strip.adopted)
-                engineLink.focusReceiver(strip.entry.key)
-        }
+        cursorShape: strip.focused ? Qt.ArrowCursor : Qt.PointingHandCursor
+        onClicked: engineLink.focusReceiver(strip.entry.key)
     }
 
     // The receiver's colour down the left edge, which is what ties the strip
@@ -144,9 +141,7 @@ Rectangle {
                                       : "hear this receiver alone, muted or not"
             }
 
-            // Not on an adopted strip: the plugin removes its own receivers.
             RButton {
-                visible: !strip.adopted
                 flat: true
                 text: "remove this receiver"
                 iconName: "trash"
@@ -181,13 +176,13 @@ Rectangle {
             // sentence is its hover, and remove is beside it because that
             // or a retune is all there is to do.
             StatusChip {
-                visible: strip.entry.refused && !strip.adopted
+                visible: strip.entry.refused
                 label: "refused"
                 detail: strip.entry.refusal
             }
 
             RButton {
-                visible: strip.entry.refused && !strip.adopted
+                visible: strip.entry.refused
                 flat: true
                 text: "remove this receiver"
                 iconName: "trash"

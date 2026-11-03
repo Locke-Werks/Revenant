@@ -13,6 +13,7 @@ import {
   type EventName,
   type GatewayEvent,
   type JsonValue,
+  type LeaseEvent,
   type LinkEvent,
   type Op,
   type OpusFrame,
@@ -85,6 +86,9 @@ export interface LinkEvents {
   display: GatewayEvent;
   desktop: GatewayEvent;
   rds: GatewayEvent;
+  lease: LeaseEvent;
+  vrx: GatewayEvent;
+  vrxList: GatewayEvent;
 }
 export type LinkEventName = keyof LinkEvents;
 
@@ -121,11 +125,33 @@ export class Link {
   private lastHeard = 0;
   private watchdog: unknown = null;
   private stableTimer: unknown = null;
+  // THE LEASE. The engine serves one user (tools/webgate/phone_hub.h), and
+  // the gateway says on every connection whether this phone holds it. The
+  // link is ready only when the socket has settled (any resume answered) AND
+  // the lease is this phone's; while it is someone else's, takeOver() is the
+  // one request that goes out.
+  private leaseState: "unknown" | "held" | "blocked" = "unknown";
+  private blocker: LeaseEvent | null = null;
+  private settled = false;
+  private settledResumed = false;
 
   constructor(private readonly deps: LinkDeps) {}
 
   get ready(): boolean {
     return this.isReady;
+  }
+
+  // Why the phone cannot use the engine right now, or null when it can (or
+  // the gateway has not said yet).
+  get lease(): LeaseEvent | null {
+    return this.blocker;
+  }
+
+  // Takes the engine from whoever holds it. On success the gateway gives this
+  // socket a fresh session and the link becomes ready.
+  takeOver(): Promise<JsonValue> {
+    if (this.ws === null || !this.settled) return Promise.reject(new LinkError("not connected"));
+    return this.send("takeOver");
   }
 
   start(): void {
@@ -207,6 +233,8 @@ export class Link {
 
   private open(): void {
     this.retry = null;
+    this.leaseState = "unknown";
+    this.settled = false;
     let ws: SocketLike;
     try {
       ws = this.deps.socket(this.deps.url);
@@ -229,7 +257,7 @@ export class Link {
     this.lastHeard = this.deps.now();
     const token = this.deps.store.getItem(RESUME_KEY);
     if (token === null) {
-      this.becomeReady(false);
+      this.settle(false);
       return;
     }
     // resume is accepted only as a connection's first command, so it goes out
@@ -260,7 +288,31 @@ export class Link {
       else this.deps.store.removeItem(RESUME_KEY);
     }
     this.freshToken = null;
-    this.becomeReady(ok);
+    this.settle(ok);
+  }
+
+  private settle(resumed: boolean): void {
+    this.settled = true;
+    this.settledResumed = resumed;
+    if (this.leaseState === "held" && !this.isReady) this.becomeReady(resumed);
+  }
+
+  private onLease(ev: LeaseEvent): void {
+    if (ev.state === "held") {
+      const wasBlocked = this.leaseState === "blocked";
+      this.leaseState = "held";
+      this.blocker = null;
+      this.emit("lease", ev);
+      // Held after being refused is a takeover: a fresh session, not a resume.
+      if (this.settled && !this.isReady) this.becomeReady(wasBlocked ? false : this.settledResumed);
+      return;
+    }
+    this.leaseState = "blocked";
+    this.blocker = ev;
+    // Only once ready: before that the one request in flight is a resume or
+    // a takeOver, which the gateway still answers.
+    if (this.isReady) this.unready();
+    this.emit("lease", ev);
   }
 
   private becomeReady(resumed: boolean): void {
@@ -302,6 +354,9 @@ export class Link {
     } else if (ev.event === "hello" && typeof ev.resume === "string") {
       if (this.resumeId !== null) this.freshToken = ev.resume;
       else this.deps.store.setItem(RESUME_KEY, ev.resume);
+    } else if (ev.event === "lease") {
+      this.onLease(ev as unknown as LeaseEvent);
+      return;
     }
     this.emit(ev.event, ev as never);
   }
@@ -336,6 +391,13 @@ export class Link {
   private lost(): void {
     this.resumeId = null;
     this.freshToken = null;
+    this.settled = false;
+    this.unready();
+  }
+
+  // Not ready any more, on this socket or at all: every pending request is
+  // failed, since the session that would have answered it is gone.
+  private unready(): void {
     const wasReady = this.isReady;
     this.isReady = false;
     if (this.stableTimer !== null) {

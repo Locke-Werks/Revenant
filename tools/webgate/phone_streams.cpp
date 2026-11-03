@@ -304,9 +304,9 @@ void PhoneStreams::start()
     const auto transcripts = session_.client().subscribe_transcripts(
         [inbox](const rpc::Transcript& t) {
             put_item(inbox, [t](PhoneStreams& self) {
-                // Engine-wide stream; a phone sees transcripts of its own
-                // receivers, as it sees only its own receivers elsewhere.
-                if (!self.known_owned_.contains(t.vrx)) {
+                // Engine-wide stream, limited to receivers the phone has been
+                // told of, so a caption never names an id it cannot place.
+                if (!self.known_.contains(t.vrx)) {
                     return;
                 }
                 self.queue_text(event("transcript", JsonObject()
@@ -329,6 +329,7 @@ void PhoneStreams::start()
 
     apply_desktop_switches();
     refresh_source();
+    send_receiver_list();
     refresh_transcription();
     refresh_display();
     refresh_desktop();
@@ -383,6 +384,50 @@ void PhoneStreams::refresh_desktop()
         sent_desktop_ = now;
         queue_text(std::move(now));
     }
+}
+
+void PhoneStreams::send_receiver_list()
+{
+    // Read now rather than from the event replay, which arrives later and
+    // one receiver at a time: the phone replaces its whole list with this,
+    // so receivers removed while it had no session (taken over, a refused
+    // resume) do not linger there as ghosts.
+    const auto ids = session_.client().vrx_ids();
+    if (!ids) {
+        return;
+    }
+    for (const auto known : session_.receiver_ids()) {
+        if (std::ranges::find(*ids, known) == ids->end()) {
+            session_.forget(known);
+            known_.erase(known);
+            described_.erase(known);
+        }
+    }
+    std::string items = "[";
+    for (const auto id : *ids) {
+        const auto status = session_.client().vrx_status(id);
+        if (!status) {
+            continue;
+        }
+        if (session_.has_receiver(id)) {
+            session_.remember(id, status->params);
+        } else {
+            session_.learn(id, status->params, status->owned_by_caller);
+        }
+        known_.insert(id);
+        auto& described = described_[id];
+        described.status = *status;
+        if (described.opened_by.empty()) {
+            described.opened_by = status->owned_by_caller ? "this phone" : "another client";
+        }
+        if (items.size() > 1) {
+            items += ',';
+        }
+        items += receiver_json(*status, source_center_, session_.decoders(id), described.opened_by);
+    }
+    items += ']';
+    queue_text(event("vrxList", JsonObject().add_raw("items", items)));
+    reconcile();
 }
 
 void PhoneStreams::refresh_display()
@@ -442,8 +487,8 @@ void PhoneStreams::on_text(std::string_view text)
     }
     queue_text(dispatch(session_, *command));
 
-    for (const auto vrx : session_.owned_ids()) {
-        known_owned_.insert(vrx);
+    for (const auto vrx : session_.receiver_ids()) {
+        known_.insert(vrx);
     }
     if (command->op == "openSource" || command->op == "setCenter") {
         refresh_source();
@@ -465,8 +510,8 @@ std::deque<std::string> PhoneStreams::take_texts()
 
 void PhoneStreams::resync()
 {
-    for (const auto vrx : session_.owned_ids()) {
-        known_owned_.insert(vrx);
+    for (const auto vrx : session_.receiver_ids()) {
+        known_.insert(vrx);
     }
     reconcile();
 }
@@ -539,6 +584,7 @@ void PhoneStreams::announce_state()
         sent_paced_by_ = paced_by_;
         queue_text(source_event());
     }
+    send_receiver_list();
     if (!sent_detections_.empty()) {
         queue_text(sent_detections_);
     }
@@ -635,7 +681,7 @@ void PhoneStreams::refresh_rds()
         return params == nullptr || params->demod != rpc::Demod::Wfm;
     });
     const auto t = now();
-    for (const auto vrx : session_.owned_ids()) {
+    for (const auto vrx : session_.receiver_ids()) {
         const auto* params = session_.last_params(vrx);
         if (params == nullptr || params->demod != rpc::Demod::Wfm) {
             continue;
@@ -646,8 +692,8 @@ void PhoneStreams::refresh_rds()
         }
         // RBDS: the owner is in North America, where PTY codes mean other
         // genres and the call sign comes from the PI. Set before the first
-        // read, since setting it later clears what the decoder has. The
-        // receiver is this phone's, so no other client's decoder is reset.
+        // read, since setting it later clears what the decoder has. One user
+        // holds the engine, so no one else's decoder is reset by it.
         if (!poll.region_set) {
             const auto set = config_.set_rds_region
                                  ? config_.set_rds_region(vrx, rpc::RdsRegion::Rbds)
@@ -1023,7 +1069,7 @@ void PhoneStreams::reconcile_hls()
 {
     std::optional<std::uint64_t> target;
     if (config_.hls != nullptr && session_.keep_listening() && session_.audio_vrx() &&
-        session_.owns(*session_.audio_vrx())) {
+        session_.has_receiver(*session_.audio_vrx())) {
         target = session_.audio_vrx();
     }
 
@@ -1066,7 +1112,7 @@ std::vector<PhoneStreams::MixMember> PhoneStreams::mix_members() const
 {
     std::vector<MixMember> members;
     const auto active = session_.audio_vrx();
-    const bool listening = active && session_.owns(*active);
+    const bool listening = active && session_.has_receiver(*active);
     if (listening) {
         const auto* params = session_.last_params(*active);
         members.push_back({*active, params != nullptr && is_digital_voice(params->demod)});
@@ -1076,7 +1122,7 @@ std::vector<PhoneStreams::MixMember> PhoneStreams::mix_members() const
     // linger after either ends, which exists so a quick lock and unlock does
     // not rebuild the stream and has no listener.
     if (listening || (hls_ && !hls_->ends_at)) {
-        for (const auto vrx : session_.owned_ids()) {
+        for (const auto vrx : session_.receiver_ids()) {
             if (listening && vrx == *active) {
                 continue;
             }
@@ -1141,7 +1187,7 @@ void PhoneStreams::reconcile_decoded()
 {
     auto& client = session_.client();
     for (auto it = decoded_.begin(); it != decoded_.end();) {
-        if (!session_.owns(it->first)) {
+        if (!session_.has_receiver(it->first)) {
             for (const auto& name : it->second) {
                 client.unsubscribe_decoded(it->first, name);
                 decoder_generation_.erase(std::pair(it->first, name));
@@ -1152,9 +1198,14 @@ void PhoneStreams::reconcile_decoded()
             ++it;
         }
     }
-    std::erase_if(decoded_applied_, [this](const auto& entry) { return !session_.owns(entry.first); });
+    std::erase_if(decoded_applied_, [this](const auto& entry) { return !session_.has_receiver(entry.first); });
 
-    for (const auto vrx : session_.owned_ids()) {
+    for (const auto vrx : session_.receiver_ids()) {
+        // Not recorded as applied, so the next reconcile tries again once the
+        // engine's decoder list can be read.
+        if (!session_.decoders_known(vrx)) {
+            continue;
+        }
         auto wanted = session_.decoders(vrx);
         if (const auto it = decoded_applied_.find(vrx); it != decoded_applied_.end() && it->second == wanted) {
             continue;
@@ -1214,7 +1265,7 @@ Status PhoneStreams::subscribe_decoder(std::uint64_t vrx, const std::string& nam
                 put_item(inbox, [vrx, name, reason, generation](PhoneStreams& self) {
                     // A receiver that went (a removal, or a mode change's
                     // replacement) ends its decoders too; vrxRemoved says that.
-                    if (!self.session_.owns(vrx)) {
+                    if (!self.session_.has_receiver(vrx)) {
                         return;
                     }
                     // The subscription this ended has since been dropped or
@@ -1339,12 +1390,61 @@ void PhoneStreams::emit_mix(std::span<const float> mixed,
     }
 }
 
-void PhoneStreams::handle_vrx_event(const rpc::VrxEvent& e)
+namespace {
+
+[[nodiscard]] std::string opened_by(const rpc::VrxEvent& e)
 {
-    if (e.kind != rpc::VrxEventKind::Removed || !known_owned_.contains(e.vrx)) {
+    switch (e.owner) {
+        case rpc::VrxOwnerKind::ThisSession: return "this phone";
+        case rpc::VrxOwnerKind::OtherSession: return "another client";
+        case rpc::VrxOwnerKind::Plugin: return e.owner_name.empty() ? "a plugin" : e.owner_name;
+        case rpc::VrxOwnerKind::Engine: break;
+    }
+    return "the engine";
+}
+
+}  // namespace
+
+void PhoneStreams::send_receiver(std::uint64_t vrx)
+{
+    const auto it = described_.find(vrx);
+    if (it == described_.end()) {
         return;
     }
-    known_owned_.erase(e.vrx);
+    queue_text(receiver_event(it->second.status, source_center_, session_.decoders(vrx),
+                              it->second.opened_by));
+}
+
+void PhoneStreams::handle_vrx_event(const rpc::VrxEvent& e)
+{
+    if (e.kind != rpc::VrxEventKind::Removed) {
+        // Every receiver the engine has is the phone's, so each one is
+        // learned and listed whoever opened it. The subscription replays the
+        // whole list as Added first, which is how a fresh session hears of
+        // receivers opened before it.
+        if (!e.status) {
+            return;
+        }
+        // Only this session's own are added again after an engine restart:
+        // two sessions each rebuilding every receiver would double them, and
+        // a plugin's come back from the plugin.
+        const bool opened_here = e.owner == rpc::VrxOwnerKind::ThisSession;
+        if (session_.has_receiver(e.vrx)) {
+            session_.remember(e.vrx, e.status->params);
+        } else {
+            session_.learn(e.vrx, e.status->params, opened_here);
+        }
+        known_.insert(e.vrx);
+        described_[e.vrx] = Described{*e.status, opened_by(e)};
+        send_receiver(e.vrx);
+        reconcile();
+        return;
+    }
+    described_.erase(e.vrx);
+    if (!known_.contains(e.vrx)) {
+        return;
+    }
+    known_.erase(e.vrx);
     session_.forget(e.vrx);
     queue_text(event("vrxRemoved",
                      JsonObject().add_u64("vrx", e.vrx).add_string("reason", e.reason)));

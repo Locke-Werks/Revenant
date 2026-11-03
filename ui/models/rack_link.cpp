@@ -315,8 +315,6 @@ void EngineLink::focus_entry(std::uint64_t key)
     if (key == 0 || key == pane_key_) {
         return;
     }
-    // Every focus path ends here, so this is the one test that keeps the pane
-    // off a receiver a plugin owns: the pane would retune it.
     if (const RackEntry* entry = rack_.find(key);
         entry == nullptr || !rack_entry_focusable(*entry)) {
         return;
@@ -621,9 +619,9 @@ void EngineLink::removeRackReceiver(qulonglong key)
 
 bool EngineLink::drop_held_entry(std::uint64_t key)
 {
-    // Not an adopted one: the plugin closes its own receivers, and the strip
-    // offers no remove. drop_adopted_entry is how one leaves the rack.
-    if (const RackEntry* entry = rack_.find(key); entry == nullptr || entry->adopted) {
+    // An adopted one too: it is held under its engine id like any other, so
+    // the remove reaches the engine. Its Removed event then finds nothing.
+    if (const RackEntry* entry = rack_.find(key); entry == nullptr) {
         return false;
     }
     rack_.remove(key);
@@ -642,10 +640,6 @@ void EngineLink::dismissReceiver(qulonglong key)
     if (which == 0) {
         return;
     }
-    if (const RackEntry* entry = rack_.find(which); entry != nullptr && entry->adopted) {
-        return;
-    }
-
     // Recorded only while the switch is on. With it off nothing would spawn
     // there anyway, and turning it on clears the list, because on means all of
     // them.
@@ -686,7 +680,7 @@ void EngineLink::clearReceivers()
     // the strips' Repeater being rebuilt for each of up to 64.
     std::vector<std::uint64_t> keys;
     for (const RackEntry& entry : rack_.entries()) {
-        if (!entry.adopted && entry.key != pane_key_) {
+        if (entry.key != pane_key_) {
             keys.push_back(entry.key);
         }
     }
@@ -694,7 +688,7 @@ void EngineLink::clearReceivers()
         (void)drop_held_entry(key);
     }
     rack_note_.clear();
-    if (const RackEntry* pane = rack_.find(pane_key_); pane != nullptr && !pane->adopted) {
+    if (const RackEntry* pane = rack_.find(pane_key_); pane != nullptr) {
         // Posts the audio wants and announces the rack itself.
         removeReceiver();
         return;
@@ -708,8 +702,7 @@ bool EngineLink::rackClearable() const
     if (auto_dv_) {
         return true;
     }
-    return std::any_of(rack_.entries().begin(), rack_.entries().end(),
-                       [](const RackEntry& entry) { return !entry.adopted; });
+    return !rack_.entries().empty();
 }
 
 void EngineLink::setAutoDv(bool on)
@@ -1195,10 +1188,10 @@ void EngineLink::forget_held(const QString& why)
 //
 // ADOPTED, NOT MADE. The trunk tracker opens a p25p1 receiver per voice call
 // and removes it when the call ends; this window learns of both from the
-// engine's receiver events and shows the receiver as a strip that is heard
-// and cannot be focused or removed. models/adopted_receivers.h has the rules
-// and the reasons. Everything below is bookkeeping: no call in this section
-// writes to a receiver, because they are the plugin's.
+// engine's receiver events and shows the receiver as a strip the operator
+// controls like any other. models/adopted_receivers.h has the rules.
+// Everything below is bookkeeping: no call in this section writes to a
+// receiver; focus and remove go through the ordinary paths.
 
 void EngineLink::apply_vrx_events(bool probe)
 {
@@ -1410,8 +1403,13 @@ void EngineLink::drain_vrx_events()
         // the rack note is the operator's, and a busy trunk would otherwise
         // write over it on every call. The stranded count still knows it is
         // the plugin's, through plugin_vrx_ids_.
-        const std::string& owner =
+        std::string owner =
             event.owner_name.empty() ? event.status->owner_name : event.owner_name;
+        // Another session's carries no name, and it is this operator's
+        // receiver, so it reads like one this window made.
+        if (owner.empty() && event.owner == rpc::VrxOwnerKind::OtherSession) {
+            owner = "RX";
+        }
         const auto key = rack_.add_adopted(owner, event.vrx);
         if (!key) {
             continue;
@@ -1453,7 +1451,14 @@ void EngineLink::drop_adopted_entry(std::uint64_t key, bool forget)
                                ReceiverAttribution{entry->slot, rack_entry_label(*entry)},
                                static_cast<std::int64_t>(now_ms));
 
-    // Focus never rests on an adopted entry, so this moves none.
+    // On the pane: out the way an ordinary removal goes, so focus steps to
+    // the entry that took its place or the pane clears. The remove that path
+    // sends finds nothing on the engine, which has already removed it, and
+    // ids are not reused on one engine, so it cannot hit another receiver.
+    if (key == pane_key_) {
+        removeReceiver();
+        return;
+    }
     static_cast<void>(rack_.remove(key));
     std::erase_if(held_views_, [key](const auto& held) { return held.first == key; });
 
@@ -1467,6 +1472,12 @@ void EngineLink::drop_adopted_entry(std::uint64_t key, bool forget)
 
 void EngineLink::drop_adopted_receivers()
 {
+    // The pane on one of them is cleared first: its receiver was on the
+    // engine that went, and the replay brings it back as a new entry.
+    if (const RackEntry* pane = rack_.find(pane_key_); pane != nullptr && pane->adopted) {
+        clear_pane();
+        pane_key_ = 0;
+    }
     const std::vector<RackEntry> gone = rack_.drop_adopted();
     for (const RackEntry& entry : gone) {
         std::erase_if(held_views_,

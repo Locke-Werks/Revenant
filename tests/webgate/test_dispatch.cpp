@@ -77,7 +77,7 @@ TEST_CASE("addVrx creates a receiver the session owns", "[gpu][webgate][dispatch
     REQUIRE(contains(reply, R"("ok":true)"));
     const auto vrx = vrx_of(reply);
 
-    CHECK(session->owns(vrx));
+    CHECK(session->has_receiver(vrx));
     const auto status = session->client().vrx_status(vrx);
     REQUIRE(status.has_value());
     CHECK(status->params.center == 100'000);
@@ -131,7 +131,7 @@ TEST_CASE("setMode recreates the receiver in the new mode", "[gpu][webgate][disp
 
     // The engine's rule is that a demodulator is a stage: one receiver goes
     // and another comes, at the same frequency.
-    CHECK_FALSE(session->owns(old_vrx));
+    CHECK_FALSE(session->has_receiver(old_vrx));
     CHECK_FALSE(harness.client().vrx_status(old_vrx).has_value());
     CHECK(session->audio_vrx() == fresh);
     const auto status = harness.client().vrx_status(fresh);
@@ -180,7 +180,7 @@ TEST_CASE("setBandwidth recreates the receiver and setSquelch changes it in plac
     CHECK_FALSE(harness.client().vrx_status(first).has_value());
 }
 
-TEST_CASE("removeVrx removes an owned receiver and refuses one that is not", "[gpu][webgate][dispatch]")
+TEST_CASE("removeVrx removes a receiver whoever opened it", "[gpu][webgate][dispatch]")
 {
     REVENANT_NEEDS_GPU();
     revenant::test::Harness harness;
@@ -194,17 +194,24 @@ TEST_CASE("removeVrx removes an owned receiver and refuses one that is not", "[g
     const auto removed =
         send(*session, R"({"id":2,"op":"removeVrx","args":{"vrx":)" + std::to_string(mine) + "}}");
     REQUIRE(contains(removed, R"("ok":true)"));
-    CHECK_FALSE(session->owns(mine));
+    CHECK_FALSE(session->has_receiver(mine));
     CHECK_FALSE(harness.client().vrx_status(mine).has_value());
 
-    const auto refused = send(
+    // Opened by another session of the same lease: one user, so it is the
+    // phone's to remove too.
+    const auto theirs = send(
         *session, R"({"id":3,"op":"removeVrx","args":{"vrx":)" + std::to_string(*other) + "}}");
-    INFO(refused);
-    CHECK(contains(refused, R"("ok":false)"));
-    CHECK(harness.client().vrx_status(*other).has_value());
+    INFO(theirs);
+    CHECK(contains(theirs, R"("ok":true)"));
+    CHECK_FALSE(harness.client().vrx_status(*other).has_value());
+
+    // An id the engine never had is the engine's to refuse.
+    const auto unknown =
+        send(*session, R"({"id":4,"op":"removeVrx","args":{"vrx":999999}})");
+    CHECK(contains(unknown, R"("ok":false)"));
 }
 
-TEST_CASE("a phone leaving removes its receivers and only its receivers",
+TEST_CASE("a phone controls receivers it did not open and leaving removes none",
           "[gpu][webgate][dispatch]")
 {
     REVENANT_NEEDS_GPU();
@@ -215,30 +222,38 @@ TEST_CASE("a phone leaving removes its receivers and only its receivers",
     REQUIRE(other.has_value());
 
     std::uint64_t mine = 0;
+    std::uint64_t theirs = 0;
     {
         auto first = phone(harness);
         auto second = phone(harness);
         mine = vrx_of(send(*first, R"({"id":1,"op":"addVrx","args":{"hz":100100000}})"));
-        const auto theirs =
-            vrx_of(send(*second, R"({"id":1,"op":"addVrx","args":{"hz":100150000}})"));
-        CHECK(first->owns(mine));
-        CHECK_FALSE(first->owns(theirs));
-        // A phone cannot drive another phone's receiver.
+        theirs = vrx_of(send(*second, R"({"id":1,"op":"addVrx","args":{"hz":100150000}})"));
+        CHECK(first->has_receiver(mine));
+
         const auto reply = send(
             *first, R"({"id":2,"op":"tune","args":{"vrx":)" + std::to_string(theirs) +
                         R"(,"hz":100160000}})");
-        CHECK(contains(reply, R"("ok":false)"));
+        INFO(reply);
+        CHECK(contains(reply, R"("ok":true)"));
+        CHECK(first->has_receiver(theirs));
+        const auto moved = harness.client().vrx_status(theirs);
+        REQUIRE(moved.has_value());
+        CHECK(moved->params.center == 160'000);
+
+        const auto engine_own = send(
+            *first, R"({"id":3,"op":"setSquelch","args":{"vrx":)" + std::to_string(*other) +
+                        R"(,"dbfs":-70}})");
+        CHECK(contains(engine_own, R"("ok":true)"));
 
         second.reset();
-        const auto ids = harness.client().vrx_ids();
-        REQUIRE(ids.has_value());
-        CHECK(std::ranges::find(*ids, theirs) == ids->end());
-        CHECK(std::ranges::find(*ids, mine) != ids->end());
     }
 
+    // The lease is still held (the harness's own client is in it), so the
+    // engine keeps every receiver; a phone session ending removes nothing.
     const auto ids = harness.client().vrx_ids();
     REQUIRE(ids.has_value());
-    CHECK(std::ranges::find(*ids, mine) == ids->end());
+    CHECK(std::ranges::find(*ids, mine) != ids->end());
+    CHECK(std::ranges::find(*ids, theirs) != ids->end());
     CHECK(std::ranges::find(*ids, *other) != ids->end());
 }
 
@@ -286,7 +301,7 @@ TEST_CASE("bad arguments are refused naming the argument", "[gpu][webgate][dispa
     CHECK(contains(mode, "mode"));
 
     // None of that reached the engine.
-    CHECK(session->owned_ids().empty());
+    CHECK(session->receiver_ids().empty());
     const auto ids = harness.client().vrx_ids();
     REQUIRE(ids.has_value());
     CHECK(ids->empty());
@@ -573,7 +588,7 @@ TEST_CASE("a recreate whose old receiver will not go is rolled back", "[gpu][web
     CHECK(contains(reply, R"("ok":false)"));
     CHECK(contains(reply, "injected remove failure"));
 
-    CHECK(session->owned_ids() == std::vector<std::uint64_t>{old_vrx});
+    CHECK(session->receiver_ids() == std::vector<std::uint64_t>{old_vrx});
     CHECK(session->audio_vrx() == old_vrx);
     CHECK(session->keep_listening());
     const auto ids = harness.client().vrx_ids();
@@ -605,7 +620,7 @@ TEST_CASE("a recreate the engine refuses leaves the old receiver alone", "[gpu][
                                           std::to_string(old_vrx) + R"(,"hz":-5}})");
     INFO(reply);
     CHECK(reply == revenant::webgate::error_reply(3, direct.error().message));
-    CHECK(session->owned_ids() == std::vector<std::uint64_t>{old_vrx});
+    CHECK(session->receiver_ids() == std::vector<std::uint64_t>{old_vrx});
     CHECK(session->audio_vrx() == old_vrx);
     const auto ids = harness.client().vrx_ids();
     REQUIRE(ids.has_value());
@@ -628,7 +643,7 @@ TEST_CASE("a status read failing after the change still reports the new id",
     REQUIRE(contains(added, R"("ok":true)"));
     CHECK(contains(added, R"("statusUnavailable":true)"));
     const auto first = vrx_of(added);
-    CHECK(session->owns(first));
+    CHECK(session->has_receiver(first));
 
     const auto changed = send(*session, R"({"id":2,"op":"setBandwidth","args":{"vrx":)" +
                                             std::to_string(first) + R"(,"hz":3000}})");
@@ -637,7 +652,7 @@ TEST_CASE("a status read failing after the change still reports the new id",
     CHECK(contains(changed, "\"replaced\":" + std::to_string(first)));
     const auto fresh = vrx_of(changed);
     CHECK(fresh != first);
-    CHECK(session->owns(fresh));
+    CHECK(session->has_receiver(fresh));
     CHECK(contains(changed, R"("bandwidthHz":3000)"));
 }
 

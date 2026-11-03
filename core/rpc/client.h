@@ -99,8 +99,28 @@ public:
     // Expected in the tree returns, and it defaults to Unclassified so that
     // the eleven hundred fail() sites that say enough already did not have to
     // be visited.
+    //
+    // THE LEASE. mode and holder are Authenticator.login's: claim takes the
+    // engine or joins a lease held under the same holder text, takeOver takes
+    // it from whoever has it, observe takes nothing and may call only info,
+    // list_sources and lease_status. A refused claim is a connect failure
+    // whose message carries the engine's "in use: <holder> since <time>",
+    // and it is not Unauthenticated: the token was good and a retry can
+    // succeed once the holder leaves. An empty holder reaches the engine as
+    // "unknown client".
     [[nodiscard]] static Expected<std::unique_ptr<Client>> connect(
-        std::string_view address, std::uint16_t port, std::span<const std::uint8_t> token);
+        std::string_view address, std::uint16_t port, std::span<const std::uint8_t> token,
+        LoginMode mode = LoginMode::Claim, std::string_view holder = {});
+
+    // Who holds the engine's lease now. Allowed to an observe session.
+    [[nodiscard]] virtual Expected<LeaseStatus> lease_status() = 0;
+
+    // Called on the event loop thread, under subscribe_vrx_events' rule,
+    // when another client took the lease over. Delivered through the
+    // receiver-event subscription, so a client that wants it subscribes to
+    // receiver events; the engine closes the connection shortly after.
+    using LeaseLostCallback = std::function<void(const std::string& new_holder)>;
+    virtual void on_lease_lost(LeaseLostCallback callback) = 0;
 
     virtual ~Client() = default;
 
