@@ -1957,4 +1957,16 @@ struct TimeShiftExtent {
     TimeShiftLimits limits{};
 };
 
+// What a login asks of the engine's lease, the schema's LoginMode. Claim is
+// the default so that a caller written before the lease keeps working.
+enum class LoginMode : std::uint8_t { Claim, TakeOver, Observe };
+
+// Session.leaseStatus. since is ISO 8601 local time with its offset, empty
+// when nobody holds the lease.
+struct LeaseStatus {
+    bool held = false;
+    std::string holder;
+    std::string since;
+};
+
 }  // namespace revenant::rpc

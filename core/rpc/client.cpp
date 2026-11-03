@@ -1469,6 +1469,7 @@ public:
 
     kj::Promise<void> event(EventContext context) override;
     kj::Promise<void> ended(EndedContext context) override;
+    kj::Promise<void> leaseLost(LeaseLostContext context) override;
 
 private:
     ClientImpl& owner_;
@@ -1487,7 +1488,11 @@ public:
     // which is the misuse client.h already rules out.
     ~ClientImpl() noexcept override;
 
-    [[nodiscard]] Status start(std::string address, std::uint16_t port, Token token);
+    [[nodiscard]] Status start(std::string address, std::uint16_t port, Token token,
+                               LoginMode mode, std::string holder);
+
+    [[nodiscard]] Expected<LeaseStatus> lease_status() override;
+    void on_lease_lost(LeaseLostCallback callback) override;
 
     [[nodiscard]] Expected<EngineInfo> info() override;
     [[nodiscard]] Expected<bool> running() override;
@@ -1607,6 +1612,7 @@ public:
     // Loop thread only, called by VrxEventReceiverImpl.
     void deliver_vrx_event(std::uint64_t generation, schema::VrxEvent::Reader in);
     void deliver_vrx_event_ended(std::uint64_t generation, capnp::Text::Reader reason);
+    void deliver_lease_lost(capnp::Text::Reader new_holder);
 
 private:
     void run(const std::string& address, std::uint16_t port, std::promise<Status>& ready);
@@ -1614,6 +1620,11 @@ private:
     // Read on the loop thread during the login handshake and never written
     // again after start() hands it over.
     Token token_{};
+    LoginMode mode_ = LoginMode::Claim;
+    std::string holder_;
+
+    // Loop thread only once start() has returned; set through on_loop.
+    LeaseLostCallback lease_lost_;
 
     // subscribe_wideband_decoded's local keys. Any thread.
     std::atomic<std::uint64_t> next_wideband_key_{0};
@@ -1815,8 +1826,11 @@ ClientImpl::~ClientImpl() noexcept {
     }
 }
 
-Status ClientImpl::start(std::string address, std::uint16_t port, Token token) {
+Status ClientImpl::start(std::string address, std::uint16_t port, Token token, LoginMode mode,
+                         std::string holder) {
     token_ = token;
+    mode_ = mode;
+    holder_ = std::move(holder);
 
     std::promise<Status> ready;
     std::future<Status> settled = ready.get_future();
@@ -1924,6 +1938,12 @@ void ClientImpl::run(const std::string& address, std::uint16_t port,
         auto login = rpc.bootstrap().castAs<schema::Authenticator>().loginRequest();
         login.setToken(capnp::Data::Reader(
             reinterpret_cast<const kj::byte*>(token_.data()), token_.size()));
+        login.setHolder(kj::StringPtr(holder_.c_str()));
+        switch (mode_) {
+            case LoginMode::Claim: login.setMode(schema::LoginMode::CLAIM); break;
+            case LoginMode::TakeOver: login.setMode(schema::LoginMode::TAKE_OVER); break;
+            case LoginMode::Observe: login.setMode(schema::LoginMode::OBSERVE); break;
+        }
         auto pending = login.send();
 
         // The empty brace is a null kj::Own: its constructor from nullptr is
@@ -1972,7 +1992,10 @@ void ClientImpl::run(const std::string& address, std::uint16_t port,
                 // Unclassified. A DISCONNECTED or an OVERLOADED during login is
                 // the engine's state and not a verdict on the token, and it
                 // already carries the category that says so.
-                if (translated.category == ErrorCategory::Unclassified) {
+                // A refused claim is the one other refusal login has, and the
+                // token was good: the holder leaving makes a retry succeed.
+                if (translated.category == ErrorCategory::Unclassified &&
+                    translated.message.find("in use: ") == std::string::npos) {
                     translated.category = ErrorCategory::Unauthenticated;
                 }
                 break;
@@ -2806,6 +2829,38 @@ kj::Promise<void> VrxEventReceiverImpl::ended(EndedContext context) {
     return kj::READY_NOW;
 }
 
+// Not gated on the generation: losing the lease is about the connection, not
+// about which subscription carried the news.
+kj::Promise<void> VrxEventReceiverImpl::leaseLost(LeaseLostContext context) {
+    owner_.deliver_lease_lost(context.getParams().getNewHolder());
+    return kj::READY_NOW;
+}
+
+void ClientImpl::deliver_lease_lost(capnp::Text::Reader new_holder) {
+    if (lease_lost_) {
+        lease_lost_(read_text(new_holder));
+    }
+}
+
+void ClientImpl::on_lease_lost(LeaseLostCallback callback) {
+    static_cast<void>(on_loop("on_lease_lost", [this, &callback](LoopState&) {
+        lease_lost_ = std::move(callback);
+        return kj::Promise<void>(kj::READY_NOW);
+    }));
+}
+
+Expected<LeaseStatus> ClientImpl::lease_status() {
+    return on_loop("leaseStatus", [](LoopState& state) {
+        return state.session.leaseStatusRequest().send().then([](auto&& response) {
+            LeaseStatus out;
+            out.held = response.getHeld();
+            out.holder = read_text(response.getHolder());
+            out.since = read_text(response.getSince());
+            return out;
+        });
+    });
+}
+
 Status ClientImpl::subscribe_vrx_events(VrxEventCallback on_event,
                                         VrxEventEndedCallback on_ended) {
     if (!on_event) {
@@ -3493,7 +3548,8 @@ void ClientImpl::deliver(schema::SpectrumFrame::Reader in) {
 }  // namespace
 
 Expected<std::unique_ptr<Client>> Client::connect(std::string_view address, std::uint16_t port,
-                                                  std::span<const std::uint8_t> token) {
+                                                  std::span<const std::uint8_t> token,
+                                                  LoginMode mode, std::string_view holder) {
     if (address.empty()) {
         return fail("cannot connect: no address was given");
     }
@@ -3524,7 +3580,9 @@ Expected<std::unique_ptr<Client>> Client::connect(std::string_view address, std:
     std::copy_n(token.begin(), kTokenBytes, copied.begin());
 
     auto client = std::make_unique<ClientImpl>();
-    if (auto started = client->start(std::string(address), port, copied); !started) {
+    if (auto started =
+            client->start(std::string(address), port, copied, mode, std::string(holder));
+        !started) {
         return std::unexpected(started.error());
     }
     return std::unique_ptr<Client>(std::move(client));
