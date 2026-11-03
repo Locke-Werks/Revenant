@@ -167,6 +167,10 @@ endif()
 # ---------------------------------------------------------------------------
 # The client
 # ---------------------------------------------------------------------------
+# Engine launch rules and launcher, shared with webgate. Its own binary dir
+# because this project is not the tree it lives in.
+add_subdirectory("${REVENANT_SOURCE_DIR}/core/launch" "${CMAKE_CURRENT_BINARY_DIR}/launch")
+
 qt_add_executable(revenant_ui
     main.cpp
     audio/audio_mix.cpp
@@ -200,7 +204,6 @@ qt_add_executable(revenant_ui
     models/detector_scope.h
     models/detector_settings.h
     models/region_choice.h
-    models/engine_launcher.cpp
     models/engine_launcher.h
     models/engine_link.cpp
     models/engine_link.h
@@ -457,6 +460,7 @@ target_link_libraries(revenant_ui
         Qt6::Multimedia
         Qt6::Quick
         Qt6::QuickControls2
+        revenant_launch
         CapnProto::capnp-rpc
         CapnProto::capnp
         CapnProto::kj-async

@@ -1,4 +1,4 @@
-#include "models/engine_launcher.h"
+#include "core/launch/engine_launcher.h"
 
 #include <cstdio>
 #include <string>
@@ -19,7 +19,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace revenant::ui {
+namespace revenant::launch {
 namespace {
 
 // How long the probe waits for a connect to complete. A listening socket on
@@ -368,14 +368,14 @@ void EngineLauncher::drain()
     exit_ = Exit{static_cast<std::uint32_t>(code), tail_};
 }
 
-}  // namespace revenant::ui
+}  // namespace revenant::launch
 
 #else  // _WIN32
 
 // The client is built for Windows. These keep the file compiling elsewhere
 // and start nothing, so a build on another platform behaves as the client did
 // before it started engines: it waits for one.
-namespace revenant::ui {
+namespace revenant::launch {
 
 bool loopback_port_answers(std::uint16_t) { return false; }
 
@@ -397,6 +397,6 @@ std::optional<EngineLauncher::Exit> EngineLauncher::exited() const
 
 void EngineLauncher::drain() {}
 
-}  // namespace revenant::ui
+}  // namespace revenant::launch
 
 #endif  // _WIN32
