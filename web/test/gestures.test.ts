@@ -103,6 +103,16 @@ test("a second finger landing mid-drag ends the drag", () => {
   assert.deepEqual(log, ["drag 50000", "dragEnd"]);
 });
 
+test("jitter after a long press never drags", () => {
+  const { g, log, fire } = rig();
+  g.down(1, 300, 50);
+  fire();
+  g.move(1, 301, 50);
+  g.move(1, 320, 50);
+  g.up(1);
+  assert.deepEqual(log, ["long 1100000"]);
+});
+
 test("a cancelled drag still ends", () => {
   const { g, log } = rig();
   g.down(1, 100, 50);

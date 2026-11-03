@@ -393,15 +393,18 @@ export function mountApp(root: HTMLElement): AppHandle {
     {
       dragTune: (dHz) => {
         if (!Number.isFinite(dHz)) return;
-        if (dragHz === null) {
+        let next = dragHz;
+        if (next === null) {
           const id = receivers.list.active;
           const r = id === null ? undefined : receivers.list.get(id);
           if (!r) return;
-          dragHz = r.hz;
+          next = r.hz;
         }
-        dragHz = Math.max(1, dragHz + dHz);
+        next = Math.max(1, next + dHz);
         // The marker and chip move now; the engine confirms through status.
-        if (!receivers.preview(dragHz)) return;
+        // Only a drag that took effect accumulates.
+        if (!receivers.preview(next)) return;
+        dragHz = next;
         tuneLimiter.set(dragHz);
         if (view) {
           const lo = view.centerHz - view.spanHz / 2;
@@ -415,6 +418,7 @@ export function mountApp(root: HTMLElement): AppHandle {
       dragEnd: () => {
         dragHz = null;
         tuneLimiter.flush();
+        receivers.endDrag();
       },
       pan: (dHz) => {
         if (view && Number.isFinite(dHz)) apply(panBy(view, dHz));

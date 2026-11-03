@@ -39,6 +39,9 @@ export class GestureClassifier {
   // pinch must not turn into a receiver drag.
   private multi = false;
   private dragging = false;
+  // The long press already added a receiver; the same touch must not also
+  // retune the previous one.
+  private longPressed = false;
   private timer: unknown = null;
 
   constructor(
@@ -53,10 +56,12 @@ export class GestureClassifier {
       this.start = { x, y };
       this.spent = false;
       this.multi = false;
+      this.longPressed = false;
       this.timer = this.timers.setTimeout(() => {
         this.timer = null;
         if (this.pts.size === 1 && !this.spent && this.start) {
           this.spent = true;
+          this.longPressed = true;
           this.sink.longPress(this.hzAt(this.start.x));
         }
       }, LONG_PRESS_MS);
@@ -73,7 +78,7 @@ export class GestureClassifier {
     if (!p) return;
 
     if (this.pts.size === 1) {
-      if (this.multi) {
+      if (this.multi || this.longPressed) {
         p.x = x;
         p.y = y;
         return;

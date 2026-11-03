@@ -279,6 +279,8 @@ export class ReceiverController {
   // would land on an id about to be removed.
   private replacing = new Set<number>();
   private tuneSeq = 0;
+  private dragging = false;
+  private heldReply: { seq: number; reply: JsonValue } | null = null;
   private goneFns = new Set<(vrx: number) => void>();
   private remapFns = new Set<(pairs: { old: number; new: number }[]) => void>();
 
@@ -334,7 +336,23 @@ export class ReceiverController {
   preview(hz: number): Receiver | null {
     const vrx = this.list.active;
     if (vrx === null || this.replacing.has(vrx)) return null;
+    this.dragging = true;
     return this.list.upsert({ vrx, hz: Math.round(hz) });
+  }
+
+  // Call after the final flush has been sent. Replies were being held back;
+  // the one answering the newest request (if it already came) lands now, and
+  // one still in flight lands on arrival.
+  endDrag(): void {
+    this.dragging = false;
+    const held = this.heldReply;
+    this.heldReply = null;
+    if (held && held.seq === this.tuneSeq) this.applyTuneReply(held.reply);
+  }
+
+  private applyTuneReply(reply: JsonValue): void {
+    const r = this.fromReply(reply);
+    if (r) this.nowPlaying(r);
   }
 
   // One tune of a drag. Replies arrive out of step with the finger, so only
@@ -347,8 +365,13 @@ export class ReceiverController {
     this.deps.link.request("tune", { vrx, hz: Math.round(hz) }).then(
       (reply) => {
         if (seq !== this.tuneSeq) return;
-        const r = this.fromReply(reply);
-        if (r) this.nowPlaying(r);
+        // The limiter may hold a newer value than this reply answers, so
+        // applying it would snap the preview back behind the finger.
+        if (this.dragging) {
+          this.heldReply = { seq, reply };
+          return;
+        }
+        this.applyTuneReply(reply);
       },
       (e: unknown) => {
         if (seq === this.tuneSeq) this.deps.toast(errorText(e));

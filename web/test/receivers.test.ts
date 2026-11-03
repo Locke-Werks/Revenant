@@ -215,6 +215,58 @@ test("a tap with an active receiver tunes it", async () => {
   assert.deepEqual(r.chips(), ["1:146940000:nfm"]);
 });
 
+async function dragRig() {
+  const r = rig();
+  r.ctl.tap(146_520_000);
+  r.link.reply(status(1, 146_520_000));
+  await flush();
+  return r;
+}
+
+test("replies to a drag's tunes do not move the preview back mid-drag", async () => {
+  const r = await dragRig();
+  r.ctl.preview(146_600_000);
+  r.ctl.tuneDragged(146_600_000);
+  // The limiter holds a newer value; the preview has moved on.
+  r.ctl.preview(146_700_000);
+  r.link.reply(status(1, 146_600_000));
+  await flush();
+  assert.deepEqual(r.chips(), ["1:146700000:nfm"]);
+});
+
+test("the engine's answer to the last tune lands when the drag ends", async () => {
+  const r = await dragRig();
+  r.ctl.preview(146_700_000);
+  r.ctl.tuneDragged(146_700_000);
+  r.link.reply(status(1, 146_705_000));
+  await flush();
+  assert.deepEqual(r.chips(), ["1:146700000:nfm"]);
+  r.ctl.endDrag();
+  assert.deepEqual(r.chips(), ["1:146705000:nfm"]);
+});
+
+test("a held reply older than the final flush is dropped", async () => {
+  const r = await dragRig();
+  r.ctl.preview(146_600_000);
+  r.ctl.tuneDragged(146_600_000);
+  r.link.reply(status(1, 146_600_000));
+  await flush();
+  r.ctl.preview(146_700_000);
+  r.ctl.tuneDragged(146_700_000); // the final flush
+  r.ctl.endDrag();
+  assert.deepEqual(r.chips(), ["1:146700000:nfm"]);
+  r.link.reply(status(1, 146_700_000));
+  await flush();
+  assert.deepEqual(r.chips(), ["1:146700000:nfm"]);
+});
+
+test("a status event cannot move the previewed frequency mid-drag", async () => {
+  const r = await dragRig();
+  r.ctl.preview(146_700_000);
+  r.link.emit("vrxStatus", { event: "vrxStatus", vrx: 1, hz: 146_520_000, audioError: "x" });
+  assert.deepEqual(r.chips(), ["1:146700000:nfm"]);
+});
+
 test("a long press adds a second receiver and makes it active", async () => {
   const r = rig();
   r.ctl.tap(146_520_000);
