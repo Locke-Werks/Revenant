@@ -28,16 +28,18 @@
 
 namespace revenant::ui {
 
-// Which owners' receivers the rack takes in. A plugin's only.
+// Which owners' receivers the rack takes in: a plugin's and another
+// session's. The engine serves one user (the single-user lease), so a
+// receiver the phone opened, or this window opened on an earlier connection,
+// is this operator's too.
 //
-// NOT THE ENGINE'S, which are its own business (a probe, a recording), and NOT
-// ANOTHER SESSION'S, which are another operator's receivers: hearing them here
-// would be listening over that person's shoulder, and a strip for each would
-// fill this rack with things its operator cannot touch. THIS SESSION'S are
-// already in the rack, under the keys this client gave them.
+// NOT THE ENGINE'S: an engine older than owner_kind reports Engine for every
+// receiver, this window's own among them, and adopting those would list each
+// one twice. THIS SESSION'S are already in the rack, under the keys this
+// client gave them.
 [[nodiscard]] constexpr bool rack_adopts(rpc::VrxOwnerKind owner)
 {
-    return owner == rpc::VrxOwnerKind::Plugin;
+    return owner == rpc::VrxOwnerKind::Plugin || owner == rpc::VrxOwnerKind::OtherSession;
 }
 
 // How long a removed adopted receiver's slot and name are kept for its

@@ -1410,8 +1410,13 @@ void EngineLink::drain_vrx_events()
         // the rack note is the operator's, and a busy trunk would otherwise
         // write over it on every call. The stranded count still knows it is
         // the plugin's, through plugin_vrx_ids_.
-        const std::string& owner =
+        std::string owner =
             event.owner_name.empty() ? event.status->owner_name : event.owner_name;
+        // Another session's carries no name, and it is this operator's
+        // receiver, so it reads like one this window made.
+        if (owner.empty() && event.owner == rpc::VrxOwnerKind::OtherSession) {
+            owner = "RX";
+        }
         const auto key = rack_.add_adopted(owner, event.vrx);
         if (!key) {
             continue;

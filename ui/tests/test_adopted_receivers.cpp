@@ -30,13 +30,13 @@ using revenant::ui::receiver_under;
 using revenant::ui::ReceiverRack;
 using revenant::ui::RecentlyAdopted;
 
-// Rejects a rack that takes in another operator's receivers, which is this
-// window listening over their shoulder, or the engine's own, or this
-// session's a second time under a key it did not issue.
-TEST_CASE("only a plugin's receivers are adopted")
+// Rejects a rack that hides receivers another session of the one user opened,
+// or takes in the engine's own, or this session's a second time under a key it
+// did not issue.
+TEST_CASE("a plugin's and another session's receivers are adopted")
 {
     CHECK(rack_adopts(VrxOwnerKind::Plugin));
-    CHECK_FALSE(rack_adopts(VrxOwnerKind::OtherSession));
+    CHECK(rack_adopts(VrxOwnerKind::OtherSession));
     CHECK_FALSE(rack_adopts(VrxOwnerKind::Engine));
     CHECK_FALSE(rack_adopts(VrxOwnerKind::ThisSession));
 }
