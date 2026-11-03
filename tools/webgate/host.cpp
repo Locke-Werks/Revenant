@@ -140,7 +140,7 @@ constexpr DWORD kStopAccess = SYNCHRONIZE | EVENT_MODIFY_STATE;
 
 // Best effort: lets an elevated --stop open gateways of other accounts,
 // whose process DACLs name only their own user and SYSTEM.
-void enable_debug_privilege()
+void set_debug_privilege(bool on)
 {
     HANDLE token = nullptr;
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token) ==
@@ -150,7 +150,7 @@ void enable_debug_privilege()
     TOKEN_PRIVILEGES privileges{};
     privileges.PrivilegeCount = 1;
     if (LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &privileges.Privileges[0].Luid) != 0) {
-        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        privileges.Privileges[0].Attributes = on ? SE_PRIVILEGE_ENABLED : 0;
         AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr);
     }
     CloseHandle(token);
@@ -259,7 +259,59 @@ StopWatch::~StopWatch()
     }
 }
 
+namespace {
+
+[[nodiscard]] StopSignal signal_with(std::uint32_t pid, HANDLE process, std::string_view prefix);
+
+[[nodiscard]] bool elevated()
+{
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) == 0) {
+        return false;
+    }
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    const bool yes = GetTokenInformation(token, TokenElevation, &elevation, sizeof elevation,
+                                         &size) != 0 &&
+                     elevation.TokenIsElevated != 0;
+    CloseHandle(token);
+    return yes;
+}
+
+[[nodiscard]] std::filesystem::path image_path(HANDLE process)
+{
+    std::wstring buffer(32768, L'\0');
+    DWORD size = static_cast<DWORD>(buffer.size());
+    if (QueryFullProcessImageNameW(process, 0, buffer.data(), &size) == 0) {
+        return {};
+    }
+    buffer.resize(size);
+    return std::filesystem::path(buffer);
+}
+
+[[nodiscard]] bool same_directory(const std::filesystem::path& a, const std::filesystem::path& b)
+{
+    std::error_code ignored;
+    const auto left = std::filesystem::weakly_canonical(a.parent_path(), ignored).wstring();
+    const auto right = std::filesystem::weakly_canonical(b.parent_path(), ignored).wstring();
+    return !left.empty() && _wcsicmp(left.c_str(), right.c_str()) == 0;
+}
+
+}  // namespace
+
 StopSignal signal_gateway(std::uint32_t pid, std::string_view prefix)
+{
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    const StopSignal result = signal_with(pid, process, prefix);
+    if (process != nullptr) {
+        CloseHandle(process);
+    }
+    return result;
+}
+
+namespace {
+
+StopSignal signal_with(std::uint32_t pid, HANDLE process, std::string_view prefix)
 {
     DWORD session = 0;
     if (ProcessIdToSessionId(pid, &session) == 0) {
@@ -274,9 +326,8 @@ StopSignal signal_gateway(std::uint32_t pid, std::string_view prefix)
     }
 
     std::vector<std::uint8_t> user;
-    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+    if (process != nullptr) {
         user = process_user(process);
-        CloseHandle(process);
     }
     PSID owner = nullptr;
     PSECURITY_DESCRIPTOR descriptor = nullptr;
@@ -297,15 +348,33 @@ StopSignal signal_gateway(std::uint32_t pid, std::string_view prefix)
     return StopSignal::Set;
 }
 
+}  // namespace
+
 int stop_running_gateways(std::chrono::milliseconds wait, std::string prefix, std::wstring image)
 {
-    enable_debug_privilege();
+    // Held only while the handles are opened, then given up: everything
+    // after that works through handles already granted.
+    set_debug_privilege(true);
+
+    // An elevated --stop terminates only gateways installed where it is, so
+    // the installer's hook cannot end some other copy that merely shares the
+    // image name. Unelevated it reaches only the caller's own processes.
+    const bool admin = elevated();
+    std::filesystem::path self;
+    if (HANDLE me = GetCurrentProcess()) {
+        self = image_path(me);
+    }
 
     // Every gateway on the machine but this one, found by image name, which
     // is what the installer's files are held open by.
-    std::vector<HANDLE> running;
+    struct Target {
+        HANDLE process;
+        bool may_terminate;
+    };
+    std::vector<Target> targets;
     int unreachable = 0;
     int impostors = 0;
+    int elsewhere = 0;
     const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot != INVALID_HANDLE_VALUE) {
         PROCESSENTRY32W entry{};
@@ -316,44 +385,62 @@ int stop_running_gateways(std::chrono::milliseconds wait, std::string prefix, st
                 _wcsicmp(entry.szExeFile, image.c_str()) != 0) {
                 continue;
             }
-            HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE,
-                                         entry.th32ProcessID);
+            HANDLE process =
+                OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                            FALSE, entry.th32ProcessID);
             if (process == nullptr) {
                 ++unreachable;
                 continue;
             }
-            if (signal_gateway(entry.th32ProcessID, prefix) == StopSignal::Impostor) {
+            if (signal_with(entry.th32ProcessID, process, prefix) == StopSignal::Impostor) {
                 ++impostors;
             }
-            running.push_back(process);
+            bool may_terminate = true;
+            if (admin) {
+                const auto where = image_path(process);
+                may_terminate = same_directory(where, self);
+                if (!may_terminate) {
+                    std::printf("revenant-webgate --stop: not terminating pid %lu at %ls, which "
+                                "is not this installation's\n",
+                                entry.th32ProcessID, where.c_str());
+                }
+            }
+            targets.push_back(Target{process, may_terminate});
         }
         CloseHandle(snapshot);
     }
+    set_debug_privilege(false);
 
     const auto until = std::chrono::steady_clock::now() + wait;
+    int exited = 0;
     int terminated = 0;
     int remaining = 0;
-    for (HANDLE process : running) {
+    for (const Target& target : targets) {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
             until - std::chrono::steady_clock::now());
         const DWORD ms = left.count() > 0 ? static_cast<DWORD>(left.count()) : 0;
-        if (WaitForSingleObject(process, ms) != WAIT_OBJECT_0) {
+        if (WaitForSingleObject(target.process, ms) == WAIT_OBJECT_0) {
+            ++exited;
+        } else if (!target.may_terminate) {
+            // Signalled and left alone: another installation's files, not
+            // the ones this install replaces.
+            ++elsewhere;
+        } else {
             // No event (a version from before --stop), an impostor's, or a
             // gateway that did not finish. Its engine's Job closes with it.
-            TerminateProcess(process, 1);
-            if (WaitForSingleObject(process, 5'000) == WAIT_OBJECT_0) {
+            TerminateProcess(target.process, 1);
+            if (WaitForSingleObject(target.process, 5'000) == WAIT_OBJECT_0) {
                 ++terminated;
             } else {
                 ++remaining;
             }
         }
-        CloseHandle(process);
+        CloseHandle(target.process);
     }
 
-    std::printf("revenant-webgate --stop: %zu exited, %d terminated, %d still running, %d not "
-                "reachable, %d impostor events ignored\n",
-                running.size() - static_cast<std::size_t>(terminated + remaining), terminated,
-                remaining, unreachable, impostors);
+    std::printf("revenant-webgate --stop: %d exited, %d terminated, %d still running, %d not "
+                "reachable, %d impostor events ignored, %d of other installations left running\n",
+                exited, terminated, remaining, unreachable, impostors, elsewhere);
     return remaining == 0 && unreachable == 0 ? 0 : 1;
 }
 
