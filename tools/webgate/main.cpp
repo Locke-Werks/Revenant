@@ -1,9 +1,13 @@
 // revenant-webgate: the HTTPS and WebSocket gateway an iPhone web app uses to
 // drive the engine over the LAN.
 //
-// Settles the TLS identity, binds the two listeners, connects to the engine
-// (starting revenant-engine.exe from beside this executable when nothing
-// answers), and serves phones until the process is ended.
+// Settles the TLS identity, binds the two listeners, watches for an engine,
+// and serves phones until the process is ended. The installer starts it at
+// every sign-in, so it costs nothing until a phone asks: the engine is
+// started from beside this executable only when a phone claims and none
+// answers, and stopped again once no phone holds it (engine_link.h, ON
+// DEMAND). Output goes to %LOCALAPPDATA%\Revenant\webgate\webgate.log, and to
+// the terminal as well when started from one (host.h).
 
 // http.h (through gateway.h) before <windows.h>: windows.h defines DELETE,
 // which breaks kj::HttpMethod.
@@ -23,7 +27,9 @@
 #include <windows.h>
 
 #include "tools/webgate/certs.h"
+#include "tools/webgate/desktop_settings.h"
 #include "tools/webgate/engine_link.h"
+#include "tools/webgate/host.h"
 
 namespace {
 
@@ -126,12 +132,55 @@ struct Runtime {
     }
 };
 
+// --state-dir, read ahead of the real parse because the log goes there and has
+// to be open before the parse can print anything.
+[[nodiscard]] std::filesystem::path state_dir_argument(int argc, char** argv) {
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string_view(argv[i]) == "--state-dir") {
+            return std::filesystem::path(std::string(argv[i + 1]));
+        }
+    }
+    return default_state_dir();
+}
+
+// The desktop's last radio, opened on an engine this gateway started with no
+// source, as the desktop opens it on an engine it started: engine/lastSource
+// with the radio's own remembered centre, rate and gain written over it.
+void reopen_last_radio(revenant::rpc::Client& client) {
+    const revenant::webgate::DesktopSettings saved =
+        revenant::webgate::read_desktop_settings(revenant::webgate::registry_desktop_reader());
+    if (!saved.last_source || saved.last_source->empty()) {
+        std::printf("engine started with no source: the desktop has no last radio to open\n");
+        return;
+    }
+    if (const auto opened = client.open_source(*saved.last_source); !opened) {
+        std::fprintf(stderr, "revenant-webgate: could not open the desktop's last radio %s: %s\n",
+                     saved.last_source->c_str(), opened.error().message.c_str());
+        return;
+    }
+    std::printf("opened the desktop's last radio: %s\n", saved.last_source->c_str());
+}
+
+void log_start() {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    std::printf("---- revenant-webgate started %04u-%02u-%02u %02u:%02u:%02u, pid %lu\n",
+                now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
+                GetCurrentProcessId());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     Options options;
     options.state_dir = default_state_dir();
     options.web_root = exe_directory() / "web";
+
+    // First, before anything prints. With the certificates, so a test that
+    // gives a state directory of its own does not write the person's log.
+    const revenant::webgate::OutputTee tee(state_dir_argument(argc, argv) /
+                                           std::string(revenant::webgate::kLogName));
+    log_start();
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -179,6 +228,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    // One per sign-in session and port. Sign-in starts one, and the Start
+    // menu entry or a terminal may start another; the second one leaves
+    // quietly rather than failing at the bind. Port 0 asks for any port, so
+    // two of those never collide and are not counted.
+    std::unique_ptr<revenant::webgate::SingleInstance> instance;
+    if (options.port != 0) {
+        instance = revenant::webgate::SingleInstance::acquire(
+            revenant::webgate::instance_name(static_cast<std::uint16_t>(options.port)));
+        if (!instance) {
+            std::printf("revenant-webgate is already running in this session on port %d; "
+                        "this copy exits\n",
+                        options.port);
+            return 0;
+        }
+    }
+
     const revenant::webgate::CertPaths paths{options.state_dir / "certs"};
     const revenant::webgate::HostNames names = revenant::webgate::current_host_names();
 
@@ -203,6 +268,9 @@ int main(int argc, char** argv) {
     // reachable at; this only says where the executable is.
     link_config.engine_exe = exe_directory() / "revenant-engine.exe";
     link_config.token_path = options.token_file;
+    // Started at sign-in, so an engine only while a phone wants one.
+    link_config.on_demand = true;
+    link_config.reopen = reopen_last_radio;
 
     revenant::webgate::HubTiming timing;
     if (options.session_linger_ms) {
@@ -230,7 +298,7 @@ int main(int argc, char** argv) {
         rt.gateway = std::make_unique<revenant::webgate::Gateway>(
             io,
             [link](revenant::rpc::LoginMode mode, const std::string& holder) {
-                return link->new_session(mode, holder);
+                return link->phone_session(mode, holder);
             },
             rt.server->hls, timing);
         auto* gateway = rt.gateway.get();

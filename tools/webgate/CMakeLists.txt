@@ -34,6 +34,7 @@ add_library(revenant_webgate_lib STATIC
     phone_streams.cpp
     phone_hub.cpp
     gateway.cpp
+    host.cpp
 )
 
 target_include_directories(revenant_webgate_lib PUBLIC "${CMAKE_SOURCE_DIR}")
@@ -65,8 +66,14 @@ endif()
 
 revenant_apply_warnings(revenant_webgate_lib)
 
-add_executable(revenant-webgate main.cpp)
+# WIN32: a Windows-subsystem program, so the HKLM Run entry that starts it at
+# sign-in opens no console window. main() stays the entry point, and host.h
+# attaches to a terminal's console when started from one.
+add_executable(revenant-webgate WIN32 main.cpp)
 target_link_libraries(revenant-webgate PRIVATE revenant_webgate_lib)
+if(MSVC)
+    target_link_options(revenant-webgate PRIVATE /ENTRY:mainCRTStartup)
+endif()
 
 revenant_apply_warnings(revenant-webgate)
 revenant_embed_version(revenant-webgate DESCRIPTION "Revenant web gateway")
