@@ -99,6 +99,8 @@ struct Options {
     std::uint32_t spectrum_points = 2048;
     std::uint32_t passband_points = 512;
     std::uint32_t probes = 4;
+    std::uint32_t probe_threads = engine::EngineConfig{}.probe_threads;
+    double probe_cpu = engine::EngineConfig{}.probe_cpu_budget;
     double rows_per_second = 30.0;
     double ring_seconds = 8.0;
     int gpu = -1;
@@ -155,6 +157,8 @@ void print_usage()
         "  --block N             samples per block (65536, revenant-engine's)\n"
         "  --spectrum-points N   points per channel in the span transform (2048)\n"
         "  --probes N            probe receivers (4)\n"
+        "  --probe-threads N     the probe pool's finishing threads (2)\n"
+        "  --probe-cpu X         the cores those threads average (1.75)\n"
         "  --rows N              the fewest spectrum rows a second of source, as\n"
         "                        revenant-engine's --rows (30)\n"
         "  --p25 HZ              a p25p1 receiver this far from baseband DC, with its voice\n"
@@ -256,6 +260,14 @@ void print_usage()
             auto got = as_integer();
             if (!got) { return std::unexpected(got.error()); }
             options.probes = static_cast<std::uint32_t>(*got);
+        } else if (token == "--probe-threads") {
+            auto got = as_integer();
+            if (!got) { return std::unexpected(got.error()); }
+            options.probe_threads = static_cast<std::uint32_t>(*got);
+        } else if (token == "--probe-cpu") {
+            auto got = as_real();
+            if (!got) { return std::unexpected(got.error()); }
+            options.probe_cpu = *got;
         } else if (token == "--p25") {
             auto got = as_integer();
             if (!got) { return std::unexpected(got.error()); }
@@ -656,6 +668,8 @@ struct WhisperCall {
     config.spectrum_rows_per_second = options.rows_per_second;
     config.passband_transform = options.passband_points;
     config.probe_receivers = options.spectrum_points != 0 ? options.probes : 0;
+    config.probe_threads = options.probe_threads;
+    config.probe_cpu_budget = options.probe_cpu;
 
     auto created = engine::Engine::create(config);
     if (!created) {

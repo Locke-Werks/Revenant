@@ -280,11 +280,22 @@ TEST_CASE("label latency on the labelled scene from a cold engine",
         INFO(message_of(rendered));
         REQUIRE(rendered.has_value());
 
+        // The pool as it was before 2026-11-03, and as revenant-engine now
+        // builds it.
+        struct PoolShape {
+            std::uint32_t probes;
+            std::uint32_t threads;
+            double cpu;
+        };
+        const PoolShape pools[] = {{4, 1, 0.5}, {16, 2, 1.75}};
+        for (const PoolShape& pool : pools)
         for (const double threshold : thresholds) {
             engine::EngineConfig config;
             config.gpu_index = -1;
             config.channels = 16;
-            config.probe_receivers = 4;
+            config.probe_receivers = pool.probes;
+            config.probe_threads = pool.threads;
+            config.probe_cpu_budget = pool.cpu;
             config.spectrum_transform = dsp::kDefaultSpectrumTransform;
             config.pace = 2.0;
             auto created = engine::Engine::create(config);
@@ -370,12 +381,15 @@ TEST_CASE("label latency on the labelled scene from a cold engine",
             std::size_t tracks_end = 0;
             std::size_t live_end = 0;
             count(&emitters_end, &tracks_end, &live_end);
-            std::println("label latency, seed {}, threshold {:.1f} dB: first label {:.1f} s, "
-                         "first emitter label {:.1f} s, at 15 s {}/{} emitters and {}/{} tracks, "
-                         "at 30 s {}/{} emitters and {}/{} tracks",
-                         seed, threshold, first_any, first_emitter, emitters_mid,
-                         std::size(kEmitters), tracks_mid, live_mid, emitters_end,
-                         std::size(kEmitters), tracks_end, live_end);
+            const engine::ProbeStats probes = eng.probe_stats();
+            std::println("label latency, seed {}, {} probes on {} threads, threshold {:.1f} dB: "
+                         "first label {:.1f} s, first emitter label {:.1f} s, at 15 s {}/{} "
+                         "emitters and {}/{} tracks, at 30 s {}/{} emitters and {}/{} tracks, "
+                         "{} probes characterised, worker CPU {:.0f} ms",
+                         seed, pool.probes, pool.threads, threshold, first_any, first_emitter,
+                         emitters_mid, std::size(kEmitters), tracks_mid, live_mid, emitters_end,
+                         std::size(kEmitters), tracks_end, live_end, probes.characterised,
+                         probes.worker_cpu_ms_total);
         }
     }
 }

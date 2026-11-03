@@ -263,6 +263,13 @@ struct ProbePool::Impl {
         ProbeRequest request{};
         std::uint64_t generation = 0;
         ProbeShape shape{};
+
+        // Where a busy slot's job is once its capture is full: 0 collecting,
+        // 1 handed to a finisher, 2 finished and waiting for the control
+        // thread to free the slot. Under finish_lock. A finisher owns the
+        // slot's job fields and its capture while this is 1, and the control
+        // thread does not touch them until it reads 2.
+        int phase = 0;
     };
     std::vector<Slot> slots;
 
@@ -288,6 +295,23 @@ struct ProbePool::Impl {
     std::thread worker;
     std::mutex wake_lock;
     std::condition_variable wake;
+
+    // THE FINISHERS. characterise() and identify() run on
+    // ProbePoolConfig::threads threads of their own rather than on the
+    // control thread, so finishing is not held to one core and a slow
+    // identify() does not hold up placing the next probe. The control thread
+    // hands a slot over by index and frees it when its phase reads finished.
+    std::vector<std::thread> finishers;
+    std::mutex finish_lock;
+    std::condition_variable finish_wake;
+    std::deque<std::uint32_t> finish_jobs;
+    bool finishers_stopping = false;
+
+    // The outcome ring has one producer, so the control thread and every
+    // finisher take this to write it; and the budget is shared by the
+    // finishers that charge it and the control thread that reads it.
+    std::mutex emit_lock;
+    std::mutex budget_lock;
     bool stopping = false;
 
     std::atomic<std::uint64_t> submitted{0};
@@ -304,7 +328,7 @@ struct ProbePool::Impl {
     std::atomic<std::uint32_t> busy{0};
     std::atomic<std::uint64_t> characterise_us{0};
 
-    // The budget in step(), which is the worker's alone; what the worker has
+    // The budget in step(), under budget_lock; what the finishers have
     // spent finishing probes, in wall time and in CPU; and how often a waiting
     // probe was held back.
     //
@@ -365,12 +389,34 @@ struct ProbePool::Impl {
             if (!slot.busy) {
                 continue;
             }
+            int phase = 0;
+            {
+                const std::scoped_lock held(finish_lock);
+                phase = slot.phase;
+                if (phase == 2) {
+                    slot.phase = 0;
+                }
+            }
+            if (phase == 1) {
+                continue;
+            }
+            if (phase == 2) {
+                slot.busy = false;
+                slot.cancelling = false;
+                busy.fetch_sub(1, std::memory_order_relaxed);
+                continue;
+            }
             if (slot.cancelling) {
                 try_cancel(slot);
                 continue;
             }
             if (slot.capture->state.load(std::memory_order_acquire) == kFull) {
-                finish(slot, static_cast<std::uint32_t>(i));
+                {
+                    const std::scoped_lock held(finish_lock);
+                    slot.phase = 1;
+                    finish_jobs.push_back(static_cast<std::uint32_t>(i));
+                }
+                finish_wake.notify_one();
             }
         }
 
@@ -383,7 +429,12 @@ struct ProbePool::Impl {
         // What that costs is probes, not correctness: tier two keeps at most
         // the pool's size outstanding, so a slower worker means fewer probes
         // a second and longer between answers.
-        if (!pending.empty() && !budget.may_start(load_clock_ns())) {
+        bool may_start = true;
+        if (!pending.empty()) {
+            const std::scoped_lock held(budget_lock);
+            may_start = budget.may_start(load_clock_ns());
+        }
+        if (!may_start) {
             budget_waits.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -560,7 +611,29 @@ struct ProbePool::Impl {
         worker_cpu_us.fetch_add(cpu / 1000U, std::memory_order_relaxed);
 
         // See THE BUDGET in step().
+        const std::scoped_lock held(budget_lock);
         budget.charge(cpu, ended);
+    }
+
+    void run_finisher() {
+        describe_this_thread(L"revenant probe finish", ThreadClass::SigId);
+        for (;;) {
+            std::uint32_t index = 0;
+            {
+                std::unique_lock held(finish_lock);
+                finish_wake.wait(held, [this] { return finishers_stopping || !finish_jobs.empty(); });
+                if (finishers_stopping) {
+                    return;
+                }
+                index = finish_jobs.front();
+                finish_jobs.pop_front();
+            }
+            finish(slots[index], index);
+            {
+                const std::scoped_lock held(finish_lock);
+                slots[index].phase = 2;
+            }
+        }
     }
 
     void finish_timed(Slot& slot, std::uint32_t index) {
@@ -666,8 +739,14 @@ struct ProbePool::Impl {
         }
 
         capture.state.store(kIdle, std::memory_order_relaxed);
-        slot.busy = false;
-        busy.fetch_sub(1, std::memory_order_relaxed);
+
+        // A front end that moved while this was being finished made the
+        // extract one from before the move, which the caller has stopped
+        // asking about: the same answer try_cancel gives a slot it caught.
+        if (slot.generation < cancel_generation.load(std::memory_order_acquire)) {
+            emit(cancelled_outcome(slot.request));
+            return;
+        }
         emit(outcome);
     }
 
@@ -697,6 +776,7 @@ struct ProbePool::Impl {
             case ProbeStatus::Cancelled: cancelled.fetch_add(1, std::memory_order_relaxed); break;
             case ProbeStatus::Failed: failed.fetch_add(1, std::memory_order_relaxed); break;
         }
+        const std::scoped_lock held(emit_lock);
         if (outcomes->write(std::span<const ProbeOutcome>(&outcome, 1)) != 1) {
             outcomes_dropped.fetch_add(1, std::memory_order_relaxed);
         }
@@ -715,10 +795,14 @@ Expected<std::unique_ptr<ProbePool>> ProbePool::create(Graph& graph,
     if (config.first_id == 0) {
         return fail("a probe pool's first id cannot be zero, which is no receiver");
     }
-    if (!(config.cpu_budget > 0.0) || config.cpu_budget > 1.0) {
-        return fail(std::format("a probe pool's CPU budget is a fraction of one core above zero "
-                                "and at most one, asked for {}",
-                                config.cpu_budget));
+    if (config.threads == 0 || config.threads > kMaxProbeThreads) {
+        return fail(std::format("a probe pool finishes on 1 to {} threads, asked for {}",
+                                kMaxProbeThreads, config.threads));
+    }
+    if (!(config.cpu_budget > 0.0) || config.cpu_budget > static_cast<double>(config.threads)) {
+        return fail(std::format("a probe pool's CPU budget is cores above zero and at most its "
+                                "{} finishing threads, asked for {}",
+                                config.threads, config.cpu_budget));
     }
 
     std::unique_ptr<ProbePool> pool(new (std::nothrow) ProbePool());
@@ -745,6 +829,9 @@ Expected<std::unique_ptr<ProbePool>> ProbePool::create(Graph& graph,
     impl.outcomes = std::move(*outcomes);
 
     impl.worker = std::thread([&impl] { impl.run(); });
+    for (std::uint32_t i = 0; i < config.threads; ++i) {
+        impl.finishers.emplace_back([&impl] { impl.run_finisher(); });
+    }
     return pool;
 }
 
@@ -759,6 +846,16 @@ ProbePool::~ProbePool() {
     impl_->wake.notify_all();
     if (impl_->worker.joinable()) {
         impl_->worker.join();
+    }
+    {
+        const std::scoped_lock held(impl_->finish_lock);
+        impl_->finishers_stopping = true;
+    }
+    impl_->finish_wake.notify_all();
+    for (std::thread& finisher : impl_->finishers) {
+        if (finisher.joinable()) {
+            finisher.join();
+        }
     }
     for (const Impl::Slot& slot : impl_->slots) {
         if (slot.built) {
