@@ -87,6 +87,8 @@ html:has(.app), html:has(.app) body {
 #app:has(.app) {
   min-height: 0;
   padding: 0;
+  max-width: 100vw;
+  overflow-x: hidden;
 }
 
 /* Edge to edge. Each bar pads itself by the inset on its own edge, so its
@@ -105,6 +107,9 @@ html:has(.app), html:has(.app) body {
   background: var(--bg);
   overscroll-behavior: none;
 }
+/* A grid item's min-width is its content by default, which lets one wide
+   child push the column, and the page, past the screen. */
+.app > * { min-width: 0; }
 .app button {
   margin: 0;
   padding: 0 12px;

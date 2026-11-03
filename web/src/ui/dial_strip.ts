@@ -118,7 +118,9 @@ export class DialStrip {
     if (this.canvas.width !== Math.round(w * dpr) || this.canvas.height !== Math.round(HEIGHT_PX * dpr)) {
       this.canvas.width = Math.round(w * dpr);
       this.canvas.height = Math.round(HEIGHT_PX * dpr);
-      this.canvas.style.width = `${w}px`;
+      // Never a pixel width: one taken while the page was zoomed out would
+      // hold the strip, and so the page, at that width for good.
+      this.canvas.style.width = "100%";
       this.canvas.style.height = `${HEIGHT_PX}px`;
     }
     const g = this.canvas.getContext("2d");

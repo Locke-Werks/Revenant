@@ -41,6 +41,26 @@ export function rulerMarks(height: number, step = 100): number[] {
   return out;
 }
 
+// The widest elements past limit, widest first. Each line names the element
+// so a screenshot from the phone says what is pushing the page out.
+export function widest(items: { label: string; width: number }[], limit: number, n = 8): string[] {
+  return items
+    .filter((x) => x.width > limit + 0.5)
+    .sort((a, b) => b.width - a.width)
+    .slice(0, n)
+    .map((x) => `${x.label} ${x.width.toFixed(1)}`);
+}
+
+function overWide(doc: Document, limit: number): string[] {
+  const items: { label: string; width: number }[] = [];
+  for (const el of Array.from(doc.querySelectorAll("*"))) {
+    const cls = typeof el.className === "string" && el.className ? "." + el.className.trim().split(/\s+/).join(".") : "";
+    const label = el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + cls;
+    items.push({ label, width: Math.max(el.getBoundingClientRect().width, el.scrollWidth) });
+  }
+  return widest(items, limit);
+}
+
 function rectText(name: string, r: { top: number; bottom: number; height: number }): string {
   return `${name} top ${r.top.toFixed(1)} bottom ${r.bottom.toFixed(1)} h ${r.height.toFixed(1)}`;
 }
@@ -50,6 +70,8 @@ function rectText(name: string, r: { top: number; bottom: number; height: number
 // from the phone settles where things are instead of guessing. Touches pass
 // through everything but the close button.
 export function showInsets(doc: Document, win: Window): void {
+  // Before anything of the overlay exists, so its own width is not counted.
+  const wideBefore = overWide(doc, win.screen.width);
   const layer = doc.createElement("div");
   layer.className = "insets-layer";
   layer.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:100;pointer-events:none;";
@@ -70,14 +92,14 @@ export function showInsets(doc: Document, win: Window): void {
   const frame = doc.createElement("div");
   frame.style.cssText = "position:fixed;top:0;bottom:0;left:0;right:0;outline:2px solid red;outline-offset:-2px;pointer-events:none;";
   const frameText = doc.createElement("div");
-  frameText.style.cssText = "position:absolute;left:4px;bottom:4px;color:red;font:11px/1.2 ui-monospace,monospace;background:rgba(0,0,0,0.7);";
+  frameText.style.cssText = "position:absolute;left:4px;bottom:4px;color:red;font:11px/1.2 ui-monospace,monospace;white-space:normal;overflow-wrap:anywhere;max-width:calc(100vw - 16px);background:rgba(0,0,0,0.7);";
   frame.append(frameText);
 
   const box = (color: string) => {
     const b = doc.createElement("div");
     b.style.cssText = `position:fixed;outline:2px solid ${color};outline-offset:-2px;pointer-events:none;`;
     const t = doc.createElement("div");
-    t.style.cssText = `position:absolute;right:4px;top:4px;color:${color};font:11px/1.2 ui-monospace,monospace;background:rgba(0,0,0,0.7);`;
+    t.style.cssText = `position:absolute;right:4px;top:4px;color:${color};font:11px/1.2 ui-monospace,monospace;white-space:normal;overflow-wrap:anywhere;max-width:calc(100vw - 16px);background:rgba(0,0,0,0.7);`;
     b.append(t);
     return { b, t };
   };
@@ -138,6 +160,8 @@ export function showInsets(doc: Document, win: Window): void {
       `scrollY ${win.scrollY}  screen ${win.screen.width}x${win.screen.height}  availHeight ${win.screen.availHeight}`,
       units.map((x) => `${x.u} ${x.p.getBoundingClientRect().height.toFixed(1)}`).join("  "),
       `standalone ${nav.standalone === true}`,
+      `wider than screen at open: ${wideBefore.join("; ") || "none"}`,
+      `wider than screen now: ${overWide(doc, win.screen.width).join("; ") || "none"}`,
       `scale ${vv ? vv.scale.toFixed(3) : "n/a"}  scrollWidth ${root.scrollWidth}  innerWidth ${win.innerWidth}`,
     ].join("\n");
   };
