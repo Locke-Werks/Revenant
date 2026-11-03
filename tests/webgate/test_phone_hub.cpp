@@ -84,7 +84,7 @@ struct HubRig {
     Clock::time_point fake_now = Clock::now();
     std::unique_ptr<PhoneHub> hub;
 
-    HubRig()
+    explicit HubRig(revenant::webgate::HubTiming timing = {})
     {
         revenant::test::HarnessOptions options;
         options.center_hz = 100'000'000;
@@ -94,7 +94,7 @@ struct HubRig {
         StreamsConfig config;
         config.hls = &registry;
         config.clock = [this] { return fake_now; };
-        hub = std::make_unique<PhoneHub>(strand, config);
+        hub = std::make_unique<PhoneHub>(strand, config, timing);
         // What the Gateway wires: the HTTP side reports every HLS request.
         registry.on_fetch = [this](std::uint64_t vrx) { hub->hls_fetched(vrx); };
     }
@@ -403,4 +403,108 @@ TEST_CASE("a silent socket is pinged, then closed after 45 s", "[gpu][webgate][h
     CHECK(socket.closed);
     CHECK(rig.hub->session(id) == nullptr);
     CHECK(rig.hub->holds(token));
+}
+
+TEST_CASE("a detached session with no receivers goes after 30 s", "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    HubRig rig;
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    const auto token = rig.hub->token(id);
+
+    rig.hub->disconnect(id);
+    rig.advance(seconds(29));
+    CHECK(rig.hub->holds(token));
+    rig.advance(seconds(2));
+    CHECK_FALSE(rig.hub->holds(token));
+}
+
+TEST_CASE("keep listening holds an empty detached session for the full linger",
+          "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    HubRig rig;
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    const auto token = rig.hub->token(id);
+    rig.text(id, R"({"id":3,"op":"keepListening","args":{"on":true}})");
+    REQUIRE(contains(reply_to(socket, 3), R"("ok":true)"));
+
+    rig.hub->disconnect(id);
+    rig.advance(seconds(31));
+    CHECK(rig.hub->holds(token));
+    rig.advance(seconds(570));
+    CHECK_FALSE(rig.hub->holds(token));
+}
+
+TEST_CASE("a detached session with a receiver outlives the 30 s empty linger",
+          "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    HubRig rig;
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    const auto token = rig.hub->token(id);
+    const auto vrx = rig.listen(id, socket, false);
+
+    rig.hub->disconnect(id);
+    rig.advance(seconds(31));
+    CHECK(rig.hub->holds(token));
+    CHECK(rig.engine_has(vrx));
+}
+
+TEST_CASE("a connection past the cap evicts the oldest detached session",
+          "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    revenant::webgate::HubTiming timing;
+    timing.max_residents = 3;
+    HubRig rig(timing);
+    FakeSocket a;
+    FakeSocket b;
+    FakeSocket c;
+    const auto ia = rig.connect(a);
+    const auto ib = rig.connect(b);
+    const auto ic = rig.connect(c);
+    const auto ta = rig.hub->token(ia);
+    const auto tb = rig.hub->token(ib);
+    const auto tc = rig.hub->token(ic);
+
+    // b drops first, then a: b is the oldest detached session.
+    rig.hub->disconnect(ib);
+    rig.advance(seconds(1));
+    rig.hub->disconnect(ia);
+    rig.advance(seconds(1));
+
+    REQUIRE(rig.hub->make_room());
+    FakeSocket d;
+    rig.connect(d);
+    CHECK(rig.hub->sessions() == 3);
+    CHECK_FALSE(rig.hub->holds(tb));
+    CHECK(rig.hub->holds(ta));
+    CHECK(rig.hub->holds(tc));
+}
+
+TEST_CASE("a connection past the cap is refused when every session is attached",
+          "[gpu][webgate][hub]")
+{
+    REVENANT_NEEDS_GPU();
+    revenant::webgate::HubTiming timing;
+    timing.max_residents = 2;
+    HubRig rig(timing);
+    FakeSocket a;
+    FakeSocket b;
+    const auto ia = rig.connect(a);
+    rig.connect(b);
+    const auto ta = rig.hub->token(ia);
+
+    CHECK_FALSE(rig.hub->make_room());
+    CHECK(rig.hub->sessions() == 2);
+    CHECK(rig.hub->holds(ta));
+    CHECK_FALSE(a.closed);
+
+    rig.hub->disconnect(ia);
+    CHECK(rig.hub->make_room());
+    CHECK(rig.hub->sessions() == 1);
 }

@@ -168,6 +168,14 @@ void Gateway::shutdown()
 
 kj::Promise<void> Gateway::accept(kj::Own<kj::WebSocket> socket)
 {
+    if (!hub_.make_room()) {
+        // Every session is a phone that is connected right now; evicting one
+        // would cut off someone listening.
+        auto& ws = *socket;
+        return ws.close(1013, "too many phones connected to this gateway; try again later")
+            .attach(kj::mv(socket))
+            .catch_([](kj::Exception&&) {});
+    }
     // Blocks the loop for one loopback connect. A phone's session is its own
     // engine Session, so it cannot share the link's connection.
     auto client = new_session_();

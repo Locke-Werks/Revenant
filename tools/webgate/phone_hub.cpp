@@ -93,8 +93,28 @@ std::chrono::steady_clock::time_point PhoneHub::now() const
     return base_.clock ? base_.clock() : std::chrono::steady_clock::now();
 }
 
+bool PhoneHub::make_room()
+{
+    while (residents_.size() >= timing_.max_residents) {
+        auto oldest = residents_.end();
+        for (auto it = residents_.begin(); it != residents_.end(); ++it) {
+            if (!it->second->connection &&
+                (oldest == residents_.end() ||
+                 it->second->detached_at < oldest->second->detached_at)) {
+                oldest = it;
+            }
+        }
+        if (oldest == residents_.end()) {
+            return false;
+        }
+        residents_.erase(oldest);
+    }
+    return true;
+}
+
 std::uint64_t PhoneHub::connect(PhoneSocket& socket, std::unique_ptr<rpc::Client> client)
 {
+    static_cast<void>(make_room());
     auto resident = std::make_unique<Resident>();
     resident->token = new_token();
     resident->session = std::make_unique<PhoneSession>(std::move(client));
@@ -249,8 +269,11 @@ void PhoneHub::tick()
             continue;
         }
         // Keep listening extends the base linger while HLS is being fetched;
-        // it never shortens it.
-        bool expire = t - resident->detached_at > timing_.detached_linger;
+        // it never shortens it. A session with nothing to keep goes sooner.
+        const bool empty = !resident->session->keep_listening() &&
+                           resident->session->owned_ids().empty();
+        bool expire = t - resident->detached_at >
+                      (empty ? timing_.empty_linger : timing_.detached_linger);
         if (expire && resident->session->keep_listening()) {
             const auto since = std::max(resident->detached_at,
                                         resident->last_hls.value_or(resident->detached_at));

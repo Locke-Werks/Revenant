@@ -10,6 +10,7 @@
 #include "tools/webgate/gateway.h"
 #include "tools/webgate/http.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -71,7 +72,8 @@ void usage() {
         "  --token-file  the engine's token (default: the engine's own default path)\n"
         "  --session-linger-ms N\n"
         "                how long a phone's session outlives its dropped socket\n"
-        "                (default 600000, 10 min); tests shorten it");
+        "                (default 600000, 10 min; at most 30 s for a session\n"
+        "                with no receivers); tests shorten it");
 }
 
 [[nodiscard]] bool parse_port(std::string_view text, int& out) {
@@ -205,6 +207,7 @@ int main(int argc, char** argv) {
     revenant::webgate::HubTiming timing;
     if (options.session_linger_ms) {
         timing.detached_linger = std::chrono::milliseconds(*options.session_linger_ms);
+        timing.empty_linger = std::min(timing.empty_linger, timing.detached_linger);
     }
 
     try {

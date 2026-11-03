@@ -8,6 +8,10 @@
 // in "hello".
 //
 // LIFETIME OF A DETACHED SESSION
+//   no receivers and keep listening off:
+//                       empty_linger after the drop. Every WebSocket opens an
+//                       engine session, so a page that connected and left
+//                       must not hold one for ten minutes.
 //   otherwise:          detached_linger after the drop.
 //   keep listening on:  the same, and also until hls_idle after the last HLS
 //                        request for one of its receivers, whichever is later.
@@ -15,6 +19,10 @@
 // between glances, and coming back to its receivers beats starting over.
 // On expiry it is destroyed exactly as a disconnect used to destroy it: its
 // streams unsubscribe and its receivers are removed.
+//
+// At most max_residents sessions exist at once. A connection that would go
+// past that evicts the detached session that dropped longest ago; when every
+// session is attached the connection is refused (make_room says so).
 //
 // No kj here, so tests drive it with a fake socket, a manual strand and a
 // fake clock. Strand thread only, like PhoneStreams.
@@ -44,6 +52,8 @@ namespace revenant::webgate {
 
 struct HubTiming {
     std::chrono::milliseconds detached_linger{600'000};
+    std::chrono::milliseconds empty_linger{30'000};
+    std::size_t max_residents = 16;
     std::chrono::milliseconds hls_idle{60'000};
 
     // Liveness. kj does not expose WebSocket protocol pings, so the gateway
@@ -68,7 +78,13 @@ public:
     PhoneHub(const PhoneHub&) = delete;
     PhoneHub& operator=(const PhoneHub&) = delete;
 
-    // A new connection with a fresh session on client. Sends "hello" with the
+    // Room for one more session: true when there already is, or after
+    // evicting the oldest detached session; false when every session is
+    // attached to a socket, and the caller refuses the connection.
+    [[nodiscard]] bool make_room();
+
+    // A new connection with a fresh session on client. Calls make_room
+    // first; the caller is expected to have checked it. Sends "hello" with the
     // session's resume token, then the current link state. Returns the
     // connection id the other calls take.
     std::uint64_t connect(PhoneSocket& socket, std::unique_ptr<rpc::Client> client);
