@@ -61,6 +61,43 @@ export function showInsets(doc: Document, win: Window): void {
   win.visualViewport?.addEventListener("scroll", render);
 }
 
+// The height of the glass the app may fill. An installed app on iOS 27
+// reports a layout viewport taller than the screen (innerHeight 1052 on a 956
+// tall screen: both insets added on top), so a box sized from the viewport
+// overruns the glass and the edges iOS resolves for it do not line up with
+// the screen's. The screen's own height along the current orientation is the
+// ceiling; anywhere the viewport is honest it is the smaller and wins.
+export function appHeightPx(g: {
+  innerHeight: number;
+  visualHeight: number | null;
+  screenWidth: number;
+  screenHeight: number;
+  landscape: boolean;
+}): number {
+  const screenTall = g.landscape ? Math.min(g.screenWidth, g.screenHeight) : Math.max(g.screenWidth, g.screenHeight);
+  let h = g.innerHeight;
+  if (g.visualHeight !== null && g.visualHeight > 0) h = Math.min(h, g.visualHeight);
+  if (screenTall > 0) h = Math.min(h, screenTall);
+  return Math.round(h);
+}
+
+export function trackAppHeight(win: Window): void {
+  const set = () => {
+    const h = appHeightPx({
+      innerHeight: win.innerHeight,
+      visualHeight: win.visualViewport?.height ?? null,
+      screenWidth: win.screen.width,
+      screenHeight: win.screen.height,
+      landscape: win.matchMedia("(orientation: landscape)").matches,
+    });
+    win.document.documentElement.style.setProperty("--app-h", `${h}px`);
+  };
+  set();
+  win.addEventListener("resize", set);
+  win.visualViewport?.addEventListener("resize", set);
+  win.matchMedia("(orientation: landscape)").addEventListener("change", set);
+}
+
 // The page itself never scrolls, but iOS scrolls the layout viewport to keep
 // a focused input above the keyboard and does not always scroll it back when
 // the keyboard closes. Every fixed element then sits that far up: under the
