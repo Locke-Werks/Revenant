@@ -245,6 +245,8 @@ struct ScalePins {
     float floor_db = 0.0F;
     bool ceiling_pinned = false;
     float ceiling_db = 0.0F;
+
+    [[nodiscard]] bool operator==(const ScalePins&) const = default;
 };
 
 // The ends a span display draws against, from where its noise is drawn and

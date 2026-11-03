@@ -5,6 +5,7 @@ add_executable(test_webgate
     test_hls.cpp
     test_http.cpp
     test_spectrum_reducer.cpp
+    test_display_sync.cpp
     test_audio_opus.cpp
     test_protocol.cpp
     test_dispatch.cpp

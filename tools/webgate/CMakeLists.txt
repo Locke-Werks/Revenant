@@ -24,6 +24,7 @@ add_library(revenant_webgate_lib STATIC
     http.cpp
     engine_link.cpp
     spectrum_reducer.cpp
+    display_sync.cpp
     audio_opus.cpp
     protocol.cpp
     session.cpp
@@ -34,6 +35,9 @@ add_library(revenant_webgate_lib STATIC
 )
 
 target_include_directories(revenant_webgate_lib PUBLIC "${CMAKE_SOURCE_DIR}")
+# The desktop's scale rules, ui/render's Qt-free headers, which include each
+# other as "render/...". No Qt and no ui source file is compiled in.
+target_include_directories(revenant_webgate_lib PUBLIC "${CMAKE_SOURCE_DIR}/ui")
 
 # revenant_rpc_client carries token.cpp, whose write_private_file is the one
 # implementation of "readable by this account and SYSTEM only".
