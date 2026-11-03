@@ -180,6 +180,7 @@ TEST_CASE("an engine restart recreates each phone's receivers", "[gpu][webgate][
     const auto second = rig.add(id, socket, 2, kCenter - 200'000);
     rig.text(id, R"({"id":3,"op":"audio","args":{"vrx":)" + std::to_string(first) + "}}");
     rig.text(id, R"({"id":4,"op":"keepListening","args":{"on":true}})");
+    rig.text(id, R"({"id":9,"op":"setDetection","args":{"minConfidence":0.3}})");
     rig.text(id, R"({"id":5,"op":"setVrxTranscribe","args":{"vrx":)" + std::to_string(second) +
                      R"(,"choice":"off"}})");
     REQUIRE(contains(reply_to(socket, 5), R"("ok":true)"));
@@ -205,6 +206,7 @@ TEST_CASE("an engine restart recreates each phone's receivers", "[gpu][webgate][
     REQUIRE(session != nullptr);
     const auto owned = session->owned_ids();
     REQUIRE(owned.size() == 2);
+    CHECK(session->min_confidence() == 0.3);
     REQUIRE(session->audio_vrx().has_value());
     const auto new_first = *session->audio_vrx();
     const auto new_second = owned.front() == new_first ? owned.back() : owned.front();

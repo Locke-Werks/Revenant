@@ -347,6 +347,7 @@ bool PhoneHub::recreate(Resident& resident, JsonObject& fields)
         fresh->set_view(*old_session.view());
     }
     fresh->set_keep_listening(old_session.keep_listening());
+    fresh->set_min_confidence(old_session.min_confidence());
 
     // Params hold the receiver's offset from the source centre. The phone
     // asked for an absolute frequency, so that is what is kept if the new

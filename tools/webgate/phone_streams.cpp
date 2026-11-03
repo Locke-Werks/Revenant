@@ -28,6 +28,38 @@ constexpr std::size_t kMaxInboxChunks = 200;
 
 constexpr auto kSourcePollInterval = std::chrono::seconds(1);
 
+// A busy band must not flood the socket, so the strongest are kept.
+constexpr std::size_t kMaxDetections = 200;
+
+// Analog and digital-family labels name a modulation. A protocol label names
+// what is carried on top of one, which the phone has no use for here.
+[[nodiscard]] std::string detections_event(const std::vector<const rpc::Detection*>& items)
+{
+    std::string array = "[";
+    for (const auto* d : items) {
+        if (array.size() > 1) {
+            array += ',';
+        }
+        // The id is a UInt64, which a JSON number cannot carry past 2^53.
+        array += JsonObject()
+                     .add_string("id", std::to_string(d->id))
+                     .add_i64("centerHz", d->center_hz)
+                     .add_i64("bandwidthHz", d->bandwidth_hz)
+                     .add_double("snrDb", d->snr_2500_db)
+                     .add_double("confidence", d->confidence)
+                     .add_string("state", d->state == rpc::TrackState::Held ? "held" : "live")
+                     .add_string("label", d->label.kind == rpc::LabelKind::AnalogModulation ||
+                                                  d->label.kind == rpc::LabelKind::DigitalFamily
+                                              ? std::string_view(d->label.name)
+                                              : std::string_view())
+                     .add_double("labelConfidence", d->label.confidence)
+                     .add_u64("lastSeen", d->last_seen)
+                     .str();
+    }
+    array += ']';
+    return event("detections", JsonObject().add_raw("items", array));
+}
+
 [[nodiscard]] std::string hls_url(std::uint64_t vrx)
 {
     return "/hls/" + std::to_string(vrx) + "/live.m3u8";
@@ -306,6 +338,9 @@ void PhoneStreams::tick()
         refresh_source();
         refresh_transcription();
     }
+    if (!last_detection_poll_ || t - *last_detection_poll_ >= config_.detection_poll) {
+        refresh_detections();
+    }
 
     bool dropped = false;
     for (auto it = hls_.begin(); it != hls_.end();) {
@@ -377,6 +412,47 @@ void PhoneStreams::refresh_transcription()
     }
     sent_transcription_ = *status;
     queue_text(transcription_status_event(*status));
+}
+
+void PhoneStreams::refresh_detections()
+{
+    const auto& view = session_.view();
+    if (!view) {
+        return;
+    }
+    last_detection_poll_ = now();
+    // The detector is built by the first request, so nothing is asked of it
+    // until a phone is actually looking.
+    const auto list = config_.detections ? config_.detections(session_.min_confidence(), 0.0)
+                                         : session_.client().detections(session_.min_confidence(), 0.0);
+    if (!list) {
+        return;
+    }
+
+    // One view-width of margin either side, so a pan reveals tracks already
+    // there instead of waiting for the next poll.
+    const double low = view->center_hz - 1.5 * view->span_hz;
+    const double high = view->center_hz + 1.5 * view->span_hz;
+    std::vector<const rpc::Detection*> kept;
+    for (const auto& d : list->detections) {
+        if (d.state != rpc::TrackState::Live && d.state != rpc::TrackState::Held) {
+            continue;
+        }
+        const double half = static_cast<double>(d.bandwidth_hz) / 2.0;
+        const double centre = static_cast<double>(d.center_hz);
+        if (centre + half < low || centre - half > high) {
+            continue;
+        }
+        kept.push_back(&d);
+    }
+    if (kept.size() > kMaxDetections) {
+        std::ranges::nth_element(kept, kept.begin() + kMaxDetections, [](const auto* a, const auto* b) {
+            return a->snr_2500_db > b->snr_2500_db;
+        });
+        kept.resize(kMaxDetections);
+        std::ranges::sort(kept, [](const auto* a, const auto* b) { return a->center_hz < b->center_hz; });
+    }
+    queue_text(detections_event(kept));
 }
 
 void PhoneStreams::refresh_source()

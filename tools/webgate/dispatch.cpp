@@ -640,6 +640,21 @@ template <class Edit>
     return JsonObject().add_bool("on", *on).str();
 }
 
+[[nodiscard]] Result op_set_detection(PhoneSession& session, const Command& command)
+{
+    const auto bar = command.get_double("minConfidence");
+    if (!bar) {
+        return std::unexpected(bar.error());
+    }
+    // The negated form also refuses NaN. The engine rejects 1 and above, and
+    // a refusal here says why instead of surfacing from the next poll.
+    if (!(*bar >= 0.0 && *bar < 1.0)) {
+        return fail("minConfidence: must be at least 0 and less than 1");
+    }
+    session.set_min_confidence(*bar);
+    return JsonObject().add_double("minConfidence", *bar).str();
+}
+
 [[nodiscard]] Result op_set_transcription(PhoneSession& session, const Command& command)
 {
     const auto on = command.get_bool("on");
@@ -705,6 +720,7 @@ template <class Edit>
     if (op == "setView") return op_set_view(session, command);
     if (op == "audio") return op_audio(session, command);
     if (op == "keepListening") return op_keep_listening(session, command);
+    if (op == "setDetection") return op_set_detection(session, command);
     if (op == "setTranscription") return op_set_transcription(session, command);
     if (op == "setVrxTranscribe") return op_set_vrx_transcribe(session, command);
     return fail("unknown op: " + std::string(op.substr(0, 64)));

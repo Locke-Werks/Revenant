@@ -93,6 +93,11 @@ public:
     [[nodiscard]] bool keep_listening() const { return keep_listening_; }
     void set_keep_listening(bool on) { keep_listening_ = on; }
 
+    // The confidence bar for the detections event. Validated by dispatch
+    // (the engine refuses 1 or more), so it is always safe to hand over.
+    [[nodiscard]] double min_confidence() const { return min_confidence_; }
+    void set_min_confidence(double value) { min_confidence_ = value; }
+
 private:
     std::unique_ptr<rpc::Client> client_;
     std::map<std::uint64_t, rpc::VrxParams> owned_;
@@ -100,6 +105,7 @@ private:
     std::optional<View> view_;
     std::optional<std::uint64_t> audio_vrx_;
     bool keep_listening_ = false;
+    double min_confidence_ = 0.0;
     TestHooks hooks_;
 };
 

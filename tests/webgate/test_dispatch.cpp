@@ -512,6 +512,34 @@ TEST_CASE("setView, audio and keepListening record state for the stream layer",
     CHECK(contains(send(*session, R"({"id":9,"op":"keepListening","args":{}})"), R"("ok":false)"));
 }
 
+TEST_CASE("setDetection stores the bar and refuses one the engine would", "[gpu][webgate][dispatch]")
+{
+    REVENANT_NEEDS_GPU();
+    revenant::test::Harness harness;
+    REQUIRE(harness.open(options()).has_value());
+    auto session = phone(harness);
+
+    CHECK(session->min_confidence() == 0.0);
+    const auto ok = send(*session, R"({"id":1,"op":"setDetection","args":{"minConfidence":0.25}})");
+    CHECK(contains(ok, R"("ok":true)"));
+    CHECK(contains(ok, R"("minConfidence":0.25)"));
+    CHECK(session->min_confidence() == 0.25);
+
+    for (const char* bad : {R"({"id":2,"op":"setDetection","args":{"minConfidence":-0.1}})",
+                            R"({"id":3,"op":"setDetection","args":{"minConfidence":1}})",
+                            R"({"id":4,"op":"setDetection","args":{"minConfidence":1.5}})",
+                            R"({"id":5,"op":"setDetection","args":{"minConfidence":1e999}})",
+                            R"({"id":6,"op":"setDetection","args":{"minConfidence":"x"}})",
+                            R"({"id":7,"op":"setDetection","args":{}})"}) {
+        INFO(bad);
+        const auto reply = send(*session, bad);
+        CHECK(contains(reply, R"("ok":false)"));
+        CHECK(session->min_confidence() == 0.25);
+    }
+    CHECK(contains(send(*session, R"({"id":8,"op":"setDetection","args":{"minConfidence":-0.1}})"),
+                   "minConfidence"));
+}
+
 TEST_CASE("json_number formats like add_double and nulls what JSON cannot spell", "[webgate][dispatch]")
 {
     CHECK(revenant::webgate::json_number(1.5) == "1.5");

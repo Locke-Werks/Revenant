@@ -133,6 +133,14 @@ struct StreamsConfig {
     // supply one, since a real engine's model state cannot be steered.
     std::function<Expected<rpc::TranscriptionStatus>()> transcription_status;
 
+    // Where the detections are read each poll. Empty reads the engine with the
+    // session's confidence bar; tests supply one, since the real detector's
+    // tracks cannot be steered.
+    std::function<Expected<rpc::DetectionList>(double, double)> detections;
+
+    // How often detections are polled while the phone has a view set.
+    std::chrono::milliseconds detection_poll{500};
+
     // How long a segmenter outlives keepListening going off, so a quick lock
     // and unlock does not rebuild the stream.
     std::chrono::milliseconds hls_linger{30'000};
@@ -258,6 +266,9 @@ private:
     // Sends a transcriptionStatus event when the engine's speech state has
     // changed since the last one, and the first time it is read.
     void refresh_transcription();
+    // Reads the detections and sends the ones near the view. Sends nothing on
+    // a failed read, so a detector that is not ready does not reach the phone.
+    void refresh_detections();
     [[nodiscard]] std::string source_event() const;
     void subscribe_spectrum(std::uint32_t every_nth);
     void settle_every_nth(const rpc::SpectrumFrame& frame);
@@ -304,6 +315,7 @@ private:
     // The speech state at the last read, and at the last event sent.
     std::optional<rpc::TranscriptionStatus> transcription_;
     std::optional<rpc::TranscriptionStatus> sent_transcription_;
+    std::optional<std::chrono::steady_clock::time_point> last_detection_poll_;
 
     // Spectrum subscription.
     bool spectrum_subscribed_ = false;

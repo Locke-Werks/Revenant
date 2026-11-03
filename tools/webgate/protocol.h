@@ -63,7 +63,7 @@ inline constexpr std::string_view kOps[] = {
     "setBandwidth", "setSquelch",    "setCenter",   "setGain",
     "setGainAuto",  "listSources",   "openSource",  "setView",
     "audio",        "keepListening", "setTranscription", "setVrxTranscribe",
-    "resume",       "pong",
+    "setDetection", "resume",       "pong",
 };
 
 // The events the gateway sends, exactly these.
@@ -88,10 +88,16 @@ inline constexpr std::string_view kOps[] = {
 // name or the detail change or the download moves a whole percent (the one
 // second poll, transcription_report_due in dispatch.h). Counters alone do not
 // send one.
+//
+// "detections" is {items:[{id, centerHz, bandwidthHz, snrDb, confidence,
+// state, label, labelConfidence, lastSeen}]}, the engine's live and held
+// tracks near the phone's view, sent each poll while a view is set. id is the
+// track id as a decimal string (a UInt64 does not survive a JSON number);
+// state is "live" or "held"; label is a modulation name or empty.
 inline constexpr std::string_view kEvents[] = {
     "vrxStatus", "decoded", "transcript", "transcriptionStatus",
     "source",    "link",    "vrxRemoved", "hls",
-    "hello",     "ping",    "vrxEventsEnded",
+    "hello",     "ping",    "vrxEventsEnded", "detections",
 };
 
 [[nodiscard]] bool is_known_op(std::string_view op);

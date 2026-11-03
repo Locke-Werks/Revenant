@@ -22,6 +22,7 @@
 //   setView            -> {"centerHz", "spanHz", "widthPx"}
 //   audio              -> {"vrx", "on"}
 //   keepListening      -> {"on"}
+//   setDetection       -> {"minConfidence"}
 //   setTranscription   -> {"enabled", "modelState", "modelName", "bytesDone",
 //                          "bytesTotal", "detail", "backend", "receivers",
 //                          "queued", "transcribed", "dropped"}

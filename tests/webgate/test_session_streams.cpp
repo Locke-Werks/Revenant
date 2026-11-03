@@ -60,6 +60,8 @@ struct Rig {
     std::size_t max_queued_text = 2000;
     // Stands in for the engine's speech status when set.
     std::function<revenant::Expected<revenant::rpc::TranscriptionStatus>()> speech;
+    // Stands in for the engine's detections when set.
+    std::function<revenant::Expected<revenant::rpc::DetectionList>(double, double)> detections;
     std::unique_ptr<PhoneSession> session;
     std::unique_ptr<PhoneStreams> streams;
 
@@ -83,6 +85,7 @@ struct Rig {
         }
         config.max_queued_text = max_queued_text;
         config.transcription_status = speech;
+        config.detections = detections;
         streams = std::make_unique<PhoneStreams>(*session, &socket, strand, config);
         streams->start();
         strand.run_pending();
@@ -678,4 +681,194 @@ TEST_CASE("a socket that stops reading is closed rather than queued without boun
     CHECK(rig.socket.closed);
     CHECK_FALSE(rig.streams->attached());
     CHECK(rig.streams->counters().text_dropped > 0);
+}
+
+namespace {
+
+[[nodiscard]] revenant::rpc::Detection track(std::uint64_t id, std::int64_t centre, double snr,
+                                             revenant::rpc::TrackState state = revenant::rpc::TrackState::Live)
+{
+    revenant::rpc::Detection d;
+    d.id = id;
+    d.center_hz = centre;
+    d.bandwidth_hz = 10'000;
+    d.snr_2500_db = snr;
+    d.confidence = 0.8;
+    d.state = state;
+    d.last_seen = 5000;
+    return d;
+}
+
+// Last "detections" event the phone was sent, as text.
+[[nodiscard]] std::string last_detections(const FakeSocket& socket)
+{
+    for (auto it = socket.sent.rbegin(); it != socket.sent.rend(); ++it) {
+        if (it->kind == Kind::Text && contains(it->text, R"("event":"detections")")) {
+            return it->text;
+        }
+    }
+    return {};
+}
+
+struct DetectionRig {
+    Rig rig;
+    revenant::rpc::DetectionList list;
+    bool fail = false;
+    int polls = 0;
+    double last_bar = -1.0;
+
+    DetectionRig()
+    {
+        rig.use_fake_clock = true;
+        rig.detections = [this](double bar, double) -> revenant::Expected<revenant::rpc::DetectionList> {
+            polls += 1;
+            last_bar = bar;
+            if (fail) {
+                return revenant::fail("detector not ready");
+            }
+            return list;
+        };
+        rig.open(still_engine());
+        rig.attach();
+    }
+
+    void view()
+    {
+        rig.command(R"({"id":1,"op":"setView","args":{"centerHz":100000000,"spanHz":200000,"widthPx":600}})");
+    }
+
+    void poll()
+    {
+        rig.fake_now += std::chrono::milliseconds(600);
+        rig.streams->tick();
+        rig.strand.run_pending();
+    }
+};
+
+}  // namespace
+
+TEST_CASE("detections event shape, labels and ids", "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    DetectionRig t;
+    auto a = track(1ULL << 60, kCentre + 1000, 12.5);
+    a.label.kind = revenant::rpc::LabelKind::AnalogModulation;
+    a.label.name = "NFM";
+    a.label.confidence = 0.9;
+    auto b = track(7, kCentre + 2000, 9.0, revenant::rpc::TrackState::Held);
+    b.label.kind = revenant::rpc::LabelKind::Protocol;
+    b.label.name = "P25";
+    t.list.detections = {a, b};
+    t.view();
+    t.poll();
+
+    const auto text = last_detections(t.rig.socket);
+    INFO(text);
+    CHECK(contains(text, R"("id":"1152921504606846976")"));
+    CHECK(contains(text, R"("centerHz":100001000)"));
+    CHECK(contains(text, R"("bandwidthHz":10000)"));
+    CHECK(contains(text, R"("snrDb":12.5)"));
+    CHECK(contains(text, R"("confidence":0.8)"));
+    CHECK(contains(text, R"("state":"live")"));
+    CHECK(contains(text, R"("label":"NFM")"));
+    CHECK(contains(text, R"("labelConfidence":0.9)"));
+    CHECK(contains(text, R"("lastSeen":5000)"));
+    // A held track, and a protocol label is not a modulation.
+    CHECK(contains(text, R"("id":"7")"));
+    CHECK(contains(text, R"("state":"held")"));
+    CHECK_FALSE(contains(text, "P25"));
+    CHECK(contains(text, R"("label":"")"));
+}
+
+TEST_CASE("detections drop merged and pending tracks and those far from the view",
+          "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    DetectionRig t;
+    // The view spans 200 kHz, so the window is 1.5 spans each side: 300 kHz.
+    t.list.detections = {track(1, kCentre, 10.0),
+                         track(2, kCentre, 10.0, revenant::rpc::TrackState::Merged),
+                         track(3, kCentre, 10.0, revenant::rpc::TrackState::Pending),
+                         track(4, kCentre + 299'000, 10.0),
+                         track(5, kCentre + 400'000, 10.0),
+                         track(6, kCentre - 400'000, 10.0)};
+    t.view();
+    t.poll();
+    const auto text = last_detections(t.rig.socket);
+    INFO(text);
+    CHECK(contains(text, R"("id":"1")"));
+    CHECK_FALSE(contains(text, R"("id":"2")"));
+    CHECK_FALSE(contains(text, R"("id":"3")"));
+    CHECK(contains(text, R"("id":"4")"));
+    CHECK_FALSE(contains(text, R"("id":"5")"));
+    CHECK_FALSE(contains(text, R"("id":"6")"));
+}
+
+TEST_CASE("detections keep the 200 strongest in view", "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    DetectionRig t;
+    for (std::uint64_t i = 0; i < 250; ++i) {
+        // Id i has SNR i, so the strongest are ids 50 to 249.
+        t.list.detections.push_back(track(i, kCentre - 100'000 + static_cast<std::int64_t>(i) * 100,
+                                          static_cast<double>(i)));
+    }
+    t.view();
+    t.poll();
+    const auto text = last_detections(t.rig.socket);
+    std::size_t count = 0;
+    for (auto at = text.find(R"("id":")"); at != std::string::npos; at = text.find(R"("id":")", at + 1)) {
+        count += 1;
+    }
+    CHECK(count == 200);
+    CHECK_FALSE(contains(text, R"("id":"49")"));
+    CHECK(contains(text, R"("id":"50")"));
+    CHECK(contains(text, R"("id":"249")"));
+}
+
+TEST_CASE("detections poll only with a view, at their own interval, with the session bar",
+          "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    DetectionRig t;
+    t.list.detections = {track(1, kCentre, 10.0)};
+
+    t.poll();
+    t.poll();
+    CHECK(t.polls == 0);
+    CHECK(count_events(t.rig.socket, "detections") == 0);
+
+    t.view();
+    t.poll();
+    CHECK(t.polls == 1);
+    // Inside the interval nothing is asked.
+    t.rig.fake_now += std::chrono::milliseconds(100);
+    t.rig.streams->tick();
+    CHECK(t.polls == 1);
+    t.poll();
+    CHECK(t.polls == 2);
+    CHECK(t.last_bar == 0.0);
+
+    t.rig.command(R"({"id":2,"op":"setDetection","args":{"minConfidence":0.4}})");
+    CHECK(contains(reply_to(t.rig.socket, 2), R"("minConfidence":0.4)"));
+    t.poll();
+    CHECK(t.last_bar == 0.4);
+
+    // The bar belongs to the session, so a socket that resumes it keeps it.
+    t.rig.streams->detach();
+    t.rig.streams->attach(t.rig.socket);
+    t.poll();
+    CHECK(t.last_bar == 0.4);
+}
+
+TEST_CASE("a failed detections poll sends nothing", "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    DetectionRig t;
+    t.fail = true;
+    t.view();
+    const auto before = t.rig.socket.sent.size();
+    t.poll();
+    CHECK(t.polls == 1);
+    CHECK(t.rig.socket.sent.size() == before);
 }

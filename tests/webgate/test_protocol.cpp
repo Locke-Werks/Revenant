@@ -119,13 +119,13 @@ TEST_CASE("Argument getters name the key on a type or range error", "[webgate][p
 }
 
 TEST_CASE("Every named op parses and the list is exact", "[webgate][protocol]") {
-    CHECK(std::size(wg::kOps) == 18);
+    CHECK(std::size(wg::kOps) == 19);
     for (auto op : wg::kOps) {
         auto c = wg::parse_command(R"({"id":1,"op":")" + std::string(op) + R"("})");
         INFO(op);
         CHECK(c.has_value());
     }
-    CHECK(std::size(wg::kEvents) == 11);
+    CHECK(std::size(wg::kEvents) == 12);
 }
 
 TEST_CASE("parse_command refuses an unknown op and names it", "[webgate][protocol]") {
