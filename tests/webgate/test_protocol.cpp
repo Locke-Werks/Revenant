@@ -147,7 +147,7 @@ TEST_CASE("Every named op parses and the list is exact", "[webgate][protocol]") 
         INFO(op);
         CHECK(c.has_value());
     }
-    CHECK(std::size(wg::kEvents) == 13);
+    CHECK(std::size(wg::kEvents) == 14);
 }
 
 TEST_CASE("get_string_list reads an array of strings and refuses anything else",

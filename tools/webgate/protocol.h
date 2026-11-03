@@ -114,11 +114,17 @@ inline constexpr std::string_view kOps[] = {
 // "display" is the desktop's colours for the phone's waterfall and trace,
 // {waterfall, spectrum, trace, background}; display_sync.h has the shape. It
 // is sent on connect, on resume and when the desktop's settings change them.
+//
+// "rds" is {vrx, pi, callSign, ps, rt, pty} and, when the station states
+// them, {tp, ta, music}, for each WFM receiver the phone owns. pi is null
+// until decoded; ps and rt are null until every segment has arrived; pty is
+// the region's long name. It is sent when any of those change and on resume.
+// A receiver with no RDS, or one the engine refuses to read, sends nothing.
 inline constexpr std::string_view kEvents[] = {
     "vrxStatus", "decoded", "transcript", "transcriptionStatus",
     "source",    "link",    "vrxRemoved", "hls",
     "hello",     "ping",    "vrxEventsEnded", "detections",
-    "display",
+    "display",   "rds",
 };
 
 [[nodiscard]] bool is_known_op(std::string_view op);

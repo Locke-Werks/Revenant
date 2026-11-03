@@ -143,6 +143,17 @@ struct StreamsConfig {
     // How often detections are polled while the phone has a view set.
     std::chrono::milliseconds detection_poll{500};
 
+    // Where a WFM receiver's RDS is read. Empty reads the engine; tests
+    // supply one, since a station's groups cannot be steered.
+    std::function<Expected<rpc::RdsStation>(std::uint64_t)> rds_station;
+
+    // How often each WFM receiver's station is read, and how long a refusal
+    // waits before the next try. The first read of a WFM receiver makes the
+    // engine open a companion receiver at the composite rate, so a refusal
+    // (no channel free for it, say) is not retried every second.
+    std::chrono::milliseconds rds_poll{1000};
+    std::chrono::milliseconds rds_retry{10'000};
+
     // How long a segmenter outlives keepListening going off, so a quick lock
     // and unlock does not rebuild the stream.
     std::chrono::milliseconds hls_linger{30'000};
@@ -285,6 +296,7 @@ private:
     // Reads the detections and sends the ones near the view. Sends nothing on
     // a failed read, so a detector that is not ready does not reach the phone.
     void refresh_detections();
+    void refresh_rds();
     // Takes the desktop's settings in and sends a display event when the
     // colours they give are not the ones last sent.
     void refresh_display();
@@ -340,6 +352,14 @@ private:
     std::optional<rpc::TranscriptionStatus> transcription_;
     std::optional<rpc::TranscriptionStatus> sent_transcription_;
     std::optional<std::chrono::steady_clock::time_point> last_detection_poll_;
+
+    // Per WFM receiver: when its station is next read, and the last rds
+    // event sent for it, so only a change goes out.
+    struct RdsPoll {
+        std::chrono::steady_clock::time_point next{};
+        std::string sent;
+    };
+    std::map<std::uint64_t, RdsPoll> rds_;
 
     // Spectrum subscription.
     bool spectrum_subscribed_ = false;

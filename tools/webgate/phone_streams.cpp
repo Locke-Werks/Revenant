@@ -8,6 +8,7 @@
 #include <utility>
 #include <variant>
 
+#include "models/rds_text.h"
 #include "tools/webgate/dispatch.h"
 #include "tools/webgate/protocol.h"
 #include "tools/webgate/spectrum_reducer.h"
@@ -75,6 +76,63 @@ constexpr std::size_t kMaxDetections = 200;
     }
     array += ']';
     return event("detections", JsonObject().add_raw("items", array));
+}
+
+// PS and RadioText go out only once every segment has arrived: a partly
+// received name is placeholders beside real characters, and the phone would
+// show it, then put each fill-in into the feed as a new message.
+[[nodiscard]] std::optional<std::string> complete_text(const std::vector<std::uint8_t>& bytes,
+                                                       std::uint32_t mask, std::size_t per_segment,
+                                                       std::size_t length)
+{
+    const auto text = ui::render_rds_text(bytes, mask, per_segment, length);
+    if (text.segments_total == 0 || text.segments_received != text.segments_total ||
+        text.text.empty()) {
+        return std::nullopt;
+    }
+    return text.text;
+}
+
+[[nodiscard]] std::string rds_event(std::uint64_t vrx, const rpc::RdsStation& s)
+{
+    JsonObject out;
+    out.add_u64("vrx", vrx);
+    if (s.pi_valid) {
+        out.add_u64("pi", s.pi);
+    } else {
+        out.add_null("pi");
+    }
+    if (s.call_sign.empty()) {
+        out.add_null("callSign");
+    } else {
+        out.add_string("callSign", s.call_sign);
+    }
+    if (const auto ps = complete_text(s.ps, s.ps_received, 2, 8)) {
+        out.add_string("ps", *ps);
+    } else {
+        out.add_null("ps");
+    }
+    const std::size_t rt_segment = s.rt_version_b ? 2 : 4;
+    if (const auto rt = complete_text(s.rt, s.rt_received, rt_segment, s.rt_length)) {
+        out.add_string("rt", *rt);
+    } else {
+        out.add_null("rt");
+    }
+    if (s.pty_valid && !s.pty_long_name.empty()) {
+        out.add_string("pty", s.pty_long_name);
+    } else {
+        out.add_null("pty");
+    }
+    if (s.tp_valid) {
+        out.add_bool("tp", s.tp);
+    }
+    if (s.ta_valid) {
+        out.add_bool("ta", s.ta);
+    }
+    if (s.music_valid) {
+        out.add_bool("music", s.music);
+    }
+    return event("rds", out);
 }
 
 [[nodiscard]] std::string hls_url(std::uint64_t vrx)
@@ -377,6 +435,7 @@ void PhoneStreams::tick()
     if (!last_detection_poll_ || t - *last_detection_poll_ >= config_.detection_poll) {
         refresh_detections();
     }
+    refresh_rds();
     // The settings source re-reads the registry on its own interval, so this
     // is a comparison on most ticks.
     refresh_display();
@@ -435,6 +494,11 @@ void PhoneStreams::announce_state()
         sent_realtime_factor_ = realtime_factor_;
         sent_paced_by_ = paced_by_;
         queue_text(source_event());
+    }
+    for (const auto& [vrx, poll] : rds_) {
+        if (!poll.sent.empty()) {
+            queue_text(poll.sent);
+        }
     }
     if (transcription_) {
         sent_transcription_ = transcription_;
@@ -507,6 +571,42 @@ void PhoneStreams::refresh_detections()
         std::ranges::sort(kept, [](const auto* a, const auto* b) { return a->center_hz < b->center_hz; });
     }
     queue_text(detections_event(kept));
+}
+
+void PhoneStreams::refresh_rds()
+{
+    // A receiver that went, or became another mode (which is a new id), is
+    // no longer read; the engine ends its companion with it.
+    std::erase_if(rds_, [this](const auto& entry) {
+        const auto* params = session_.last_params(entry.first);
+        return params == nullptr || params->demod != rpc::Demod::Wfm;
+    });
+    const auto t = now();
+    for (const auto vrx : session_.owned_ids()) {
+        const auto* params = session_.last_params(vrx);
+        if (params == nullptr || params->demod != rpc::Demod::Wfm) {
+            continue;
+        }
+        auto& poll = rds_[vrx];
+        if (t < poll.next) {
+            continue;
+        }
+        const auto station = config_.rds_station ? config_.rds_station(vrx)
+                                                 : session_.client().rds_station(vrx);
+        // A refusal is "no RDS here" or "not yet" (no channel for the
+        // companion, a passband too narrow for the composite), which the phone
+        // shows by showing nothing. A faulted decoder is the same to a phone.
+        if (!station || !station->fault.empty()) {
+            poll.next = t + config_.rds_retry;
+            continue;
+        }
+        poll.next = t + config_.rds_poll;
+        std::string json = rds_event(vrx, *station);
+        if (json != poll.sent) {
+            poll.sent = json;
+            queue_text(std::move(json));
+        }
+    }
 }
 
 void PhoneStreams::refresh_source()

@@ -4,8 +4,10 @@
 // an engine restart. The restart is the harness being destroyed and a second
 // one opened, as in test_recreate.cpp.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <set>
 #include <string>
@@ -70,12 +72,15 @@ struct Rig {
     Clock::time_point fake_now = Clock::now();
     std::uint64_t next_id = 100;
 
-    Rig()
+    explicit Rig(const std::function<void(StreamsConfig&)>& tweak = {})
     {
         open_engine();
         StreamsConfig config;
         config.hls = &registry;
         config.clock = [this] { return fake_now; };
+        if (tweak) {
+            tweak(config);
+        }
         hub = std::make_unique<PhoneHub>(
             strand, config, revenant::webgate::HubTiming{},
             [this]() -> revenant::Expected<std::unique_ptr<rpc::Client>> {
@@ -316,4 +321,197 @@ TEST_CASE("an engine restart re-applies each receiver's decoders", "[gpu][webgat
     CHECK(seen == 3);
     static_cast<void>(defaulted);
     static_cast<void>(plain);
+}
+
+// ---- RDS ---------------------------------------------------------------------
+
+namespace {
+
+// What the fake rdsStation answers, and which receivers it was asked about.
+struct FakeRds {
+    std::vector<std::uint64_t> asked;
+    revenant::Expected<rpc::RdsStation> answer = std::unexpected(revenant::Error{"no RDS yet"});
+};
+
+[[nodiscard]] rpc::RdsStation station(std::string_view ps, std::string_view rt)
+{
+    rpc::RdsStation s;
+    s.pi = 0x54A6;
+    s.pi_valid = true;
+    s.call_sign = "KQRS";
+    s.ps.assign(ps.begin(), ps.end());
+    s.ps_received = 0x0F;
+    s.rt.assign(rt.begin(), rt.end());
+    s.rt_length = static_cast<std::uint32_t>(rt.size());
+    s.rt_received = (1U << ((rt.size() + 3) / 4)) - 1U;
+    s.pty = 10;
+    s.pty_valid = true;
+    s.pty_long_name = "Country";
+    return s;
+}
+
+[[nodiscard]] std::vector<std::string> rds_events(const FakeSocket& socket)
+{
+    std::vector<std::string> out;
+    for (const auto& message : socket.sent) {
+        if (message.kind == Kind::Text && message.text.rfind(R"({"event":"rds")", 0) == 0) {
+            out.push_back(message.text);
+        }
+    }
+    return out;
+}
+
+void tick(Rig& rig, std::chrono::milliseconds step)
+{
+    rig.fake_now += step;
+    rig.hub->tick();
+    rig.strand.run_pending();
+}
+
+}  // namespace
+
+TEST_CASE("a WFM receiver's station goes to the phone once per change", "[gpu][webgate][rds]")
+{
+    REVENANT_NEEDS_GPU();
+    FakeRds fake;
+    fake.answer = station("KQRS FM ", "Now playing");
+    Rig rig([&fake](StreamsConfig& config) {
+        config.rds_station = [&fake](std::uint64_t vrx) {
+            fake.asked.push_back(vrx);
+            return fake.answer;
+        };
+    });
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    const auto wfm = rig.add(id, socket, kCenter + 100'000, "wfm");
+    const auto nfm = rig.add(id, socket, kCenter + 300'000, "nfm");
+
+    tick(rig, std::chrono::seconds(1));
+    auto events = rds_events(socket);
+    REQUIRE(events.size() == 1);
+    INFO(events[0]);
+    CHECK(contains(events[0], R"("vrx":)" + std::to_string(wfm)));
+    CHECK(contains(events[0], R"("ps":"KQRS FM")"));
+    CHECK(contains(events[0], R"("rt":"Now playing")"));
+    CHECK(contains(events[0], R"("pi":21670)"));
+    CHECK(contains(events[0], R"("callSign":"KQRS")"));
+    CHECK(contains(events[0], R"("pty":"Country")"));
+    CHECK(std::ranges::find(fake.asked, nfm) == fake.asked.end());
+
+    // The same station a second later says nothing new.
+    tick(rig, std::chrono::seconds(1));
+    CHECK(rds_events(socket).size() == 1);
+
+    fake.answer = station("KQRS FM ", "Next up");
+    tick(rig, std::chrono::seconds(1));
+    events = rds_events(socket);
+    REQUIRE(events.size() == 2);
+    CHECK(contains(events[1], R"("rt":"Next up")"));
+}
+
+TEST_CASE("a half-received PS or RadioText goes out as null", "[gpu][webgate][rds]")
+{
+    REVENANT_NEEDS_GPU();
+    FakeRds fake;
+    auto partial = station("KQRS FM ", "Now playing");
+    partial.ps_received = 0x03;
+    partial.rt_received = 0x01;
+    fake.answer = partial;
+    Rig rig([&fake](StreamsConfig& config) {
+        config.rds_station = [&fake](std::uint64_t vrx) {
+            fake.asked.push_back(vrx);
+            return fake.answer;
+        };
+    });
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    static_cast<void>(rig.add(id, socket, kCenter + 100'000, "wfm"));
+
+    tick(rig, std::chrono::seconds(1));
+    const auto events = rds_events(socket);
+    REQUIRE(events.size() == 1);
+    INFO(events[0]);
+    CHECK(contains(events[0], R"("ps":null)"));
+    CHECK(contains(events[0], R"("rt":null)"));
+}
+
+TEST_CASE("an RDS refusal is silent and waits before asking again", "[gpu][webgate][rds]")
+{
+    REVENANT_NEEDS_GPU();
+    FakeRds fake;
+    Rig rig([&fake](StreamsConfig& config) {
+        config.rds_retry = std::chrono::seconds(10);
+        config.rds_station = [&fake](std::uint64_t vrx) {
+            fake.asked.push_back(vrx);
+            return fake.answer;
+        };
+    });
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    static_cast<void>(rig.add(id, socket, kCenter + 100'000, "wfm"));
+
+    tick(rig, std::chrono::seconds(1));
+    CHECK(fake.asked.size() == 1);
+    tick(rig, std::chrono::seconds(1));
+    tick(rig, std::chrono::seconds(1));
+    CHECK(fake.asked.size() == 1);
+    CHECK(rds_events(socket).empty());
+
+    fake.answer = station("KQRS FM ", "Now playing");
+    tick(rig, std::chrono::seconds(10));
+    CHECK(fake.asked.size() == 2);
+    CHECK(rds_events(socket).size() == 1);
+}
+
+TEST_CASE("RDS polling stops on removal and on a change of mode", "[gpu][webgate][rds]")
+{
+    REVENANT_NEEDS_GPU();
+    FakeRds fake;
+    fake.answer = station("KQRS FM ", "Now playing");
+    Rig rig([&fake](StreamsConfig& config) {
+        config.rds_station = [&fake](std::uint64_t vrx) {
+            fake.asked.push_back(vrx);
+            return fake.answer;
+        };
+    });
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    const auto removed = rig.add(id, socket, kCenter + 100'000, "wfm");
+    const auto changed = rig.add(id, socket, kCenter + 300'000, "wfm");
+    tick(rig, std::chrono::seconds(1));
+    REQUIRE(fake.asked.size() == 2);
+
+    REQUIRE(contains(rig.send(id, socket, "removeVrx", R"({"vrx":)" + std::to_string(removed) + "}"),
+                     R"("ok":true)"));
+    const auto reply = rig.send(id, socket, "setMode",
+                                R"({"vrx":)" + std::to_string(changed) + R"(,"mode":"nfm"})");
+    REQUIRE(contains(reply, R"("ok":true)"));
+    fake.asked.clear();
+    tick(rig, std::chrono::seconds(1));
+    tick(rig, std::chrono::seconds(1));
+    CHECK(fake.asked.empty());
+}
+
+TEST_CASE("a resumed phone hears the station it already had", "[gpu][webgate][rds]")
+{
+    REVENANT_NEEDS_GPU();
+    FakeRds fake;
+    fake.answer = station("KQRS FM ", "Now playing");
+    Rig rig([&fake](StreamsConfig& config) {
+        config.rds_station = [&fake](std::uint64_t vrx) {
+            fake.asked.push_back(vrx);
+            return fake.answer;
+        };
+    });
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+    static_cast<void>(rig.add(id, socket, kCenter + 100'000, "wfm"));
+    tick(rig, std::chrono::seconds(1));
+    REQUIRE(rds_events(socket).size() == 1);
+
+    auto* streams = rig.hub->streams(id);
+    REQUIRE(streams != nullptr);
+    streams->announce_state();
+    rig.strand.run_pending();
+    CHECK(rds_events(socket).size() == 2);
 }
