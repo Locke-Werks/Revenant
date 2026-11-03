@@ -38,6 +38,7 @@
 namespace {
 
 using revenant::webgate::HlsRegistry;
+using revenant::webgate::kDefaultMaxPhoneFps;
 using revenant::webgate::HlsSegmenter;
 using revenant::webgate::OutgoingMessage;
 using revenant::webgate::PhoneSession;
@@ -280,7 +281,7 @@ TEST_CASE("no source open", "[gpu][webgate][streams]")
     CHECK_FALSE(rig.streams->spectrum_subscribed());
 }
 
-TEST_CASE("openSource at a new rate recomputes everyNth", "[gpu][webgate][streams]")
+TEST_CASE("every row under the cap, and a faster source thinned to it", "[gpu][webgate][streams]")
 {
     REVENANT_NEEDS_GPU();
     Rig rig;
@@ -307,8 +308,9 @@ TEST_CASE("openSource at a new rate recomputes everyNth", "[gpu][webgate][stream
 
     const double slow = measure();
     INFO("2.4 MS/s: " << slow << " fps, every_nth " << rig.streams->every_nth());
-    CHECK(slow >= 15.0);
-    CHECK(slow <= 25.0);
+    CHECK(rig.streams->every_nth() == 1);
+    CHECK(slow >= 30.0);
+    CHECK(slow <= 40.0);
 
     // close_source stops run(), so the harness's runner is joined and started
     // again around the phone's openSource.
@@ -327,8 +329,9 @@ TEST_CASE("openSource at a new rate recomputes everyNth", "[gpu][webgate][stream
     const auto engine_info = rig.harness.client().info();
     INFO("realtime factor " << (engine_info ? engine_info->realtime_factor : -1.0));
     INFO("20 MS/s: " << fast << " fps, every_nth " << rig.streams->every_nth());
-    CHECK(fast >= 15.0);
-    CHECK(fast <= 25.0);
+    CHECK(rig.streams->every_nth() == 6);
+    CHECK(fast >= 42.0);
+    CHECK(fast <= kDefaultMaxPhoneFps);
 }
 
 TEST_CASE("the source event carries the engine's realtime factor", "[gpu][webgate][streams]")

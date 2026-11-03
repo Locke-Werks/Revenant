@@ -81,6 +81,10 @@ std::string link_event(LinkState state, const std::string& detail)
 PhoneHub::PhoneHub(Strand& strand, StreamsConfig base, HubTiming timing, NewSession new_session)
     : strand_(strand), base_(std::move(base)), timing_(timing), new_session_(std::move(new_session))
 {
+    // Every phone this hub makes copies base_, so they all share one cache.
+    if (!base_.frame_levels) {
+        base_.frame_levels = std::make_shared<FrameLevelsCache>();
+    }
 }
 
 PhoneHub::~PhoneHub()

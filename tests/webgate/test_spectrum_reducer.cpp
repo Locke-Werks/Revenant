@@ -15,7 +15,7 @@
 
 namespace {
 
-using revenant::webgate::every_nth_for;
+using revenant::webgate::every_nth_at_most;
 using revenant::webgate::ReducedFrame;
 using revenant::webgate::reduce;
 using revenant::webgate::View;
@@ -316,8 +316,21 @@ TEST_CASE("columns in dB mark the pixels over the spectrum", "[webgate][spectrum
     CHECK(scale == direct.scale_db);
 }
 
-TEST_CASE("every_nth_for", "[webgate][spectrum]") {
-    CHECK(every_nth_for(305.0) == 15);
-    CHECK(every_nth_for(10.0) == 1);
-    CHECK(every_nth_for(0.0) == 1);
+// Rejects a rate rounded to the nearest (305 / 60 rounds to 5, 61 rows a
+// second, over the cap) and a cap that thins a source already under it.
+TEST_CASE("every_nth_at_most", "[webgate][spectrum]") {
+    // 2.4 MS/s in 65,536-sample blocks: every row under the default cap.
+    CHECK(every_nth_at_most(2'400'000.0 / 65'536.0) == 1);
+    CHECK(every_nth_at_most(36.6, 60.0) == 1);
+    // 20 MS/s: 305 rows a second, thinned to 50.8, never above 60.
+    CHECK(every_nth_at_most(305.0, 60.0) == 6);
+    CHECK(every_nth_at_most(305.0, 20.0) == 16);
+    // Exactly on the cap is every row, not every second one.
+    CHECK(every_nth_at_most(60.0, 60.0) == 1);
+    CHECK(every_nth_at_most(120.0, 60.0) == 2);
+    // No cap, or nonsense, is every row.
+    CHECK(every_nth_at_most(305.0, 0.0) == 1);
+    CHECK(every_nth_at_most(305.0, std::numeric_limits<double>::infinity()) == 1);
+    CHECK(every_nth_at_most(0.0, 60.0) == 1);
+    CHECK(every_nth_at_most(std::numeric_limits<double>::quiet_NaN(), 60.0) == 1);
 }

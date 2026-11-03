@@ -59,6 +59,7 @@
 #include "tools/webgate/hls_playlist.h"
 #include "tools/webgate/display_sync.h"
 #include "tools/webgate/session.h"
+#include "tools/webgate/spectrum_reducer.h"
 
 namespace revenant::webgate {
 
@@ -150,12 +151,19 @@ struct StreamsConfig {
     // stall, short enough that what plays after it is still live.
     std::size_t max_queued_opus = 25;
 
-    double target_fps = 20.0;
+    // The most spectrum rows a second this phone is sent; every row the
+    // engine makes when it makes fewer. Zero or less is no cap.
+    double max_fps = kDefaultMaxPhoneFps;
 
     // The desktop's display settings, read on every tick. Empty is the
     // desktop's defaults; the gateway reads the registry through a
     // DisplaySettingsSource, and tests supply their own.
     std::function<ui::DisplaySettings()> display_settings;
+
+    // Shared by every phone the hub makes, so the whole-frame half of the
+    // zoomed view offsets is measured once a frame and not once a phone. Null
+    // measures it per phone.
+    std::shared_ptr<FrameLevelsCache> frame_levels;
 
     // JSON queued for a socket that is not taking it. Past either limit an
     // attached socket is closed (the phone reconnects and resumes); a
@@ -355,6 +363,10 @@ private:
     PhoneDisplay display_;
     std::string sent_display_;
     std::optional<View> display_view_;
+    // A row's working columns, kept so a row allocates none of them.
+    std::vector<float> shown_columns_;
+    std::vector<float> waterfall_columns_;
+    std::vector<float> trace_columns_;
 };
 
 }  // namespace revenant::webgate

@@ -544,8 +544,8 @@ void PhoneStreams::refresh_source()
         return;
     }
     if (open && spectrum_enabled_) {
-        subscribe_spectrum(every_nth_for(static_cast<double>(source_rate_) / kAssumedBlockSamples,
-                                         config_.target_fps));
+        subscribe_spectrum(every_nth_at_most(static_cast<double>(source_rate_) / kAssumedBlockSamples,
+                                         config_.max_fps));
     } else {
         stop_spectrum();
     }
@@ -610,11 +610,14 @@ std::optional<std::vector<std::uint8_t>> PhoneStreams::cut_spectrum(
     reduced.view = columns.view;
     // Only the pixels over the spectrum are the desktop's columns: the ones a
     // pan has moved off its edge are no level at all, and draw the bottom.
-    std::vector<float> waterfall(columns.db.size(), -std::numeric_limits<float>::infinity());
-    std::vector<float> trace = waterfall;
+    std::vector<float>& waterfall = waterfall_columns_;
+    std::vector<float>& trace = trace_columns_;
+    waterfall.assign(columns.db.size(), -std::numeric_limits<float>::infinity());
+    trace.assign(columns.db.size(), -std::numeric_limits<float>::infinity());
     if (columns.end_valid > columns.first_valid) {
-        std::vector<float> shown_columns(columns.db.begin() + columns.first_valid,
-                                         columns.db.begin() + columns.end_valid);
+        std::vector<float>& shown_columns = shown_columns_;
+        shown_columns.assign(columns.db.begin() + columns.first_valid,
+                             columns.db.begin() + columns.end_valid);
         // A pixel of NaN bins inside the spectrum is the floor sentinel the
         // desktop's reduction would carry, not a hole in the history.
         for (float& c : shown_columns) {
@@ -623,11 +626,16 @@ std::optional<std::vector<std::uint8_t>> PhoneStreams::cut_spectrum(
             }
         }
         const std::span<const float> whole(frame.power_db);
+        const std::span<const float> shown = whole.subspan(columns.first_bin, columns.bin_count);
         const DisplayFrame facts{frame.start, frame.count, source_rate_, first_bin_hz, floor_db,
                                  ceiling_db};
-        const DisplayRow row =
-            display_.take(facts, whole, whole.subspan(columns.first_bin, columns.bin_count),
-                          shown_columns, columns.bins_per_px);
+        // Unzoomed, the offsets are zero and the whole frame is never read.
+        const bool zoomed = shown.size() < whole.size();
+        const FrameLevels levels = zoomed && config_.frame_levels
+                                       ? config_.frame_levels->get(source_epoch_, frame.start, whole)
+                                       : FrameLevels::of(whole, zoomed);
+        const DisplayRow& row =
+            display_.take(facts, levels, shown, shown_columns, columns.bins_per_px);
         std::copy(shown_columns.begin(), shown_columns.end(),
                   waterfall.begin() + columns.first_valid);
         std::copy(row.trace_columns.begin(), row.trace_columns.end(),
@@ -703,7 +711,7 @@ void PhoneStreams::settle_every_nth(const rpc::SpectrumFrame& frame)
                                      static_cast<double>(frame.sequence - first_seen_->sequence);
     every_nth_checked_ = true;
     const auto wanted =
-        every_nth_for(static_cast<double>(source_rate_) / samples_per_frame, config_.target_fps);
+        every_nth_at_most(static_cast<double>(source_rate_) / samples_per_frame, config_.max_fps);
     if (wanted != every_nth_) {
         subscribe_spectrum(wanted);
         every_nth_checked_ = true;

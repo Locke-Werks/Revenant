@@ -133,12 +133,15 @@ ReducedFrame reduce(std::span<const float> power_db, double first_bin_hz, double
     return out;
 }
 
-std::uint32_t every_nth_for(double block_rate_hz, double target_fps) {
-    if (!std::isfinite(block_rate_hz) || !std::isfinite(target_fps) || !(block_rate_hz > 0.0) ||
-        !(target_fps > 0.0)) {
+std::uint32_t every_nth_at_most(double block_rate_hz, double max_fps) {
+    if (!std::isfinite(block_rate_hz) || !std::isfinite(max_fps) || !(block_rate_hz > 0.0) ||
+        !(max_fps > 0.0)) {
         return 1;
     }
-    const double n = std::round(block_rate_hz / target_fps);
+    // Up, since this is a ceiling: rounding to the nearest sends 61 rows a
+    // second from 305 under a 60 cap. The slack keeps a rate a hair over an
+    // exact multiple, from float division, from costing a whole extra skip.
+    const double n = std::ceil(block_rate_hz / max_fps - 1e-9);
     // Cap before the cast: a corrupt rate must not overflow into 0 or UB.
     return n < 1.0 ? 1u : static_cast<std::uint32_t>(std::min(n, 4.0e9));
 }

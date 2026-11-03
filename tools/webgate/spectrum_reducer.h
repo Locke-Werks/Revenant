@@ -76,8 +76,15 @@ ReducedFrame reduce(std::span<const float> power_db, double first_bin_hz, double
                     std::uint64_t source_start, const View& view, float floor_db,
                     float ceiling_db);
 
-// How many source blocks to skip between frames so the phone gets about
-// target_fps rows a second. Never less than 1.
-std::uint32_t every_nth_for(double block_rate_hz, double target_fps = 20.0);
+// The default ceiling on rows a second to a phone. The phone draws at its
+// display's refresh and scrolls between rows, so every row the engine makes
+// is wanted up to the rate a 60 Hz screen can show one per refresh; past
+// that, rows would only cost the gateway and the Wi-Fi.
+inline constexpr double kDefaultMaxPhoneFps = 60.0;
+
+// The smallest every_nth that keeps a block_rate_hz stream at or under
+// max_fps rows a second: 1, every row, whenever the source is already under
+// it. A max_fps that is not positive and finite is no cap.
+std::uint32_t every_nth_at_most(double block_rate_hz, double max_fps = kDefaultMaxPhoneFps);
 
 }  // namespace revenant::webgate
