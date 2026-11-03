@@ -81,9 +81,8 @@ struct RackEntry {
     // ADOPTED SAYS WHERE IT CAME FROM, NOT WHAT MAY BE DONE WITH IT. The
     // engine serves one user, so the operator controls it like any other:
     // focus, tune, remove. What differs is bookkeeping: the engine's events
-    // keep it in the rack and take it out, and a reconnection does not make it
-    // again. Focusing one takes it in for good (ReceiverRack::take_in), since
-    // the pane retunes it and from then on it is this window's to put back.
+    // keep it in the rack and take it out, focused or not, and a reconnection
+    // does not make it again but gets it back from the engine's replay.
     bool adopted = false;
     std::string owner;
 };
@@ -218,20 +217,6 @@ public:
         return key;
     }
 
-    // An adopted entry becomes one this window made: labelled "RX n", put
-    // back by a reconnection, and no longer taken out by the engine's events.
-    // False when there is no such entry or it was never adopted.
-    bool take_in(std::uint64_t key)
-    {
-        RackEntry* entry = find(key);
-        if (entry == nullptr || !entry->adopted) {
-            return false;
-        }
-        entry->adopted = false;
-        entry->owner.clear();
-        return true;
-    }
-
     // The adopted entry for an engine id, or nothing. Adopted entries only:
     // an id this client's own entry carries can be zero or stale while a
     // rebuild is in flight, and the plugin's events never name one of those.
@@ -251,10 +236,6 @@ public:
     // entry that took its place in the rack, or the one above it when it was
     // the last, which is what closing a tab does; to nothing when the rack is
     // now empty. Answers the key focus moved to, zero for none.
-    //
-    // Adopted entries are stepped over on the way, in both directions, so
-    // closing the receiver beside a trunk call's strip lands on the next one
-    // the operator made and never on the call.
     std::uint64_t remove(std::uint64_t key)
     {
         const auto index = index_of(key);
@@ -322,12 +303,16 @@ public:
 
     // Takes every adopted entry out and answers them, for a connection that
     // has gone: their ids were that engine's and their receivers the plugin's
-    // on it. Focus never rests on one, so it does not move.
+    // on it. A focused one goes too and leaves nothing focused: the engine's
+    // replay brings it back, and this rack cannot tell which entry it will be.
     std::vector<RackEntry> drop_adopted()
     {
         std::vector<RackEntry> out;
         for (auto it = entries_.begin(); it != entries_.end();) {
             if (it->adopted) {
+                if (it->key == focused_) {
+                    focused_ = 0;
+                }
                 out.push_back(std::move(*it));
                 it = entries_.erase(it);
             } else {

@@ -352,11 +352,6 @@ void EngineLink::focus_entry(std::uint64_t key)
     receiver_status_.transcribing = incoming.transcribing;
     receiver_edge_limit_ = incoming.edge_limit;
 
-    // Opened elsewhere and now on the pane, which retunes it: it is this
-    // window's from here, so the engine's Removed event and a lost connection
-    // no longer take it out from under the pane.
-    static_cast<void>(rack_.take_in(key));
-
     const RackEntry* entry = rack_.find(key);
     receiver_id_ = entry == nullptr ? 0 : entry->engine_id;
     pane_key_ = key;
@@ -1456,7 +1451,14 @@ void EngineLink::drop_adopted_entry(std::uint64_t key, bool forget)
                                ReceiverAttribution{entry->slot, rack_entry_label(*entry)},
                                static_cast<std::int64_t>(now_ms));
 
-    // Focus never rests on an adopted entry, so this moves none.
+    // On the pane: out the way an ordinary removal goes, so focus steps to
+    // the entry that took its place or the pane clears. The remove that path
+    // sends finds nothing on the engine, which has already removed it, and
+    // ids are not reused on one engine, so it cannot hit another receiver.
+    if (key == pane_key_) {
+        removeReceiver();
+        return;
+    }
     static_cast<void>(rack_.remove(key));
     std::erase_if(held_views_, [key](const auto& held) { return held.first == key; });
 
@@ -1470,6 +1472,12 @@ void EngineLink::drop_adopted_entry(std::uint64_t key, bool forget)
 
 void EngineLink::drop_adopted_receivers()
 {
+    // The pane on one of them is cleared first: its receiver was on the
+    // engine that went, and the replay brings it back as a new entry.
+    if (const RackEntry* pane = rack_.find(pane_key_); pane != nullptr && pane->adopted) {
+        clear_pane();
+        pane_key_ = 0;
+    }
     const std::vector<RackEntry> gone = rack_.drop_adopted();
     for (const RackEntry& entry : gone) {
         std::erase_if(held_views_,

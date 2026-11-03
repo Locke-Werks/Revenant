@@ -5,7 +5,8 @@
 // AN ADOPTED STRIP, a receiver an engine plugin opened such as one of the
 // trunk tracker's voice calls, or one a phone opened, is named for whoever
 // opened it and is otherwise like any other: the engine serves one user, so
-// it can be focused, tuned and removed. models/adopted_receivers.h.
+// it can be focused, tuned and removed. It leaves when the engine removes it,
+// focused or not. models/adopted_receivers.h.
 //
 // Everything shown comes from one entry of EngineLink::rackEntries, which
 // ui/models/rack_link.cpp builds; the rules behind mute, solo and the gain
