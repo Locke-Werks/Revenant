@@ -11,7 +11,11 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
+#include <list>
+#include <memory>
+#include <thread>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -80,10 +84,21 @@ public:
     // its registry can go after this in any order. Idempotent.
     void shutdown();
 
+    // Waits for every claim still on its worker thread. Call after
+    // EngineLink::cancel_waits, or a claim waiting for an engine holds this
+    // up to EngineLinkConfig::demand_wait. Loop thread.
+    void join_claims();
+
 private:
     struct Connection;
+    struct ClaimSlot;
+    struct Claim {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
     [[nodiscard]] kj::Promise<void> receive(Connection& connection);
     [[nodiscard]] kj::Promise<void> tick_loop();
+    void prune_claims();
 
     kj::AsyncIoContext& io_;
     NewSession new_session_;
@@ -92,6 +107,12 @@ private:
     PhoneHub hub_;
     LinkState last_state_ = LinkState::Starting;
     std::string last_detail_;
+    std::list<Claim> claims_;
 };
+
+// {"event":"engine","state":"starting"}: sent to a phone whose claim is
+// waiting for an engine to be started for it, ahead of hello. The app shows
+// "Starting the engine..." until the link reports up.
+[[nodiscard]] std::string engine_starting_event();
 
 }  // namespace revenant::webgate

@@ -1,6 +1,9 @@
 #include "tools/webgate/gateway.h"
 
+#include <atomic>
+#include <deque>
 #include <memory>
+#include <thread>
 #include <string_view>
 #include <utility>
 
@@ -130,6 +133,19 @@ struct Gateway::Connection {
     kj::Own<kj::WebSocket> socket;
     KjPhoneSocket adapter;
     std::uint64_t id = 0;
+
+    // While the claim is on its worker thread there is no hub connection to
+    // give the phone's commands to, so they wait here in order.
+    bool claiming = true;
+    std::deque<std::string> early;
+};
+
+// What a claim's worker hands back to the loop. Shared, so a phone that left
+// during the start can drop its half while the worker still holds the other;
+// the Client, if one came back, is destroyed by whichever half goes last,
+// which releases the lease it claimed.
+struct Gateway::ClaimSlot {
+    Expected<std::unique_ptr<rpc::Client>> result{std::unexpected(Error{})};
 };
 
 namespace {
@@ -167,6 +183,7 @@ Gateway::~Gateway()
 
 void Gateway::shutdown()
 {
+    join_claims();
     hub_.clear();
     if (hls_ != nullptr) {
         hls_->on_fetch = nullptr;
@@ -184,30 +201,91 @@ kj::Promise<void> Gateway::accept(kj::Own<kj::WebSocket> socket, std::string pee
             .attach(kj::mv(socket))
             .catch_([](kj::Exception&&) {});
     }
-    // Blocks the loop for one loopback connect. A phone's session is its own
-    // engine Session, claiming the lease as this phone, so it cannot share
-    // the link's observing connection. A claim the lease refuses still
-    // connects: the phone is shown who holds the engine and offered Take
-    // over (phone_hub.h).
+    // A phone's session is its own engine Session, claiming the lease as this
+    // phone, so it cannot share the link's observing connection. The claim
+    // may wait for an engine to be started, seconds on a cold GPU, so it runs
+    // on a worker and the loop goes on serving every other socket; this one
+    // keeps being read, its commands held until the claim lands, so a phone
+    // that leaves during the start is noticed and its claim dropped. A claim
+    // the lease refuses still connects: the phone is shown who holds the
+    // engine and offered Take over (phone_hub.h).
     const std::string holder = phone_holder(peer);
-    auto client = new_session_(rpc::LoginMode::Claim, holder);
-    const bool refused = !client && parse_lease_refusal(client.error().message).has_value();
-    if (!client && !refused) {
-        auto text = kj::heap<std::string>(link_event(last_state_, client.error().message));
-        auto sending = socket->send(kj::ArrayPtr<const char>(text->data(), text->size()));
-        auto& ws = *socket;
-        return sending.attach(kj::mv(text))
-            .then([&ws] { return ws.close(1013, "engine unavailable"); })
-            .attach(kj::mv(socket))
-            .catch_([](kj::Exception&&) {});
+    auto connection = kj::heap<Connection>(*this, kj::mv(socket));
+    auto& ref = *connection;
+    if (last_state_ != LinkState::Up) {
+        // The link is not up, so this claim is the one that brings an engine.
+        ref.adapter.send(OutgoingMessage{.text = engine_starting_event()}, [] {});
     }
 
-    auto connection = kj::heap<Connection>(*this, kj::mv(socket));
-    connection->id = refused
-                         ? hub_.connect_refused(connection->adapter, holder, client.error().message)
-                         : hub_.connect(connection->adapter, std::move(*client), holder);
-    auto& ref = *connection;
-    return receive(ref).catch_([](kj::Exception&&) {}).attach(kj::mv(connection));
+    auto slot = std::make_shared<ClaimSlot>();
+    auto paf = kj::newPromiseAndCrossThreadFulfiller<void>();
+    prune_claims();
+    claims_.push_back(Claim{});
+    Claim& claim = claims_.back();
+    claim.done = std::make_shared<std::atomic<bool>>(false);
+    claim.thread = std::thread(
+        [new_session = new_session_, holder, slot, done = claim.done,
+         fulfiller = kj::mv(paf.fulfiller)]() mutable {
+            slot->result = new_session(rpc::LoginMode::Claim, holder);
+            // Safe after the promise is gone: a cross-thread fulfiller whose
+            // promise was cancelled ignores the call.
+            fulfiller->fulfill();
+            done->store(true);
+        });
+
+    auto seated = paf.promise.then([this, &ref, holder, slot]() -> kj::Promise<void> {
+        auto client = std::move(slot->result);
+        ref.claiming = false;
+        const bool refused = !client && parse_lease_refusal(client.error().message).has_value();
+        if (!client && !refused) {
+            auto text = kj::heap<std::string>(link_event(last_state_, client.error().message));
+            auto& ws = *ref.socket;
+            return ws.send(kj::ArrayPtr<const char>(text->data(), text->size()))
+                .attach(kj::mv(text))
+                .then([&ws] { return ws.close(1013, "engine unavailable"); });
+        }
+        ref.id = refused ? hub_.connect_refused(ref.adapter, holder, client.error().message)
+                         : hub_.connect(ref.adapter, std::move(*client), holder);
+        while (!ref.early.empty()) {
+            const std::string text = std::move(ref.early.front());
+            ref.early.pop_front();
+            hub_.text(ref.id, text);
+        }
+        // The receive loop below ends the connection from here on.
+        return kj::NEVER_DONE;
+    });
+
+    return receive(ref)
+        .exclusiveJoin(kj::mv(seated))
+        .catch_([](kj::Exception&&) {})
+        .attach(kj::mv(connection));
+}
+
+void Gateway::prune_claims()
+{
+    for (auto it = claims_.begin(); it != claims_.end();) {
+        if (it->done->load()) {
+            it->thread.join();
+            it = claims_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Gateway::join_claims()
+{
+    for (auto& claim : claims_) {
+        if (claim.thread.joinable()) {
+            claim.thread.join();
+        }
+    }
+    claims_.clear();
+}
+
+std::string engine_starting_event()
+{
+    return event("engine", JsonObject().add_string("state", "starting"));
 }
 
 kj::Promise<void> Gateway::receive(Connection& connection)
@@ -219,7 +297,11 @@ kj::Promise<void> Gateway::receive(Connection& connection)
             }
             if (message.is<kj::String>()) {
                 const auto& text = message.get<kj::String>();
-                hub_.text(connection.id, std::string_view(text.cStr(), text.size()));
+                if (connection.claiming) {
+                    connection.early.emplace_back(text.cStr(), text.size());
+                } else {
+                    hub_.text(connection.id, std::string_view(text.cStr(), text.size()));
+                }
             }
             // Binary frames: the phone sends none, and one is ignored rather
             // than dropping the connection over it.
