@@ -184,7 +184,7 @@ TEST_CASE("an engine restart recreates each phone's receivers", "[gpu][webgate][
     rig.text(id, R"({"id":5,"op":"setVrxTranscribe","args":{"vrx":)" + std::to_string(second) +
                      R"(,"choice":"off"}})");
     REQUIRE(contains(reply_to(socket, 5), R"("ok":true)"));
-    REQUIRE(rig.registry.find(first) != nullptr);
+    REQUIRE(rig.registry.find(rig.hub->streams(id)->hls_id()) != nullptr);
 
     // A second phone, detached when the engine goes: it is rebuilt too.
     FakeSocket other;
@@ -229,8 +229,8 @@ TEST_CASE("an engine restart recreates each phone's receivers", "[gpu][webgate][
     // Keep listening followed the new id: a segmenter under it, and the phone
     // was told the new URL. (A fresh engine numbers from 1 again, so the new
     // id may well equal the old one.)
-    CHECK(rig.registry.find(new_first) != nullptr);
-    CHECK(texts_with(socket, "/hls/" + std::to_string(new_first) + "/live.m3u8", mark).size() ==
+    CHECK(rig.registry.find(rig.hub->streams(id)->hls_id()) != nullptr);
+    CHECK(texts_with(socket, "/hls/" + std::to_string(rig.hub->streams(id)->hls_id()) + "/live.m3u8", mark).size() ==
           1);
 
     // Both phones' receivers exist, and nothing else.

@@ -203,23 +203,24 @@ TEST_CASE("keep listening outlives a dropped socket while HLS is fetched",
     const auto id = rig.connect(socket);
     const auto token = rig.hub->token(id);
     const auto vrx = rig.listen(id, socket, true);
-    REQUIRE(rig.registry.find(vrx) != nullptr);
+    const auto hls_id = rig.hub->streams(id)->hls_id();
+    REQUIRE(rig.registry.find(hls_id) != nullptr);
 
     rig.hub->disconnect(id);
     // Well past the 30 s base linger, so only the fetches keep it.
     for (int i = 0; i < 660; ++i) {
-        rig.registry.fetched(vrx);
+        rig.registry.fetched(hls_id);
         rig.advance(seconds(1));
     }
     CHECK(rig.hub->holds(token));
-    CHECK(rig.registry.find(vrx) != nullptr);
+    CHECK(rig.registry.find(hls_id) != nullptr);
     CHECK(rig.engine_has(vrx));
 
     rig.advance(seconds(59));
     CHECK(rig.hub->holds(token));
     rig.advance(seconds(2));
     CHECK_FALSE(rig.hub->holds(token));
-    CHECK(rig.registry.find(vrx) == nullptr);
+    CHECK(rig.registry.find(hls_id) == nullptr);
     CHECK_FALSE(rig.engine_has(vrx));
 }
 
@@ -325,7 +326,7 @@ TEST_CASE("resume reattaches and the next frames go to the new socket", "[gpu][w
     CHECK(rig.hub->sessions() == 1);
     CHECK(rig.hub->streams(again) == streams);
     CHECK(rig.hub->session(again)->owns(vrx));
-    CHECK(rig.registry.find(vrx) != nullptr);
+    CHECK(rig.registry.find(streams->hls_id()) != nullptr);
 
     const auto opus_before = second.count(Kind::Opus);
     streams->deliver_spectrum(synthetic_frame());

@@ -297,6 +297,23 @@ test("glue: a replaced receiver is followed to its new id", async () => {
   assert.deepEqual(g.media.plays.slice(-1), ["/hls/7/live.m3u8"]);
 });
 
+test("glue: the mixed stream keeps its URL when the listener moves to another receiver", async () => {
+  // The gateway mixes every digital voice receiver into one stream per
+  // session, so a replaced or reselected receiver is a new vrx on the same URL.
+  const g = glue();
+  g.keep.on();
+  g.link.emit("hls", { event: "hls", vrx: 4, stream: 9, url: "/hls/9/live.m3u8" });
+  await g.clock.advance(0);
+  const plays = g.media.plays.length;
+  g.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 4, reason: "replaced" });
+  g.link.emit("hls", { event: "hls", vrx: 7, stream: 9, url: "/hls/9/live.m3u8" });
+  await g.clock.advance(REPLACE_GRACE_MS * 2);
+  assert.equal(g.keep.state, "Background");
+  assert.equal(g.ui.message, null);
+  // The element was not reloaded: same URL, nothing to start again.
+  assert.equal(g.media.plays.length, plays);
+});
+
 test("glue: a removed receiver stops keep listening and says why", async () => {
   const g = glue();
   g.keep.on();

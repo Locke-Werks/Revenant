@@ -4,9 +4,10 @@
 // could come with normalising it. The desktop deliberately does not AGC
 // digital voice (ui/audio/voice_gain.h says why: levelling decoded voice rides
 // each talker and pumps between syllables), so the phone does what the desktop
-// does instead: one fixed boost, the desktop's audio/voiceGainDb, then the
-// desktop's soft limiter from ui/audio/mix_stages.h. Both headers are Qt-free
-// and are reused as they are, so the two cannot drift apart.
+// does instead: one fixed boost, the desktop's audio/voiceGainDb, here, then
+// the desktop's soft limiter from ui/audio/mix_stages.h on the sum, in
+// audio_mix.h. Both ui headers are Qt-free and are reused as they are, so the
+// two cannot drift apart.
 //
 // Only receivers whose audio is decoded voice get it. The engine already
 // levels every analogue mode, and boosting those would stack a second gain on
@@ -27,7 +28,6 @@
 #include <string_view>
 #include <vector>
 
-#include "audio/mix_stages.h"
 #include "audio/voice_gain.h"
 #include "core/rpc/types.h"
 #include "tools/webgate/audio_rate.h"
@@ -82,15 +82,14 @@ private:
     double db_ = 0.0;
 };
 
-// The boost and then the limiter, on one receiver's 48 kHz mono stream. Not
-// thread safe; it lives with the receiver's audio path on the strand.
+// The boost, on one receiver's 48 kHz mono stream. The soft limiter is not
+// here: it runs on the sum of every stream, in PhoneMixer, as on the desktop.
+// Not thread safe; it lives with the receiver's audio path on the strand.
 class VoiceGainStage {
 public:
     // About 20 ms, long enough that a step in gain is not heard as a click and
     // short enough to be done before the next poll's change could stack on it.
     static constexpr std::size_t kRampSamples = kPhoneAudioRate / 50;
-
-    VoiceGainStage() { limiter_.configure(kPhoneAudioRate); }
 
     // The stream at `db` of boost. The span is good until the next call. A
     // change in `db` ramps linearly in amplitude from wherever the gain is
@@ -117,12 +116,10 @@ public:
             }
             out_[i] = static_cast<float>(static_cast<double>(mono[i]) * current_);
         }
-        limiter_.process(out_.data(), out_.size(), 1);
         return out_;
     }
 
 private:
-    ui::SoftLimiter limiter_;
     std::vector<float> out_;
     bool started_ = false;
     double current_ = 1.0;

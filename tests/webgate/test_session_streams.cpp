@@ -649,10 +649,10 @@ TEST_CASE("HLS lingers 30 s after keepListening off", "[gpu][webgate][streams]")
     for (const auto& m : rig.socket.sent) {
         announced = announced ||
                     (m.kind == Kind::Text && contains(m.text, R"("event":"hls")") &&
-                     contains(m.text, "/hls/" + id + "/live.m3u8"));
+                     contains(m.text, "/hls/" + std::to_string(rig.streams->hls_id()) + "/live.m3u8"));
     }
     CHECK(announced);
-    HlsSegmenter* const first = rig.registry.find(vrx);
+    HlsSegmenter* const first = rig.registry.find(rig.streams->hls_id());
     REQUIRE(first != nullptr);
 
     SECTION("gone after the linger")
@@ -660,11 +660,11 @@ TEST_CASE("HLS lingers 30 s after keepListening off", "[gpu][webgate][streams]")
         rig.command(R"({"id":4,"op":"keepListening","args":{"on":false}})");
         rig.fake_now += std::chrono::seconds(29);
         rig.streams->tick();
-        CHECK(rig.registry.find(vrx) == first);
+        CHECK(rig.registry.find(rig.streams->hls_id()) == first);
         rig.fake_now += std::chrono::seconds(2);
         rig.streams->tick();
-        CHECK(rig.registry.find(vrx) == nullptr);
-        CHECK(rig.streams->segmenter(vrx) == nullptr);
+        CHECK(rig.registry.find(rig.streams->hls_id()) == nullptr);
+        CHECK(rig.streams->segmenter(rig.streams->hls_id()) == nullptr);
     }
 
     SECTION("on again inside the linger keeps the same segmenter")
@@ -673,10 +673,10 @@ TEST_CASE("HLS lingers 30 s after keepListening off", "[gpu][webgate][streams]")
         rig.fake_now += std::chrono::seconds(10);
         rig.streams->tick();
         rig.command(R"({"id":5,"op":"keepListening","args":{"on":true}})");
-        CHECK(rig.registry.find(vrx) == first);
+        CHECK(rig.registry.find(rig.streams->hls_id()) == first);
         rig.fake_now += std::chrono::seconds(60);
         rig.streams->tick();
-        CHECK(rig.registry.find(vrx) == first);
+        CHECK(rig.registry.find(rig.streams->hls_id()) == first);
     }
 }
 
@@ -695,7 +695,7 @@ TEST_CASE("8000 S/s digital voice reaches Opus and HLS", "[gpu][webgate][streams
     const auto id = std::to_string(vrx);
     rig.command(R"({"id":2,"op":"audio","args":{"vrx":)" + id + "}}");
     rig.command(R"({"id":3,"op":"keepListening","args":{"on":true}})");
-    HlsSegmenter* const segmenter = rig.registry.find(vrx);
+    HlsSegmenter* const segmenter = rig.registry.find(rig.streams->hls_id());
     REQUIRE(segmenter != nullptr);
 
     // Four seconds in 20 ms chunks, enough for the three segments a playlist
@@ -801,6 +801,100 @@ TEST_CASE("digital voice reaches the phone boosted and analogue does not",
     CHECK(voice / voice_flat == Catch::Approx(7.943).epsilon(0.05));
     // An analogue receiver ignores the setting entirely.
     CHECK(analogue / analogue_flat == Catch::Approx(1.0).epsilon(0.02));
+}
+
+TEST_CASE("audio subscriptions follow the digital voice receivers", "[gpu][webgate][streams][mix]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.open(still_engine());
+    rig.attach();
+
+    rig.command(R"({"id":1,"op":"addVrx","args":{"hz":100100000,"mode":"am"}})");
+    const auto analogue = vrx_of(reply_to(rig.socket, 1));
+    rig.command(R"({"id":2,"op":"addVrx","args":{"hz":100200000,"mode":"p25p1"}})");
+    const auto voice = vrx_of(reply_to(rig.socket, 2));
+
+    // Audio is off: nothing is subscribed, not even the voice receiver.
+    CHECK(rig.streams->audio_subscriptions().empty());
+
+    rig.command(R"({"id":3,"op":"audio","args":{"vrx":)" + std::to_string(analogue) + "}}");
+    CHECK(rig.streams->audio_subscriptions() == std::set<std::uint64_t>{analogue, voice});
+
+    // A second voice receiver joins when it is added, and leaves when it goes.
+    rig.command(R"({"id":4,"op":"addVrx","args":{"hz":100300000,"mode":"dmr"}})");
+    const auto second = vrx_of(reply_to(rig.socket, 4));
+    CHECK(rig.streams->audio_subscriptions() ==
+          std::set<std::uint64_t>{analogue, voice, second});
+    rig.command(R"({"id":5,"op":"removeVrx","args":{"vrx":)" + std::to_string(voice) + "}}");
+    CHECK(rig.streams->audio_subscriptions() == std::set<std::uint64_t>{analogue, second});
+
+    // An analogue receiver that is not the active one is never mixed.
+    rig.command(R"({"id":6,"op":"addVrx","args":{"hz":100400000,"mode":"nfm"}})");
+    CHECK(rig.streams->audio_subscriptions() == std::set<std::uint64_t>{analogue, second});
+
+    // Audio off again ends them all.
+    rig.command(R"({"id":7,"op":"audio","args":{"vrx":)" + std::to_string(analogue) +
+                R"(,"on":false}})");
+    CHECK(rig.streams->audio_subscriptions().empty());
+}
+
+TEST_CASE("one HLS stream carries the mix and keeps its URL across receivers",
+          "[gpu][webgate][streams][mix]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.open(still_engine());
+    rig.attach();
+
+    rig.command(R"({"id":1,"op":"addVrx","args":{"hz":100100000,"mode":"am"}})");
+    const auto analogue = vrx_of(reply_to(rig.socket, 1));
+    rig.command(R"({"id":2,"op":"addVrx","args":{"hz":100200000,"mode":"p25p1"}})");
+    const auto voice = vrx_of(reply_to(rig.socket, 2));
+    rig.command(R"({"id":3,"op":"audio","args":{"vrx":)" + std::to_string(analogue) + "}}");
+    rig.command(R"({"id":4,"op":"keepListening","args":{"on":true}})");
+
+    const auto id = rig.streams->hls_id();
+    HlsSegmenter* const segmenter = rig.registry.find(id);
+    REQUIRE(segmenter != nullptr);
+    // Registered under the session's id, not a receiver's.
+    const auto url = "/hls/" + std::to_string(id) + "/live.m3u8";
+    int announced = 0;
+    for (const auto& m : rig.socket.sent) {
+        announced += m.kind == Kind::Text && contains(m.text, R"("event":"hls")") &&
+                     contains(m.text, url);
+    }
+    CHECK(announced == 1);
+
+    // The active receiver says nothing; the voice receiver is heard alone for
+    // four seconds, which is enough for a playlist. The mix did not wait for
+    // the silent lead.
+    revenant::rpc::AudioChunk chunk;
+    chunk.sample_rate = 8000;
+    chunk.channel_count = 1;
+    double phase = 0.0;
+    for (int c = 0; c < 200; ++c) {
+        chunk.samples.assign(160, 0.0F);
+        for (float& s : chunk.samples) {
+            s = 0.1F * static_cast<float>(std::sin(phase));
+            phase += 2.0 * 3.14159265358979323846 * 1000.0 / 8000.0;
+        }
+        rig.streams->deliver_audio(voice, chunk);
+        rig.strand.run_pending();
+    }
+    CHECK_FALSE(segmenter->playlist().empty());
+
+    // The listener moves to the voice receiver: same segmenter, same URL, and
+    // a new hls event naming the receiver the phone is following.
+    rig.command(R"({"id":5,"op":"audio","args":{"vrx":)" + std::to_string(voice) + "}}");
+    CHECK(rig.registry.find(id) == segmenter);
+    int named_voice = 0;
+    for (const auto& m : rig.socket.sent) {
+        named_voice += m.kind == Kind::Text && contains(m.text, R"("event":"hls")") &&
+                       contains(m.text, R"("vrx":)" + std::to_string(voice)) &&
+                       contains(m.text, url);
+    }
+    CHECK(named_voice == 1);
 }
 
 TEST_CASE("a starting session sends the engine switches the desktop saved",

@@ -132,23 +132,6 @@ TEST_CASE("zero decibels below the threshold passes voice untouched", "[webgate]
     }
 }
 
-TEST_CASE("the limiter holds a hot input under full scale", "[webgate][voicegain]")
-{
-    VoiceGainStage stage;
-    // 0.5 at +30 dB is x15.8, nearly sixteen times full scale unlimited.
-    for (int chunk = 0; chunk < 10; ++chunk) {
-        const auto in = tone(960, 0.5, static_cast<std::size_t>(chunk) * 960);
-        const auto out = stage.process(30.0, in);
-        REQUIRE(out.size() == in.size());
-        for (const float s : out) {
-            REQUIRE(std::abs(s) <= static_cast<float>(ui::SoftLimiter::kThreshold) + 1e-6F);
-        }
-    }
-    // And it is still loud: the limiter turned the burst down, not off.
-    const auto last = stage.process(30.0, tone(960, 0.5, 9600));
-    CHECK(peak_of(last) > 0.5F);
-}
-
 TEST_CASE("a change in gain ramps over about 20 ms", "[webgate][voicegain]")
 {
     VoiceGainStage stage;

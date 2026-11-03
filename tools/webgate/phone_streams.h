@@ -59,6 +59,7 @@
 #include "tools/webgate/audio_rate.h"
 #include "tools/webgate/desktop_settings.h"
 #include "tools/webgate/hls_playlist.h"
+#include "tools/webgate/phone_mix.h"
 #include "tools/webgate/display_sync.h"
 #include "tools/webgate/session.h"
 #include "tools/webgate/spectrum_reducer.h"
@@ -126,7 +127,7 @@ private:
 };
 
 struct StreamsConfig {
-    // Where /hls/<vrx>/ finds this phone's segmenters. Null disables keep
+    // Where /hls/<id>/ finds this phone's segmenter. Null disables keep
     // listening (the reply still succeeds and no hls event is sent).
     HlsRegistry* hls = nullptr;
 
@@ -275,8 +276,15 @@ public:
     [[nodiscard]] StreamCounters counters() const { return counters_; }
     [[nodiscard]] std::uint32_t every_nth() const { return every_nth_; }
 
-    // The segmenter serving this vrx, null when there is none.
-    [[nodiscard]] HlsSegmenter* segmenter(std::uint64_t vrx) const;
+    // The segmenter behind /hls/<id>/, null when this session has none or the
+    // id is another's. One per session: it encodes the mix, whichever
+    // receiver the phone is listening to.
+    [[nodiscard]] HlsSegmenter* segmenter(std::uint64_t id) const;
+    // The id this session's segmenter is registered under, fixed for the life
+    // of the object. Not a receiver id.
+    [[nodiscard]] std::uint64_t hls_id() const { return hls_id_; }
+    // The receivers the mix has a stream for, for tests.
+    [[nodiscard]] std::set<std::uint64_t> audio_subscriptions() const { return audio_subscribed_; }
     // The decoders subscribed on a receiver right now, for tests.
     [[nodiscard]] std::set<std::string> decoding(std::uint64_t vrx) const;
 
@@ -286,17 +294,27 @@ private:
         std::unique_ptr<HlsSegmenter> segmenter;
         std::optional<std::chrono::steady_clock::time_point> ends_at;
     };
+    // One per receiver whose audio is subscribed. The resampler sits ahead of
+    // the mix, so every stream enters it at 48 kHz and a receiver re-created
+    // under a new id starts a fresh filter.
     struct AudioPath {
-        std::unique_ptr<LiveOpusEncoder> opus;
-        // Ahead of both encoders, so Opus and HLS hear one resampled stream
-        // and a receiver re-created under a new id starts a fresh filter.
         PhoneRateConverter rate;
-        // After the resample and ahead of both encoders, for decoded voice
-        // only: the desktop's boost and soft limiter.
-        VoiceGainStage voice;
-        std::uint32_t next_seq = 0;
         bool reported_error = false;
     };
+
+    // A receiver in the mix and whether its audio is decoded voice.
+    struct MixMember {
+        std::uint64_t vrx = 0;
+        bool digital_voice = false;
+    };
+
+    // WHO THE PHONE HEARS, in one place. The receiver it is listening to, and
+    // every digital voice receiver this session has while audio is on. A phone
+    // that may hear every receiver the engine has changes this function and
+    // nothing else: the mixer is told what it is given.
+    [[nodiscard]] std::vector<MixMember> mix_members() const;
+    // Mixed samples out to the Opus encoder and the HLS segmenter.
+    void emit_mix(std::span<const float> mixed, const std::function<void(const std::string&)>& report);
 
     // The callbacks' half: copy into the inbox and post one wake-up. Static
     // because a callback must not reach this object, only the inbox.
@@ -343,7 +361,7 @@ private:
     [[nodiscard]] Status subscribe_decoder(std::uint64_t vrx, const std::string& name);
     void handle_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk);
     void handle_vrx_event(const rpc::VrxEvent& event);
-    void drop_hls(std::uint64_t vrx);
+    void drop_hls();
     void subscribe_vrx_events();
 
     PhoneSession& session_;
@@ -410,8 +428,22 @@ private:
 
     std::set<std::uint64_t> audio_subscribed_;
     std::map<std::uint64_t, AudioPath> audio_;
-    std::map<std::uint64_t, Hls> hls_;
+    // The one segmenter, present while keep listening is on and for the linger
+    // after. Registered under hls_id_, which is unique per session so the
+    // playlist URL does not change when the active receiver does.
+    std::optional<Hls> hls_;
+    std::uint64_t hls_id_ = 0;
+    // The receiver named in the last hls event, so a move of the audio to
+    // another receiver is announced and a repeat is not.
     std::optional<std::uint64_t> announced_hls_;
+
+    // The sum of every mixed receiver, and the one Opus stream cut from it.
+    // The encoder and its sequence start again when the receiver the phone
+    // listens to changes, which is a new stream to the phone.
+    PhoneMixer mixer_;
+    std::unique_ptr<LiveOpusEncoder> mix_opus_;
+    std::uint32_t mix_opus_seq_ = 0;
+    std::optional<std::uint64_t> mix_opus_for_;
     // Per receiver: the decoder set last applied, and which of it the engine
     // took. A set is applied once; a refusal is reported and not retried
     // until the phone changes the set or the receiver is recreated.

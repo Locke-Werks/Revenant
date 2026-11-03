@@ -23,10 +23,10 @@ remove receivers, hear the audio and read the decoded text.**
   page from an origin that is not the gateway's own, so a web page open in
   another browser tab on the LAN cannot drive the radio. That limits browsers.
   It does not limit a script or another program, which sends no `Origin`.
-- Live audio is open too. The HLS streams under `/hls/<vrx>/` that carry
+- Live audio is open too. The HLS stream under `/hls/<id>/` that carries
   Keep listening audio can be fetched by any device on the LAN that can reach
   port 17700, without a WebSocket and without the phone's session, for as long
-  as the receiver exists. Treat everything a receiver hears as audible to the
+  as the session exists. Treat everything a receiver hears as audible to the
   whole network.
 - The certificate profile at `/ca` is served over plain HTTP on 17701, because
   the phone cannot trust HTTPS until it has it. Someone on the network could
@@ -216,10 +216,35 @@ The desktop deliberately does not AGC digital voice: it applies one fixed boost,
 `audio/voiceGainDb` (whole dB, 0 to 30, default 0), and a soft limiter on the
 sum (`ui/audio/voice_gain.h`, `ui/audio/mix_stages.h`). The gateway applies the
 same to the phone's audio for digital voice receivers (p25p1, dmr, dstar,
-tetra), after the 48 kHz resample and before both the Opus and HLS encoders,
+tetra), after the 48 kHz resample and before the mix that feeds both the Opus and HLS encoders,
 reading `HKCU\Software\Locke Werks\Revenant\audio` every two seconds. A change
 ramps linearly over 20 ms. Analogue receivers are untouched; the engine already
 levels them.
+
+### What the phone hears
+
+The phone hears one mixed stream, as the desktop does: the receiver it is
+listening to plus every digital voice receiver (p25p1, dmr, dstar, tetra) the
+session has, while audio is on. Each is resampled to 48 kHz, the digital voice
+ones are boosted by `audio/voiceGainDb`, they are summed, and the desktop's soft
+limiter holds the sum under -1 dBFS (`tools/webgate/phone_mix.h`, reusing
+`ui/audio/mix_stages.h`). Silence between calls is a voice stream that sends
+nothing, so the sound is the receiver being listened to. The same mix feeds
+live audio and Keep listening, so both play the same thing.
+
+- The gateway subscribes audio for each digital voice receiver while the phone
+  has audio on, and unsubscribes when the receiver is removed or audio is
+  turned off. Analogue receivers other than the one listened to are not mixed.
+  Which receivers are mixed is decided in one function,
+  `PhoneStreams::mix_members`.
+- Streams are aligned in 20 ms blocks paced by the receiver being listened to.
+  A stream that has nothing for a block is silent in it, and the mix does not
+  wait: if the receiver being listened to stalls, the voice streams carry on
+  after 60 ms. A voice stream more than 120 ms behind loses its oldest audio.
+- Live Opus packets are tagged with the receiver being listened to. Keep
+  listening has one playlist per session, `/hls/<id>/live.m3u8`; the `hls`
+  event gives the id, and the URL stays the same when the listener moves to
+  another receiver, so the player is not reloaded.
 
 ### Keep listening
 
@@ -411,7 +436,7 @@ bar are not sent.
 | `decoded` | `vrx`, `decoder`, `kind`, `text`, `sequence`, `fields` | per decoded message |
 | `transcript` | `vrx`, `sequence`, `text`, `centerHz`, `lowHz`, `highHz`, `mode`, `confidence`, `sourceStart`, `sourceEnd` | per transcribed transmission |
 | `transcriptionStatus` | the `setTranscription` reply | on connect, resume and change |
-| `hls` | `vrx`, `url`, or `url: null` and `error` | when Keep listening's stream starts or fails |
+| `hls` | `vrx` (the receiver being listened to), `stream` (the session's stream id), `url`; or `url: null` and `error` | when Keep listening's stream starts or fails, and when the listener moves to another receiver (the URL does not change) |
 | `ping` | none | every 15 seconds |
 
 `dataLowHz` and `dataHighHz` are the outer edges of the spectrum's first and

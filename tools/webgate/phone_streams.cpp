@@ -1,6 +1,7 @@
 #include "tools/webgate/phone_streams.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -240,6 +241,9 @@ PhoneStreams::PhoneStreams(PhoneSession& session, PhoneSocket* socket, Strand& s
 {
     inbox_->strand = &strand_;
     inbox_->owner = this;
+    // Process-wide, because the registry is shared by every phone.
+    static std::atomic<std::uint64_t> next_hls_id{1};
+    hls_id_ = next_hls_id.fetch_add(1);
 }
 
 PhoneStreams::~PhoneStreams()
@@ -264,10 +268,8 @@ PhoneStreams::~PhoneStreams()
     }
     client.unsubscribe_vrx_events();
     client.unsubscribe_transcripts();
-    if (config_.hls != nullptr) {
-        for (const auto& [vrx, hls] : hls_) {
-            config_.hls->remove(vrx);
-        }
+    if (config_.hls != nullptr && hls_) {
+        config_.hls->remove(hls_id_);
     }
 }
 
@@ -276,10 +278,9 @@ std::chrono::steady_clock::time_point PhoneStreams::now() const
     return config_.clock ? config_.clock() : std::chrono::steady_clock::now();
 }
 
-HlsSegmenter* PhoneStreams::segmenter(std::uint64_t vrx) const
+HlsSegmenter* PhoneStreams::segmenter(std::uint64_t id) const
 {
-    const auto it = hls_.find(vrx);
-    return it == hls_.end() ? nullptr : it->second.segmenter.get();
+    return hls_ && id == hls_id_ ? hls_->segmenter.get() : nullptr;
 }
 
 void PhoneStreams::deliver_spectrum(const rpc::SpectrumFrame& frame)
@@ -477,19 +478,8 @@ void PhoneStreams::tick()
     refresh_display();
     refresh_desktop();
 
-    bool dropped = false;
-    for (auto it = hls_.begin(); it != hls_.end();) {
-        if (it->second.ends_at && *it->second.ends_at <= t) {
-            if (config_.hls != nullptr) {
-                config_.hls->remove(it->first);
-            }
-            it = hls_.erase(it);
-            dropped = true;
-        } else {
-            ++it;
-        }
-    }
-    if (dropped) {
+    if (hls_ && hls_->ends_at && *hls_->ends_at <= t) {
+        drop_hls();
         reconcile_audio();
     }
 }
@@ -549,13 +539,11 @@ void PhoneStreams::announce_state()
     if (!sent_desktop_.empty()) {
         queue_text(sent_desktop_);
     }
-    if (announced_hls_) {
-        if (const auto it = hls_.find(*announced_hls_);
-            it != hls_.end() && it->second.segmenter && !it->second.ends_at) {
-            queue_text(event("hls", JsonObject()
-                                        .add_u64("vrx", *announced_hls_)
-                                        .add_string("url", hls_url(*announced_hls_))));
-        }
+    if (announced_hls_ && hls_ && hls_->segmenter && !hls_->ends_at) {
+        queue_text(event("hls", JsonObject()
+                                    .add_u64("vrx", *announced_hls_)
+                                    .add_u64("stream", hls_id_)
+                                    .add_string("url", hls_url(hls_id_))));
     }
 }
 
@@ -1002,16 +990,16 @@ void PhoneStreams::reconcile()
     reconcile_decoded();
 }
 
-void PhoneStreams::drop_hls(std::uint64_t vrx)
+void PhoneStreams::drop_hls()
 {
-    if (!hls_.contains(vrx)) {
+    if (!hls_) {
         return;
     }
     // Out of the registry first: it borrows the pointer.
     if (config_.hls != nullptr) {
-        config_.hls->remove(vrx);
+        config_.hls->remove(hls_id_);
     }
-    hls_.erase(vrx);
+    hls_.reset();
 }
 
 void PhoneStreams::reconcile_hls()
@@ -1022,21 +1010,15 @@ void PhoneStreams::reconcile_hls()
         target = session_.audio_vrx();
     }
 
-    std::vector<std::uint64_t> gone;
-    for (auto& [vrx, hls] : hls_) {
-        if (!session_.owns(vrx)) {
-            gone.push_back(vrx);
-        } else if (target == vrx) {
-            hls.ends_at.reset();
-        } else if (!hls.ends_at) {
-            hls.ends_at = now() + config_.hls_linger;
+    if (hls_) {
+        if (target) {
+            hls_->ends_at.reset();
+        } else if (!hls_->ends_at) {
+            hls_->ends_at = now() + config_.hls_linger;
         }
     }
-    for (const auto vrx : gone) {
-        drop_hls(vrx);
-    }
 
-    if (target && !hls_.contains(*target)) {
+    if (target && !hls_) {
         auto segmenter = std::make_unique<HlsSegmenter>(kPhoneAudioRate);
         if (!segmenter->ok()) {
             queue_text(event("hls", JsonObject()
@@ -1046,34 +1028,62 @@ void PhoneStreams::reconcile_hls()
             announced_hls_ = target;
             return;
         }
-        config_.hls->set(*target, segmenter.get());
-        hls_[*target].segmenter = std::move(segmenter);
+        config_.hls->set(hls_id_, segmenter.get());
+        hls_ = Hls{std::move(segmenter), std::nullopt};
     }
 
+    // Announced again when the audio moves to another receiver, though the URL
+    // is the same: the phone follows the receiver by this id.
     if (target != announced_hls_) {
         if (target) {
-            queue_text(event(
-                "hls", JsonObject().add_u64("vrx", *target).add_string("url", hls_url(*target))));
+            queue_text(event("hls", JsonObject()
+                                        .add_u64("vrx", *target)
+                                        .add_u64("stream", hls_id_)
+                                        .add_string("url", hls_url(hls_id_))));
         }
         announced_hls_ = target;
     }
 }
 
+std::vector<PhoneStreams::MixMember> PhoneStreams::mix_members() const
+{
+    std::vector<MixMember> members;
+    const auto active = session_.audio_vrx();
+    const bool listening = active && session_.owns(*active);
+    if (listening) {
+        const auto* params = session_.last_params(*active);
+        members.push_back({*active, params != nullptr && is_digital_voice(params->demod)});
+    }
+    // Digital voice receivers join only while audio is on: the active receiver
+    // is being heard, or keep listening still has its stream up.
+    if (listening || hls_) {
+        for (const auto vrx : session_.owned_ids()) {
+            if (listening && vrx == *active) {
+                continue;
+            }
+            const auto* params = session_.last_params(vrx);
+            if (params != nullptr && is_digital_voice(params->demod)) {
+                members.push_back({vrx, true});
+            }
+        }
+    }
+    return members;
+}
+
 void PhoneStreams::reconcile_audio()
 {
     std::set<std::uint64_t> wanted;
-    if (const auto vrx = session_.audio_vrx(); vrx && session_.owns(*vrx)) {
-        wanted.insert(*vrx);
+    for (const auto& member : mix_members()) {
+        wanted.insert(member.vrx);
     }
-    for (const auto& [vrx, hls] : hls_) {
-        wanted.insert(vrx);
-    }
+    mixer_.set_lead(session_.audio_vrx());
 
     auto& client = session_.client();
     for (auto it = audio_subscribed_.begin(); it != audio_subscribed_.end();) {
         if (!wanted.contains(*it)) {
             client.unsubscribe_audio(*it);
             audio_.erase(*it);
+            mixer_.remove(*it);
             it = audio_subscribed_.erase(it);
         } else {
             ++it;
@@ -1095,6 +1105,7 @@ void PhoneStreams::reconcile_audio()
                 put_item(inbox, [vrx](PhoneStreams& self) {
                     self.audio_subscribed_.erase(vrx);
                     self.audio_.erase(vrx);
+                    self.mixer_.remove(vrx);
                 });
             });
         if (granted) {
@@ -1257,24 +1268,46 @@ void PhoneStreams::handle_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk)
         mono = downmixed;
     }
     mono = path.rate.convert(chunk.sample_rate, mono);
-    if (const auto* params = session_.last_params(vrx);
-        params != nullptr && is_digital_voice(params->demod)) {
-        mono = path.voice.process(config_.voice_gain_db ? config_.voice_gain_db() : 0.0, mono);
-    }
 
-    if (session_.audio_vrx() == vrx && attached()) {
-        if (!path.opus) {
+    // Every receiver the phone hears goes into the one mix; what leaves it is
+    // what both encoders are fed. Digital voice is boosted on the way in by the
+    // desktop's setting, whichever receiver the phone is listening to.
+    const auto* params = session_.last_params(vrx);
+    const bool digital = params != nullptr && is_digital_voice(params->demod);
+    mixer_.set_lead(session_.audio_vrx());
+    mixer_.push(vrx, digital, digital && config_.voice_gain_db ? config_.voice_gain_db() : 0.0,
+                mono);
+    emit_mix(mixer_.take(), report);
+    pump();
+}
+
+void PhoneStreams::emit_mix(std::span<const float> mixed,
+                            const std::function<void(const std::string&)>& report)
+{
+    if (mixed.empty()) {
+        return;
+    }
+    const auto active = session_.audio_vrx();
+    if (active && attached()) {
+        // A different receiver is a different stream to the phone, which
+        // starts its sequence again (web/src/audio/live.ts).
+        if (mix_opus_for_ != active) {
+            mix_opus_.reset();
+            mix_opus_seq_ = 0;
+            mix_opus_for_ = active;
+        }
+        if (!mix_opus_) {
             auto created = LiveOpusEncoder::create(kPhoneAudioRate);
             if (!created) {
                 report(created.error().message);
             } else {
-                path.opus = std::move(*created);
+                mix_opus_ = std::move(*created);
             }
         }
-        if (path.opus) {
-            path.opus->push(mono);
-            for (const auto& packet : path.opus->take_packets()) {
-                opus_.push_back(encode_opus(vrx, path.next_seq++, packet));
+        if (mix_opus_) {
+            mix_opus_->push(mixed);
+            for (const auto& packet : mix_opus_->take_packets()) {
+                opus_.push_back(encode_opus(*active, mix_opus_seq_++, packet));
             }
             while (opus_.size() > config_.max_queued_opus) {
                 opus_.pop_front();
@@ -1282,11 +1315,9 @@ void PhoneStreams::handle_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk)
             }
         }
     }
-
-    if (const auto it = hls_.find(vrx); it != hls_.end()) {
-        it->second.segmenter->push(mono);
+    if (hls_ && hls_->segmenter) {
+        hls_->segmenter->push(mixed);
     }
-    pump();
 }
 
 void PhoneStreams::handle_vrx_event(const rpc::VrxEvent& e)
@@ -1296,7 +1327,6 @@ void PhoneStreams::handle_vrx_event(const rpc::VrxEvent& e)
     }
     known_owned_.erase(e.vrx);
     session_.forget(e.vrx);
-    drop_hls(e.vrx);
     queue_text(event("vrxRemoved",
                      JsonObject().add_u64("vrx", e.vrx).add_string("reason", e.reason)));
     reconcile();

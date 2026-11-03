@@ -144,8 +144,8 @@ struct HttpServer::Impl final : kj::TaskSet::ErrorHandler {
         }
 
     private:
-        // `rest` is what follows "/hls/": "<vrx>/live.m3u8", "<vrx>/init.mp4"
-        // or "<vrx>/<seq>.m4s". The numbers are parsed strictly so nothing
+        // `rest` is what follows "/hls/": "<id>/live.m3u8", "<id>/init.mp4"
+        // or "<id>/<seq>.m4s", the id a session's segmenter is registered under. The numbers are parsed strictly so nothing
         // else, a "..", a sign, a stray suffix, reaches the lookup.
         kj::Promise<void> serve_hls(std::string_view rest, Response& response) {
             const auto not_found = [&] {
