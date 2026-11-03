@@ -100,6 +100,68 @@ TEST_CASE("values are read by the desktop's restore rules", "[webgate][desktop]"
     CHECK_FALSE(bad.detection_threshold_db.has_value());
 }
 
+TEST_CASE("the radio's remembered state is laid over the opened URI", "[webgate][desktop]")
+{
+    // The cases of ui/tests/test_radio_memory.cpp "the reopen URI carries what
+    // the radio was left at", through the registry keys the desktop writes.
+    Values v{
+        {"engine/lastSource", "rtlsdr://0?rate=2400000&freq=98100000&gain=20.7"},
+        {"source/lastRadio", "rtlsdr:00000001"},
+        {"source/radios/rtlsdr:00000001/centreHz", "7100000"},
+        {"source/radios/rtlsdr:00000001/sampleRate", "1024000"},
+        {"source/radios/rtlsdr:00000001/gain", "auto"},
+        {"source/radios/rtlsdr:00000001/directSampling", "q"},
+    };
+    CHECK(read_desktop_settings(reader_of(v)).last_source ==
+          "rtlsdr://0?direct=q&freq=7100000&rate=1024000&gain=auto");
+
+    // A gain the owner changed after opening is the one the phone opens with.
+    v = {
+        {"engine/lastSource", "rtlsdr://0?rate=2400000&freq=98100000&gain=auto"},
+        {"source/lastRadio", "rtlsdr:00000001"},
+        {"source/radios/rtlsdr:00000001/gain", "33.8"},
+    };
+    CHECK(read_desktop_settings(reader_of(v)).last_source ==
+          "rtlsdr://0?rate=2400000&freq=98100000&gain=33.8");
+
+    // Direct "off" takes direct= away; junk and zero read as nothing kept.
+    v = {
+        {"engine/lastSource", "rtlsdr://0?freq=7100000&direct=q"},
+        {"source/lastRadio", "rtlsdr:00000001"},
+        {"source/radios/rtlsdr:00000001/directSampling", "off"},
+        {"source/radios/rtlsdr:00000001/sampleRate", "0"},
+        {"source/radios/rtlsdr:00000001/gain", "loud"},
+    };
+    CHECK(read_desktop_settings(reader_of(v)).last_source == "rtlsdr://0?freq=7100000");
+
+    // No lastRadio: the desktop cannot say whose memory it is either, and the
+    // URI stays as opened.
+    v = {
+        {"engine/lastSource", "rtlsdr://0?rate=2400000&freq=98100000"},
+        {"source/radios/rtlsdr:00000001/sampleRate", "1024000"},
+    };
+    CHECK(read_desktop_settings(reader_of(v)).last_source ==
+          "rtlsdr://0?rate=2400000&freq=98100000");
+
+    // A backend with no tuner never gains a freq=.
+    v = {
+        {"engine/lastSource", "synthetic://two-tones?rate=48000"},
+        {"source/lastRadio", "synthetic:x"},
+        {"source/radios/synthetic:x/centreHz", "7100000"},
+    };
+    CHECK(read_desktop_settings(reader_of(v)).last_source == "synthetic://two-tones?rate=48000");
+
+    // The radio id is narrowed the way the desktop writes it, so a path
+    // separator in the registry text cannot reach another key.
+    v = {
+        {"engine/lastSource", "rtlsdr://0?freq=1"},
+        {"source/lastRadio", "a/../b"},
+        {"source/radios/a_.._b/sampleRate", "1024000"},
+        {"source/radios/a/../b/sampleRate", "9"},
+    };
+    CHECK(read_desktop_settings(reader_of(v)).last_source == "rtlsdr://0?freq=1&rate=1024000");
+}
+
 TEST_CASE("a source URI splits into backend, device and parameters", "[webgate][desktop]")
 {
     const auto p = parse_source_uri(

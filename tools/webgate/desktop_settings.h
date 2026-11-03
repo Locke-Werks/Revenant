@@ -9,7 +9,11 @@
 // ui/models/settings.h:
 //
 //   engine/lastSource         the URI the desktop last opened, front end
-//                             parameters included
+//                             parameters included, with what that radio was
+//                             left at laid over it by the desktop's own
+//                             restore_radio_uri: source/lastRadio names the
+//                             radio and source/radios/<radio>/{sampleRate,
+//                             centreHz,gain,directSampling} are the values
 //   radio/impulseExcision     engine-wide, on or off
 //   radio/combCancel          engine-wide, on or off
 //   radio/spurCancel          engine-wide, on or off

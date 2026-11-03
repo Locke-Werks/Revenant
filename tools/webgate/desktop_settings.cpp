@@ -7,7 +7,9 @@
 #include <map>
 #include <memory>
 
+#include "models/detector_scope.h"
 #include "models/detector_settings.h"
+#include "models/radio_memory.h"
 #include "tools/webgate/protocol.h"
 
 namespace revenant::webgate {
@@ -45,6 +47,60 @@ namespace {
 // figure (web/src/ui/signals.ts CONFIDENCE_MAX).
 constexpr double kConfidenceTop = 0.99;
 
+[[nodiscard]] std::optional<std::int64_t> parse_int(std::string_view text)
+{
+    std::int64_t value = 0;
+    const char* end = text.data() + text.size();
+    const auto [at, error] = std::from_chars(text.data(), end, value);
+    if (error != std::errc{} || at != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+// engine/lastSource holds the radio as it was OPENED. What the radio was left
+// at (rate, centre, gain, direct sampling) is kept per radio beside it, and
+// the desktop lays that over the URI when it reopens: EngineLink::
+// restored_last_source, which calls restore_radio_uri. This is the same call
+// over the same keys, so a gain the owner changed after opening is the gain the
+// phone opens with. source/lastRadio says which radio the URI was.
+[[nodiscard]] std::string restore_from_radio_memory(const DesktopValueReader& read,
+                                                    std::string uri)
+{
+    const auto last = read("source", "lastRadio");
+    if (!last || last->empty()) {
+        return uri;
+    }
+    // The registry is the owner's, but a path built from its text is
+    // narrowed to what the desktop writes in the first place.
+    const std::string radio = ui::radio_settings_id(*last);
+    const std::string group = "source/radios/" + radio;
+
+    ui::RadioMemory memory;
+    if (const auto text = read(group, ui::kRadioCentreLeaf)) {
+        if (const auto value = parse_int(*text)) {
+            memory.centre_hz = ui::read_positive_setting(*value);
+        }
+    }
+    if (const auto text = read(group, ui::kRadioRateLeaf)) {
+        if (const auto value = parse_int(*text)) {
+            memory.rate = ui::read_positive_setting(*value);
+        }
+    }
+    if (const auto text = read(group, ui::kRadioGainLeaf)) {
+        ui::read_gain_setting(*text, memory);
+    }
+    std::optional<std::string> direct;
+    if (const auto text = read(group, "directSampling")) {
+        direct = ui::direct_sampling_choice(*text);
+    }
+    std::optional<std::string_view> direct_view;
+    if (direct) {
+        direct_view = *direct;
+    }
+    return ui::restore_radio_uri(uri, memory, direct_view);
+}
+
 }  // namespace
 
 DesktopSettings read_desktop_settings(const DesktopValueReader& read)
@@ -62,7 +118,7 @@ DesktopSettings read_desktop_settings(const DesktopValueReader& read)
         return text ? parse_double(*text) : std::nullopt;
     };
     if (auto uri = read("engine", "lastSource"); uri && !uri->empty()) {
-        s.last_source = std::move(*uri);
+        s.last_source = restore_from_radio_memory(read, std::move(*uri));
     }
     s.impulse_excision = bool_of("radio", "impulseExcision");
     s.comb_cancel = bool_of("radio", "combCancel");
@@ -78,13 +134,17 @@ DesktopSettings read_desktop_settings(const DesktopValueReader& read)
 
 DesktopValueReader registry_desktop_reader()
 {
-    auto readers = std::make_shared<std::map<std::string, DisplayValueReader, std::less<>>>();
-    for (const char* group : {"engine", "radio", "speech", "detections"}) {
-        readers->emplace(group, registry_key_reader(group));
-    }
-    return [readers](std::string_view group, std::string_view name) -> std::optional<std::string> {
-        const auto it = readers->find(group);
-        return it == readers->end() ? std::nullopt : it->second(name);
+    return [](std::string_view group, std::string_view name) -> std::optional<std::string> {
+        // QSettings' "source/radios/<id>" is the registry key source\radios\<id>.
+        // Only the groups the desktop writes under are read.
+        const std::string_view top = group.substr(0, group.find('/'));
+        if (top != "engine" && top != "radio" && top != "speech" && top != "detections" &&
+            top != "source") {
+            return std::nullopt;
+        }
+        std::string key(group);
+        std::replace(key.begin(), key.end(), '/', '\\');
+        return registry_key_reader(key)(name);
     };
 }
 
