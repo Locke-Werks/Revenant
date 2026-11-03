@@ -66,6 +66,7 @@ export const EVENTS = [
   "vrxEventsEnded",
   "detections",
   "display",
+  "desktop",
   "rds",
 ] as const;
 export type EventName = (typeof EVENTS)[number];

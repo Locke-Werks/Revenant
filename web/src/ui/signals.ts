@@ -296,6 +296,12 @@ export class SignalsPanel {
     return readConfidence(this.slider.value);
   }
 
+  // Moves the slider without counting as the user's choice: nothing is saved.
+  setValue(v: number): void {
+    this.slider.value = String(readConfidence(String(v)));
+    this.out.textContent = this.value().toFixed(2);
+  }
+
   update(d: Detection[]): void {
     this.latest = d;
     if (this.visible) this.render();

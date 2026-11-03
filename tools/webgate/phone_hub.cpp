@@ -122,6 +122,13 @@ std::uint64_t PhoneHub::connect(PhoneSocket& socket, std::unique_ptr<rpc::Client
     auto resident = std::make_unique<Resident>();
     resident->token = new_token();
     resident->session = std::make_unique<PhoneSession>(std::move(client));
+    // The detection bar starts where the desktop's is. A phone that has moved
+    // its slider sends its own on connecting, which replaces this.
+    if (base_.desktop_settings) {
+        if (const auto bar = base_.desktop_settings().confidence_bar) {
+            resident->session->set_min_confidence(*bar);
+        }
+    }
     resident->streams =
         std::make_unique<PhoneStreams>(*resident->session, &socket, strand_, base_);
 

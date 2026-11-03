@@ -141,7 +141,9 @@ namespace {
     // One reader for every phone: they all follow the same desktop.
     auto display = std::make_shared<DisplaySettingsSource>(registry_display_reader());
     config.display_settings = [display] { return display->current(); };
-    auto voice_gain = std::make_shared<VoiceGainSource>(registry_audio_reader());
+    auto desktop = std::make_shared<DesktopSettingsSource>(registry_desktop_reader());
+    config.desktop_settings = [desktop] { return desktop->current(); };
+    auto voice_gain =std::make_shared<VoiceGainSource>(registry_audio_reader());
     config.voice_gain_db = [voice_gain] { return voice_gain->current(); };
     return config;
 }

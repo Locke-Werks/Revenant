@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -84,7 +85,8 @@ struct HubRig {
     Clock::time_point fake_now = Clock::now();
     std::unique_ptr<PhoneHub> hub;
 
-    explicit HubRig(revenant::webgate::HubTiming timing = {})
+    explicit HubRig(revenant::webgate::HubTiming timing = {},
+                    std::function<revenant::webgate::DesktopSettings()> desktop = {})
     {
         revenant::test::HarnessOptions options;
         options.center_hz = 100'000'000;
@@ -94,6 +96,7 @@ struct HubRig {
         StreamsConfig config;
         config.hls = &registry;
         config.clock = [this] { return fake_now; };
+        config.desktop_settings = std::move(desktop);
         hub = std::make_unique<PhoneHub>(strand, config, timing);
         // What the Gateway wires: the HTTP side reports every HLS request.
         registry.on_fetch = [this](std::uint64_t vrx) { hub->hls_fetched(vrx); };
@@ -164,6 +167,31 @@ TEST_CASE("hello carries a resume token", "[gpu][webgate][hub]")
     CHECK(token.size() == 32);
     CHECK(contains(socket.sent.front().text,
                    R"({"event":"hello","resume":")" + token + "\"}"));
+}
+
+TEST_CASE("a new phone's detection bar starts at the desktop's", "[gpu][webgate][hub][desktop]")
+{
+    REVENANT_NEEDS_GPU();
+    {
+        HubRig rig({}, [] {
+            revenant::webgate::DesktopSettings s;
+            s.confidence_bar = 0.91;
+            return s;
+        });
+        FakeSocket socket;
+        const auto id = rig.connect(socket);
+        CHECK(rig.hub->session(id)->min_confidence() == 0.91);
+        // The phone's own slider replaces it, as it does on every connect.
+        rig.text(id, R"({"id":1,"op":"setDetection","args":{"minConfidence":0.3}})");
+        CHECK(rig.hub->session(id)->min_confidence() == 0.3);
+    }
+    {
+        // A desktop that never set the bar leaves the phone at zero.
+        HubRig rig;
+        FakeSocket socket;
+        const auto id = rig.connect(socket);
+        CHECK(rig.hub->session(id)->min_confidence() == 0.0);
+    }
 }
 
 TEST_CASE("keep listening outlives a dropped socket while HLS is fetched",

@@ -10,6 +10,7 @@ import { attachGestures } from "./gestures";
 import { TuneLimiter } from "./tune_limiter";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
 import { parseDisplay } from "./display";
+import { NO_DESKTOP, parseDesktop, type DesktopState } from "./desktop";
 import { DEFAULT_ACCENT, DETECTION_COLOR, detectionBoxes, passbandHz } from "./markers";
 import { drawReceivers, type ReceiverMark } from "./overlay";
 import { RdsModel } from "./rds";
@@ -305,7 +306,9 @@ export function mountApp(root: HTMLElement): AppHandle {
     },
   });
   root.querySelector("#sheet-slot")!.append(sheet.el);
-  const radio = new RadioPanel({ link: gate, toast });
+  // What the desktop has saved, from the gateway's "desktop" event.
+  let desktop: DesktopState = NO_DESKTOP;
+  const radio = new RadioPanel({ link: gate, toast, desktopRadio: () => desktop.radio });
   sheet.radioHost.append(radio.el);
 
   // ---- Signals tab ---------------------------------------------------------
@@ -341,6 +344,16 @@ export function mountApp(root: HTMLElement): AppHandle {
     clock: () => (newestIndex !== null && band ? { index: newestIndex, rateHz: band.rateHz } : null),
   });
   sheet.signalsHost.append(signals.el);
+  // The bar starts where the desktop's is, and stays the phone's once the user
+  // has moved the slider (saveConfidence wrote it).
+  link.on("desktop", (e) => {
+    desktop = parseDesktop(e);
+    const bar = desktop.confidenceBar;
+    if (bar !== null && prefs.getItem(CONFIDENCE_KEY) === null) {
+      signals.setValue(bar);
+      sendConfidence(signals.value());
+    }
+  });
   sheet.onTab((tab) => {
     sheetTab = tab;
     signals.setVisible(tab === "signals");

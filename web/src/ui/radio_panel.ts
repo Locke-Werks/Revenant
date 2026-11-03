@@ -5,6 +5,7 @@ import type { JsonValue, SourceEvent } from "../protocol";
 import type { GateLink } from "./receivers";
 import { formatMHz, readFrequency } from "./receivers";
 import type { TuneRange } from "../band_edge";
+import { desktopOpenUri, reaches, type DesktopRadio } from "../desktop";
 
 // Opening a device or enumerating them waits on USB and driver start-up,
 // which can run well past an ordinary request's 10 s.
@@ -24,6 +25,7 @@ interface SourceEntry {
   uri: string;
   backend: string;
   name: string;
+  serial?: string;
   available: boolean;
   unavailable?: string;
   tuneRanges: TuneRange[];
@@ -65,6 +67,25 @@ export function openUri(s: OpenFields, centreHz: number | null): string {
   return s.uri + (s.uri.includes("?") ? "&" : "?") + params.join("&");
 }
 
+// The centre openUri picks when nothing better is known.
+function defaultCentre(ranges: TuneRange[], centreHz: number | null): number {
+  if (centreHz !== null && reaches(ranges, centreHz)) return centreHz;
+  if (reaches(ranges, DEFAULT_CENTRE_HZ)) return DEFAULT_CENTRE_HZ;
+  const first = ranges[0]!;
+  return Math.min(Math.max(DEFAULT_CENTRE_HZ, first.lowHz), first.highHz);
+}
+
+// The desktop's front end for the radio it last opened, the phone's own
+// composition for any other. The owner's decision of 2026-11-03: gain, rate,
+// bandwidth and the rest are the desktop's saved ones, not a phone default.
+export function openUriFollowingDesktop(
+  s: OpenFields & { serial?: string },
+  desktop: DesktopRadio | null,
+  centreHz: number | null,
+): string {
+  return desktopOpenUri(s, desktop, centreHz, defaultCentre) ?? openUri(s, centreHz);
+}
+
 function entries(v: JsonValue): SourceEntry[] {
   const list = (v as { sources?: unknown } | null)?.sources;
   return Array.isArray(list) ? (list as unknown as SourceEntry[]) : [];
@@ -91,6 +112,9 @@ export function setCenter(deps: RadioPanelDeps, hz: number): Promise<boolean> {
 export interface RadioPanelDeps {
   link: GateLink;
   toast(text: string): void;
+  // The radio the desktop last opened, when the gateway has said. Opening a
+  // radio on that device uses its front end parameters.
+  desktopRadio?(): DesktopRadio | null;
 }
 
 export class RadioPanel {
@@ -209,7 +233,7 @@ export class RadioPanel {
 
   private open(s: SourceEntry): void {
     this.status.textContent = `Opening ${s.name || s.uri}...`;
-    const uri = openUri(s, this.lastCentreHz);
+    const uri = openUriFollowingDesktop(s, this.deps.desktopRadio?.() ?? null, this.lastCentreHz);
     this.deps.link.request("openSource", { uri }, { timeoutMs: OPEN_SOURCE_TIMEOUT_MS }).then(
       (r) => {
         const opened = (r as { source?: unknown } | null)?.source;

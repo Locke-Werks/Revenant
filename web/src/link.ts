@@ -83,6 +83,7 @@ export interface LinkEvents {
   vrxEventsEnded: GatewayEvent;
   detections: GatewayEvent;
   display: GatewayEvent;
+  desktop: GatewayEvent;
   rds: GatewayEvent;
 }
 export type LinkEventName = keyof LinkEvents;

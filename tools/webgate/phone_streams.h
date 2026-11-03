@@ -57,6 +57,7 @@
 #include "core/rpc/types.h"
 #include "tools/webgate/audio_opus.h"
 #include "tools/webgate/audio_rate.h"
+#include "tools/webgate/desktop_settings.h"
 #include "tools/webgate/hls_playlist.h"
 #include "tools/webgate/display_sync.h"
 #include "tools/webgate/session.h"
@@ -184,6 +185,11 @@ struct StreamsConfig {
     // The desktop's digital voice boost in whole decibels, read per audio
     // chunk. Empty is zero, which leaves decoded voice at the engine's level.
     std::function<double()> voice_gain_db;
+
+    // What the desktop has saved, read on every tick; see desktop_settings.h.
+    // Empty is nothing saved: no engine switch is sent and the phone is told
+    // nothing about the desktop.
+    std::function<DesktopSettings()> desktop_settings;
 
     // Shared by every phone the hub makes, so the whole-frame half of the
     // zoomed view offsets is measured once a frame and not once a phone. Null
@@ -321,6 +327,11 @@ private:
     // colours they give are not the ones last sent.
     void refresh_display();
     void send_display_if_changed();
+    // The desktop event, sent when what it would say has changed.
+    void refresh_desktop();
+    // The engine-wide switches the desktop has written, sent the way the
+    // desktop sends them on each connection. Once per session start.
+    void apply_desktop_switches();
     [[nodiscard]] std::string source_event() const;
     void subscribe_spectrum(std::uint32_t every_nth);
     void settle_every_nth(const rpc::SpectrumFrame& frame);
@@ -417,6 +428,7 @@ private:
     // last sent. The view is the one the last row was cut for.
     PhoneDisplay display_;
     std::string sent_display_;
+    std::string sent_desktop_;
     std::optional<View> display_view_;
     // A row's working columns, kept so a row allocates none of them.
     std::vector<float> shown_columns_;

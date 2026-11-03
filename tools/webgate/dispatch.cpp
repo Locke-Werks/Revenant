@@ -192,6 +192,7 @@ constexpr ModeName kModes[] = {
     out.add_string("uri", source.uri)
         .add_string("backend", source.backend)
         .add_string("name", source.display_name)
+        .add_string("serial", source.serial)
         .add_bool("available", source.available());
     if (!source.available()) {
         out.add_string("unavailable", source.unavailable);

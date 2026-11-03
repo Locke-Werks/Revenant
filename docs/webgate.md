@@ -172,6 +172,55 @@ desktop settings stored the phone draws the desktop's defaults. A desktop
 client running on another PC is not followed; only the one on the machine
 running the gateway is.
 
+### Everything else the phone takes from the desktop
+
+The same registry, other groups, read by `tools/webgate/desktop_settings.h`
+with the key names of `ui/models/settings.h`. A key the desktop has never
+written is absent and nothing is sent for it.
+
+- **Radio front end.** `engine/lastSource` is the URI the desktop last opened,
+  for example `rtlsdr://0?agc=1&bw=3000000&direct=auto&freq=903536000&rate=3200000&gain=auto`.
+  The gateway sends it parsed in a `desktop` event (below). When the phone
+  opens a radio on that same device (same backend, and the same index as the
+  listed URI or the same serial) it opens it with every parameter the desktop
+  carries, in the desktop's order: rate, bw, gain, agc, direct, ppm, bias,
+  whatever is there. Only `freq` is the phone's: its last centre when the
+  tuner reaches it, else the desktop's `freq`. A radio with no tune range never
+  gets `freq`. Any other device is opened with the phone's own composition
+  (2.4 MS/s and a centre). The composition is `web/src/desktop.ts`, a port of
+  `with_query_value` from `ui/models/source_choice.h` and the overlay rules of
+  `restore_radio_uri` in `ui/models/radio_memory.h`. Calibration is not part of
+  this: the engine loads `%LOCALAPPDATA%\Revenant\calibration.txt` for every
+  client.
+- **Engine-wide switches.** `radio/impulseExcision`, `radio/combCancel`,
+  `radio/spurCancel`, `detections/thresholdDb` and `speech/transcribe` are sent
+  to the engine when a phone's session starts and again after an engine
+  restart (which builds a new session), the way the desktop sends them on every
+  connection. The threshold is refused rather than clamped when outside
+  -60 to 120 dB, as the desktop does.
+- **Detection confidence bar.** A new phone session starts at
+  `detections/confidenceBar`, and the phone's slider follows it until the phone's
+  user moves the slider, after which the phone's stored value wins.
+- **Digital voice level.** See "Digital voice level" below.
+
+The registry is re-read every two seconds. The `desktop` event is
+`{"event":"desktop","confidenceBar":0.91,"radio":{"uri":...,"backend":"rtlsdr",
+"device":"0","params":{"agc":"1",...}}}`, either field absent when the desktop
+has not saved it, sent on connect, on resume and when the values change.
+`listSources` entries also carry `serial` now, which the phone uses to match a
+device.
+
+### Digital voice level
+
+The desktop deliberately does not AGC digital voice: it applies one fixed boost,
+`audio/voiceGainDb` (whole dB, 0 to 30, default 0), and a soft limiter on the
+sum (`ui/audio/voice_gain.h`, `ui/audio/mix_stages.h`). The gateway applies the
+same to the phone's audio for digital voice receivers (p25p1, dmr, dstar,
+tetra), after the 48 kHz resample and before both the Opus and HLS encoders,
+reading `HKCU\Software\Locke Werks\Revenant\audio` every two seconds. A change
+ramps linearly over 20 ms. Analogue receivers are untouched; the engine already
+levels them.
+
 ### Keep listening
 
 Live audio plays through the page and stops when iOS suspends it. Keep
@@ -353,6 +402,7 @@ bar are not sent.
 | `link` | `state`, `detail`; after a restart `recreated`, `lost` | on connect and when the engine link changes |
 | `source` | `open`; open: `rateHz`, `centerHz`, `epoch`, `realtimeFactor`, `pacedBy`; with the spectrum on, `dataLowHz`, `dataHighHz` | when the stream, centre or pace changes |
 | `display` | `waterfall`, `spectrum`, `trace`, `background` | on connect, on resume, when the desktop's settings change |
+| `desktop` | `confidenceBar`, `radio`: `{uri, backend, device, params}`; each absent when the desktop has not saved it | on connect, on resume, when the desktop's settings change |
 | `detections` | `items`: `{id, centerHz, bandwidthHz, snrDb, confidence, state, label, labelKind, labelConfidence, lastSeen}` | every 500 ms while a view is set |
 | `rds` | `vrx`, `pi`, `callSign`, `ps`, `rt`, `pty`; `tp`, `ta`, `music` when stated | when a WFM receiver's station changes, and on resume |
 | `vrxStatus` | `vrx` and `audioError`, or `decoder` and `decoderError` | when audio or a decoder fails |

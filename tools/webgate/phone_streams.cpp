@@ -325,9 +325,49 @@ void PhoneStreams::start()
     // sees a transcript, which is what that engine means.
     static_cast<void>(transcripts);
 
+    apply_desktop_switches();
     refresh_source();
     refresh_transcription();
     refresh_display();
+    refresh_desktop();
+}
+
+void PhoneStreams::apply_desktop_switches()
+{
+    if (!config_.desktop_settings) {
+        return;
+    }
+    const DesktopSettings saved = config_.desktop_settings();
+    auto& client = session_.client();
+    // A refusal comes from an engine older than the call, which has nothing to
+    // switch; the desktop discards it the same way.
+    if (saved.detection_threshold_db) {
+        static_cast<void>(client.set_detection_threshold(*saved.detection_threshold_db));
+    }
+    if (saved.impulse_excision) {
+        static_cast<void>(client.set_impulse_excision(*saved.impulse_excision));
+    }
+    if (saved.comb_cancel) {
+        static_cast<void>(client.set_comb_cancel(*saved.comb_cancel));
+    }
+    if (saved.spur_cancel) {
+        static_cast<void>(client.set_spur_cancel(*saved.spur_cancel));
+    }
+    if (saved.transcribe) {
+        static_cast<void>(client.set_transcription(*saved.transcribe));
+    }
+}
+
+void PhoneStreams::refresh_desktop()
+{
+    if (!config_.desktop_settings) {
+        return;
+    }
+    std::string now = desktop_event(config_.desktop_settings());
+    if (now != sent_desktop_) {
+        sent_desktop_ = now;
+        queue_text(std::move(now));
+    }
 }
 
 void PhoneStreams::refresh_display()
@@ -435,6 +475,7 @@ void PhoneStreams::tick()
     // The settings source re-reads the registry on its own interval, so this
     // is a comparison on most ticks.
     refresh_display();
+    refresh_desktop();
 
     bool dropped = false;
     for (auto it = hls_.begin(); it != hls_.end();) {
@@ -505,6 +546,9 @@ void PhoneStreams::announce_state()
     }
     sent_display_ = display_.event();
     queue_text(sent_display_);
+    if (!sent_desktop_.empty()) {
+        queue_text(sent_desktop_);
+    }
     if (announced_hls_) {
         if (const auto it = hls_.find(*announced_hls_);
             it != hls_.end() && it->second.segmenter && !it->second.ends_at) {

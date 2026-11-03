@@ -70,6 +70,8 @@ struct Rig {
     std::function<revenant::ui::DisplaySettings()> display;
     // Stands in for the desktop's audio/voiceGainDb when set.
     std::function<double()> voice_gain_db;
+    // Stands in for the rest of the desktop's saved state when set.
+    std::function<revenant::webgate::DesktopSettings()> desktop;
     std::unique_ptr<PhoneSession> session;
     std::unique_ptr<PhoneStreams> streams;
 
@@ -96,6 +98,7 @@ struct Rig {
         config.detections = detections;
         config.display_settings = display;
         config.voice_gain_db = voice_gain_db;
+        config.desktop_settings = desktop;
         streams =std::make_unique<PhoneStreams>(*session, &socket, strand, config);
         streams->start();
         strand.run_pending();
@@ -798,6 +801,58 @@ TEST_CASE("digital voice reaches the phone boosted and analogue does not",
     CHECK(voice / voice_flat == Catch::Approx(7.943).epsilon(0.05));
     // An analogue receiver ignores the setting entirely.
     CHECK(analogue / analogue_flat == Catch::Approx(1.0).epsilon(0.02));
+}
+
+TEST_CASE("a starting session sends the engine switches the desktop saved",
+          "[gpu][webgate][streams][desktop]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.desktop = [] {
+        revenant::webgate::DesktopSettings s;
+        s.detection_threshold_db = 11.0;
+        s.comb_cancel = false;
+        s.impulse_excision = false;
+        s.confidence_bar = 0.91;
+        s.last_source = "rtlsdr://0?gain=auto&freq=903536000";
+        return s;
+    };
+    // The detector needs a spectrum stage to exist before it takes a threshold.
+    auto options = still_engine();
+    options.spectrum_transform = 4096;
+    rig.open(options);
+    rig.attach();
+
+    auto& client = rig.session->client();
+    const auto stats = client.source_stats();
+    REQUIRE(stats.has_value());
+    CHECK_FALSE(stats->comb_cancel);
+    CHECK_FALSE(stats->impulse_excision);
+    const auto listed = client.detections(0.0, 0.0);
+    REQUIRE(listed.has_value());
+    CHECK(listed->detection_threshold_db == 11.0);
+
+    bool told = false;
+    for (const auto& m : rig.socket.sent) {
+        told = told || (m.kind == Kind::Text && contains(m.text, R"("event":"desktop")") &&
+                        contains(m.text, R"("confidenceBar":0.91)") &&
+                        contains(m.text, R"("gain":"auto")"));
+    }
+    CHECK(told);
+}
+
+TEST_CASE("a switch the desktop never saved is left alone", "[gpu][webgate][streams][desktop]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.desktop = [] { return revenant::webgate::DesktopSettings{}; };
+    rig.open(still_engine());
+    rig.attach();
+    // The engine's own defaults: both stages on.
+    const auto stats = rig.session->client().source_stats();
+    REQUIRE(stats.has_value());
+    CHECK(stats->comb_cancel);
+    CHECK(stats->impulse_excision);
 }
 
 TEST_CASE("a receiver removed elsewhere is reported to its phone", "[gpu][webgate][streams]")
