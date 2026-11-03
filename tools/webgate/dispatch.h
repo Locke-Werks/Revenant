@@ -47,6 +47,9 @@
 
 namespace revenant::webgate {
 
+// A mode's wire name: "nfm", "cw", "p25p1" and so on.
+[[nodiscard]] std::string_view demod_name(rpc::Demod demod);
+
 // The "vrx" event: one receiver the engine has, whoever opened it, with the
 // fields of the addVrx result plus "openedBy" ("this phone", "another
 // client", the plugin's name, or "the engine"). Sent for every receiver when

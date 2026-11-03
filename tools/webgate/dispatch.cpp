@@ -863,6 +863,11 @@ std::optional<std::vector<std::string>> voice_modes(const rpc::VocoderPlugins& p
     return voice;
 }
 
+std::string_view demod_name(rpc::Demod demod)
+{
+    return mode_name(demod);
+}
+
 std::string receiver_event(const rpc::VrxStatus& status, std::int64_t center,
                            const std::vector<std::string>& decoders, std::string_view opened_by)
 {

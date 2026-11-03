@@ -199,6 +199,32 @@ TEST_CASE("an analog receiver decodes nothing and a digital voice one its own mo
     CHECK(streams->decoding(dv) == Names{"p25p1"});
 }
 
+TEST_CASE("every receiver defaults to the decoder named after its mode", "[gpu][webgate][decoders]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    FakeSocket socket;
+    const auto id = rig.connect(socket);
+
+    const auto cw = rig.add(id, socket, kCenter + 100'000, "cw");
+    const auto nfm = rig.add(id, socket, kCenter + 200'000, "nfm");
+    auto* session = rig.hub->session(id);
+    auto* streams = rig.hub->streams(id);
+    REQUIRE(session != nullptr);
+    REQUIRE(streams != nullptr);
+
+    // The engine has a cw decoder and no nfm one.
+    CHECK(session->decoders(cw) == std::vector<std::string>{"cw"});
+    CHECK(streams->decoding(cw) == Names{"cw"});
+    CHECK(session->decoders(nfm).empty());
+    CHECK(streams->decoding(nfm).empty());
+
+    // An explicit choice still wins over the default.
+    CHECK(contains(rig.set(id, socket, cw, "[]"), R"("ok":true)"));
+    CHECK(session->decoders(cw).empty());
+    CHECK(streams->decoding(cw).empty());
+}
+
 TEST_CASE("setDecoders replaces a receiver's set and refuses what its mode cannot feed",
           "[gpu][webgate][decoders]")
 {

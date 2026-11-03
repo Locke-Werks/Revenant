@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "tools/webgate/dispatch.h"
+
 namespace revenant::webgate {
 
 PhoneSession::PhoneSession(std::unique_ptr<rpc::Client> client) : client_(std::move(client)) {}
@@ -76,19 +78,32 @@ std::vector<std::string> PhoneSession::decoders(std::uint64_t vrx) const
     if (params == nullptr) {
         return {};
     }
-    // Each digital voice mode has a decoder of the same name in the engine.
-    switch (params->demod) {
-    case rpc::Demod::P25p1:
-        return {"p25p1"};
-    case rpc::Demod::Dstar:
-        return {"dstar"};
-    case rpc::Demod::Tetra:
-        return {"tetra"};
-    case rpc::Demod::Dmr:
-        return {"dmr"};
-    default:
-        return {};
+    return default_decoders(params->demod);
+}
+
+std::vector<std::string> PhoneSession::default_decoders(rpc::Demod demod) const
+{
+    // The decoder named after the mode whenever the engine has one (cw,
+    // p25p1, dstar, tetra, dmr, and any added later), else none. The engine's
+    // list is read once and kept; a failed read is tried again next time.
+    if (!engine_decoders_) {
+        const auto known = client_->decoders();
+        if (!known) {
+            return {};
+        }
+        std::vector<std::string> names;
+        for (const auto& d : *known) {
+            names.push_back(d.name);
+        }
+        engine_decoders_ = std::move(names);
     }
+    const std::string mode(demod_name(demod));
+    for (const auto& name : *engine_decoders_) {
+        if (name == mode) {
+            return {mode};
+        }
+    }
+    return {};
 }
 
 const std::vector<std::string>* PhoneSession::decoder_choice(std::uint64_t vrx) const

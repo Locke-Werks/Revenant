@@ -94,13 +94,14 @@ public:
     [[nodiscard]] rpc::TranscribeChoice transcribe_choice(std::uint64_t vrx) const;
     void set_transcribe_choice(std::uint64_t vrx, rpc::TranscribeChoice choice);
 
-    // The decoders the phone wants on a receiver. Until it picks, a digital
-    // voice receiver gets its mode's own decoder, which is what carries its
-    // talkgroup and encryption flags, and an analog one gets none, because a
-    // decoder costs engine CPU on every chunk and most analog listening has
-    // nothing to decode. The choice is kept beside the params so a receiver
-    // recreated after an engine restart decodes what it did before.
+    // The decoders the phone wants on a receiver: its own choice once it made
+    // one, else default_decoders. The choice is kept beside the params so a
+    // receiver recreated after an engine restart decodes what it did before.
     [[nodiscard]] std::vector<std::string> decoders(std::uint64_t vrx) const;
+    // THE default for a receiver of this mode: the engine's decoder named
+    // after the mode when it has one (cw, p25p1, dstar, tetra, dmr, ...),
+    // else none. A mode with no decoder of its own costs nothing undecoded.
+    [[nodiscard]] std::vector<std::string> default_decoders(rpc::Demod demod) const;
     // Null while the phone has made no choice for the receiver.
     [[nodiscard]] const std::vector<std::string>* decoder_choice(std::uint64_t vrx) const;
     void set_decoders(std::uint64_t vrx, std::vector<std::string> names);
@@ -131,6 +132,8 @@ private:
     std::map<std::uint64_t, Known> receivers_;
     std::map<std::uint64_t, rpc::TranscribeChoice> transcribe_;
     std::map<std::uint64_t, std::vector<std::string>> decoders_;
+    // The engine's decoder names, read on first need.
+    mutable std::optional<std::vector<std::string>> engine_decoders_;
     std::optional<View> view_;
     std::optional<std::uint64_t> audio_vrx_;
     bool keep_listening_ = false;
