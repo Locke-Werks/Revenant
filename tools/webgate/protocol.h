@@ -89,7 +89,8 @@ inline constexpr std::string_view kOps[] = {
 // "source" is {open} and, while open, {rateHz, centerHz, epoch,
 // realtimeFactor, pacedBy}: the engine's capture seconds per wall second over
 // its recent window (0 is not measured yet) and the pace in force (0 is
-// unthrottled). It goes out when the stream, the centre or the pace changes, or the factor by
+// unthrottled). With the spectrum on it also carries {dataLowHz, dataHighHz},
+// the absolute outer edges of the first and last bins. It goes out when the stream, the centre or the pace changes, or the factor by
 // kRealtimeReportStep or more changes, so a source falling behind real time
 // reaches the phone within the one second poll. SourceEvent in
 // web/src/protocol.ts is the phone's copy.

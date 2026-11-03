@@ -128,6 +128,33 @@ bottom sheet has mode, bandwidth, squelch, the decoded text and the radio panel
 (source, centre, gain). The Speech switch turns on transcription; the first use
 downloads a model and the top bar shows the progress.
 
+Dragging the receiver's passband retunes it. The dial strip under the
+waterfall tunes in steps; a vertical swipe on one digit of the top bar's
+frequency steps that digit. With no receiver selected, the same gestures move
+the radio's centre and the readout shows the display's centre, dimmed. Tuning a
+receiver past the edge of the band recentres the radio so it stays in view.
+Long-press a receiver chip to remove it, after a confirmation.
+
+Detections are drawn as boxes on the waterfall, labelled where there is room.
+The Signals tab lists them; tapping one tunes the active receiver to it at the
+nearest width the sheet offers and pans the view to it. With no receiver it
+asks for one first. The confidence slider there sets the lowest
+classifier confidence shown, and is remembered on the phone.
+
+Digital voice: P25 Phase 1 plays through the engine's built-in IMBE vocoder.
+DMR and D-STAR need an AMBE+2 vocoder plugin in a `vocoders` folder beside
+`revenant-engine.exe`; without one the chip says "no vocoder". A chip says
+"encrypted" for five seconds after an encrypted call. The Decoders section of
+the sheet turns each of the engine's decoders on or off per receiver.
+
+A WFM receiver on a station with RDS shows the station name (PS) on its chip
+and beside the top bar's frequency, and each new RadioText goes into the feed
+once. Nothing needs turning on. The engine reads RDS from a companion receiver
+it opens at 171000 S/s on the same tuning, so the receiver being listened to
+keeps its rate and stereo; the companion costs one channel and about 4% more
+GPU than the listening receiver. With no channel free for it the phone just
+shows no RDS.
+
 Several phones can be connected at once, and with the desktop client. They share
 one radio, so changing the centre frequency from any of them moves the others,
 and a receiver that falls outside the new span is removed with the reason shown.
@@ -226,6 +253,16 @@ device that cannot keep up at the chosen rate. Lower the rate or the load.
 **Audio breaks up on Wi-Fi.** Try Keep listening, which buffers about 3
 seconds. Live audio buffers about 80 ms and grows when it underruns.
 
+**The installed app has a gap the height of the status bar at the bottom.**
+This is the short-viewport bug: on a cold launch iOS can give an installed
+app a layout viewport a status bar short. The app sizes `html` and `body` to
+`100lvh` (`web/static/app.css`), which fixes it; a build without that shows
+the gap. Safari's default page zoom (Settings, Apps, Safari, Page Zoom) also
+applies to installed apps, and anything other than 100% scales the whole
+layout. Open the app with `?insets`, or tap with three fingers inside the
+installed app, for an overlay with the safe-area insets and viewport heights
+and a layout ruler showing where the viewport, the app and the sheet sit.
+
 **A phone is refused with "too many phones connected".** The gateway holds at
 most 16 phone sessions. A new connection evicts the session that dropped
 longest ago; it is refused only when all 16 are connected right now.
@@ -265,9 +302,83 @@ longest ago; it is refused only when all 16 are connected right now.
   Every receiver reply carries the set in force as `decoders`. When the engine
   refuses or ends a subscription anyway, a `vrxStatus` event carries
   `{vrx, decoder, decoderError}` with the engine's sentence.
-- `detections` items carry `labelKind`, `modulation` or `protocol`, beside
-  `label`. Protocol labels (P25, POCSAG and so on) used to be blanked; they go
-  out now because they are the more specific answer.
+- RDS needs no command. Every WFM receiver a phone owns is read about once a
+  second and an `rds` event goes out when the station changes. A refusal
+  ("no RDS here", no channel for the companion) sends nothing and is retried
+  after 10 seconds.
+
+### Commands
+
+Text frames `{"id", "op", "args"}`; the reply is `{"id", "ok":true, ...}` or
+`{"id", "ok":false, "error"}`. Frequencies are absolute hertz. Modes are
+`raw am nfm wfm usb lsb dsb cw p25p1 dstar tetra dmr sam`. A receiver reply is
+`{vrx, hz, mode, bandwidthHz, squelchDbfs, grantedLowHz, grantedHighHz,
+clamped, clampReason?, transcribe, transcribing, decoders}`.
+`tools/webgate/dispatch.h` is the authority.
+
+| op | args | reply |
+| --- | --- | --- |
+| `addVrx` | `hz`, `mode`?, `bandwidthHz`?, `squelchDbfs`? | receiver |
+| `removeVrx` | `vrx` | `{vrx}` |
+| `tune` | `vrx`, `hz` | receiver |
+| `setMode` | `vrx`, `mode` | receiver plus `replaced`, the old id |
+| `setBandwidth` | `vrx`, `hz` (0 is the mode's default) | receiver plus `replaced` |
+| `setSquelch` | `vrx`, `dbfs` | receiver |
+| `setVrxTranscribe` | `vrx`, `choice` (`auto`, `on`, `off`) | receiver |
+| `setCenter` | `hz` | `{grantedHz, removed}` |
+| `setGain` | `stage`, `db` | `{stage, grantedDb}` |
+| `setGainAuto` | `stage`, `on` | `{stage, on}` |
+| `listSources` | none | `{sources}` |
+| `openSource` | `uri` | `{source}` |
+| `setView` | `centerHz`, `spanHz`, `widthPx` | `{centerHz, spanHz, widthPx}` |
+| `audio` | `vrx`, `on` | `{vrx, on}` |
+| `keepListening` | `on` | `{on}` |
+| `setTranscription` | `on` | the speech state, as `transcriptionStatus` |
+| `setDetection` | `minConfidence`, 0 to below 1 | `{minConfidence}` |
+| `listDecoders` | none | `{decoders, voiceModes}` |
+| `setDecoders` | `vrx`, `names` | `{vrx, decoders}` |
+| `resume` | `token`, only as the first command | `{resumed:true}`, then the session's state as events |
+| `pong` | none | none; answers `ping` |
+
+`setDetection` is per session and kept across a resume; detections below the
+bar are not sent.
+
+### Events
+
+`{"event": name, ...}`. `tools/webgate/protocol.h` is the authority.
+
+| event | fields | sent |
+| --- | --- | --- |
+| `hello` | `resume`, the token | on connect |
+| `link` | `state`, `detail`; after a restart `recreated`, `lost` | on connect and when the engine link changes |
+| `source` | `open`; open: `rateHz`, `centerHz`, `epoch`, `realtimeFactor`, `pacedBy`; with the spectrum on, `dataLowHz`, `dataHighHz` | when the stream, centre or pace changes |
+| `display` | `waterfall`, `spectrum`, `trace`, `background` | on connect, on resume, when the desktop's settings change |
+| `detections` | `items`: `{id, centerHz, bandwidthHz, snrDb, confidence, state, label, labelKind, labelConfidence, lastSeen}` | every 500 ms while a view is set |
+| `rds` | `vrx`, `pi`, `callSign`, `ps`, `rt`, `pty`; `tp`, `ta`, `music` when stated | when a WFM receiver's station changes, and on resume |
+| `vrxStatus` | `vrx` and `audioError`, or `decoder` and `decoderError` | when audio or a decoder fails |
+| `vrxRemoved` | `vrx`, `reason` | when the engine removes a phone's receiver |
+| `vrxEventsEnded` | `reason` | when removals can no longer be reported |
+| `decoded` | `vrx`, `decoder`, `kind`, `text`, `sequence`, `fields` | per decoded message |
+| `transcript` | `vrx`, `sequence`, `text`, `centerHz`, `lowHz`, `highHz`, `mode`, `confidence`, `sourceStart`, `sourceEnd` | per transcribed transmission |
+| `transcriptionStatus` | the `setTranscription` reply | on connect, resume and change |
+| `hls` | `vrx`, `url`, or `url: null` and `error` | when Keep listening's stream starts or fails |
+| `ping` | none | every 15 seconds |
+
+`dataLowHz` and `dataHighHz` are the outer edges of the spectrum's first and
+last bins. The spectrum starts half a coarse channel below the band, so these
+are narrower than `centerHz` plus or minus half of `rateHz`, and the phone
+draws nothing outside them.
+
+`detections` ids are decimal strings, since a UInt64 does not survive a JSON
+number. `state` is `live` or `held`. `labelKind` is `modulation` or `protocol`;
+protocol labels (P25, POCSAG) go out because they are the more specific
+answer. At most 200 tracks within a view width either side of the view are
+sent, the strongest kept.
+
+In `rds`, `pi` is null until decoded, `ps` and `rt` are null until every
+segment has arrived, and `pty` is the programme type's long name. The engine's
+region is left at its default, RDS (EN 50067), so `pty` names and the call
+sign follow that table and not RBDS.
 
 ## Cost to the engine
 
@@ -295,15 +406,23 @@ throughout, so the absolute figures are not the M2 numbers (those are the
 | phone, 1 | 5798 | 10.515 / 10.447 / 12.640 | 1 | 7291 | 24 | 7290 | 1.000 |
 | phone, 2 | 6018 | 10.132 / 9.942 / 13.469 | 0 | 7281 | 36 | 7277 | 1.000 |
 
-The phone in both runs was connected for the whole measured window and was
-receiving what a real one does: about 20 spectrum rows a second (1360 rows,
+In those runs the phone was sent about 20 spectrum rows a second (1360 rows,
 1.65 MB in 68 s), 50 Opus packets a second (3400 packets, 0.31 MB), the
 gateway's pings answered, no errors. The engine held 1.000x real time with and
 without it, the client received the same number of frames from the engine to
-within 1%, and the engine's own drop count did not rise (it was lower with the
-phone, which is run-to-run noise: 24 to 87 over four runs). The main window met
-its budget in all four. The engine's numbers did not move beyond run-to-run
-noise.
+within 1%, and the engine's own drop count did not rise (24 to 87 over four
+runs, run-to-run noise). The main window met its budget in all four.
+
+The 20 rows a second is stale: the gateway now sends rows at up to 60 a
+second. Measured again on 2026-11-03 with that rate, `-Seconds 60` each:
+
+| run | main frames | interval p50 / p95 / p99 (ms) | over budget | engine frames in | phone rows |
+| --- | --- | --- | --- | --- | --- |
+| no phone | 5990 | 9.985 / 11.951 / 13.553 | 5 | 7262 | |
+| phone | 5799 | 10.455 / 11.779 / 12.514 | 1 | 7273 | 4078 |
+
+Both met the 60 Hz budget, and the engine took in the same number of frames
+with the phone as without it.
 
 What this does not show: a real phone on Wi-Fi, which can back up, and HLS
 (Keep listening) encoding, which the simulated phone does not request. Both
@@ -411,6 +530,49 @@ Speech
     and new ones land on the new rows.
 31. Reload the page with speech already on: the top bar says "Speech on" at
     once.
+
+Tuning
+
+32. Drag a receiver's passband: it follows the finger and the receiver
+    retunes, with audio, without the waterfall panning.
+33. Drag and flick the dial strip: the receiver steps and coasts, and stops
+    when the strip is touched.
+34. Swipe one digit of the top bar's frequency up and down: that digit steps,
+    the rest carry.
+35. Deselect every receiver: the readout dims and shows the display's centre.
+    The dial and a digit swipe move the radio's centre.
+36. Tune a receiver past the edge of the band: the radio recentres and the
+    receiver stays on screen.
+37. Long-press a receiver chip: a confirmation appears; confirm, and the
+    receiver goes.
+
+Detections and decoding
+
+38. On a live band, detection boxes sit over the signals and carry labels
+    where there is room; they move with pan and zoom.
+39. Open Signals and tap a row: the active receiver tunes to it at a fitting
+    width and the view pans to it. With no receiver, a toast asks for one.
+40. Move the confidence slider: low-confidence boxes drop out. Relaunch: the
+    slider keeps its value.
+41. P25 voice plays through the built-in IMBE vocoder. DMR plays with an
+    AMBE+2 vocoder plugin in a `vocoders` folder beside `revenant-engine.exe`;
+    without one, a DMR chip says "no vocoder". An encrypted call shows
+    "encrypted" on the chip and it clears a few seconds after.
+42. In the sheet's Decoders section, turn a decoder off and on: the chip and
+    the feed follow, and a refusal is a short toast.
+43. Tune a WFM receiver to a broadcast station with RDS: within a few seconds
+    the station name shows on the chip and beside the frequency, and the
+    RadioText appears in the feed once per new message.
+
+Display
+
+44. Change the desktop's colour theme, pins or contrast: the phone follows
+    within a couple of seconds.
+45. Scroll the waterfall on a busy band: smooth, at 60 rows a second, no
+    stutter.
+46. Open the app with `?insets`, or tap with three fingers in the installed
+    app: the overlay and layout ruler appear; the app reaches the bottom edge
+    with no gap.
 
 Report: any silence, the click at the cut, whether the Go live button ever
 appeared, whether the lock screen controls worked, and anything that was not
