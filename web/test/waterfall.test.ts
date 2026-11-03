@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BOX_CARRY_ROWS, RESTORE_WAIT_MS, RING_ROWS, RowRing, WaterfallHost, type Renderer } from "../src/waterfall";
+import { BOX_CARRY_ROWS, RESTORE_WAIT_MS, RING_ROWS, RowRing, rowAt, rowTop, WaterfallHost, type Renderer } from "../src/waterfall";
 import { panBy, type View } from "../src/view";
 
 const v: View = { centerHz: 100_000_000, spanHz: 2_000_000, widthPx: 1000 };
@@ -74,14 +74,15 @@ test("rows wider than the texture are clipped to it", () => {
   assert.equal(r.width[slot], 512);
 });
 
-function fakeRenderer(kind: string, log: string[]): Renderer {
+function fakeRenderer(kind: string, log: string[], scrolls = kind === "gl"): Renderer {
   return {
     resize: (w, h) => log.push(`${kind} resize ${w}x${h}`),
     setView: (x) => log.push(`${kind} view ${x.centerHz}`),
     pushRow: () => log.push(`${kind} row`),
     setPalette: (p) => log.push(`${kind} palette ${p[0]}`),
     clear: () => log.push(`${kind} clear`),
-    draw: () => log.push(`${kind} draw`),
+    scrolls,
+    draw: (shift = 0) => log.push(shift === 0 ? `${kind} draw` : `${kind} draw ${shift}`),
     setDetections: () => log.push(`${kind} detections`),
     drawBoxes: () => log.push(`${kind} boxes`),
   };
@@ -177,4 +178,35 @@ test("a restore whose rebuild fails goes to 2D", () => {
   ok = false;
   host.contextRestored();
   assert.equal(host.state, "2d");
+});
+
+test("between rows each row is drawn, and boxed, over the same pixels", () => {
+  // The shader picks a pixel's row with rowAt and the box overlay starts a
+  // row at rowTop, so a box stays on its row through the scroll.
+  for (const shift of [0, -0.25, -0.5, -0.999, -1, -1.6]) {
+    for (const k of [0, 1, 7, RING_ROWS - 1]) {
+      const top = rowTop(k, shift);
+      assert.equal(rowAt(top + 1e-6, shift), k);
+      assert.equal(rowAt(top + 1 - 1e-6, shift), k);
+    }
+  }
+  // At rest the rows are where they always were.
+  assert.equal(rowTop(5, 0), 5);
+  // With the newest row a quarter in, the top quarter of the screen is it.
+  assert.equal(rowAt(0.2, -0.75), 0);
+  assert.equal(rowAt(0.3, -0.75), 1);
+});
+
+test("only GL scrolls between rows; the host says which it has", () => {
+  let ok = true;
+  const { host, log, fire } = hostRig(() => ok);
+  assert.equal(host.scrolls, true);
+  host.draw(-0.5);
+  assert.deepEqual(log, ["gl draw -0.5"]);
+  host.contextLost();
+  assert.equal(host.scrolls, false);
+  ok = false;
+  fire();
+  assert.equal(host.state, "2d");
+  assert.equal(host.scrolls, false);
 });

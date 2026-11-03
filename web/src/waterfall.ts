@@ -18,11 +18,26 @@ import { boxPx, parseHexColor, type DetectionBox } from "./markers";
 import type { SpectrumFrame } from "./protocol";
 import { MAX_WIDTH_PX, rowTransform, type RowTransform, type View } from "./view";
 
-// About 50 s of history at the gateway's 20 rows/s.
+// About 28 s of history at 2.4 MS/s, where the gateway sends every one of
+// the engine's 36.6 rows a second.
 export const RING_ROWS = 1024;
 
-// Two seconds of rows: four missed polls at 2 Hz before boxes stop.
-export const BOX_CARRY_ROWS = 40;
+// About two seconds of rows at 37 a second: four missed polls at 2 Hz before
+// boxes stop.
+export const BOX_CARRY_ROWS = 75;
+
+// Where rows sit while the waterfall scrolls between them. shift is in rows,
+// 0 at rest and negative while the newest row is still coming in (smooth.ts:
+// the pacer's phase less one). Row k, counted from the newest, spans
+// [rowTop(k), rowTop(k) + 1) rows down the screen; the shader finds a
+// pixel's row with rowAt. Both renderer and overlays use these, which is what
+// keeps a box, a caption and its row together mid-scroll.
+export function rowTop(k: number, shift: number): number {
+  return k + shift;
+}
+export function rowAt(down: number, shift: number): number {
+  return Math.floor(down - shift);
+}
 const NO_BOXES: readonly DetectionBox[] = [];
 
 // Where each slot's row came from, and the per-slot transform for the view on
@@ -54,7 +69,7 @@ export class RowRing {
     return this.head;
   }
 
-  // Detections arrive a few times a second and rows twenty times, so the rows
+  // Detections arrive a few times a second and rows dozens of times, so the rows
   // between two events carry the latest list; a list nobody refreshes stops
   // being drawn rather than painting a stale signal down the screen.
   stamp(boxes: readonly DetectionBox[]): void {
@@ -114,12 +129,16 @@ export interface Renderer {
   // 256 RGBA entries, indexed by a row's byte.
   setPalette(rgba: Uint8Array): void;
   clear(): void;
-  draw(): void;
+  // Whether draw honours a shift. One that does not steps a row at a time.
+  readonly scrolls: boolean;
+  // shift: see rowTop.
+  draw(shift?: number): void;
   // Stamps the latest detections onto the row current now.
   setDetections(boxes: readonly DetectionBox[]): void;
   // Paints history's detection boxes onto an overlay the size of the
-  // waterfall. A renderer that burns them into its own pixels does nothing.
-  drawBoxes(ctx: CanvasRenderingContext2D, accent: string): void;
+  // waterfall, at the shift the waterfall was drawn at. A renderer that burns
+  // them into its own pixels does nothing.
+  drawBoxes(ctx: CanvasRenderingContext2D, accent: string, shift?: number): void;
 }
 
 const VS = `#version 300 es
@@ -137,17 +156,20 @@ uniform sampler2D u_pal;
 uniform int u_head;
 uniform vec2 u_size;
 uniform float u_texw;
+uniform float u_shift;
 out vec4 o;
 const int ROWS = ${RING_ROWS};
 void main() {
   float s = gl_FragCoord.x / u_size.x;
   float down = (u_size.y - gl_FragCoord.y) / u_size.y;
-  int k = min(int(down * float(ROWS)), ROWS - 1);
-  int slot = (u_head - k + ROWS) % ROWS;
+  // rowAt in waterfall.ts. Past the oldest row is no row: the scroll has
+  // pushed it off the bottom.
+  int k = int(floor(down * float(ROWS) - u_shift));
+  int slot = (u_head - min(k, ROWS - 1) + ROWS) % ROWS;
   vec4 m = texelFetch(u_meta, ivec2(slot, 0), 0);
   float u = m.x + m.y * s;
   float v = 0.0;
-  if (m.z > 0.0 && u >= 0.0 && u < m.z) {
+  if (k < ROWS && m.z > 0.0 && u >= 0.0 && u < m.z) {
     // Linear filtering at the row's last texel would blend in whatever an
     // earlier, wider row left beyond it.
     u = min(u, m.z - 0.5 / u_texw);
@@ -165,6 +187,8 @@ class GlRenderer implements Renderer {
   private uHead: WebGLUniformLocation | null;
   private uSize: WebGLUniformLocation | null;
   private uTexw: WebGLUniformLocation | null;
+  private uShift: WebGLUniformLocation | null;
+  readonly scrolls = true;
   private view: View | null = null;
   private metaDirty = true;
 
@@ -191,6 +215,7 @@ class GlRenderer implements Renderer {
     this.uHead = gl.getUniformLocation(this.prog, "u_head");
     this.uSize = gl.getUniformLocation(this.prog, "u_size");
     this.uTexw = gl.getUniformLocation(this.prog, "u_texw");
+    this.uShift = gl.getUniformLocation(this.prog, "u_shift");
     gl.uniform1f(this.uTexw, texWidth);
     // A float texture the driver refused leaves texelFetch returning zeros,
     // which draws a blank waterfall without any error; fail to 2D instead.
@@ -235,7 +260,7 @@ class GlRenderer implements Renderer {
     this.metaDirty = true;
   }
 
-  draw(): void {
+  draw(shift = 0): void {
     const gl = this.gl;
     if (this.metaDirty && this.view) {
       this.ring.place(this.view);
@@ -247,6 +272,7 @@ class GlRenderer implements Renderer {
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.uniform1i(this.uHead, Math.max(0, this.ring.head));
     gl.uniform2f(this.uSize, this.canvas.width, this.canvas.height);
+    gl.uniform1f(this.uShift, shift);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
@@ -254,7 +280,7 @@ class GlRenderer implements Renderer {
     this.ring.stamp(boxes);
   }
 
-  drawBoxes(ctx: CanvasRenderingContext2D, accent: string): void {
+  drawBoxes(ctx: CanvasRenderingContext2D, accent: string, shift = 0): void {
     const ring = this.ring;
     const view = this.view;
     if (!view || ring.head < 0) return;
@@ -274,7 +300,7 @@ class GlRenderer implements Renderer {
         end++;
       }
       if (boxes.length > 0) {
-        const y = k * rowH;
+        const y = rowTop(k, shift) * rowH;
         const hh = (end - k) * rowH;
         for (const p of ring.boxesPx(slot, view, w)) {
           ctx.globalAlpha = p.box.alpha;
@@ -417,6 +443,8 @@ class CanvasRenderer implements Renderer {
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
+  readonly scrolls = false;
+
   draw(): void {}
 
   setDetections(boxes: readonly DetectionBox[]): void {
@@ -499,14 +527,17 @@ export class WaterfallHost implements Renderer {
   clear(): void {
     this.r?.clear();
   }
-  draw(): void {
-    this.r?.draw();
+  get scrolls(): boolean {
+    return this.r?.scrolls ?? false;
+  }
+  draw(shift = 0): void {
+    this.r?.draw(shift);
   }
   setDetections(boxes: readonly DetectionBox[]): void {
     this.r?.setDetections(boxes);
   }
-  drawBoxes(ctx: CanvasRenderingContext2D, accent: string): void {
-    this.r?.drawBoxes(ctx, accent);
+  drawBoxes(ctx: CanvasRenderingContext2D, accent: string, shift = 0): void {
+    this.r?.drawBoxes(ctx, accent, shift);
   }
 
   private become2d(): void {

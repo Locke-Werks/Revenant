@@ -11,6 +11,7 @@ import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "
 import { parseDisplay } from "./display";
 import { DEFAULT_ACCENT, DETECTION_COLOR, detectionBoxes, passbandHz } from "./markers";
 import { drawReceivers, type ReceiverMark } from "./overlay";
+import { RowPacer } from "./smooth";
 import { SpectrumTrace } from "./spectrum_trace";
 import { clampView, viewBand, MAX_WIDTH_PX, panBy, pxToHz, sameView, ViewSync, zoomAt, type Band, type View } from "./view";
 import { createWaterfall, RING_ROWS } from "./waterfall";
@@ -114,9 +115,13 @@ export function mountApp(root: HTMLElement): AppHandle {
   const captionStore = new CaptionStore();
   const captionLayer = new CaptionLayer(root.querySelector<HTMLElement>("#captions")!, captionStore, clock);
   let rendererState = waterfall.state;
+  // Rows arrive at the engine's rate and frames at the display's; the pacer
+  // says how far the history has scrolled between them.
+  const pacer = new RowPacer();
   const forgetRows = () => {
     clock.clear();
     captionStore.clear();
+    pacer.clear();
   };
 
   let band: Band | null = null;
@@ -130,26 +135,33 @@ export function mountApp(root: HTMLElement): AppHandle {
   let widthDev = 1;
   let drawQueued = false;
 
-  const draw = () => {
+  const draw = (now: number) => {
     drawQueued = false;
-    waterfall.draw();
-    trace.draw();
+    // The 2D fallback scrolls whole rows of pixels it cannot move again, so
+    // it steps; everything over it then sits at rest too.
+    const scrolling = waterfall.scrolls;
+    const shift = scrolling ? pacer.phase(now) - 1 : 0;
+    waterfall.draw(shift);
+    trace.draw(now);
     ruler.draw();
     top.viewCentre(centrePreviewHz ?? band?.centerHz ?? (view ? view.centerHz : null));
-    drawMarks();
-    layoutCaptions();
+    drawMarks(shift);
+    layoutCaptions(shift);
+    // Another frame only while something is moving: a still screen with no
+    // rows arriving costs nothing.
+    if ((scrolling && pacer.moving(now)) || trace.moving()) requestDraw();
   };
-  const drawMarks = () => {
+  const drawMarks = (shift: number) => {
     if (!marks) return;
     marks.clearRect(0, 0, marksCanvas.width, marksCanvas.height);
     if (!view) return;
-    waterfall.drawBoxes(marks, DETECTION_COLOR);
+    waterfall.drawBoxes(marks, DETECTION_COLOR, shift);
     drawReceivers(marks, view, receiverMarks, activeMark, accent);
   };
   // Filled in once the receiver controller exists; drawn on the current view.
   let receiverMarks: ReceiverMark[] = [];
   let activeMark: number | null = null;
-  const layoutCaptions = () => {
+  const layoutCaptions = (shift: number) => {
     if (!view) return;
     const heightCss = body.clientHeight;
     const widthCss = body.clientWidth;
@@ -159,7 +171,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     const twoD = waterfall.state === "2d";
     const rowHeightCss = twoD ? 2 / (window.devicePixelRatio || 1) : heightCss / RING_ROWS;
     const visibleRows = twoD ? Math.max(1, Math.floor(heightCss / rowHeightCss)) : RING_ROWS;
-    captionLayer.layout({ view, widthCss, rowHeightCss, visibleRows });
+    captionLayer.layout({ view, widthCss, rowHeightCss, visibleRows, offsetRows: shift });
   };
   const requestDraw = () => {
     if (drawQueued) return;
@@ -797,8 +809,10 @@ export function mountApp(root: HTMLElement): AppHandle {
     if (waterfall.state !== "lost" && clock.push(Number(f.sourceStart))) captionStore.clear();
     // Both rows arrive already in the desktop's windows; nothing is rescaled
     // here.
+    const now = performance.now();
     waterfall.pushRow(f);
-    trace.setRow(f);
+    if (waterfall.state !== "lost") pacer.onRow(now);
+    trace.setRow(f, now);
     const active = receivers.list.active;
     const r = active === null ? undefined : receivers.list.get(active);
     if (r) {

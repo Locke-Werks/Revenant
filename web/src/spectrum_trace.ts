@@ -11,13 +11,14 @@ import { DEFAULT_DISPLAY, fillStops, type DisplayColours } from "./display";
 import { DETECTION_COLOR, type DetectionBox } from "./markers";
 import { drawReceivers, type ReceiverMark } from "./overlay";
 import type { SpectrumFrame } from "./protocol";
+import { TraceEaser } from "./smooth";
 import { hzToPx, rowTransform, type RowTransform, type View } from "./view";
 
 // The trace's polyline in canvas pixels, x and y interleaved, one run per
 // stretch of the canvas the row covers. Byte 0 is the foot of the plot and 255
 // its top, since the gateway quantised the row to the window it is drawn in.
 export function traceRuns(
-  f: Pick<SpectrumFrame, "centerHz" | "spanHz" | "tracePx">,
+  f: Pick<SpectrumFrame, "centerHz" | "spanHz"> & { tracePx: ArrayLike<number> },
   view: View,
   w: number,
   h: number,
@@ -50,6 +51,7 @@ export function traceRuns(
 export class SpectrumTrace {
   private ctx: CanvasRenderingContext2D | null;
   private row: SpectrumFrame | null = null;
+  private eased = new TraceEaser();
   private view: View | null = null;
   private t: RowTransform = { a: 0, b: 0, limit: 0 };
   private boxes: readonly DetectionBox[] = [];
@@ -76,9 +78,16 @@ export class SpectrumTrace {
   }
 
   // The frame's bytes are a view onto the message buffer; holding the latest
-  // one keeps that buffer alive until the next row replaces it.
-  setRow(f: SpectrumFrame): void {
+  // one keeps that buffer alive until the next row replaces it. now is when
+  // it arrived, on the clock draw is given.
+  setRow(f: SpectrumFrame, now: number): void {
     this.row = f;
+    this.eased.setTarget(f.tracePx, now, `${f.centerHz}/${f.spanHz}`);
+  }
+
+  // Whether the trace is still easing toward its latest row.
+  moving(): boolean {
+    return this.eased.moving();
   }
 
   setDetections(boxes: readonly DetectionBox[]): void {
@@ -104,7 +113,8 @@ export class SpectrumTrace {
     this.active = active;
   }
 
-  draw(): void {
+  draw(now: number): void {
+    this.eased.step(now);
     const ctx = this.ctx;
     if (!ctx) return;
     const w = this.canvas.width;
@@ -117,7 +127,7 @@ export class SpectrumTrace {
     drawReceivers(ctx, view, this.receivers, this.active, this.accent);
     const f = this.row;
     if (!f || f.tracePx.length === 0) return;
-    const runs = traceRuns(f, view, w, h, this.t);
+    const runs = traceRuns({ centerHz: f.centerHz, spanHz: f.spanHz, tracePx: this.eased.shown }, view, w, h, this.t);
     if (runs.length === 0) return;
     // The fill closes each run down to the foot of the plot.
     ctx.beginPath();
