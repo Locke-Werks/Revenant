@@ -86,7 +86,7 @@ both.
 | Unit | Does | Depends on |
 | --- | --- | --- |
 | `engine_link` | Connects to the engine, reconnects with backoff, starts a local engine with `--no-source` inside a Job object when none answers and `revenant-engine.exe` is beside it | the launch rules, moved out of `ui/models/engine_start.h` into a shared library both use |
-| `certs` | First run: creates a CA. Each start: issues a server certificate whose SANs are the hostname, `<hostname>.local`, and every current LAN IPv4/IPv6 address, reissuing from the same CA when that set changed. Builds the iOS `.mobileconfig` | OpenSSL |
+| `certs` | First run: creates a CA. Each start: issues a server certificate whose SANs are the hostname, `<hostname>.local`, and every current LAN IPv4 address (no IPv6, owner 2026-11-02), reissuing from the same CA when that set changed. Builds the iOS `.mobileconfig` | OpenSSL |
 | `http` | TLS listener on 17700 serving the static app and the WebSocket upgrade; plain listener on 17701 serving `/ca` and a redirect | kj-http, kj-tls |
 | `session` | One per WebSocket. Owns an engine `Session` and the receivers it made; ends them when the socket closes | `engine_link` |
 | `protocol` | JSON control messages to and from `Session` calls; binary frame encoding | none |
