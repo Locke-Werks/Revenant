@@ -1,5 +1,6 @@
 #include "tools/webgate/engine_link.h"
 
+#include <cstdio>
 #include <span>
 #include <system_error>
 #include <utility>
@@ -8,7 +9,36 @@
 
 namespace revenant::webgate {
 
-EngineLink::EngineLink(EngineLinkConfig config) : config_(std::move(config)) {}
+namespace {
+
+class LauncherProcess final : public EngineProcess {
+public:
+    std::string start(const std::filesystem::path& exe, std::uint16_t port,
+                      const std::filesystem::path& token_file,
+                      const launch::CaptureChoice& capture) override
+    {
+        return launcher_.start(exe, port, token_file, capture);
+    }
+
+    void stop() override { launcher_.stop(); }
+
+    [[nodiscard]] std::optional<launch::EngineLauncher::Exit> exited() const override
+    {
+        return launcher_.exited();
+    }
+
+private:
+    launch::EngineLauncher launcher_;
+};
+
+}  // namespace
+
+EngineLink::EngineLink(EngineLinkConfig config)
+    : config_(std::move(config)),
+      process_(config_.make_process ? config_.make_process()
+                                    : std::make_unique<LauncherProcess>())
+{
+}
 
 EngineLink::~EngineLink()
 {
@@ -24,7 +54,7 @@ EngineLink::~EngineLink()
         const std::lock_guard<std::mutex> lock(mutex_);
         client = std::move(client_);
     }
-    // The Client goes before the launcher (a member, destroyed after this
+    // The Client goes before the process (a member, destroyed after this
     // body): its teardown talks to the engine, which has to still be there.
     client.reset();
 }
@@ -52,6 +82,18 @@ LinkState EngineLink::state() const
 {
     const std::lock_guard<std::mutex> lock(mutex_);
     return state_;
+}
+
+bool EngineLink::owns_engine() const
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return launched_ && !process_->exited();
+}
+
+std::uint32_t EngineLink::idle_stops() const
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return idle_stops_;
 }
 
 std::filesystem::path EngineLink::resolved_token_path() const
@@ -92,6 +134,46 @@ Expected<std::unique_ptr<rpc::Client>> EngineLink::new_session(rpc::LoginMode mo
                                 mode, holder);
 }
 
+Expected<std::unique_ptr<rpc::Client>> EngineLink::phone_session(rpc::LoginMode mode,
+                                                                 std::string_view holder)
+{
+    if (mode == rpc::LoginMode::Observe) {
+        return new_session(mode, holder);
+    }
+
+    if (config_.on_demand) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        last_demand_ = std::chrono::steady_clock::now();
+        demanded_ = true;
+        demand_failed_ = false;
+        poked_ = true;
+        wake_.notify_all();
+        // Up is the engine answering the link; Refused and a failed launch
+        // will not change by waiting, and the connect below reports them.
+        changed_.wait_for(lock, config_.demand_wait, [this] {
+            return state_ == LinkState::Up || state_ == LinkState::Refused || demand_failed_;
+        });
+    }
+
+    auto client = new_session(mode, holder);
+    if (!client) {
+        return client;
+    }
+
+    bool fresh = false;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        // A demand is also a phone being here, so the grace starts again from
+        // now and not from whenever the lease last read free.
+        last_demand_ = std::chrono::steady_clock::now();
+        fresh = std::exchange(fresh_, false);
+    }
+    if (fresh && config_.reopen) {
+        config_.reopen(**client);
+    }
+    return client;
+}
+
 void EngineLink::publish(LinkState state, std::string detail)
 {
     {
@@ -103,6 +185,7 @@ void EngineLink::publish(LinkState state, std::string detail)
         state_ = state;
         detail_ = detail;
     }
+    changed_.notify_all();
     // Outside the lock, so a callback that asks the link a question does not
     // deadlock on it.
     if (callback_) {
@@ -110,16 +193,28 @@ void EngineLink::publish(LinkState state, std::string detail)
     }
 }
 
+bool EngineLink::may_launch() const
+{
+    if (!config_.on_demand) {
+        return true;
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return demanded_;
+}
+
 std::optional<std::string> EngineLink::maybe_launch()
 {
     if (launched_) {
-        if (!launcher_.exited()) {
+        if (!process_->exited()) {
             return std::nullopt;  // Ours, still coming up.
         }
         if (std::chrono::steady_clock::now() < launch_not_before_) {
-            return launch::engine_exit_sentence(launcher_.exited()->code,
-                                                launcher_.exited()->tail);
+            return launch::engine_exit_sentence(process_->exited()->code,
+                                                process_->exited()->tail);
         }
+    }
+    if (!may_launch()) {
+        return std::nullopt;
     }
 
     launch::EngineLaunchFacts facts;
@@ -135,13 +230,41 @@ std::optional<std::string> EngineLink::maybe_launch()
     }
 
     launch_not_before_ = std::chrono::steady_clock::now() + config_.restart_interval;
-    std::string refusal = launcher_.start(config_.engine_exe, config_.port,
+    std::string refusal = process_->start(config_.engine_exe, config_.port,
                                           resolved_token_path(), config_.capture);
     if (!refusal.empty()) {
         return refusal;
     }
+    const std::lock_guard<std::mutex> lock(mutex_);
     launched_ = true;
+    // Started with --no-source, so the first phone opens the desktop's radio.
+    fresh_ = true;
     return std::nullopt;
+}
+
+void EngineLink::stop_own_engine()
+{
+    std::unique_ptr<rpc::Client> gone;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        gone = std::move(client_);
+    }
+    // The link's observing connection first, while the engine can still
+    // answer its goodbye.
+    gone.reset();
+
+    // EngineLauncher::stop terminates the Job object, so the engine and
+    // anything it started go together, then waits on the process handle. A
+    // process that has exited has released its device handles, which is the
+    // dongle and the GPU context both: Windows closes every handle at exit.
+    process_->stop();
+
+    const std::lock_guard<std::mutex> lock(mutex_);
+    launched_ = false;
+    demanded_ = false;
+    fresh_ = false;
+    ++idle_stops_;
+    idle_.reset();
 }
 
 void EngineLink::supervise(const std::stop_token& stop)
@@ -150,12 +273,14 @@ void EngineLink::supervise(const std::stop_token& stop)
     // refused_interval and not at poll_interval. The epoch is always in the
     // past, so the first attempt is not delayed.
     auto not_before = std::chrono::steady_clock::time_point{};
+    idle_.grace = config_.idle_grace;
 
     publish(LinkState::Starting, "connecting to the engine");
 
     while (!stop.stop_requested()) {
         std::unique_lock<std::mutex> lock(mutex_);
         const bool connected = client_ != nullptr;
+        const bool ours = launched_;
         lock.unlock();
 
         if (connected) {
@@ -166,14 +291,41 @@ void EngineLink::supervise(const std::stop_token& stop)
             // else.
             // lease_status, not running: the link observes, and an observer
             // may ask only info, listSources and leaseStatus.
-            if (auto alive = client_->lease_status(); !alive) {
+            auto alive = client_->lease_status();
+            if (!alive) {
                 std::unique_ptr<rpc::Client> gone;
                 lock.lock();
                 gone = std::move(client_);
                 lock.unlock();
                 gone.reset();
+                idle_.reset();
                 publish(LinkState::Waiting, "the engine went away: " + alive.error().message);
                 continue;
+            }
+            if (config_.on_demand) {
+                lock.lock();
+                const auto last_demand = last_demand_;
+                lock.unlock();
+                const bool idle =
+                    idle_.observe(alive->held, std::chrono::steady_clock::now(), last_demand);
+                if (idle && !ours) {
+                    // Somebody else's engine, which is theirs to stop. The ask
+                    // is over, though, so if it goes away now the link does
+                    // not start one of its own for a phone that has left.
+                    lock.lock();
+                    demanded_ = false;
+                    lock.unlock();
+                    idle_.reset();
+                } else if (idle) {
+                    stop_own_engine();
+                    std::fprintf(stderr,
+                                 "revenant-webgate: stopped the engine it started: no phone or "
+                                 "other client has held it for %.1f s; the next phone starts it "
+                                 "again\n",
+                                 static_cast<double>(config_.idle_grace.count()) / 1000.0);
+                    publish(LinkState::Waiting, "the engine is stopped until a phone connects");
+                    continue;
+                }
             }
         } else if (std::chrono::steady_clock::now() >= not_before) {
             // Observe, so an idle gateway holds no lease and the desktop can
@@ -195,8 +347,23 @@ void EngineLink::supervise(const std::stop_token& stop)
             } else {
                 not_before = {};
                 const std::optional<std::string> launch_note = maybe_launch();
-                if (launched_ && !launcher_.exited()) {
+                lock.lock();
+                const bool coming_up = launched_ && !process_->exited();
+                const bool asked = demanded_;
+                if (asked && !coming_up) {
+                    // Nothing is going to answer this ask: no engine to start,
+                    // or ours died on the way up. The waiting phone gets the
+                    // connect error now rather than at demand_wait.
+                    demand_failed_ = true;
+                }
+                lock.unlock();
+                if (asked && !coming_up) {
+                    changed_.notify_all();
+                }
+                if (coming_up) {
                     publish(LinkState::Starting, "waiting for the engine to start");
+                } else if (config_.on_demand && !asked && !launch_note) {
+                    publish(LinkState::Waiting, "the engine starts when a phone connects");
                 } else {
                     publish(LinkState::Waiting, launch_note ? *launch_note : failure.message);
                 }
@@ -204,9 +371,10 @@ void EngineLink::supervise(const std::stop_token& stop)
         }
 
         // Woken early by a stop request, which is what lets the destructor
-        // join without waiting out the interval.
+        // join without waiting out the interval, and by a phone's demand.
         lock.lock();
-        wake_.wait_for(lock, stop, config_.poll_interval, [] { return false; });
+        wake_.wait_for(lock, stop, config_.poll_interval, [this] { return poked_; });
+        poked_ = false;
     }
 }
 

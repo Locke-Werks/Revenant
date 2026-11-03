@@ -20,6 +20,26 @@
 // state leaves Up: a caller that holds it across a state change holds a
 // pointer to a Client the supervisor has destroyed, so use it on the thread
 // that saw Up, or take a session of its own with new_session().
+//
+// ON DEMAND (EngineLinkConfig::on_demand), which is how revenant-webgate runs
+// from sign-in. The owner, 2026-11-03: "gateway should start at windows
+// login. Make sure it also stops the engine completely releasing all of those
+// resources when the phone is known gone." So:
+//
+//   - Nothing is started until a phone claims. The link still observes, so an
+//     engine the desktop started is found and used, but a gateway that nobody
+//     has asked for holds no GPU context and no radio.
+//   - phone_session() is the claim path. It asks for the engine, waits for it,
+//     and on an engine this link has just started (with --no-source) opens
+//     the desktop's last radio through EngineLinkConfig::reopen, once.
+//   - An engine this link started is stopped, by ending its Job object, once
+//     leaseStatus has read free for idle_grace and no phone has asked since.
+//     A free lease is the phone known gone: a phone's session claims until
+//     its linger ends, and keep listening extends the linger while the phone
+//     fetches audio, so the lease outlives the socket by exactly the time the
+//     phone may come back. It also covers the desktop: a desktop on this
+//     engine claims, and a held lease is never stopped under.
+//   - An engine this link did not start is never stopped.
 
 #pragma once
 
@@ -45,6 +65,63 @@ namespace revenant::webgate {
 
 // The holder text the link's own observing connection logs in with.
 inline constexpr std::string_view kLinkHolder = "revenant-webgate";
+
+// How long the lease of an engine the link started must read free before the
+// engine is stopped. Long enough that a phone reloading its page, or a desktop
+// handing over to a phone, does not pay a cold start; short next to the
+// phone's own linger, which has already waited out the phone.
+inline constexpr std::chrono::milliseconds kIdleStopGrace{10'000};
+
+// How long a phone's claim waits for an engine this link is starting. The
+// engine opens a Vulkan device before it binds, which takes seconds on a cold
+// GPU and longer on a loaded one.
+inline constexpr std::chrono::milliseconds kDemandWait{20'000};
+
+// The process half of starting an engine, so tests can stand an in-process
+// engine in for revenant-engine.exe. The default is launch::EngineLauncher.
+class EngineProcess {
+public:
+    virtual ~EngineProcess() = default;
+
+    // Empty on success, the reason otherwise.
+    [[nodiscard]] virtual std::string start(const std::filesystem::path& exe, std::uint16_t port,
+                                            const std::filesystem::path& token_file,
+                                            const launch::CaptureChoice& capture) = 0;
+
+    // Ends what start() started and returns once it is gone.
+    virtual void stop() = 0;
+
+    // Empty while it runs.
+    [[nodiscard]] virtual std::optional<launch::EngineLauncher::Exit> exited() const = 0;
+};
+
+// Whether the engine should be stopped, from what the link has seen. Pure, so
+// the grace is tested without waiting it out.
+struct IdleStop {
+    std::chrono::milliseconds grace = kIdleStopGrace;
+    std::optional<std::chrono::steady_clock::time_point> free_since;
+
+    // One leaseStatus reading. Returns true when the engine should stop now:
+    // the lease has read free at every reading since free_since, free_since
+    // is grace ago, and nothing has asked for the engine since then either.
+    [[nodiscard]] bool observe(bool lease_held, std::chrono::steady_clock::time_point now,
+                               std::optional<std::chrono::steady_clock::time_point> last_demand)
+    {
+        if (lease_held) {
+            free_since.reset();
+            return false;
+        }
+        if (!free_since) {
+            free_since = now;
+        }
+        if (last_demand && now - *last_demand < grace) {
+            return false;
+        }
+        return now - *free_since >= grace;
+    }
+
+    void reset() { free_since.reset(); }
+};
 
 enum class LinkState : std::uint8_t {
     // An engine this link started is coming up, or the first attempt is
@@ -95,6 +172,21 @@ struct EngineLinkConfig {
     // started again. An engine that dies on launch would otherwise be
     // relaunched every poll_interval.
     std::chrono::milliseconds restart_interval{5'000};
+
+    // See ON DEMAND above. Off, an engine is started as soon as nothing
+    // answers and is never stopped for want of a phone.
+    bool on_demand = false;
+    std::chrono::milliseconds idle_grace = kIdleStopGrace;
+    std::chrono::milliseconds demand_wait = kDemandWait;
+
+    // Called on a phone's claiming connection when the engine behind it is
+    // one this link started and nobody has been handed it since: the place
+    // the desktop's last radio is opened. Not called for an engine somebody
+    // else started, which already has whatever source they chose.
+    std::function<void(rpc::Client&)> reopen;
+
+    // Empty means a launch::EngineLauncher.
+    std::function<std::unique_ptr<EngineProcess>()> make_process;
 };
 
 class EngineLink {
@@ -127,7 +219,21 @@ public:
     [[nodiscard]] Expected<std::unique_ptr<rpc::Client>> new_session(
         rpc::LoginMode mode = rpc::LoginMode::Claim, std::string_view holder = {});
 
+    // A phone's claim (or takeOver): asks for the engine when the link is on
+    // demand, waits up to demand_wait for it, then new_session(mode, holder),
+    // then reopen on an engine this link has just started. Observe goes
+    // straight to new_session. Blocks the calling thread while it waits.
+    [[nodiscard]] Expected<std::unique_ptr<rpc::Client>> phone_session(rpc::LoginMode mode,
+                                                                       std::string_view holder);
+
     [[nodiscard]] LinkState state() const;
+
+    // Whether an engine this link started is running. Any thread.
+    [[nodiscard]] bool owns_engine() const;
+
+    // How many times the link has stopped an engine of its own for want of a
+    // phone. For tests and the log.
+    [[nodiscard]] std::uint32_t idle_stops() const;
 
 private:
     void supervise(const std::stop_token& stop);
@@ -139,20 +245,39 @@ private:
     // when it did, or when it tried and failed.
     [[nodiscard]] std::optional<std::string> maybe_launch();
 
+    // Drops the connection and ends the engine this link started. Supervisor
+    // thread only.
+    void stop_own_engine();
+
+    // Whether the supervisor may start an engine now.
+    [[nodiscard]] bool may_launch() const;
+
     EngineLinkConfig config_;
 
     // Declared before the supervisor so it is destroyed after it.
-    launch::EngineLauncher launcher_;
+    std::unique_ptr<EngineProcess> process_;
 
     mutable std::mutex mutex_;
     std::condition_variable_any wake_;
+    std::condition_variable_any changed_;
     std::unique_ptr<rpc::Client> client_;  // guarded by mutex_
     LinkState state_ = LinkState::Starting;  // guarded by mutex_
     std::string detail_;                     // guarded by mutex_
     bool published_ = false;                 // guarded by mutex_
     std::function<void(LinkState, std::string)> callback_;
-    bool launched_ = false;                  // supervisor thread only
+    bool launched_ = false;                  // guarded by mutex_, written by the supervisor
     std::chrono::steady_clock::time_point launch_not_before_{};  // supervisor only
+
+    // On demand: whether a phone has asked since the last stop, when it last
+    // did, whether the supervisor has given up on the current ask, and
+    // whether the running engine is one of ours nobody has been handed yet.
+    bool demanded_ = false;                  // guarded by mutex_
+    bool poked_ = false;                     // guarded by mutex_
+    bool demand_failed_ = false;             // guarded by mutex_
+    bool fresh_ = false;                     // guarded by mutex_
+    std::optional<std::chrono::steady_clock::time_point> last_demand_;  // guarded by mutex_
+    std::uint32_t idle_stops_ = 0;           // guarded by mutex_
+    IdleStop idle_;                          // supervisor only
 
     std::jthread supervisor_;
 };
