@@ -394,7 +394,7 @@ if(TARGET revenant-engine)
     set_tests_properties(engined_takes_the_budgets_it_is_given PROPERTIES
         LABELS "rpc"
         TIMEOUT 300
-        PASS_REGULAR_EXPRESSION "budgets +detector 0\\.10 of a core, probes 0\\.20 of a core, 3 decode lanes"
+        PASS_REGULAR_EXPRESSION "budgets +detection 0\\.30 cores: detector 0\\.10, 16 probes on 2 threads 0\\.20; 3 decode lanes"
         FAIL_REGULAR_EXPRESSION "revenant-engine: |listening on 127\\.0\\.0\\.1:17690"
     )
 else()
