@@ -1,4 +1,4 @@
-import { chooseScreen, installScreenHtml, type StandaloneEnv } from "./install";
+import { chooseScreen, installScreenHtml, layoutPreview, type StandaloneEnv } from "./install";
 import { gatewayReachable, offlineScreenHtml, type Probe } from "./offline";
 import { appScreenHtml, mountApp } from "./app";
 import { insetsToggle, isEditable, pinViewport, trackShortViewport, showInsets, wantsInsets } from "./insets";
@@ -18,7 +18,7 @@ export async function render(host: Host): Promise<void> {
     host.root.innerHTML = installScreenHtml();
     return;
   }
-  if (await gatewayReachable(host.probe)) {
+  if (layoutPreview(host.search) || (await gatewayReachable(host.probe))) {
     host.root.innerHTML = appScreenHtml();
     host.mount?.();
     return;

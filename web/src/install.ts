@@ -21,6 +21,13 @@ export function chooseScreen(env: StandaloneEnv, search: string): Screen {
   return isStandalone(env) ? "app" : "install";
 }
 
+// ?dev=1&layout=1 mounts the app without asking for the gateway, so the pane
+// split can be looked at from a static server with no engine behind it.
+export function layoutPreview(search: string): boolean {
+  const q = new URLSearchParams(search);
+  return q.get("dev") === "1" && q.get("layout") === "1";
+}
+
 export function installScreenHtml(): string {
   return `
 <main class="screen install">
