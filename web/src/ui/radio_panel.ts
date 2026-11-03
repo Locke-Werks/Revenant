@@ -18,12 +18,54 @@ interface GainStage {
   inForceAuto: boolean;
 }
 
+interface TuneRange {
+  lowHz: number;
+  highHz: number;
+}
+
 interface SourceEntry {
   uri: string;
+  backend: string;
   name: string;
   available: boolean;
   unavailable?: string;
+  tuneRanges: TuneRange[];
+  sampleRates: number[];
+  minRate: number;
+  maxRate: number;
   gainStages: GainStage[];
+}
+
+// The desktop's defaults when it opens a radio with nothing remembered.
+export const DEFAULT_RATE_HZ = 2_400_000;
+export const DEFAULT_CENTRE_HZ = 98_100_000;
+
+type OpenFields = Pick<SourceEntry, "uri" | "backend" | "tuneRanges" | "sampleRates" | "minRate" | "maxRate">;
+
+// The engine refuses a tuner opened with no freq=: an R820T left where opening
+// put it fails to lock and then cannot tune at all. The synthetic scene
+// defaults to 20 MS/s, which this machine renders at a fraction of real time.
+export function openUri(s: OpenFields, centreHz: number | null): string {
+  const params: string[] = [];
+  const rateFits =
+    s.minRate <= DEFAULT_RATE_HZ &&
+    DEFAULT_RATE_HZ <= s.maxRate &&
+    (s.sampleRates.length === 0 || s.sampleRates.includes(DEFAULT_RATE_HZ));
+  if (rateFits || s.backend === "synthetic") params.push(`rate=${DEFAULT_RATE_HZ}`);
+  const ranges = s.tuneRanges ?? [];
+  if (ranges.length > 0) {
+    const reaches = (hz: number) => ranges.some((r) => r.lowHz <= hz && hz <= r.highHz);
+    let hz: number;
+    if (centreHz !== null && reaches(centreHz)) hz = centreHz;
+    else if (reaches(DEFAULT_CENTRE_HZ)) hz = DEFAULT_CENTRE_HZ;
+    else {
+      const first = ranges[0]!;
+      hz = Math.min(Math.max(DEFAULT_CENTRE_HZ, first.lowHz), first.highHz);
+    }
+    params.push(`freq=${Math.round(hz)}`);
+  }
+  if (params.length === 0) return s.uri;
+  return s.uri + (s.uri.includes("?") ? "&" : "?") + params.join("&");
 }
 
 function entries(v: JsonValue): SourceEntry[] {
@@ -65,6 +107,8 @@ export class RadioPanel {
   // openSource answered; the source event for its new stream comes after
   // the reply and must not forget what was just opened.
   private justOpened = false;
+  // Where the last open source was tuned, so switching radios keeps the band.
+  private lastCentreHz: number | null = null;
 
   constructor(private readonly deps: RadioPanelDeps) {
     this.el = document.createElement("section");
@@ -111,6 +155,7 @@ export class RadioPanel {
       this.justOpened = false;
       this.epoch = e.epoch;
     }
+    if (e.centerHz > 0) this.lastCentreHz = e.centerHz;
     const name = this.current?.name ? `${this.current.name}, ` : "";
     this.status.textContent = `${name}${formatMHz(e.centerHz)} MHz, ${(e.rateHz / 1e6).toFixed(3)} MS/s`;
     if (document.activeElement !== this.center) this.center.value = formatMHz(e.centerHz);
@@ -162,7 +207,8 @@ export class RadioPanel {
 
   private open(s: SourceEntry): void {
     this.status.textContent = `Opening ${s.name || s.uri}...`;
-    this.deps.link.request("openSource", { uri: s.uri }, { timeoutMs: OPEN_SOURCE_TIMEOUT_MS }).then(
+    const uri = openUri(s, this.lastCentreHz);
+    this.deps.link.request("openSource", { uri }, { timeoutMs: OPEN_SOURCE_TIMEOUT_MS }).then(
       (r) => {
         const opened = (r as { source?: unknown } | null)?.source;
         this.current = opened && typeof opened === "object" ? (opened as SourceEntry) : null;

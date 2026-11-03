@@ -12,7 +12,48 @@ import {
   type GateLink,
 } from "../src/ui/receivers";
 import { BEHIND_BELOW, sourceBehind, StatusModel } from "../src/ui/status";
-import { gainId, OPEN_SOURCE_TIMEOUT_MS, setCenter } from "../src/ui/radio_panel";
+import { gainId, openUri, OPEN_SOURCE_TIMEOUT_MS, setCenter } from "../src/ui/radio_panel";
+
+// ---- Opening a source --------------------------------------------------------
+
+const rtl = {
+  uri: "rtlsdr://0",
+  backend: "rtlsdr",
+  tuneRanges: [{ lowHz: 24_000_000, highHz: 1_766_000_000 }],
+  sampleRates: [],
+  minRate: 225_001,
+  maxRate: 3_200_000,
+};
+
+test("an RTL-SDR opens with a centre and the desktop's rate", () => {
+  assert.equal(openUri(rtl, null), "rtlsdr://0?rate=2400000&freq=98100000");
+});
+
+test("the centre the phone was on is kept when the tuner reaches it", () => {
+  assert.equal(openUri(rtl, 162_550_000), "rtlsdr://0?rate=2400000&freq=162550000");
+});
+
+test("a centre outside the tuner's range falls back to the default", () => {
+  assert.equal(openUri(rtl, 7_100_000), "rtlsdr://0?rate=2400000&freq=98100000");
+});
+
+test("a default outside every range is clamped into the first one", () => {
+  const hf = { ...rtl, tuneRanges: [{ lowHz: 1_000_000, highHz: 30_000_000 }] };
+  assert.equal(openUri(hf, null), "rtlsdr://0?rate=2400000&freq=30000000");
+});
+
+test("the synthetic scene opens at 2.4 MS/s, not its 20 MS/s default", () => {
+  const syn = { uri: "synthetic:wideband", backend: "synthetic", tuneRanges: [], sampleRates: [20_000_000], minRate: 20_000_000, maxRate: 20_000_000 };
+  assert.equal(openUri(syn, 98_100_000), "synthetic:wideband?rate=2400000");
+});
+
+test("a URI that already carries a query is extended, not replaced", () => {
+  assert.equal(openUri({ ...rtl, uri: "rtlsdr://0?ppm=12" }, null), "rtlsdr://0?ppm=12&rate=2400000&freq=98100000");
+});
+
+test("a device that cannot run 2.4 MS/s gets no rate", () => {
+  assert.equal(openUri({ ...rtl, maxRate: 2_000_000 }, null), "rtlsdr://0?freq=98100000");
+});
 import { sheetHint } from "../src/ui/sheet";
 import { levelInBand } from "../src/ui/top_bar";
 import type { GatewayEvent, JsonValue, LinkEvent } from "../src/protocol";
