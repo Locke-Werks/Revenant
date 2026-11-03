@@ -1,6 +1,6 @@
 # Single-user engine
 
-Date: 2026-11-03. Status: owner decisions taken in conversation, awaiting spec review.
+Date: 2026-11-03. Status: approved by the owner 2026-11-03, with receiver ownership removed.
 
 ## Rule
 
@@ -67,10 +67,22 @@ Schema changes are additive; an older client that calls `login` with no
 
 ## What this removes
 
-Per-client receiver ownership logic stays (it is harmless), but nothing new
-is built for several clients at once. The session linger, resume tokens and
-ownership checks in webgate remain because they serve one phone across
-locks and reconnects.
+Receiver ownership goes (owner, 2026-11-03: "I'd rip out vrx ownership"; the
+phone had refused receivers as "not yours"). With one user every receiver is
+that user's:
+
+- Engine: a session may list, tune, change, subscribe to and remove every
+  receiver, including ones opened by another session of the same lease, by
+  engine plugins and by the trunk follower. Receivers are not removed when the
+  session that opened them drops while the lease is still held; they are
+  removed when the lease ends without a takeover, and kept across a takeover
+  (the new holder inherits the radio as it is).
+- Webgate: the per-session `owns` checks and "not yours" refusals are
+  deleted; a phone sees and controls every receiver the engine has.
+- Desktop: shows every receiver the engine has, whoever opened it.
+
+The session linger and resume token remain, since they serve one phone
+across locks and reconnects.
 
 ## Testing
 
