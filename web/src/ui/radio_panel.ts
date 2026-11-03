@@ -3,7 +3,7 @@
 
 import type { JsonValue, SourceEvent } from "../protocol";
 import type { GateLink } from "./receivers";
-import { formatMHz, parseFrequency } from "./receivers";
+import { formatMHz, readFrequency } from "./receivers";
 
 // Opening a device or enumerating them waits on USB and driver start-up,
 // which can run well past an ordinary request's 10 s.
@@ -31,6 +31,24 @@ function entries(v: JsonValue): SourceEntry[] {
   return Array.isArray(list) ? (list as unknown as SourceEntry[]) : [];
 }
 
+// Stage names come from the driver ("LNA", "IF 1", ...); an id is kept to
+// characters a selector and a label's for= can carry.
+export function gainId(stage: string): string {
+  return `rp-gain-${stage.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+}
+
+// Retunes the front end. A receiver the retune dropped arrives as its own
+// vrxRemoved with its frequency and reason, so the reply adds nothing to say.
+export function setCenter(deps: RadioPanelDeps, hz: number): Promise<boolean> {
+  return deps.link.request("setCenter", { hz }).then(
+    () => true,
+    (e: unknown) => {
+      deps.toast(e instanceof Error ? e.message : String(e));
+      return false;
+    },
+  );
+}
+
 export interface RadioPanelDeps {
   link: GateLink;
   toast(text: string): void;
@@ -43,6 +61,10 @@ export class RadioPanel {
   private readonly gains: HTMLElement;
   private readonly center: HTMLInputElement;
   private current: SourceEntry | null = null;
+  private epoch: number | undefined = undefined;
+  // openSource answered; the source event for its new stream comes after
+  // the reply and must not forget what was just opened.
+  private justOpened = false;
 
   constructor(private readonly deps: RadioPanelDeps) {
     this.el = document.createElement("section");
@@ -65,30 +87,39 @@ export class RadioPanel {
     this.el.querySelector("#rp-list")!.addEventListener("click", () => this.findSources());
     this.el.querySelector("#rp-center-form")!.addEventListener("submit", (ev) => {
       ev.preventDefault();
-      const hz = parseFrequency(this.center.value);
-      if (hz === null) {
-        deps.toast(`"${this.center.value}" is not a frequency`);
+      const f = readFrequency(this.center.value);
+      if ("error" in f) {
+        deps.toast(f.error);
         return;
       }
-      deps.link.request("setCenter", { hz }).then(
-        (r) => {
-          const removed = (r as { removed?: unknown } | null)?.removed;
-          if (Array.isArray(removed) && removed.length > 0) deps.toast(`The retune removed ${removed.length} receiver(s)`);
-          this.center.blur();
-        },
-        (e: unknown) => deps.toast(e instanceof Error ? e.message : String(e)),
-      );
+      void setCenter(deps, f.hz).then((ok) => {
+        if (ok) this.center.blur();
+      });
     });
   }
 
   source(e: SourceEvent): void {
     if (!e.open || typeof e.centerHz !== "number" || typeof e.rateHz !== "number") {
       this.status.textContent = "No radio open";
+      this.forget();
       return;
+    }
+    // A new epoch is a different stream: whatever this phone opened before is
+    // not what is open now (another client, or an engine restart, changed it).
+    if (e.epoch !== this.epoch) {
+      if (!this.justOpened) this.forget();
+      this.justOpened = false;
+      this.epoch = e.epoch;
     }
     const name = this.current?.name ? `${this.current.name}, ` : "";
     this.status.textContent = `${name}${formatMHz(e.centerHz)} MHz, ${(e.rateHz / 1e6).toFixed(3)} MS/s`;
     if (document.activeElement !== this.center) this.center.value = formatMHz(e.centerHz);
+  }
+
+  private forget(): void {
+    if (this.current === null) return;
+    this.current = null;
+    this.showGains();
   }
 
   private findSources(): void {
@@ -135,6 +166,7 @@ export class RadioPanel {
       (r) => {
         const opened = (r as { source?: unknown } | null)?.source;
         this.current = opened && typeof opened === "object" ? (opened as SourceEntry) : null;
+        this.justOpened = true;
         this.showGains();
         this.list.textContent = "";
       },
@@ -151,7 +183,7 @@ export class RadioPanel {
       const row = document.createElement("div");
       row.className = "row gain";
       const label = document.createElement("label");
-      const id = `rp-gain-${g.name}`;
+      const id = gainId(g.name);
       label.htmlFor = id;
       label.textContent = `${g.name} gain`;
       const slider = document.createElement("input");

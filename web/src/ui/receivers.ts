@@ -20,18 +20,40 @@ export const DEFAULT_MODE = "nfm";
 // carry and says so.
 export const BANDWIDTHS_HZ = [2_400, 3_000, 6_000, 10_000, 12_500, 25_000, 50_000, 200_000];
 
-// "146.52", "146.52M", "146520k" and "146520000" are the same frequency. A
-// bare number below 100000 is read as MHz, since nobody types 146 meaning
-// 146 Hz and an HF frequency in hertz has six digits or more.
-export function parseFrequency(text: string): number | null {
-  const m = /^\s*(\d+(?:\.\d*)?|\.\d+)\s*([kKmMgG]?)(?:[hH][zZ])?\s*$/.exec(text);
-  if (!m) return null;
+// Below this a bare number is MHz; from it up to UNITLESS_HZ_FROM it could
+// be kHz or MHz, so it needs a unit.
+export const UNITLESS_MHZ_BELOW = 1_000;
+export const UNITLESS_HZ_FROM = 100_000;
+
+export type FrequencyParse = { hz: number } | { error: string };
+
+// "146.52", "146,52", "146.52M", "146520k" and "146520000" are the same
+// frequency. A bare number below 1000 is MHz and from 100000 up is Hz; in
+// between (14070: kHz? MHz?) a guess would tune somewhere surprising, so it
+// is refused with a sentence asking for a unit.
+export function readFrequency(text: string): FrequencyParse {
+  const t = text.replace(",", ".");
+  const m = /^\s*(\d+(?:\.\d*)?|\.\d+)\s*([kKmMgG]?)([hH][zZ])?\s*$/.exec(t);
+  const bad = { error: `"${text.trim()}" is not a frequency` };
+  if (!m) return bad;
   const value = Number(m[1]);
-  if (!Number.isFinite(value) || value <= 0) return null;
+  if (!Number.isFinite(value) || value <= 0) return bad;
   const unit = (m[2] ?? "").toLowerCase();
-  const scale = unit === "k" ? 1e3 : unit === "m" ? 1e6 : unit === "g" ? 1e9 : value < 100_000 && !/hz/i.test(text) ? 1e6 : 1;
+  let scale: number;
+  if (unit === "k") scale = 1e3;
+  else if (unit === "m") scale = 1e6;
+  else if (unit === "g") scale = 1e9;
+  else if (m[3]) scale = 1;
+  else if (value < UNITLESS_MHZ_BELOW) scale = 1e6;
+  else if (value >= UNITLESS_HZ_FROM) scale = 1;
+  else return { error: `"${text.trim()}": add a unit (k, M, G)` };
   const hz = Math.round(value * scale);
-  return hz > 0 ? hz : null;
+  return hz > 0 ? { hz } : bad;
+}
+
+export function parseFrequency(text: string): number | null {
+  const r = readFrequency(text);
+  return "hz" in r ? r.hz : null;
 }
 
 export function formatMHz(hz: number): string {
@@ -240,6 +262,9 @@ export class ReceiverController {
   readonly list = new ReceiverList();
   // Removals this phone asked for, so their events are not reported as news.
   private removing = new Set<number>();
+  // Receivers with a setMode or setBandwidth in flight. A tap tuning one
+  // would land on an id about to be removed.
+  private replacing = new Set<number>();
 
   constructor(private readonly deps: ControllerDeps) {
     const link = deps.link;
@@ -257,6 +282,7 @@ export class ReceiverController {
       this.add(hz);
       return;
     }
+    if (this.replacing.has(active)) return;
     this.call("tune", { vrx: active, hz: Math.round(hz) }).then((r) => {
       if (r) this.nowPlaying(r);
     });
@@ -301,6 +327,9 @@ export class ReceiverController {
     this.removing.add(vrx);
     this.deps.link.request("removeVrx", { vrx }).then(
       () => {
+        // The reply settles it: an event still to come finds no chip, and an
+        // id the engine reuses later is reported as anyone else's would be.
+        this.removing.delete(vrx);
         if (this.deps.audio.vrx === vrx) this.deps.audio.stop();
         this.list.remove(vrx);
       },
@@ -333,8 +362,10 @@ export class ReceiverController {
   private replace(vrx: number, op: "setMode" | "setBandwidth", args: { [key: string]: JsonValue }): void {
     const gate = this.deps.link;
     gate.hold(vrx);
+    this.replacing.add(vrx);
     this.deps.link.request(op, args).then(
       (reply) => {
+        this.replacing.delete(vrx);
         const replaced = num((reply as { replaced?: JsonValue } | null)?.replaced);
         const r = this.fromReply(reply, replaced);
         if (r && replaced !== undefined && r.vrx !== replaced) {
@@ -349,6 +380,7 @@ export class ReceiverController {
         gate.release(vrx);
       },
       (e: unknown) => {
+        this.replacing.delete(vrx);
         this.deps.toast(errorText(e));
         gate.release(vrx);
       },
@@ -418,6 +450,9 @@ export class ReceiverController {
   }
 
   private onLink(e: LinkEvent): void {
+    // A rebuilt session has new ids; a removal asked for before it names an
+    // id that may now belong to another receiver.
+    if (e.recreated || e.lost) this.removing.clear();
     const lost = e.lost ?? [];
     // Lost ids are old ids: take them out before the map reuses them.
     for (const l of lost) {

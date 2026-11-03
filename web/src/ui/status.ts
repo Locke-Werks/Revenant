@@ -33,7 +33,17 @@ export class StatusModel {
     this.socketUp = up;
   }
 
-  link(state: EngineState, detail = ""): void {
+  // The link is ready. A session that was not resumed is a new one with its
+  // own receiver event subscription.
+  ready(resumed: boolean): void {
+    this.socketUp = true;
+    if (!resumed) this.ended = null;
+  }
+
+  // rebuilt: the Up event carried recreated/lost, so the session's receiver
+  // events were subscribed afresh and an earlier end no longer holds.
+  link(state: EngineState, detail = "", rebuilt = false): void {
+    if (state === "up" && rebuilt) this.ended = null;
     this.engine = state;
     this.engineDetail = detail;
     if (state === "up") this.everUp = true;

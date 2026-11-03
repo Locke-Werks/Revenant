@@ -141,16 +141,6 @@ button {
   transform: scaleX(0);
   transition: transform 80ms linear;
 }
-.meter-text {
-  position: absolute;
-  right: 6px;
-  top: 0;
-  line-height: 22px;
-  font-size: 0.75rem;
-  font-variant-numeric: tabular-nums;
-  text-shadow: 0 0 3px #000;
-}
-
 .stage {
   grid-area: stage;
   position: relative;

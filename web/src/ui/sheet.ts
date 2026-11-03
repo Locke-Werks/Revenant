@@ -15,6 +15,10 @@ export interface SheetDeps {
   toggleKeepListening(): void;
 }
 
+export function sheetHint(others: boolean): string {
+  return others ? "Tap a receiver to listen" : "Tap the waterfall to listen there; press and hold to add another receiver.";
+}
+
 function bandwidthLabel(hz: number): string {
   return hz >= 1000 ? `${hz / 1000} kHz` : `${hz} Hz`;
 }
@@ -121,10 +125,14 @@ export class Sheet {
     this.keep.setAttribute("aria-pressed", String(on));
   }
 
-  show(r: Receiver | null): void {
+  // others: receivers exist though none is selected, so the hint points at
+  // the chips rather than the waterfall.
+  show(r: Receiver | null, others = false): void {
     this.active = r;
     this.tuning.hidden = r === null;
-    this.el.querySelector<HTMLElement>("#sh-hint")!.hidden = r !== null;
+    const hint = this.el.querySelector<HTMLElement>("#sh-hint")!;
+    hint.hidden = r !== null;
+    hint.textContent = sheetHint(others);
     this.title.textContent = r ? `${formatMHz(r.hz)} MHz ${r.mode.toUpperCase()}` : "No receiver";
     if (!r) return;
     for (const b of Array.from(this.modes.querySelectorAll<HTMLButtonElement>("button"))) {

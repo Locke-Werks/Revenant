@@ -239,7 +239,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     }
     const current = active === null ? null : receivers.list.get(active) ?? null;
     top.show(current);
-    sheet!.show(current);
+    sheet!.show(current, list.length > 0);
   };
   receivers.list.onChange(renderReceivers);
   renderReceivers();
@@ -262,8 +262,8 @@ export function mountApp(root: HTMLElement): AppHandle {
     }
   };
   renderStatus();
-  link.on("ready", () => {
-    status.socket(true);
+  link.on("ready", (e) => {
+    status.ready(e.resumed);
     renderStatus();
   });
   link.on("down", () => {
@@ -271,7 +271,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     renderStatus();
   });
   link.on("link", (e) => {
-    status.link(e.state, e.detail);
+    status.link(e.state, e.detail, e.recreated !== undefined || e.lost !== undefined);
     renderStatus();
   });
   link.on("vrxEventsEnded", (e) => {

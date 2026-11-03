@@ -4,6 +4,7 @@ import {
   DEFAULT_MODE,
   formatMHz,
   parseFrequency,
+  readFrequency,
   ReceiverController,
   ReplaceGate,
   type ControllerAudio,
@@ -11,7 +12,8 @@ import {
   type GateLink,
 } from "../src/ui/receivers";
 import { BEHIND_BELOW, sourceBehind, StatusModel } from "../src/ui/status";
-import { OPEN_SOURCE_TIMEOUT_MS } from "../src/ui/radio_panel";
+import { gainId, OPEN_SOURCE_TIMEOUT_MS, setCenter } from "../src/ui/radio_panel";
+import { sheetHint } from "../src/ui/sheet";
 import { levelInBand } from "../src/ui/top_bar";
 import type { GatewayEvent, JsonValue, LinkEvent } from "../src/protocol";
 
@@ -438,4 +440,105 @@ test("the S-meter reads the strongest bin inside the receiver's passband", () =>
   assert.equal(levelInBand(f, 10_150, 10_250), -120 + 60 * 0.5);
   assert.equal(levelInBand(f, 20_000, 21_000), null);
   assert.equal(levelInBand(f, 1_000, 2_000), null);
+});
+
+// ---- Fix round 1 -----------------------------------------------------------------
+
+test("frequency entry takes a comma and refuses a unitless value it would have to guess", () => {
+  assert.equal(parseFrequency("146,52"), 146_520_000);
+  assert.equal(parseFrequency("999"), 999_000_000);
+  assert.deepEqual(readFrequency("14070"), { error: '"14070": add a unit (k, M, G)' });
+  assert.deepEqual(readFrequency("1000"), { error: '"1000": add a unit (k, M, G)' });
+  assert.equal(parseFrequency("100000"), 100_000);
+  assert.equal(parseFrequency("14070k"), 14_070_000);
+  assert.deepEqual(readFrequency("abc"), { error: '"abc" is not a frequency' });
+});
+
+test("a removal's id is forgotten once the reply lands, so a reused id's removal is reported", async () => {
+  const r = rig();
+  await listening(r, 1);
+  r.ctl.remove(1);
+  r.link.reply({ vrx: 1 });
+  await flush();
+  // The engine's event for that removal never came. Later id 1 is reused.
+  r.ctl.longPress(162_550_000);
+  r.link.reply(status(1, 162_550_000));
+  await flush();
+  r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 1, reason: "retuned away" });
+  assert.deepEqual(r.toasts, ["Receiver at 162.5500 MHz removed: retuned away"]);
+});
+
+test("a restart forgets removals in flight", async () => {
+  const r = rig();
+  await listening(r, 1);
+  r.ctl.remove(1);
+  // The socket dropped before the reply; the session was rebuilt.
+  r.link.refuse("connection lost");
+  r.link.emit("link", { event: "link", state: "up", detail: "", recreated: [], lost: [] });
+  r.ctl.longPress(100_000_000);
+  r.link.reply(status(1, 100_000_000));
+  await flush();
+  r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 1, reason: "gone" });
+  assert.equal(r.toasts[r.toasts.length - 1], "Receiver at 100.0000 MHz removed: gone");
+});
+
+test("a removal event before the reply is not news, and a restart in between clears it", async () => {
+  const r = rig();
+  await listening(r, 1);
+  r.ctl.remove(1);
+  r.link.emit("link", { event: "link", state: "up", detail: "", recreated: [{ old: 1, new: 1 }], lost: [] });
+  r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 1, reason: "x" });
+  assert.deepEqual(r.toasts, ["Receiver at 146.5200 MHz removed: x"]);
+});
+
+test("taps are ignored while the active receiver is being replaced", async () => {
+  const r = rig();
+  await listening(r, 1);
+  r.ctl.setMode("am");
+  const before = r.link.sent.length;
+  r.ctl.tap(147_000_000);
+  assert.equal(r.link.sent.length, before);
+  r.link.reply(status(2, 146_520_000, "am", { replaced: 1 }));
+  await flush();
+  r.ctl.tap(147_000_000);
+  assert.deepEqual(r.link.last().args, { vrx: 2, hz: 147_000_000 });
+});
+
+test("setCenter shows only a refusal; dropped receivers report themselves", async () => {
+  const link = new FakeLink();
+  const toasts: string[] = [];
+  const ok = setCenter({ link: new ReplaceGate(link), toast: (t) => toasts.push(t) }, 100_000_000);
+  link.reply({ grantedHz: 100_000_000, removed: [1, 2] });
+  assert.equal(await ok, true);
+  assert.deepEqual(toasts, []);
+  const bad = setCenter({ link: new ReplaceGate(link), toast: (t) => toasts.push(t) }, 1);
+  link.refuse("set_source_center: out of range");
+  assert.equal(await bad, false);
+  assert.deepEqual(toasts, ["set_source_center: out of range"]);
+});
+
+test("gain element ids keep to safe characters", () => {
+  assert.equal(gainId("IF 1"), "rp-gain-IF_1");
+  assert.equal(gainId('L"NA'), "rp-gain-L_NA");
+});
+
+test("the sheet hint points at the chips when receivers exist but none is active", () => {
+  assert.equal(sheetHint(true), "Tap a receiver to listen");
+  assert.match(sheetHint(false), /Tap the waterfall/);
+});
+
+test("the receiver-events chip clears on a rebuilt session or a fresh one", () => {
+  const s = new StatusModel();
+  s.ready(true);
+  s.link("up");
+  s.eventsEnded("fell behind");
+  s.link("up", "", false);
+  assert.equal(s.chips().length, 1);
+  s.link("up", "", true);
+  assert.deepEqual(s.chips(), []);
+  s.eventsEnded("fell behind");
+  s.ready(true);
+  assert.equal(s.chips().length, 1);
+  s.ready(false);
+  assert.deepEqual(s.chips(), []);
 });
