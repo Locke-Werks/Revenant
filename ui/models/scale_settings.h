@@ -26,6 +26,7 @@
 #include <QtQmlIntegration>
 
 #include "models/settings.h"
+#include "render/display_settings.h"
 #include "render/spectrum_scale.h"
 #include "render/waterfall_scale.h"
 
@@ -91,7 +92,7 @@ public:
         manual_pivot_ = waterfall_pivot_;
         waterfall_auto_pivot_ = store.value(settings::kWaterfallAutoPivot, false).toBool();
         spectrum_range_fit_ = clamp_fit(store.value(settings::kSpectrumRangeFit, 0.0).toDouble());
-        spectrum_smoothing_ = clamp_smoothing(
+        spectrum_smoothing_ = revenant::ui::clamp_smoothing(
             store.value(settings::kSpectrumSmoothing, kDefaultSmoothDecaySeconds).toDouble());
         spectrum_floor_smoothing_ = store.value(settings::kSpectrumFloorSmoothing, true).toBool();
         caption_zoom_ =
@@ -205,7 +206,7 @@ public:
 
     void setSpectrumSmoothing(double seconds)
     {
-        seconds = clamp_smoothing(seconds);
+        seconds = revenant::ui::clamp_smoothing(seconds);
         if (seconds == spectrum_smoothing_) {
             return;
         }
@@ -404,31 +405,14 @@ private:
         emit pinsChanged();
     }
 
-    // A hand-edited registry value outside 0 to 1, or not a number, reads as
-    // the nearest end rather than extrapolating the blend past either look.
-    [[nodiscard]] static double clamp_fit(double value)
-    {
-        return value > 0.0 ? std::min(value, 1.0) : 0.0;
-    }
-
-    // The contrast runs on past tight to the hot ends; see HistoryLevels::ends.
+    // The bounds live in render/display_settings.h, where the web gateway
+    // applies the same ones to the values it reads back for the phone.
+    [[nodiscard]] static double clamp_fit(double value) { return clamp_range_fit(value); }
     [[nodiscard]] static double clamp_contrast(double value)
     {
-        return value > 0.0 ? std::min(value, static_cast<double>(kMaxWaterfallContrast))
-                           : 0.0;
+        return clamp_waterfall_contrast(value);
     }
-
-    [[nodiscard]] static double clamp_pivot(double value)
-    {
-        return value == value ? std::clamp(value, static_cast<double>(kMinCurvePivot),
-                                           static_cast<double>(kMaxCurvePivot))
-                              : static_cast<double>(kDefaultCurvePivot);
-    }
-
-    [[nodiscard]] static double clamp_smoothing(double seconds)
-    {
-        return seconds > 0.0 ? std::min(seconds, kMaxSmoothDecaySeconds) : 0.0;
-    }
+    [[nodiscard]] static double clamp_pivot(double value) { return clamp_waterfall_pivot(value); }
 
     ScalePins pins_;
     double waterfall_contrast_ = 0.0;

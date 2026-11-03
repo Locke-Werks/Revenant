@@ -560,6 +560,54 @@ inline constexpr float kMaxWaterfallContrast = 2.0F;
     return blend_ends(padded, tight_ends(noise, peak, kSpectrumTightGuardDb, pins), fit);
 }
 
+// How much quieter or louder a zoomed view is than the whole frame, added to
+// the engine's two ends before they are placed.
+//
+// The engine measures its ends over every bin. Rather than redo its outlier
+// rejection and smoothing for the view, the same two percentiles are measured
+// over both the whole frame and the view and the difference carried, so the
+// engine's ends move by exactly how much quieter or louder the zoomed part is.
+// The quarter is the noise, for the reason render/waterfall_scale.h gives; the
+// thousandth is the strong level. A view of the whole frame carries nothing.
+struct ViewOffsets {
+    float floor_db = 0.0F;
+    float ceiling_db = 0.0F;
+    bool valid = false;
+
+    // A second either way: the percentiles of a narrow view are a small
+    // sample and jump frame to frame, and the engine's own ends already carry
+    // the attack and decay a signal arriving needs.
+    static constexpr double kSeconds = 1.0;
+
+    void track(std::span<const float> whole, std::span<const float> shown, double seconds,
+               std::vector<float>& scratch)
+    {
+        if (shown.size() >= whole.size() || shown.empty()) {
+            *this = ViewOffsets{};
+            return;
+        }
+        const auto at = [&scratch](std::span<const float> bins, double fraction) {
+            scratch.assign(bins.begin(), bins.end());
+            const auto rank =
+                static_cast<std::size_t>(fraction * static_cast<double>(scratch.size() - 1));
+            std::nth_element(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(rank),
+                             scratch.end());
+            return scratch[rank];
+        };
+        const float floor_target = at(shown, 0.25) - at(whole, 0.25);
+        const float ceiling_target = at(shown, 0.999) - at(whole, 0.999);
+        if (!valid) {
+            floor_db = floor_target;
+            ceiling_db = ceiling_target;
+            valid = true;
+            return;
+        }
+        const auto step = static_cast<float>(1.0 - std::exp(-std::max(seconds, 0.0) / kSeconds));
+        floor_db += (floor_target - floor_db) * step;
+        ceiling_db += (ceiling_target - ceiling_db) * step;
+    }
+};
+
 [[nodiscard]] inline float pin_level(float drawn_db)
 {
     return std::round(drawn_db * 10.0F) / 10.0F;
