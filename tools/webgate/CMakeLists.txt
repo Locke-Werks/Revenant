@@ -26,6 +26,8 @@ add_library(revenant_webgate_lib STATIC
     spectrum_reducer.cpp
     audio_opus.cpp
     protocol.cpp
+    session.cpp
+    dispatch.cpp
 )
 
 target_include_directories(revenant_webgate_lib PUBLIC "${CMAKE_SOURCE_DIR}")

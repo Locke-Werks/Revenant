@@ -7,6 +7,7 @@ add_executable(test_webgate
     test_spectrum_reducer.cpp
     test_audio_opus.cpp
     test_protocol.cpp
+    test_dispatch.cpp
     ../reference/gpu_fixture.cpp
     test_engine_link.cpp
 )
