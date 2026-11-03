@@ -56,6 +56,7 @@
 
 #include "core/rpc/types.h"
 #include "tools/webgate/audio_opus.h"
+#include "tools/webgate/audio_rate.h"
 #include "tools/webgate/hls_playlist.h"
 #include "tools/webgate/display_sync.h"
 #include "tools/webgate/session.h"
@@ -276,6 +277,9 @@ private:
     };
     struct AudioPath {
         std::unique_ptr<LiveOpusEncoder> opus;
+        // Ahead of both encoders, so Opus and HLS hear one resampled stream
+        // and a receiver re-created under a new id starts a fresh filter.
+        PhoneRateConverter rate;
         std::uint32_t next_seq = 0;
         bool reported_error = false;
     };

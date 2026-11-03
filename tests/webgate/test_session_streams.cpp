@@ -672,6 +672,52 @@ TEST_CASE("HLS lingers 30 s after keepListening off", "[gpu][webgate][streams]")
     }
 }
 
+// What a p25p1 receiver hands the gateway: decoded voice at 8000 S/s. Before
+// the rate converter this was refused with an audioError and the phone stayed
+// silent through a call whose transcript it was showing.
+TEST_CASE("8000 S/s digital voice reaches Opus and HLS", "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    rig.open(still_engine());
+    rig.attach();
+
+    rig.command(R"({"id":1,"op":"addVrx","args":{"hz":100100000,"mode":"am"}})");
+    const auto vrx = vrx_of(reply_to(rig.socket, 1));
+    const auto id = std::to_string(vrx);
+    rig.command(R"({"id":2,"op":"audio","args":{"vrx":)" + id + "}}");
+    rig.command(R"({"id":3,"op":"keepListening","args":{"on":true}})");
+    HlsSegmenter* const segmenter = rig.registry.find(vrx);
+    REQUIRE(segmenter != nullptr);
+
+    // Four seconds in 20 ms chunks, enough for the three segments a playlist
+    // needs, the engine not running so nothing else arrives on this receiver.
+    revenant::rpc::AudioChunk chunk;
+    chunk.sample_rate = 8000;
+    chunk.channel_count = 1;
+    double phase = 0.0;
+    for (int c = 0; c < 200; ++c) {
+        chunk.samples.assign(160, 0.0F);
+        for (float& s : chunk.samples) {
+            s = 0.5F * static_cast<float>(std::sin(phase));
+            phase += 2.0 * 3.14159265358979323846 * 1000.0 / 8000.0;
+        }
+        chunk.sample_index = static_cast<std::uint64_t>(c) * 160;
+        rig.streams->deliver_audio(vrx, chunk);
+        rig.strand.run_pending();
+    }
+
+    // Four seconds is 200 packets less the few the socket may still hold back.
+    CHECK(rig.socket.count(Kind::Opus) + rig.streams->counters().opus_dropped >= 195);
+    bool refused = false;
+    for (const auto& m : rig.socket.sent) {
+        refused = refused || (m.kind == Kind::Text && contains(m.text, "audioError"));
+    }
+    CHECK_FALSE(refused);
+    CHECK(segmenter->ok());
+    CHECK_FALSE(segmenter->playlist().empty());
+}
+
 TEST_CASE("a receiver removed elsewhere is reported to its phone", "[gpu][webgate][streams]")
 {
     REVENANT_NEEDS_GPU();
