@@ -52,6 +52,7 @@ export function showInsets(doc: Document, win: Window): void {
       `visualViewport.height ${vv ? vv.height.toFixed(1) : "n/a"}  offsetTop ${vv ? vv.offsetTop.toFixed(1) : "n/a"}`,
       `scrollY ${win.scrollY}  screen ${win.screen.width}x${win.screen.height}`,
       `standalone ${nav.standalone === true}`,
+      `--app-top ${doc.documentElement.style.getPropertyValue("--app-top") || "unset"}  --app-h ${doc.documentElement.style.getPropertyValue("--app-h") || "unset"}`,
     ].join("\n");
   };
   render();
@@ -61,41 +62,64 @@ export function showInsets(doc: Document, win: Window): void {
   win.visualViewport?.addEventListener("scroll", render);
 }
 
-// The height of the glass the app may fill. An installed app on iOS 27
-// reports a layout viewport taller than the screen (innerHeight 1052 on a 956
-// tall screen: both insets added on top), so a box sized from the viewport
-// overruns the glass and the edges iOS resolves for it do not line up with
-// the screen's. The screen's own height along the current orientation is the
-// ceiling; anywhere the viewport is honest it is the smaller and wins.
-export function appHeightPx(g: {
-  innerHeight: number;
-  visualHeight: number | null;
-  screenWidth: number;
-  screenHeight: number;
-  landscape: boolean;
-}): number {
-  const screenTall = g.landscape ? Math.min(g.screenWidth, g.screenHeight) : Math.max(g.screenWidth, g.screenHeight);
-  let h = g.innerHeight;
-  if (g.visualHeight !== null && g.visualHeight > 0) h = Math.min(h, g.visualHeight);
-  if (screenTall > 0) h = Math.min(h, screenTall);
-  return Math.round(h);
+// Where the glass is inside the layout viewport. An installed app on iOS 27
+// reports a viewport taller than the screen (innerHeight 1052 on a 956 tall
+// screen): it reaches a top inset above the glass and a bottom inset below
+// it, so a fixed box at top 0 starts under the status bar, out of sight. When
+// the overshoot is exactly the two insets the glass starts a top inset down;
+// otherwise nothing is assumed and the viewport is taken as it is.
+export interface Geometry {
+  topPx: number;
+  heightPx: number;
 }
 
-export function trackAppHeight(win: Window): void {
+export function appGeometry(g: {
+  innerHeight: number;
+  screenTall: number;
+  insetTop: number;
+  insetBottom: number;
+}): Geometry {
+  const overshoot = g.innerHeight - g.screenTall;
+  if (g.screenTall > 0 && overshoot > 0 && Math.abs(g.insetTop + g.insetBottom - overshoot) < 1) {
+    return { topPx: Math.round(overshoot - g.insetBottom), heightPx: Math.round(g.screenTall) };
+  }
+  return { topPx: 0, heightPx: Math.round(g.innerHeight) };
+}
+
+// The screen's length along the current orientation.
+export function screenTallPx(width: number, height: number, landscape: boolean): number {
+  return landscape ? Math.min(width, height) : Math.max(width, height);
+}
+
+// env() insets are only readable through CSS, so a hidden probe carries them.
+function insetProbe(doc: Document): HTMLElement {
+  const probe = doc.createElement("div");
+  probe.style.cssText =
+    "position:fixed;visibility:hidden;pointer-events:none;" +
+    "padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)";
+  doc.body.append(probe);
+  return probe;
+}
+
+export function trackAppGeometry(win: Window): void {
+  const doc = win.document;
+  const probe = insetProbe(doc);
+  const landscape = win.matchMedia("(orientation: landscape)");
   const set = () => {
-    const h = appHeightPx({
+    const cs = win.getComputedStyle(probe);
+    const g = appGeometry({
       innerHeight: win.innerHeight,
-      visualHeight: win.visualViewport?.height ?? null,
-      screenWidth: win.screen.width,
-      screenHeight: win.screen.height,
-      landscape: win.matchMedia("(orientation: landscape)").matches,
+      screenTall: screenTallPx(win.screen.width, win.screen.height, landscape.matches),
+      insetTop: parseFloat(cs.paddingTop) || 0,
+      insetBottom: parseFloat(cs.paddingBottom) || 0,
     });
-    win.document.documentElement.style.setProperty("--app-h", `${h}px`);
+    doc.documentElement.style.setProperty("--app-top", `${g.topPx}px`);
+    doc.documentElement.style.setProperty("--app-h", `${g.heightPx}px`);
   };
   set();
   win.addEventListener("resize", set);
   win.visualViewport?.addEventListener("resize", set);
-  win.matchMedia("(orientation: landscape)").addEventListener("change", set);
+  landscape.addEventListener("change", set);
 }
 
 // The page itself never scrolls, but iOS scrolls the layout viewport to keep

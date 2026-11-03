@@ -77,7 +77,6 @@ button {
 html:has(.app), html:has(.app) body {
   overflow: hidden;
   overscroll-behavior: none;
-  height: var(--app-h, 100%);
 }
 /* The setup screens' inset padding and full height would otherwise still
    wrap the running app, making the document a top and a bottom inset taller
@@ -89,10 +88,10 @@ html:has(.app), html:has(.app) body {
 
 /* Edge to edge. Each bar pads itself by the inset on its own edge, so its
    background reaches the glass and the display fills what is left. */
-/* Sized from the screen, not the viewport: see appHeightPx in insets.ts. */
+/* Placed on the glass, not the viewport: see appGeometry in insets.ts. */
 .app {
   position: fixed;
-  top: 0;
+  top: var(--app-top, 0px);
   left: 0;
   right: 0;
   height: var(--app-h, 100%);
@@ -402,7 +401,7 @@ html:has(.app), html:has(.app) body {
   right: env(safe-area-inset-right);
   /* Hangs from the app's bottom edge rather than the viewport's, which iOS
      misplaces in an installed app. */
-  top: var(--app-h, 100%);
+  top: calc(var(--app-top, 0px) + var(--app-h, 100%));
   transform: translateY(-100%);
   max-height: calc(var(--app-h, 100dvh) * 0.7);
   display: flex;
