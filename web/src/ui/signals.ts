@@ -82,20 +82,20 @@ export class RowSet {
 
 // The desktop's table, ui/models/label_tune.h, so a detection opens in the
 // same mode on both. Protocols by core/identify's names, analogue by
-// core/detect/label.cpp's.
-const PROTOCOL_MODES: Record<string, string> = {
-  P25: "p25p1",
-  "D-STAR": "dstar",
-  TETRA: "tetra",
-  M17: "p25p1",
-  DMR: "dmr",
-  POCSAG: "nfm",
-  "AX.25": "nfm",
-  RTTY: "usb",
-  "SITOR-B": "usb",
-  PSK31: "usb",
-  CW: "cw",
-  RDS: "wfm",
+// core/detect/label.cpp's. [mode, decoder], decoder "" for none.
+const PROTOCOL_TUNES: Record<string, readonly [string, string]> = {
+  P25: ["p25p1", "p25p1"],
+  "D-STAR": ["dstar", "dstar"],
+  TETRA: ["tetra", "tetra"],
+  M17: ["p25p1", "m17"],
+  DMR: ["dmr", "dmr"],
+  POCSAG: ["nfm", "pocsag"],
+  "AX.25": ["nfm", "ax25"],
+  RTTY: ["usb", "rtty"],
+  "SITOR-B": ["usb", "sitor_b"],
+  PSK31: ["usb", "psk31"],
+  CW: ["cw", "cw"],
+  RDS: ["wfm", ""],
 };
 const ANALOGUE_MODES: Record<string, string> = { AM: "am", NFM: "nfm", WFM: "wfm", CW: "cw", USB: "usb", LSB: "lsb" };
 // ui::kFamilySidebandMaxHz: a digital family this narrow fits a USB voice
@@ -103,22 +103,47 @@ const ANALOGUE_MODES: Record<string, string> = { AM: "am", NFM: "nfm", WFM: "wfm
 export const FAMILY_SIDEBAND_MAX_HZ = 3_000;
 // ui::kNarrowbandChannelHz, the width rule's line between NFM and WFM.
 export const NARROWBAND_CHANNEL_HZ = 25_000;
+// The modes whose passband the shared width list describes. Every other mode
+// gets the engine's own default, which the list cannot say: USB's is 300 to
+// 2700 Hz, offset from the carrier.
+export const FITTED_MODES: readonly string[] = ["nfm", "am", "wfm", "raw"];
 
-// The mode a receiver spawned on d opens in. The gateway folds digital
+// Modes the gateway opens with their own decoder already on.
+const DV_MODES: readonly string[] = ["p25p1", "dstar", "tetra", "dmr"];
+
+export interface DetectionTune {
+  mode: string;
+  // Attached after the add; "" for none. Never the decoder a DV mode
+  // already brings with it.
+  decoder: string;
+  // 0 asks the engine for the mode's default passband.
+  bandwidthHz: number;
+}
+
+// What a receiver spawned on d opens with. The gateway folds digital
 // families into "modulation", so a modulation name the analogue table does
 // not know is taken as a family, as the desktop would.
-export function modeForDetection(d: Pick<Detection, "label" | "labelKind" | "bandwidthHz">): string {
+export function tuneForDetection(d: Pick<Detection, "label" | "labelKind" | "bandwidthHz">): DetectionTune {
   const name = d.label.toUpperCase();
+  let mode = "";
+  let decoder = "";
   if (d.labelKind === "protocol") {
     // A refined protocol such as "P25 control" tunes as its base protocol.
-    const base = PROTOCOL_MODES[name] ?? PROTOCOL_MODES[name.split(" ")[0] ?? ""];
-    if (base) return base;
+    const row = PROTOCOL_TUNES[name] ?? PROTOCOL_TUNES[name.split(" ")[0] ?? ""];
+    if (row) [mode, decoder] = row;
   } else if (d.labelKind === "modulation") {
-    const analogue = ANALOGUE_MODES[name];
-    if (analogue) return analogue;
-    if (d.bandwidthHz > 0 && d.bandwidthHz <= FAMILY_SIDEBAND_MAX_HZ) return "usb";
+    mode = ANALOGUE_MODES[name] ?? "";
+    if (mode === "" && d.bandwidthHz > 0 && d.bandwidthHz <= FAMILY_SIDEBAND_MAX_HZ) mode = "usb";
   }
-  return d.bandwidthHz > NARROWBAND_CHANNEL_HZ ? "wfm" : "nfm";
+  if (mode === "") mode = d.bandwidthHz > NARROWBAND_CHANNEL_HZ ? "wfm" : "nfm";
+  // A DV receiver is opened with its mode's decoder by the gateway.
+  if (DV_MODES.includes(mode) && decoder === mode) decoder = "";
+  const bandwidthHz = FITTED_MODES.includes(mode) ? fitBandwidth(d.bandwidthHz, BANDWIDTHS_HZ) : 0;
+  return { mode, decoder, bandwidthHz };
+}
+
+export function modeForDetection(d: Pick<Detection, "label" | "labelKind" | "bandwidthHz">): string {
+  return tuneForDetection(d).mode;
 }
 
 // The receiver already sitting on hz: its passband covers it. The nearest
@@ -140,7 +165,7 @@ export function receiverCovering(rs: readonly Pick<Receiver, "vrx" | "hz" | "ban
 export interface PickDeps {
   receivers(): readonly Pick<Receiver, "vrx" | "hz" | "bandwidthHz">[];
   select(vrx: number): void;
-  spawn(hz: number, mode: string, bandwidthHz: number): void;
+  spawn(hz: number, mode: string, bandwidthHz: number, decoder: string): void;
   stopDial(): void;
   // Pans the view when hz is off screen.
   reveal(hz: number): void;
@@ -152,7 +177,10 @@ export function pickSignal(d: Detection, deps: PickDeps): void {
   deps.stopDial();
   const there = receiverCovering(deps.receivers(), d.centerHz);
   if (there !== null) deps.select(there);
-  else deps.spawn(d.centerHz, modeForDetection(d), fitBandwidth(d.bandwidthHz, BANDWIDTHS_HZ));
+  else {
+    const t = tuneForDetection(d);
+    deps.spawn(d.centerHz, t.mode, t.bandwidthHz, t.decoder);
+  }
   deps.reveal(d.centerHz);
 }
 

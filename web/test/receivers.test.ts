@@ -64,6 +64,7 @@ import {
   modeForDetection,
   pickSignal,
   receiverCovering,
+  tuneForDetection,
   readConfidence,
   RowSet,
   RateLimitedSender,
@@ -778,7 +779,7 @@ function pickRig(rs: Rx[] = []) {
   const deps: PickDeps = {
     receivers: () => rs,
     select: (vrx) => calls.push(`select ${vrx}`),
-    spawn: (hz, mode, bw) => calls.push(`spawn ${hz} ${mode} ${bw}`),
+    spawn: (hz, mode, bw, dec) => calls.push(`spawn ${hz} ${mode} ${bw}${dec ? " " + dec : ""}`),
     stopDial: () => calls.push("stop"),
     reveal: (hz) => calls.push(`reveal ${hz}`),
   };
@@ -788,7 +789,66 @@ function pickRig(rs: Rx[] = []) {
 test("picking a signal spawns a receiver in its mode at the fitted width and reveals it", () => {
   const { calls, deps } = pickRig([{ vrx: 1, hz: 100_000_000, bandwidthHz: 200_000 }]);
   pickSignal(det("1", 10, { centerHz: 162_550_000, bandwidthHz: 9_000, label: "P25", labelKind: "protocol" }), deps);
-  assert.deepEqual(calls, ["stop", "spawn 162550000 p25p1 10000", "reveal 162550000"]);
+  assert.deepEqual(calls, ["stop", "spawn 162550000 p25p1 0", "reveal 162550000"]);
+});
+
+test("an analogue FM pick is fitted to the shared width list", () => {
+  const { calls, deps } = pickRig();
+  pickSignal(det("1", 10, { bandwidthHz: 9_000, label: "NFM", labelKind: "modulation" }), deps);
+  assert.equal(calls[1], "spawn 146520000 nfm 10000");
+});
+
+test("a pick names the desktop's decoder, except one a DV mode brings itself", () => {
+  const t = (label: string, bandwidthHz = 12_000) => tuneForDetection({ label, labelKind: "protocol", bandwidthHz });
+  assert.deepEqual(t("POCSAG"), { mode: "nfm", decoder: "pocsag", bandwidthHz: 12_500 });
+  assert.deepEqual(t("AX.25"), { mode: "nfm", decoder: "ax25", bandwidthHz: 12_500 });
+  assert.deepEqual(t("RTTY", 400), { mode: "usb", decoder: "rtty", bandwidthHz: 0 });
+  assert.deepEqual(t("PSK31", 100), { mode: "usb", decoder: "psk31", bandwidthHz: 0 });
+  assert.deepEqual(t("CW", 200), { mode: "cw", decoder: "cw", bandwidthHz: 0 });
+  assert.deepEqual(t("M17"), { mode: "p25p1", decoder: "m17", bandwidthHz: 0 });
+  assert.deepEqual(t("RDS", 150_000), { mode: "wfm", decoder: "", bandwidthHz: 200_000 });
+  for (const dv of ["P25", "DMR", "D-STAR", "TETRA"]) assert.equal(t(dv).decoder, "", dv);
+});
+
+test("only nfm, am, wfm and raw are fitted; every other mode asks for its default", () => {
+  const m = (label: string, bandwidthHz: number) => tuneForDetection({ label, labelKind: "modulation", bandwidthHz }).bandwidthHz;
+  assert.equal(m("AM", 7_000), 10_000);
+  assert.equal(m("WFM", 150_000), 200_000);
+  assert.equal(m("USB", 2_800), 0);
+  assert.equal(m("LSB", 2_800), 0);
+  assert.equal(m("CW", 300), 0);
+  assert.equal(m("BPSK", 2_000), 0);
+});
+
+test("a spawn adds in mode and width, then attaches the decoder", async () => {
+  const r = rig();
+  r.ctl.spawn(7_040_000, "usb", 0, "rtty");
+  assert.deepEqual(r.link.last(), { op: "addVrx", args: { hz: 7_040_000, mode: "usb", bandwidthHz: 0 }, timeoutMs: undefined });
+  r.link.reply(status(3, 7_040_000, "usb"));
+  await flush();
+  assert.equal(r.ctl.list.active, 3);
+  assert.deepEqual(r.link.last(), { op: "setDecoders", args: { vrx: 3, names: ["rtty"] }, timeoutMs: undefined });
+});
+
+test("a refused spawn decoder says nothing", async () => {
+  const r = rig();
+  r.ctl.spawn(7_040_000, "usb", 0, "rtty");
+  r.link.reply(status(3, 7_040_000, "usb"));
+  await flush();
+  r.link.refuse("unknown decoder");
+  await flush();
+  assert.deepEqual(r.toasts, []);
+});
+
+test("a spawn with no decoder, or one the receiver already has, sends no setDecoders", async () => {
+  const r = rig();
+  r.ctl.spawn(146_520_000, "nfm", 12_500);
+  r.link.reply(status(1, 146_520_000));
+  await flush();
+  r.ctl.spawn(851_000_000, "p25p1", 0, "p25p1");
+  r.link.reply(status(2, 851_000_000, "p25p1", { decoders: ["p25p1"] }));
+  await flush();
+  assert.deepEqual(r.link.sent.map((s) => s.op).filter((op) => op === "setDecoders"), []);
 });
 
 test("a signal wider than every choice gets the widest", () => {

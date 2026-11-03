@@ -321,7 +321,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   const signals = new SignalsPanel({
     receivers: () => receivers.list.list(),
     select: (vrx) => receivers.select(vrx),
-    spawn: (hz, mode, bw) => receivers.spawn(hz, mode, bw),
+    spawn: (hz, mode, bw, dec) => receivers.spawn(hz, mode, bw, dec),
     stopDial: () => dial.stop(),
     reveal: (hz) => {
       if (!view) return;
