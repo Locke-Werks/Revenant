@@ -61,7 +61,9 @@ import {
   CONFIDENCE_MIN,
   CONFIDENCE_SEND_MS,
   heardAgo,
+  modeForDetection,
   pickSignal,
+  receiverCovering,
   readConfidence,
   RowSet,
   RateLimitedSender,
@@ -770,36 +772,77 @@ test("time since heard is blank without a clock, and never negative", () => {
   assert.equal(heardAgo(5_000_000, 1_000_000, 2_400_000), "now");
 });
 
-function pickRig(hasActive = true) {
+type Rx = { vrx: number; hz: number; bandwidthHz: number | null };
+function pickRig(rs: Rx[] = []) {
   const calls: string[] = [];
   const deps: PickDeps = {
-    hasActiveReceiver: () => hasActive,
+    receivers: () => rs,
+    select: (vrx) => calls.push(`select ${vrx}`),
+    spawn: (hz, mode, bw) => calls.push(`spawn ${hz} ${mode} ${bw}`),
     stopDial: () => calls.push("stop"),
-    tuneFit: (hz, bw) => calls.push(`tune ${hz} ${bw}`),
     reveal: (hz) => calls.push(`reveal ${hz}`),
-    toast: (t) => calls.push(`toast ${t}`),
   };
   return { calls, deps };
 }
 
-test("picking a signal stops the dial, tunes to the centre at the fitted width and reveals it", () => {
-  const { calls, deps } = pickRig();
-  pickSignal(det("1", 10, { centerHz: 162_550_000, bandwidthHz: 9_000 }), deps);
-  assert.deepEqual(calls, ["stop", "tune 162550000 10000", "reveal 162550000"]);
+test("picking a signal spawns a receiver in its mode at the fitted width and reveals it", () => {
+  const { calls, deps } = pickRig([{ vrx: 1, hz: 100_000_000, bandwidthHz: 200_000 }]);
+  pickSignal(det("1", 10, { centerHz: 162_550_000, bandwidthHz: 9_000, label: "P25", labelKind: "protocol" }), deps);
+  assert.deepEqual(calls, ["stop", "spawn 162550000 p25p1 10000", "reveal 162550000"]);
 });
 
 test("a signal wider than every choice gets the widest", () => {
   const { calls, deps } = pickRig();
   pickSignal(det("1", 10, { bandwidthHz: 900_000 }), deps);
-  assert.equal(calls[1], "tune 146520000 200000");
+  assert.equal(calls[1], "spawn 146520000 wfm 200000");
 });
 
-test("picking with no active receiver only says so", () => {
-  const { calls, deps } = pickRig(false);
+test("picking a signal a receiver already covers selects that receiver", () => {
+  const { calls, deps } = pickRig([{ vrx: 4, hz: 146_525_000, bandwidthHz: 12_500 }]);
   pickSignal(det("1", 10), deps);
-  assert.equal(calls.length, 1);
-  assert.match(calls[0]!, /^toast /);
+  assert.deepEqual(calls, ["stop", "select 4", "reveal 146520000"]);
 });
+
+test("receiverCovering takes the nearest passband holding the centre", () => {
+  const rs: Rx[] = [
+    { vrx: 1, hz: 146_500_000, bandwidthHz: 50_000 },
+    { vrx: 2, hz: 146_521_000, bandwidthHz: 12_500 },
+    { vrx: 3, hz: 146_520_000, bandwidthHz: null },
+  ];
+  assert.equal(receiverCovering(rs, 146_520_000), 2);
+  assert.equal(receiverCovering(rs, 146_510_000), 1);
+  assert.equal(receiverCovering(rs, 147_000_000), null);
+  assert.equal(receiverCovering([], 1), null);
+});
+
+test("modeForDetection follows the desktop's label table", () => {
+  const m = (label: string, labelKind: string, bandwidthHz = 12_000) => modeForDetection({ label, labelKind, bandwidthHz });
+  assert.equal(m("WFM", "modulation", 150_000), "wfm");
+  assert.equal(m("NFM", "modulation"), "nfm");
+  assert.equal(m("AM", "modulation"), "am");
+  assert.equal(m("USB", "modulation"), "usb");
+  assert.equal(m("LSB", "modulation"), "lsb");
+  assert.equal(m("CW", "modulation"), "cw");
+  assert.equal(m("P25", "protocol"), "p25p1");
+  assert.equal(m("P25 control", "protocol"), "p25p1");
+  assert.equal(m("DMR", "protocol"), "dmr");
+  assert.equal(m("D-STAR", "protocol"), "dstar");
+  assert.equal(m("TETRA", "protocol"), "tetra");
+  assert.equal(m("POCSAG", "protocol"), "nfm");
+  assert.equal(m("RTTY", "protocol"), "usb");
+});
+
+test("families and unlabelled signals fall to the width rule, narrow families to usb", () => {
+  const m = (label: string, labelKind: string, bandwidthHz: number) => modeForDetection({ label, labelKind, bandwidthHz });
+  assert.equal(m("2FSK", "modulation", 12_000), "nfm");
+  assert.equal(m("8PSK", "modulation", 60_000), "wfm");
+  assert.equal(m("BPSK", "modulation", 2_000), "usb");
+  assert.equal(m("", "", 9_000), "nfm");
+  assert.equal(m("", "", 180_000), "wfm");
+  assert.equal(m("", "", 0), "nfm");
+  assert.equal(m("Unheard", "protocol", 9_000), "nfm");
+});
+
 
 test("tuneFit tunes the active receiver, then fits the width when it differs", async () => {
   const r = rig();

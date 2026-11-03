@@ -1,7 +1,7 @@
 // The Signals tab: the engine's detections as a list, and the confidence bar.
 
 import { fitBandwidth, labelText, sortForList, type Detection } from "../detections";
-import { BANDWIDTHS_HZ, formatMHz } from "./receivers";
+import { BANDWIDTHS_HZ, formatMHz, type Receiver } from "./receivers";
 
 // The gateway refuses a negative bar or one at 1.0 or above.
 export const CONFIDENCE_MIN = 0;
@@ -80,22 +80,79 @@ export class RowSet {
   }
 }
 
-export interface PickDeps {
-  hasActiveReceiver(): boolean;
-  stopDial(): void;
-  tuneFit(hz: number, bandwidthHz: number): void;
-  // Pans the view when hz is off screen.
-  reveal(hz: number): void;
-  toast(text: string): void;
+// The desktop's table, ui/models/label_tune.h, so a detection opens in the
+// same mode on both. Protocols by core/identify's names, analogue by
+// core/detect/label.cpp's.
+const PROTOCOL_MODES: Record<string, string> = {
+  P25: "p25p1",
+  "D-STAR": "dstar",
+  TETRA: "tetra",
+  M17: "p25p1",
+  DMR: "dmr",
+  POCSAG: "nfm",
+  "AX.25": "nfm",
+  RTTY: "usb",
+  "SITOR-B": "usb",
+  PSK31: "usb",
+  CW: "cw",
+  RDS: "wfm",
+};
+const ANALOGUE_MODES: Record<string, string> = { AM: "am", NFM: "nfm", WFM: "wfm", CW: "cw", USB: "usb", LSB: "lsb" };
+// ui::kFamilySidebandMaxHz: a digital family this narrow fits a USB voice
+// channel, where its tones reach the audio.
+export const FAMILY_SIDEBAND_MAX_HZ = 3_000;
+// ui::kNarrowbandChannelHz, the width rule's line between NFM and WFM.
+export const NARROWBAND_CHANNEL_HZ = 25_000;
+
+// The mode a receiver spawned on d opens in. The gateway folds digital
+// families into "modulation", so a modulation name the analogue table does
+// not know is taken as a family, as the desktop would.
+export function modeForDetection(d: Pick<Detection, "label" | "labelKind" | "bandwidthHz">): string {
+  const name = d.label.toUpperCase();
+  if (d.labelKind === "protocol") {
+    // A refined protocol such as "P25 control" tunes as its base protocol.
+    const base = PROTOCOL_MODES[name] ?? PROTOCOL_MODES[name.split(" ")[0] ?? ""];
+    if (base) return base;
+  } else if (d.labelKind === "modulation") {
+    const analogue = ANALOGUE_MODES[name];
+    if (analogue) return analogue;
+    if (d.bandwidthHz > 0 && d.bandwidthHz <= FAMILY_SIDEBAND_MAX_HZ) return "usb";
+  }
+  return d.bandwidthHz > NARROWBAND_CHANNEL_HZ ? "wfm" : "nfm";
 }
 
-export function pickSignal(d: Detection, deps: PickDeps): void {
-  if (!deps.hasActiveReceiver()) {
-    deps.toast("Add a receiver first: tap the waterfall.");
-    return;
+// The receiver already sitting on hz: its passband covers it. The nearest
+// wins when passbands overlap.
+export function receiverCovering(rs: readonly Pick<Receiver, "vrx" | "hz" | "bandwidthHz">[], hz: number): number | null {
+  let best: number | null = null;
+  let bestGap = Infinity;
+  for (const r of rs) {
+    if (r.bandwidthHz === null || !(r.bandwidthHz > 0)) continue;
+    const gap = Math.abs(r.hz - hz);
+    if (gap <= r.bandwidthHz / 2 && gap < bestGap) {
+      best = r.vrx;
+      bestGap = gap;
+    }
   }
+  return best;
+}
+
+export interface PickDeps {
+  receivers(): readonly Pick<Receiver, "vrx" | "hz" | "bandwidthHz">[];
+  select(vrx: number): void;
+  spawn(hz: number, mode: string, bandwidthHz: number): void;
+  stopDial(): void;
+  // Pans the view when hz is off screen.
+  reveal(hz: number): void;
+}
+
+// A row tap opens a receiver of its own on the signal, so whatever the
+// active one was listening to keeps going.
+export function pickSignal(d: Detection, deps: PickDeps): void {
   deps.stopDial();
-  deps.tuneFit(d.centerHz, fitBandwidth(d.bandwidthHz, BANDWIDTHS_HZ));
+  const there = receiverCovering(deps.receivers(), d.centerHz);
+  if (there !== null) deps.select(there);
+  else deps.spawn(d.centerHz, modeForDetection(d), fitBandwidth(d.bandwidthHz, BANDWIDTHS_HZ));
   deps.reveal(d.centerHz);
 }
 

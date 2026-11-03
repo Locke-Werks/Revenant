@@ -319,16 +319,16 @@ export function mountApp(root: HTMLElement): AppHandle {
     link.request("setDetection", { minConfidence: v }).catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)));
   };
   const signals = new SignalsPanel({
-    hasActiveReceiver: () => receivers.list.active !== null,
+    receivers: () => receivers.list.list(),
+    select: (vrx) => receivers.select(vrx),
+    spawn: (hz, mode, bw) => receivers.spawn(hz, mode, bw),
     stopDial: () => dial.stop(),
-    tuneFit: (hz, bw) => receivers.tuneFit(hz, bw),
     reveal: (hz) => {
       if (!view) return;
       const lo = view.centerHz - view.spanHz / 2;
       const hi = view.centerHz + view.spanHz / 2;
       if (hz < lo || hz > hi) apply(panBy(view, hz - view.centerHz));
     },
-    toast,
     setMinConfidence: sendConfidence,
     initialConfidence: readConfidence(prefs.getItem(CONFIDENCE_KEY)),
     saveConfidence: (v) => {

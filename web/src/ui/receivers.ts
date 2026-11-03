@@ -664,8 +664,15 @@ export class ReceiverController {
     this.placed(hz, { mode, bandwidthHz: null }, (to) => this.addAt(to, mode));
   }
 
-  private addAt(hz: number, mode: string): void {
-    void this.call("addVrx", { hz: Math.round(hz), mode, bandwidthHz: 0 }).then((r) => {
+  // A new receiver opened on a detected signal, already in its mode and
+  // width: one addVrx, so there is no replace racing the add.
+  spawn(hz: number, mode: string, bandwidthHz: number): void {
+    void this.deps.audio.unlock();
+    this.placed(hz, { mode, bandwidthHz }, (to) => this.addAt(to, mode, bandwidthHz));
+  }
+
+  private addAt(hz: number, mode: string, bandwidthHz = 0): void {
+    void this.call("addVrx", { hz: Math.round(hz), mode, bandwidthHz: Math.round(bandwidthHz) }).then((r) => {
       if (!r) return;
       this.list.select(r.vrx);
       this.nowPlaying(r);
