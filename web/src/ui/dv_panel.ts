@@ -18,6 +18,8 @@ export interface DvPanelDeps {
   setFollow(vrx: number, on: boolean, maxFollowers: number): void;
   receivers(): readonly { vrx: number }[];
   select(vrx: number): void;
+  // The follower count this phone last chose, over the desktop's.
+  savedMaxFollowers(): number | null;
 }
 
 // Rows drawn per table. The gateway sends up to 100; a screen holds fewer.
@@ -129,7 +131,7 @@ export class DvPanel {
     this.followBtn.setAttribute("aria-pressed", String(this.dv.follow !== null));
     this.followBtn.textContent = target === null ? "Follow trunk" : `Follow trunk on #${target}`;
     if (document.activeElement !== this.maxSel) {
-      this.maxSel.value = String(this.dv.follow?.maxFollowers ?? this.dv.maxFollowers);
+      this.maxSel.value = String(this.dv.follow?.maxFollowers ?? this.deps.savedMaxFollowers() ?? this.dv.maxFollowers);
     }
   }
 

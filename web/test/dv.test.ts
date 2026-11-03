@@ -2,6 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   callCells,
+  controlAt,
+  DvReplay,
+  NO_MEMORY,
+  readDvMemory,
   followTarget,
   groupCells,
   hasDvReceiver,
@@ -104,6 +108,60 @@ test("events parse into rows, switches and the trunk line", () => {
   assert.equal(parseTrunk({ event: "trunk", enabled: false, note: "" }).text, "Not following");
   assert.match(parseTrunk({ event: "trunk", enabled: true, controlVrx: 3, tsbks: 9, grants: 2, calls: [{ active: true }] }).text, /#3.*1 on the air/);
   assert.match(parseTrunk({ event: "trunk", fault: "old engine" }).text, /old engine/);
+});
+
+function replayRig(stored: string | null) {
+  const sent: string[] = [];
+  let text = stored;
+  const replay = new DvReplay(
+    {
+      autoDv: (on) => sent.push(`autoDv ${on}`),
+      follow: (vrx, on, max) => sent.push(`follow ${vrx} ${on} ${max}`),
+      rules: (r) => sent.push(r ? `rules ${r.allow}` : "rules desktop"),
+    },
+    () => text,
+    (t) => (text = t),
+  );
+  return { sent, replay, stored: () => text };
+}
+
+test("the phone's switches are saved and re-sent on every ready", () => {
+  const a = replayRig(null);
+  a.replay.ready([]);
+  assert.deepEqual(a.sent, []);
+  a.replay.setAutoDv(true);
+  a.replay.setFollow(3, 851_012_500, true, 4);
+  a.replay.setRules({ allow: "100", deny: "", priority: "" });
+
+  // A relaunched page on a fresh session, where receiver ids have changed.
+  const b = replayRig(a.stored());
+  b.replay.ready([]);
+  assert.deepEqual(b.sent, ["autoDv true", "rules 100"]);
+  b.replay.receivers([
+    { vrx: 20, hz: 851_012_500 + 300, mode: "p25p1" },
+    { vrx: 21, hz: 851_012_500, mode: "nfm" },
+  ]);
+  assert.deepEqual(b.sent, ["autoDv true", "rules 100", "follow 20 true 4"]);
+  // Once only.
+  b.replay.receivers([{ vrx: 20, hz: 851_012_500, mode: "p25p1" }]);
+  assert.equal(b.sent.length, 3);
+});
+
+test("follow already on at the gateway is not sent again", () => {
+  const r = replayRig(JSON.stringify({ autoDv: false, follow: { hz: 851_000_000, maxFollowers: 2 } }));
+  r.replay.ready([]);
+  r.replay.gateway({ autoDv: false, follow: { vrx: 5, maxFollowers: 2 }, maxFollowers: 2 });
+  r.replay.receivers([{ vrx: 5, hz: 851_000_000, mode: "p25p1" }]);
+  assert.deepEqual(r.sent, []);
+});
+
+test("turning follow off forgets its channel, and a bad store reads as nothing", () => {
+  const r = replayRig(null);
+  r.replay.setFollow(3, 851_000_000, true, 2);
+  r.replay.setFollow(3, 851_000_000, false, 2);
+  assert.equal(readDvMemory(r.stored()).follow, null);
+  assert.deepEqual(readDvMemory("{nope"), NO_MEMORY);
+  assert.equal(controlAt(851_000_000, [{ vrx: 1, hz: 851_010_000, mode: "p25p1" }]), null);
 });
 
 test("Follow is offered on a P25 receiver, or on the channel already followed", () => {

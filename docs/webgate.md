@@ -291,9 +291,20 @@ one does; if it was open, Tune opens instead. The logic is the desktop's, run
 in the gateway so it carries on with the phone locked:
 
 - Auto DV opens a receiver on every verified DV signal no receiver covers and
-  never removes one, by `ui/models/dv_spawn.h`. It is per phone session and
-  survives an engine restart. As on the desktop, turning it on holds plugin
-  receivers off, which stops trunk following while it is on.
+  never removes one, by `ui/models/dv_spawn.h`. As on the desktop, turning it
+  on holds plugin receivers off, which stops trunk following while it is on;
+  Follow comes back when Auto DV goes off.
+- Auto DV keeps running while the phone is locked only while its gateway
+  session lives: about 30 seconds after the socket drops, or for as long as
+  Keep listening is on. Past that the session ends, and on unlock the phone
+  sends its switches again and Auto DV picks up where the band is.
+- The phone keeps Auto DV, Follow (by its control channel's frequency, since
+  receiver ids change), the follower count and any rules it set in its own
+  storage, and sends them on every connect and resume.
+- When a phone session ends (linger, take over, lease lost), the gateway
+  leaves the engine as the phone found it: it lifts the plugin hold that
+  phone set and stops the following it started. Turning Auto DV off lifts
+  only a hold this phone set.
 - Follow trunk appears for a P25 receiver. The engine follows; the gateway
   sends the desktop's saved allow, deny and priority lists (`trunk/*` in the
   desktop's settings) unless the phone set its own, and puts them back if they
@@ -744,8 +755,10 @@ DV tab
     the tab appears. Remove it while the DV tab is open: the tab goes and Tune
     opens.
 48. Turn Auto DV on over a band with digital voice: a receiver opens on each
-    DV signal, none doubled over one already there. Lock the phone for a few
-    minutes: new signals still get receivers. Signals that go quiet keep
+    DV signal, none doubled over one already there. With Keep listening on,
+    lock the phone for a few minutes: new signals still get receivers.
+    Without it, lock for a few minutes and unlock: Auto DV is still on and
+    opens receivers for what is on the air. Signals that go quiet keep
     theirs. Remove one: it is not opened again until Auto DV is turned on
     afresh.
 49. Select a P25 control channel receiver: Follow trunk appears with the

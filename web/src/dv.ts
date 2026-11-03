@@ -189,6 +189,143 @@ export function parseTrunk(e: GatewayEvent): TrunkSummary {
   return { enabled, controlVrx: num(e.controlVrx), text };
 }
 
+// ---- What the phone remembers ----------------------------------------------
+// The gateway's session dies with the resident linger, and receiver ids change
+// across sessions, so the phone keeps its own switches and sends them on every
+// link ready, as it does the confidence bar. Follow is kept by its control
+// channel's frequency and found again on whatever receiver sits there.
+
+export const DV_KEY = "revenant.dv";
+
+// Half a P25 channel: a receiver this close is the same control channel.
+export const FOLLOW_MATCH_HZ = 6_250;
+
+export interface TrunkRuleTexts {
+  allow: string;
+  deny: string;
+  priority: string;
+}
+
+export interface DvMemory {
+  autoDv: boolean;
+  follow: { hz: number; maxFollowers: number } | null;
+  maxFollowers: number | null;
+  rules: TrunkRuleTexts | null;
+}
+
+export const NO_MEMORY: DvMemory = { autoDv: false, follow: null, maxFollowers: null, rules: null };
+
+export function readDvMemory(text: string | null): DvMemory {
+  if (text === null) return NO_MEMORY;
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    return NO_MEMORY;
+  }
+  if (v === null || typeof v !== "object") return NO_MEMORY;
+  const o = v as Record<string, unknown>;
+  const f = o.follow as Record<string, unknown> | null | undefined;
+  const r = o.rules as Record<string, unknown> | null | undefined;
+  const s = (x: unknown) => (typeof x === "string" ? x : "");
+  return {
+    autoDv: o.autoDv === true,
+    follow:
+      f && typeof f.hz === "number" && Number.isFinite(f.hz)
+        ? { hz: f.hz, maxFollowers: typeof f.maxFollowers === "number" ? f.maxFollowers : 2 }
+        : null,
+    maxFollowers: typeof o.maxFollowers === "number" ? o.maxFollowers : null,
+    rules: r && typeof r === "object" ? { allow: s(r.allow), deny: s(r.deny), priority: s(r.priority) } : null,
+  };
+}
+
+export function controlAt(hz: number, receivers: readonly { vrx: number; hz: number; mode: string }[]): number | null {
+  let best: number | null = null;
+  let gap = Infinity;
+  for (const r of receivers) {
+    const d = Math.abs(r.hz - hz);
+    if (r.mode === "p25p1" && d <= FOLLOW_MATCH_HZ && d < gap) {
+      best = r.vrx;
+      gap = d;
+    }
+  }
+  return best;
+}
+
+export interface DvSend {
+  autoDv(on: boolean): void;
+  follow(vrx: number, on: boolean, maxFollowers: number): void;
+  // null goes back to the desktop's saved rules.
+  rules(r: TrunkRuleTexts | null): void;
+}
+
+// The phone's switches, saved on every change and replayed on every ready.
+// Follow waits for its control channel's receiver to be listed, since a fresh
+// session hears of receivers after ready.
+export class DvReplay {
+  private memory: DvMemory;
+  private followPending = false;
+
+  constructor(
+    private readonly send: DvSend,
+    private readonly load: () => string | null,
+    private readonly save: (text: string) => void,
+  ) {
+    this.memory = readDvMemory(load());
+  }
+
+  get state(): DvMemory {
+    return this.memory;
+  }
+
+  ready(receivers: readonly { vrx: number; hz: number; mode: string }[]): void {
+    this.memory = readDvMemory(this.load());
+    if (this.memory.autoDv) this.send.autoDv(true);
+    if (this.memory.rules) this.send.rules(this.memory.rules);
+    this.followPending = this.memory.follow !== null;
+    this.receivers(receivers);
+  }
+
+  // The gateway's dv event: following already on means nothing to replay.
+  gateway(dv: DvState): void {
+    if (dv.follow) this.followPending = false;
+  }
+
+  receivers(list: readonly { vrx: number; hz: number; mode: string }[]): void {
+    const f = this.memory.follow;
+    if (!this.followPending || !f) return;
+    const vrx = controlAt(f.hz, list);
+    if (vrx === null) return;
+    this.followPending = false;
+    this.send.follow(vrx, true, f.maxFollowers);
+  }
+
+  setAutoDv(on: boolean): void {
+    this.store({ ...this.memory, autoDv: on });
+    this.send.autoDv(on);
+  }
+
+  setFollow(vrx: number, hz: number, on: boolean, maxFollowers: number): void {
+    this.followPending = false;
+    this.store({ ...this.memory, follow: on ? { hz, maxFollowers } : null, maxFollowers });
+    this.send.follow(vrx, on, maxFollowers);
+  }
+
+  setRules(r: TrunkRuleTexts | null): void {
+    this.store({ ...this.memory, rules: r });
+    this.send.rules(r);
+  }
+
+  private store(m: DvMemory): void {
+    this.memory = m;
+    try {
+      this.save(JSON.stringify(m));
+    } catch {
+      // A full disk costs the preference, not the session.
+    }
+  }
+}
+
 // The Follow switch belongs to a P25 receiver the phone is on, or to the
 // control channel already being followed.
 export function followTarget(active: { vrx: number; mode: string } | null, dv: DvState): number | null {
