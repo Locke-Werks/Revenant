@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -40,6 +41,17 @@ public:
     PhoneSession& operator=(PhoneSession&&) = delete;
 
     [[nodiscard]] rpc::Client& client() { return *client_; }
+
+    // The two engine calls dispatch makes after it has already changed engine
+    // state, routed here so a test can make them fail. Production never sets
+    // the hooks.
+    struct TestHooks {
+        std::function<Status(std::uint64_t)> remove_vrx;
+        std::function<Expected<rpc::VrxStatus>(std::uint64_t)> vrx_status;
+    };
+    [[nodiscard]] TestHooks& test_hooks() { return hooks_; }
+    [[nodiscard]] Status remove_receiver(std::uint64_t vrx);
+    [[nodiscard]] Expected<rpc::VrxStatus> receiver_status(std::uint64_t vrx);
 
     // ---- Receivers this phone created ----
     [[nodiscard]] bool owns(std::uint64_t vrx) const { return owned_.contains(vrx); }
@@ -71,6 +83,7 @@ private:
     std::optional<View> view_;
     std::optional<std::uint64_t> audio_vrx_;
     bool keep_listening_ = false;
+    TestHooks hooks_;
 };
 
 }  // namespace revenant::webgate

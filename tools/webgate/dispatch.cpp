@@ -159,12 +159,7 @@ constexpr ModeName kModes[] = {
     for (const auto& stage : source.gain_stages) {
         std::vector<std::string> steps;
         for (const double step : stage.steps_db) {
-            JsonObject one;
-            one.add_double("v", step);
-            // A bare number list: reuse the double formatter through a
-            // one-field object and cut the value back out.
-            const std::string text = one.str();
-            steps.push_back(text.substr(5, text.size() - 6));
+            steps.push_back(json_number(step));
         }
         JsonObject s;
         s.add_string("name", stage.name)
@@ -214,6 +209,26 @@ constexpr ModeName kModes[] = {
         .add_u64("transcribed", status.transcribed)
         .add_u64("dropped", status.dropped);
     return out.str();
+}
+
+// The receiver as the engine reports it, or, when that read fails after the
+// engine has already changed, what was sent, marked so the phone knows the
+// granted figures are missing.
+[[nodiscard]] std::string status_or_sent(PhoneSession& session, std::uint64_t id,
+                                         const rpc::VrxParams& sent,
+                                         rpc::TranscribeChoice transcribe, std::int64_t center)
+{
+    if (const auto status = session.receiver_status(id)) {
+        return vrx_json(*status, center);
+    }
+    rpc::VrxStatus guess;
+    guess.id = id;
+    guess.params = sent;
+    guess.transcribe = transcribe;
+    std::string body = vrx_json(guess, center);
+    body.pop_back();
+    body += ",\"statusUnavailable\":true}";
+    return body;
 }
 
 // ---- Receiver access -------------------------------------------------------
@@ -308,11 +323,7 @@ template <class Change>
         return std::unexpected(id.error());
     }
     session.adopt(*id, params);
-    const auto status = session.client().vrx_status(*id);
-    if (!status) {
-        return std::unexpected(status.error());
-    }
-    return vrx_json(*status, *center);
+    return status_or_sent(session, *id, params, rpc::TranscribeChoice::Auto, *center);
 }
 
 [[nodiscard]] Result op_remove_vrx(PhoneSession& session, const Command& command)
@@ -374,18 +385,35 @@ template <class Edit>
         return std::unexpected(new_id.error());
     }
     session.adopt(*new_id, params);
-    (void)session.client().remove_vrx(*old_id);
+
+    // From here the engine holds two receivers. Anything that fails before the
+    // old one is gone undoes the new one, so the phone still has exactly what
+    // it had and the error is the engine's.
+    const auto roll_back = [&](const Error& why) -> Result {
+        if (session.client().remove_vrx(*new_id)) {
+            session.forget(*new_id);
+        }
+        // If even that fails the new id stays owned, so the session's
+        // destructor tries again rather than leaving it untracked.
+        return std::unexpected(why);
+    };
+
+    if (before->transcribe != rpc::TranscribeChoice::Auto) {
+        if (auto set = session.client().set_vrx_transcribe(*new_id, before->transcribe); !set) {
+            return roll_back(set.error());
+        }
+    }
+    if (auto removed = session.remove_receiver(*old_id); !removed) {
+        return roll_back(removed.error());
+    }
     const bool had_audio = session.audio_vrx() == *old_id;
     session.forget(*old_id);
     if (had_audio) {
         session.set_audio_vrx(*new_id);
     }
-    auto after = session.client().vrx_status(*new_id);
-    if (!after) {
-        return std::unexpected(after.error());
-    }
-    // vrx_json's object, plus the id this receiver replaced.
-    std::string body = vrx_json(*after, *center);
+    // The change is done, so a failed read must not turn it into an error that
+    // hides the new id: answer from what was sent.
+    std::string body = status_or_sent(session, *new_id, params, before->transcribe, *center);
     body.pop_back();
     body += ",\"replaced\":" + std::to_string(*old_id) + "}";
     return body;

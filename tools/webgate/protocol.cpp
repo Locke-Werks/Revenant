@@ -336,12 +336,16 @@ JsonObject& JsonObject::add_i64(std::string_view key, std::int64_t value) {
     return add_raw(key, std::to_string(value));
 }
 
-JsonObject& JsonObject::add_double(std::string_view key, double value) {
-    if (!std::isfinite(value)) return add_null(key);
+std::string json_number(double value) {
+    if (!std::isfinite(value)) return "null";
     std::array<char, 40> buf{};
     // Shortest text that round-trips, so a frequency survives the trip exactly.
     const auto r = std::to_chars(buf.data(), buf.data() + buf.size(), value);
-    return add_raw(key, std::string_view(buf.data(), static_cast<std::size_t>(r.ptr - buf.data())));
+    return std::string(buf.data(), static_cast<std::size_t>(r.ptr - buf.data()));
+}
+
+JsonObject& JsonObject::add_double(std::string_view key, double value) {
+    return add_raw(key, json_number(value));
 }
 
 JsonObject& JsonObject::add_string(std::string_view key, std::string_view value) {

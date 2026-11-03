@@ -2,6 +2,8 @@
 // tests/rpc/rpc_fixture.h. Each case asserts the engine-side effect, read back
 // through a client the dispatcher did not use, not the reply text alone.
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -477,4 +479,125 @@ TEST_CASE("setView, audio and keepListening record state for the stream layer",
                      R"("ok":true)"));
     CHECK(session->keep_listening());
     CHECK(contains(send(*session, R"({"id":9,"op":"keepListening","args":{}})"), R"("ok":false)"));
+}
+
+TEST_CASE("json_number formats like add_double and nulls what JSON cannot spell", "[webgate][dispatch]")
+{
+    CHECK(revenant::webgate::json_number(1.5) == "1.5");
+    CHECK(revenant::webgate::json_number(-60.0) == "-60");
+    CHECK(revenant::webgate::json_number(std::nan("")) == "null");
+}
+
+TEST_CASE("a recreate whose old receiver will not go is rolled back", "[gpu][webgate][dispatch]")
+{
+    REVENANT_NEEDS_GPU();
+    revenant::test::Harness harness;
+    REQUIRE(harness.open(options()).has_value());
+    auto session = phone(harness);
+
+    const auto old_vrx = vrx_of(send(*session, R"({"id":1,"op":"addVrx","args":{"hz":100100000}})"));
+    REQUIRE(contains(send(*session, R"({"id":2,"op":"audio","args":{"vrx":)" +
+                                        std::to_string(old_vrx) + "}}"),
+                     R"("ok":true)"));
+    REQUIRE(contains(send(*session, R"({"id":3,"op":"keepListening","args":{"on":true}})"),
+                     R"("ok":true)"));
+    session->test_hooks().remove_vrx = [old_vrx](std::uint64_t id) -> revenant::Status {
+        if (id == old_vrx) {
+            return revenant::fail("injected remove failure");
+        }
+        return {};
+    };
+
+    const auto reply = send(*session, R"({"id":4,"op":"setBandwidth","args":{"vrx":)" +
+                                          std::to_string(old_vrx) + R"(,"hz":3000}})");
+    INFO(reply);
+    CHECK(contains(reply, R"("ok":false)"));
+    CHECK(contains(reply, "injected remove failure"));
+
+    CHECK(session->owned_ids() == std::vector<std::uint64_t>{old_vrx});
+    CHECK(session->audio_vrx() == old_vrx);
+    CHECK(session->keep_listening());
+    const auto ids = harness.client().vrx_ids();
+    REQUIRE(ids.has_value());
+    CHECK(*ids == std::vector<std::uint64_t>{old_vrx});
+}
+
+TEST_CASE("a recreate the engine refuses leaves the old receiver alone", "[gpu][webgate][dispatch]")
+{
+    REVENANT_NEEDS_GPU();
+    revenant::test::Harness harness;
+    REQUIRE(harness.open(options()).has_value());
+    auto session = phone(harness);
+
+    const auto old_vrx = vrx_of(send(*session, R"({"id":1,"op":"addVrx","args":{"hz":100100000}})"));
+    REQUIRE(contains(send(*session, R"({"id":2,"op":"audio","args":{"vrx":)" +
+                                        std::to_string(old_vrx) + "}}"),
+                     R"("ok":true)"));
+
+    // Compared against the engine's own refusal of the same receiver.
+    auto params = session->client().vrx_status(old_vrx)->params;
+    params.bandwidth = -5;
+    params.passband_low = 0;
+    params.passband_high = 0;
+    const auto direct = harness.client().add_vrx(params);
+    REQUIRE_FALSE(direct.has_value());
+
+    const auto reply = send(*session, R"({"id":3,"op":"setBandwidth","args":{"vrx":)" +
+                                          std::to_string(old_vrx) + R"(,"hz":-5}})");
+    INFO(reply);
+    CHECK(reply == revenant::webgate::error_reply(3, direct.error().message));
+    CHECK(session->owned_ids() == std::vector<std::uint64_t>{old_vrx});
+    CHECK(session->audio_vrx() == old_vrx);
+    const auto ids = harness.client().vrx_ids();
+    REQUIRE(ids.has_value());
+    CHECK(*ids == std::vector<std::uint64_t>{old_vrx});
+}
+
+TEST_CASE("a status read failing after the change still reports the new id",
+          "[gpu][webgate][dispatch]")
+{
+    REVENANT_NEEDS_GPU();
+    revenant::test::Harness harness;
+    REQUIRE(harness.open(options()).has_value());
+    auto session = phone(harness);
+    session->test_hooks().vrx_status = [](std::uint64_t) -> revenant::Expected<revenant::rpc::VrxStatus> {
+        return revenant::fail("injected status failure");
+    };
+
+    const auto added = send(*session, R"({"id":1,"op":"addVrx","args":{"hz":100100000}})");
+    INFO(added);
+    REQUIRE(contains(added, R"("ok":true)"));
+    CHECK(contains(added, R"("statusUnavailable":true)"));
+    const auto first = vrx_of(added);
+    CHECK(session->owns(first));
+
+    const auto changed = send(*session, R"({"id":2,"op":"setBandwidth","args":{"vrx":)" +
+                                            std::to_string(first) + R"(,"hz":3000}})");
+    INFO(changed);
+    REQUIRE(contains(changed, R"("ok":true)"));
+    CHECK(contains(changed, "\"replaced\":" + std::to_string(first)));
+    const auto fresh = vrx_of(changed);
+    CHECK(fresh != first);
+    CHECK(session->owns(fresh));
+    CHECK(contains(changed, R"("bandwidthHz":3000)"));
+}
+
+TEST_CASE("a recreate carries the receiver's transcribe choice", "[gpu][webgate][dispatch]")
+{
+    REVENANT_NEEDS_GPU();
+    revenant::test::Harness harness;
+    REQUIRE(harness.open(options()).has_value());
+    auto session = phone(harness);
+
+    const auto first = vrx_of(send(*session, R"({"id":1,"op":"addVrx","args":{"hz":100100000}})"));
+    REQUIRE(contains(send(*session, R"({"id":2,"op":"setVrxTranscribe","args":{"vrx":)" +
+                                        std::to_string(first) + R"(,"choice":"off"}})"),
+                     R"("ok":true)"));
+    const auto changed = send(*session, R"({"id":3,"op":"setBandwidth","args":{"vrx":)" +
+                                            std::to_string(first) + R"(,"hz":3000}})");
+    INFO(changed);
+    REQUIRE(contains(changed, R"("ok":true)"));
+    const auto status = harness.client().vrx_status(vrx_of(changed));
+    REQUIRE(status.has_value());
+    CHECK(status->transcribe == revenant::rpc::TranscribeChoice::Off);
 }

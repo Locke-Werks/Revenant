@@ -146,6 +146,10 @@ private:
 // be UTF-8 and a browser drops the connection on one bad byte.
 [[nodiscard]] std::string json_string(std::string_view text);
 
+// A JSON number for a double: shortest text that round-trips, "null" when not
+// finite (JSON has no spelling for NaN or infinity).
+[[nodiscard]] std::string json_number(double value);
+
 // {"id":n,"ok":true,"result":<result_json>}. result_json must be valid JSON.
 [[nodiscard]] std::string ok_reply(std::uint64_t id, std::string_view result_json = "null");
 

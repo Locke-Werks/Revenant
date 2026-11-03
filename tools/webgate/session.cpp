@@ -16,6 +16,16 @@ PhoneSession::~PhoneSession()
     }
 }
 
+Status PhoneSession::remove_receiver(std::uint64_t vrx)
+{
+    return hooks_.remove_vrx ? hooks_.remove_vrx(vrx) : client_->remove_vrx(vrx);
+}
+
+Expected<rpc::VrxStatus> PhoneSession::receiver_status(std::uint64_t vrx)
+{
+    return hooks_.vrx_status ? hooks_.vrx_status(vrx) : client_->vrx_status(vrx);
+}
+
 std::vector<std::uint64_t> PhoneSession::owned_ids() const
 {
     std::vector<std::uint64_t> ids;
