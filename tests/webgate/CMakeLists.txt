@@ -23,6 +23,7 @@ add_executable(test_webgate
     test_lease.cpp
     test_cold_start.cpp
     test_cold_claim.cpp
+    test_dv_feed.cpp
 )
 
 target_link_libraries(test_webgate PRIVATE

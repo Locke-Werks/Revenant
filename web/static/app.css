@@ -480,6 +480,22 @@ html:has(.app), html:has(.app) body {
   font-variant-numeric: tabular-nums;
 }
 .signal.held { color: var(--muted); }
+/* The DV tab's call tables: CallsPane.qml's columns, monospaced and dense. */
+.dv h2 { margin-top: 10px; }
+.dv-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  table-layout: fixed;
+}
+.dv-table th { color: var(--muted); font-weight: 500; text-align: left; padding: 2px 4px; }
+.dv-table td { padding: 6px 4px; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dv-table tr.live td { color: var(--fg); }
+.dv-table tr.ended td, .dv-table tr.granted td, .dv-table td.enc { color: var(--muted); }
+.dv-table tr.live td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+#dv-calls tr { cursor: pointer; }
 /* Bridges the linger tick's 100 ms steps so a lost row fades continuously. */
 .signal { transition: opacity 120ms linear; }
 .panel { padding: 8px 0; border-top: 1px solid var(--line); }

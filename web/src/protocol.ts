@@ -50,6 +50,11 @@ export const OPS = [
   "listDecoders",
   "setDecoders",
   "takeOver",
+  "autoDv",
+  "trunkFollow",
+  "trunkStatus",
+  "setTrunkRules",
+  "dvTab",
 ] as const;
 export type Op = (typeof OPS)[number];
 
@@ -73,6 +78,10 @@ export const EVENTS = [
   "vrx",
   "vrxList",
   "engine",
+  "calls",
+  "talkgroups",
+  "trunk",
+  "dv",
 ] as const;
 export type EventName = (typeof EVENTS)[number];
 

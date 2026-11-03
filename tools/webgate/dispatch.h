@@ -30,6 +30,13 @@
 //                          "voiceModes":[modes whose voice plays] | null}
 //   setDecoders        -> {"vrx", "decoders":[names]}, the receiver's whole
 //                         set, which replaces the last; [] decodes nothing
+//   autoDv {on}        -> {"on"}
+//   trunkFollow {vrx, on, maxFollowers?}
+//                      -> {"on", "vrx", "maxFollowers"}
+//   trunkStatus        -> the "trunk" event's fields (dv_feed.h)
+//   setTrunkRules {allow?, deny?, priority?}, the desktop panel's texts
+//                      -> {"allow", "deny", "priorities", "skipped"}
+//   dvTab {visible}    -> {"visible"}
 //
 // Modes are lowercase: raw am nfm wfm usb lsb dsb cw p25p1 dstar tetra dmr sam.
 
@@ -84,6 +91,9 @@ namespace revenant::webgate {
 [[nodiscard]] std::optional<std::vector<std::string>> voice_modes(const rpc::VocoderPlugins& plugins);
 
 [[nodiscard]] std::string dispatch(PhoneSession& session, const Command& command);
+
+// The "dv" event: the session's Auto DV and trunk follow switches (dv_feed.h).
+[[nodiscard]] std::string dv_state_event(const PhoneSession& session);
 
 // For the socket layer: parses a text frame and dispatches it. A frame
 // parse_command refuses is answered with an error_reply when it carried a

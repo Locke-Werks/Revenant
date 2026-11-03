@@ -95,6 +95,10 @@ export interface LinkEvents {
   vrx: GatewayEvent;
   vrxList: GatewayEvent;
   engine: GatewayEvent;
+  calls: GatewayEvent;
+  talkgroups: GatewayEvent;
+  trunk: GatewayEvent;
+  dv: GatewayEvent;
 }
 export type LinkEventName = keyof LinkEvents;
 

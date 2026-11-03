@@ -9,8 +9,15 @@ export const CONFIDENCE_MIN = 0;
 export const CONFIDENCE_MAX = 0.99;
 export const CONFIDENCE_SEND_MS = 250;
 
+// Only signals the engine has named, by modulation or protocol, are worth a
+// row (owner, 2026-11-03): an unnamed detection is usually a spike, and the
+// spectrum and waterfall still show it.
+export function isListable(d: Detection): boolean {
+  return d.label.trim() !== "";
+}
+
 export function signalRows<T extends Detection>(d: readonly T[]): T[] {
-  return sortForList(d);
+  return sortForList(d.filter(isListable));
 }
 
 // lastSeen is an absolute source sample index (docs/conventions.md), not a

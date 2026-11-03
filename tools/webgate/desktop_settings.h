@@ -20,6 +20,9 @@
 //   detections/thresholdDb    engine-wide detection threshold
 //   detections/confidenceBar  the desktop's own filter on the detections list
 //   speech/transcribe         engine-wide speech to text switch
+//   trunk/{aliases,allow,deny,priority,maxFollowers}
+//                             the trunking panel's alias table, rule texts
+//                             and follower count, for the DV tab (dv_feed.h)
 //
 // A value the desktop has never written is absent here, and absent means
 // nothing is sent: the desktop's rule for its engine-wide switches too, since
@@ -50,6 +53,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -71,6 +75,13 @@ struct DesktopSettings {
     std::optional<double> detection_threshold_db;
     // Already through the desktop's restore rules (models/detector_settings.h).
     std::optional<double> confidence_bar;
+    // The trunking panel's text fields and follower count, ui/models/
+    // trunk_link.cpp, in the form trunk_aliases.h parses.
+    std::optional<std::string> trunk_aliases;
+    std::optional<std::string> trunk_allow;
+    std::optional<std::string> trunk_deny;
+    std::optional<std::string> trunk_priority;
+    std::optional<std::int64_t> trunk_max_followers;
 
     friend bool operator==(const DesktopSettings&, const DesktopSettings&) = default;
 };
