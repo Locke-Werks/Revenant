@@ -64,3 +64,47 @@ target_link_libraries(revenant-webgate PRIVATE revenant_webgate_lib)
 
 revenant_apply_warnings(revenant-webgate)
 revenant_embed_version(revenant-webgate DESCRIPTION "Revenant web gateway")
+
+# The phone web app. Needs Node at configure time; without it the target is
+# skipped so a machine that only builds the C++ (CI without Node) still
+# configures. The gateway then runs without a web directory and serves 404s.
+#
+# Two commands keyed on different inputs: npm ci reruns only when the lockfile
+# changes, the bundle only when a source does, so an ordinary build touches
+# neither.
+find_program(REVENANT_NPM npm)
+find_program(REVENANT_NODE node)
+if(REVENANT_NPM AND REVENANT_NODE)
+    set(WEB_DIR "${CMAKE_SOURCE_DIR}/web")
+    file(GLOB_RECURSE WEB_SOURCES CONFIGURE_DEPENDS
+        "${WEB_DIR}/src/*" "${WEB_DIR}/static/*")
+    set(WEB_DEPS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/web-npm-ci.stamp")
+    set(WEB_BUILD_STAMP "${CMAKE_CURRENT_BINARY_DIR}/web-build.stamp")
+
+    add_custom_command(
+        OUTPUT "${WEB_DEPS_STAMP}"
+        COMMAND "${REVENANT_NPM}" ci
+        COMMAND "${CMAKE_COMMAND}" -E touch "${WEB_DEPS_STAMP}"
+        DEPENDS "${WEB_DIR}/package.json" "${WEB_DIR}/package-lock.json"
+        WORKING_DIRECTORY "${WEB_DIR}"
+        COMMENT "web: npm ci"
+        VERBATIM)
+
+    add_custom_command(
+        OUTPUT "${WEB_BUILD_STAMP}"
+        COMMAND "${REVENANT_NODE}" build.mjs
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory "$<TARGET_FILE_DIR:revenant-webgate>/web"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${WEB_DIR}/dist"
+                "$<TARGET_FILE_DIR:revenant-webgate>/web"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${WEB_BUILD_STAMP}"
+        DEPENDS "${WEB_DEPS_STAMP}" ${WEB_SOURCES}
+                "${WEB_DIR}/build.mjs" "${WEB_DIR}/tsconfig.json"
+        WORKING_DIRECTORY "${WEB_DIR}"
+        COMMENT "web: bundle and copy beside revenant-webgate"
+        VERBATIM)
+
+    add_custom_target(revenant_web ALL DEPENDS "${WEB_BUILD_STAMP}")
+    add_dependencies(revenant_web revenant-webgate)
+else()
+    message(STATUS "npm or node not found: skipping the revenant_web target (phone web app not built)")
+endif()
