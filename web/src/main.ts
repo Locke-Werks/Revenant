@@ -1,7 +1,7 @@
 import { chooseScreen, installScreenHtml, type StandaloneEnv } from "./install";
 import { gatewayReachable, offlineScreenHtml, type Probe } from "./offline";
 import { appScreenHtml, mountApp } from "./app";
-import { insetsToggle, isEditable, pinViewport, showInsets, wantsInsets } from "./insets";
+import { insetsToggle, isEditable, pinViewport, trackShortViewport, showInsets, wantsInsets } from "./insets";
 import { reloadOnUpdate } from "./sw_reload";
 
 export interface Host {
@@ -63,6 +63,7 @@ if (typeof document !== "undefined") {
     });
   }
   pinViewport(window);
+  trackShortViewport(window);
   // Re-applying the viewport meta (pinViewportWidth) does not narrow the
   // layout viewport on iOS: 0.850 -> 0.850 on the owner's phone, so it is off.
   insetsToggle(document, window);

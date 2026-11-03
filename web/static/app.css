@@ -105,6 +105,10 @@ html:has(.app), html:has(.app) body {
 .app {
   position: fixed;
   inset: 0;
+  /* --short-fix is the top inset when iOS hands an installed app a viewport
+     one status bar short (trackShortViewport in insets.ts), else 0. */
+  bottom: auto;
+  height: calc(100% + var(--short-fix, 0px));
   /* Nothing inside may widen the page: iOS answers that by zooming out. */
   overflow: hidden;
   padding-left: env(safe-area-inset-left);
@@ -139,7 +143,21 @@ html:has(.app), html:has(.app) body {
 /* Top bar: the frequency, the mode, the meter, in that order of size. */
 .top {
   grid-area: top;
-  padding-top: env(safe-area-inset-top);
+  /* 8 px past the inset clears the soft edge of iOS's status bar blur. */
+  padding-top: calc(env(safe-area-inset-top) + 8px);
+}
+/* iOS blurs whatever sits under the status bar; an opaque band there leaves
+   it nothing of ours to blur. */
+.app::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: env(safe-area-inset-top);
+  background: var(--bg);
+  z-index: 20;
+  pointer-events: none;
 }
 .topbar {
   display: flex;

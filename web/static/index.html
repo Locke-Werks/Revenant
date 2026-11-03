@@ -44,18 +44,43 @@
   }
   // Every launch is kept, the last three, so the ruler (which reloads with
   // the overlay on) can show what a launch without it looked like.
+  // Read at load: the three-finger tap sets the flag just before reloading,
+  // so reading it later would mark this launch as a ruler launch.
+  var overlay = false;
+  try {
+    overlay = location.search.indexOf("insets") >= 0 || localStorage.getItem("revenant.insets") === "1";
+  } catch (e) {
+    overlay = location.search.indexOf("insets") >= 0;
+  }
+  var saved = false;
+  function insets() {
+    if (!document.body) return null;
+    var p = document.createElement("div");
+    p.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom) 0";
+    document.body.appendChild(p);
+    var cs = getComputedStyle(p);
+    var r = { top: parseFloat(cs.paddingTop) || 0, bottom: parseFloat(cs.paddingBottom) || 0 };
+    p.remove();
+    return r;
+  }
   function save() {
+    if (saved) return;
+    saved = true;
     try {
-      var overlay = location.search.indexOf("insets") >= 0 || localStorage.getItem("revenant.insets") === "1";
       var list = JSON.parse(localStorage.getItem("revenant.wideLaunches") || "[]");
       if (!Array.isArray(list)) list = [];
       list.push({ t: t0, overlay: overlay, maxScrollWidth: w.maxScrollWidth, at: w.at, items: w.items,
-        scale: window.visualViewport ? visualViewport.scale : null, innerWidth: window.innerWidth });
+        scale: window.visualViewport ? visualViewport.scale : null, innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight, screenHeight: screen.height, screenWidth: screen.width,
+        insets: insets(), savedAt: Date.now() - t0 });
       localStorage.setItem("revenant.wideLaunches", JSON.stringify(list.slice(-3)));
     } catch (e) {
       // No storage: the current launch is still in window.__wideAtLoad.
     }
   }
+  // A three-finger tap inside the first 3 s reloads before the frame loop
+  // ends; the record goes out on the way.
+  window.addEventListener("pagehide", save);
   document.addEventListener("DOMContentLoaded", look);
   window.addEventListener("load", look);
   requestAnimationFrame(frame);

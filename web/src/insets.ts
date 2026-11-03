@@ -79,6 +79,11 @@ export interface LaunchCapture {
   items: { label: string; width: number; css: string }[];
   scale: number | null;
   innerWidth: number;
+  innerHeight?: number;
+  screenWidth?: number;
+  screenHeight?: number;
+  insets?: { top: number; bottom: number } | null;
+  savedAt?: number;
 }
 
 export function previousNormal(list: LaunchCapture[], loadedAt: number): LaunchCapture | null {
@@ -97,7 +102,11 @@ function previousLaunch(win: Window): string {
   const p = previousNormal(Array.isArray(list) ? list : [], loadedAt);
   if (!p) return "none recorded";
   const items = p.items.map((x) => `${x.label} ${x.width.toFixed(1)} (${x.css})`).join("; ");
-  return `scrollWidth ${p.maxScrollWidth} at ${p.at} ms, scale ${p.scale ?? "n/a"} innerWidth ${p.innerWidth} at 3 s: ${items || "nothing past the screen"}`;
+  const ins = p.insets ? `t ${p.insets.top} b ${p.insets.bottom}` : "n/a";
+  return (
+    `at ${p.savedAt ?? "?"} ms: inner ${p.innerWidth}x${p.innerHeight ?? "?"} scale ${p.scale ?? "n/a"} ` +
+    `screen ${p.screenWidth ?? "?"}x${p.screenHeight ?? "?"} insets ${ins}; widest ${p.maxScrollWidth} at ${p.at} ms: ${items || "nothing past the screen"}`
+  );
 }
 
 function repins(win: Window): string {
@@ -210,7 +219,7 @@ export function showInsets(doc: Document, win: Window): void {
       `wider than screen at open: ${wideBefore.join("; ") || "none"}`,
       `wider than screen now: ${overWide(doc, win.screen.width).join("; ") || "none"}`,
       `widest during load: ${wideAtLoad(win)}`,
-      `previous normal launch: ${previousLaunch(win)}`,
+      `last launch without ruler: ${previousLaunch(win)}`,
       `viewport re-pins: ${repins(win)}`,
       `scale ${vv ? vv.scale.toFixed(3) : "n/a"}  scrollWidth ${root.scrollWidth}  innerWidth ${win.innerWidth}`,
     ].join("\n");
@@ -273,6 +282,38 @@ export function pinViewportWidth(win: Window): () => void {
   win.addEventListener("orientationchange", later);
   win.visualViewport?.addEventListener("resize", later);
   return later;
+}
+
+// The iOS 26+ standalone short viewport: the layout viewport leaves out the
+// status bar yet starts at the top of the glass, so a box sized to it stops a
+// top inset short of the bottom. Returns how far to extend the app, or 0.
+export function shortViewportFix(g: { standalone: boolean; innerHeight: number; insetTop: number; screenWidth: number; screenHeight: number; landscape: boolean }): number {
+  if (!g.standalone || g.insetTop <= 0) return 0;
+  const tall = g.landscape ? Math.min(g.screenWidth, g.screenHeight) : Math.max(g.screenWidth, g.screenHeight);
+  return Math.abs(g.innerHeight + g.insetTop - tall) <= 2 ? g.insetTop : 0;
+}
+
+export function trackShortViewport(win: Window): void {
+  const doc = win.document;
+  const probe = doc.createElement("div");
+  probe.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;padding-top:env(safe-area-inset-top)";
+  doc.body.append(probe);
+  const landscape = win.matchMedia("(orientation: landscape)");
+  const set = () => {
+    const fix = shortViewportFix({
+      standalone: (win.navigator as Navigator & { standalone?: boolean }).standalone === true,
+      innerHeight: win.innerHeight,
+      insetTop: parseFloat(win.getComputedStyle(probe).paddingTop) || 0,
+      screenWidth: win.screen.width,
+      screenHeight: win.screen.height,
+      landscape: landscape.matches,
+    });
+    doc.documentElement.style.setProperty("--short-fix", `${fix}px`);
+  };
+  set();
+  win.addEventListener("resize", set);
+  win.visualViewport?.addEventListener("resize", set);
+  landscape.addEventListener("change", set);
 }
 
 // The page itself never scrolls, but iOS scrolls the layout viewport to keep

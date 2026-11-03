@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { needsRepin, previousNormal, rulerMarks, widest, type LaunchCapture } from "../src/insets";
+import { needsRepin, previousNormal, shortViewportFix, rulerMarks, widest, type LaunchCapture } from "../src/insets";
 
 test("ruler lines fall every 100 px below the height, none at 0", () => {
   assert.deepEqual(rulerMarks(450), [100, 200, 300, 400]);
@@ -21,7 +21,11 @@ test("layout code does not size anything from the screen's height", () => {
     // The overlay prints the screen; the re-pin reads its width along the
     // orientation, never to size anything.
     if (f === "src/insets.ts") {
-      text = text.replace(/export function showInsets[\s\S]*?\n}\n/, "").replace(/export function pinViewportWidth[\s\S]*?\n}\n/, "");
+      text = text.replace(/export function showInsets[\s\S]*?\n}\n/, "").replace(/export function pinViewportWidth[\s\S]*?\n}\n/, "")
+        // Compares the viewport with the screen to detect the short case; the
+        // size it applies is the inset, not the screen.
+        .replace(/export function shortViewportFix[\s\S]*?\n}\n/, "")
+        .replace(/export function trackShortViewport[\s\S]*?\n}\n/, "");
     }
     assert.equal(/screen\.(height|availHeight)/.test(text), false, f);
   }
@@ -55,4 +59,17 @@ test("the previous normal launch is the newest without the overlay from before t
   assert.equal(previousNormal([c(1, false), c(2, false), c(3, true)], 10)!.t, 2);
   assert.equal(previousNormal([c(1, false), c(20, false)], 10)!.t, 1);
   assert.equal(previousNormal([c(3, true)], 10), null);
+});
+
+test("an installed app one status bar short is extended by the top inset, and only then", () => {
+  const g = { standalone: true, insetTop: 62, screenWidth: 440, screenHeight: 956, landscape: false };
+  assert.equal(shortViewportFix({ ...g, innerHeight: 894 }), 62);
+  assert.equal(shortViewportFix({ ...g, innerHeight: 956 }), 0);
+  assert.equal(shortViewportFix({ ...g, innerHeight: 1125 }), 0);
+  assert.equal(shortViewportFix({ ...g, innerHeight: 894, standalone: false }), 0);
+  // Landscape: the screen's short side, with a landscape top inset.
+  const l = { standalone: true, screenWidth: 440, screenHeight: 956, landscape: true };
+  assert.equal(shortViewportFix({ ...l, insetTop: 20, innerHeight: 420 }), 20);
+  assert.equal(shortViewportFix({ ...l, insetTop: 0, innerHeight: 440 }), 0);
+  assert.equal(shortViewportFix({ ...l, insetTop: 20, innerHeight: 440 }), 0);
 });
