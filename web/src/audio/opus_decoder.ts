@@ -38,14 +38,48 @@ export interface PcmDecoder {
 export const VENDOR_URL = "/vendor/opus-decoder.min.js";
 const GLOBAL_NAME = "opus-decoder";
 
-export async function createPcmDecoder(mod: OpusDecoderModule): Promise<PcmDecoder> {
+export interface DecoderLog {
+  warn(msg: string): void;
+  now(): number;
+}
+const defaultLog: DecoderLog = { warn: (m) => console.warn(m), now: () => Date.now() };
+
+// At most one decoder warning per this long, carrying how many were folded.
+export const LOG_EVERY_MS = 1000;
+
+export async function createPcmDecoder(mod: OpusDecoderModule, log: DecoderLog = defaultLog): Promise<PcmDecoder> {
   // preSkip 0: a live stream joined mid-way has no Ogg pre-skip to honour, and
   // skipping would make the first packets come out short.
   const dec = new mod.OpusDecoder({ channels: 1, sampleRate: 48_000, preSkip: 0 });
   await dec.ready;
+  let lastLog = Number.NEGATIVE_INFINITY;
+  let suppressed = 0;
   return {
     decode(packet) {
-      const r = dec.decodeFrame(packet);
+      // The library console.errors every packet libopus refuses. A corrupt
+      // stream would do that fifty times a second, so its messages are
+      // caught here and summarised instead.
+      const saved = console.error;
+      let msg: string | null = null;
+      console.error = (...a: unknown[]) => {
+        msg = a.map(String).join(" ");
+      };
+      let r: OpusDecodedAudio;
+      try {
+        r = dec.decodeFrame(packet);
+      } finally {
+        console.error = saved;
+      }
+      const errText = msg ?? r.errors[0]?.message ?? null;
+      if (errText !== null) {
+        ++suppressed;
+        const t = log.now();
+        if (t - lastLog >= LOG_EVERY_MS) {
+          log.warn(`opus: ${suppressed} packet(s) refused, last: ${errText}`);
+          lastLog = t;
+          suppressed = 0;
+        }
+      }
       const pcm = r.channelData[0];
       if (r.errors.length > 0 || r.samplesDecoded !== FRAME || !pcm || pcm.length !== FRAME) return null;
       return pcm;

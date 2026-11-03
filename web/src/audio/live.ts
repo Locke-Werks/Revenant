@@ -68,6 +68,8 @@ export class LiveAudio {
   private gen = 0;
   // The receiver whose packets the decoder's state came from.
   private decodedVrx: number | null = null;
+  // What the caller last asked for: start's vrx, or null after stop.
+  private wanted: number | null = null;
 
   constructor(private readonly deps: LiveAudioDeps) {
     deps.link.on("opus", (f) => this.onOpus(f));
@@ -100,6 +102,7 @@ export class LiveAudio {
 
   async start(vrx: number): Promise<void> {
     const gen = ++this.gen;
+    this.wanted = vrx;
     const ctx = this.context();
     // Not awaited before the rest: see the file comment.
     const resumed = this.unlock();
@@ -125,7 +128,13 @@ export class LiveAudio {
         }
       }
       await this.deps.link.request("audio", { vrx, on: true });
-      if (gen !== this.gen) return;
+      if (gen !== this.gen) {
+        // A stop() came in while the gateway was turning this on: turn it
+        // off again. A newer start() owns the selection itself, and an off
+        // for this id could clear what it just chose.
+        if (this.wanted === null) void this.deps.link.request("audio", { vrx, on: false }).catch(() => {});
+        return;
+      }
       this.active = vrx;
     } catch (e) {
       // A failed setup is not cached, so the next tap tries again.
@@ -138,6 +147,7 @@ export class LiveAudio {
 
   stop(): void {
     ++this.gen;
+    this.wanted = null;
     const vrx = this.active;
     this.clear();
     if (vrx !== null) void this.deps.link.request("audio", { vrx, on: false }).catch(() => {});
@@ -163,8 +173,15 @@ export class LiveAudio {
 
   // The gateway moved the audio selection to a new id (setMode, setBandwidth,
   // or an engine restart); the stream carries on under it.
+  // The new receiver's stream starts again from seq 0 and is a separate
+  // Opus stream, so the buffer and the decoder start over too.
   retarget(oldVrx: number, newVrx: number): void {
-    if (this.active === oldVrx) this.active = newVrx;
+    if (this.wanted === oldVrx) this.wanted = newVrx;
+    if (this.active !== oldVrx) return;
+    this.active = newVrx;
+    this.flush();
+    this.decodedVrx = null;
+    void this.decoder?.reset();
   }
 
   private context(): AudioContextLike {

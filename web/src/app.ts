@@ -122,21 +122,22 @@ export function mountApp(root: HTMLElement): AppHandle {
 
   const audio = new LiveAudio(browserLiveAudioDeps(link));
 
-  // Temporary until the receiver UI (Task 16): a tap listens there in NFM,
-  // adding one receiver the first time and retuning it after. The context is
+  // TEMPORARY, removed by Task 16's receiver UI: a tap listens there in NFM,
+  // adding one receiver the first time and retuning it after. It tunes
+  // whatever audio.vrx is now, so a receiver the gateway recreated under a
+  // new id is followed rather than leaked by adding another. The context is
   // unlocked in the tap itself, since iOS refuses it once addVrx has awaited.
-  let listenVrx: number | null = null;
   const listenAt = (hz: number) => {
     void audio.unlock();
     const hzInt = Math.round(hz);
     const go = async () => {
-      if (listenVrx !== null && audio.vrx === listenVrx) {
-        await link.request("tune", { vrx: listenVrx, hz: hzInt });
+      const playing = audio.vrx;
+      if (playing !== null) {
+        await link.request("tune", { vrx: playing, hz: hzInt });
         return;
       }
       const r = (await link.request("addVrx", { hz: hzInt, mode: "nfm" })) as { vrx?: unknown };
       if (typeof r.vrx !== "number") throw new Error("addVrx: no vrx in the reply");
-      listenVrx = r.vrx;
       await audio.start(r.vrx);
     };
     go().catch((e: unknown) => console.warn("listen", e));

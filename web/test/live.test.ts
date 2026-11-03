@@ -240,3 +240,39 @@ test("live: unlock creates and resumes the context synchronously, once", async (
   assert.equal(contexts(), 1);
   assert.equal(audio.vrx, 7);
 });
+
+test("live: a stop during start's audio op turns the stream off again", async () => {
+  const { audio, link } = setup();
+  const p = audio.start(7);
+  // Wait until the on is in flight, then stop before its reply lands.
+  while (link.requests.length === 0) await Promise.resolve();
+  audio.stop();
+  await p;
+  assert.deepEqual(link.requests, [
+    { op: "audio", args: { vrx: 7, on: true } },
+    { op: "audio", args: { vrx: 7, on: false } },
+  ]);
+  assert.equal(audio.vrx, null);
+});
+
+test("live: a newer start during an older one's audio op sends no off", async () => {
+  const { audio, link } = setup();
+  const p = audio.start(7);
+  while (link.requests.length === 0) await Promise.resolve();
+  await audio.start(8);
+  await p;
+  assert.ok(!link.requests.some((r) => (r.args as { on?: boolean }).on === false));
+  assert.equal(audio.vrx, 8);
+});
+
+test("live: retarget flushes the buffer and resets the decoder", async () => {
+  const { audio, link, sink, frame, decoderResets } = setup();
+  await audio.start(7);
+  link.emit("opus", frame(7, 900));
+  const before = sink.resets;
+  audio.retarget(7, 12);
+  assert.equal(sink.resets, before + 1);
+  assert.equal(decoderResets(), 1);
+  link.emit("opus", frame(12, 0));
+  assert.deepEqual(sink.pushed, [900, 0]);
+});

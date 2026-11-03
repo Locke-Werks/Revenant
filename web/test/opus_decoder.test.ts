@@ -67,9 +67,21 @@ test("opus: the vendored decoder plays the gateway encoder's 1 kHz tone", async 
   dec.free();
 });
 
-test("opus: a packet libopus refuses decodes to null", async () => {
-  const dec = await createPcmDecoder(loadVendored());
+test("opus: refused packets decode to null and are logged once a second", async () => {
+  const warned: string[] = [];
+  let now = 0;
+  const dec = await createPcmDecoder(loadVendored(), { warn: (m) => warned.push(m), now: () => now });
   // TOC byte for a code 3 packet with a frame count of zero: invalid.
-  assert.equal(dec.decode(new Uint8Array([0x03, 0x00])), null);
+  const bad = new Uint8Array([0x03, 0x00]);
+  assert.equal(dec.decode(bad), null);
+  for (let i = 0; i < 49; ++i) {
+    now += 20;
+    assert.equal(dec.decode(bad), null);
+  }
+  now = 1000;
+  dec.decode(bad);
+  assert.equal(warned.length, 2);
+  assert.match(warned[0]!, /^opus: 1 packet\(s\) refused, last: libopus -4/);
+  assert.match(warned[1]!, /^opus: 50 packet\(s\) refused/);
   dec.free();
 });
