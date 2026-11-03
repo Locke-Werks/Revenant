@@ -51,6 +51,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     socket: (url) => new WebSocket(url) as unknown as SocketLike,
     timers: { setTimeout: (fn, ms) => window.setTimeout(fn, ms), clearTimeout: (h) => window.clearTimeout(h as number) },
     store: keyStore(),
+    now: () => performance.now(),
   });
   const waterfall = createWaterfall(wfCanvas);
   const trace = new SpectrumTrace(traceCanvas);
@@ -105,6 +106,17 @@ export function mountApp(root: HTMLElement): AppHandle {
   // through as a size change.
   new ResizeObserver(resize).observe(body);
   resize();
+  // Moving between displays or a zoom change alters devicePixelRatio without
+  // resizing the element. The query matches only the current ratio, so it is
+  // re-armed for the new one each time it fires.
+  const watchDpr = () => {
+    const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    mq.addEventListener("change", () => {
+      resize();
+      watchDpr();
+    }, { once: true });
+  };
+  watchDpr();
 
   const handle: AppHandle = {
     link,

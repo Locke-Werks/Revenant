@@ -20,6 +20,9 @@ export const OPUS_HEADER_SIZE = 1 + 8 + 4;
 // The gateway refuses a command text frame larger than this.
 export const MAX_COMMAND_BYTES = 64 * 1024;
 
+// The gateway sends a "ping" event this often (kPingIntervalMs).
+export const PING_INTERVAL_MS = 15_000;
+
 export const OPS = [
   "addVrx",
   "removeVrx",

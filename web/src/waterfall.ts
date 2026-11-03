@@ -88,6 +88,7 @@ uniform highp sampler2D u_meta;
 uniform sampler2D u_pal;
 uniform int u_head;
 uniform vec2 u_size;
+uniform float u_texw;
 out vec4 o;
 const int ROWS = ${RING_ROWS};
 void main() {
@@ -99,6 +100,9 @@ void main() {
   float u = m.x + m.y * s;
   float v = 0.0;
   if (m.z > 0.0 && u >= 0.0 && u < m.z) {
+    // Linear filtering at the row's last texel would blend in whatever an
+    // earlier, wider row left beyond it.
+    u = min(u, m.z - 0.5 / u_texw);
     v = texture(u_data, vec2(u, (float(slot) + 0.5) / float(ROWS))).r;
   }
   o = texture(u_pal, vec2((v * 255.0 + 0.5) / 256.0, 0.5));
@@ -112,6 +116,7 @@ class GlRenderer implements Renderer {
   private pal: WebGLTexture;
   private uHead: WebGLUniformLocation | null;
   private uSize: WebGLUniformLocation | null;
+  private uTexw: WebGLUniformLocation | null;
   private view: View | null = null;
   private metaDirty = true;
 
@@ -137,6 +142,12 @@ class GlRenderer implements Renderer {
     gl.uniform1i(gl.getUniformLocation(this.prog, "u_pal"), 2);
     this.uHead = gl.getUniformLocation(this.prog, "u_head");
     this.uSize = gl.getUniformLocation(this.prog, "u_size");
+    this.uTexw = gl.getUniformLocation(this.prog, "u_texw");
+    gl.uniform1f(this.uTexw, texWidth);
+    // A float texture the driver refused leaves texelFetch returning zeros,
+    // which draws a blank waterfall without any error; fail to 2D instead.
+    const err = gl.getError();
+    if (err !== gl.NO_ERROR) throw new Error(`WebGL setup failed, error 0x${err.toString(16)}`);
     // A fresh texture is not guaranteed zeroed on every driver.
     this.clear();
   }
@@ -283,19 +294,133 @@ class CanvasRenderer implements Renderer {
   draw(): void {}
 }
 
-export function createWaterfall(canvas: HTMLCanvasElement): Renderer {
-  const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, preserveDrawingBuffer: false });
-  if (gl) {
-    try {
-      return new GlRenderer(canvas, gl);
-    } catch (e) {
-      // A canvas that handed out a webgl2 context cannot give a 2d one, so the
-      // fallback needs a fresh element in the same place.
-      console.error("waterfall: WebGL2 failed, using 2D", e);
-      const fresh = canvas.cloneNode(false) as HTMLCanvasElement;
-      canvas.replaceWith(fresh);
-      return new CanvasRenderer(fresh);
+// How long a lost WebGL context gets to come back before the 2D renderer
+// takes over.
+export const RESTORE_WAIT_MS = 3000;
+
+export interface RendererFactories {
+  // Null or a throw when WebGL2 is unavailable or fails to set up.
+  gl(): Renderer | null;
+  canvas2d(): Renderer;
+}
+
+// Owns whichever renderer is live and survives a lost GL context: iOS drops
+// contexts when the app is backgrounded under memory pressure. While lost,
+// rows and draws are dropped; size and view are remembered and applied to the
+// replacement. History is not kept across a loss.
+export class WaterfallHost implements Renderer {
+  state: "gl" | "lost" | "2d";
+  private r: Renderer | null;
+  private size: [number, number] | null = null;
+  private view: View | null = null;
+  private wait: unknown = null;
+
+  constructor(
+    private readonly make: RendererFactories,
+    private readonly timers: { setTimeout(fn: () => void, ms: number): unknown; clearTimeout(h: unknown): void },
+  ) {
+    const g = this.tryGl();
+    this.r = g ?? make.canvas2d();
+    this.state = g ? "gl" : "2d";
+  }
+
+  contextLost(): void {
+    if (this.state !== "gl") return;
+    this.state = "lost";
+    this.r = null;
+    this.wait = this.timers.setTimeout(() => {
+      this.wait = null;
+      if (this.state === "lost") this.become2d();
+    }, RESTORE_WAIT_MS);
+  }
+
+  contextRestored(): void {
+    if (this.state !== "lost") return;
+    if (this.wait !== null) this.timers.clearTimeout(this.wait);
+    this.wait = null;
+    const g = this.tryGl();
+    if (g) {
+      this.state = "gl";
+      this.adopt(g);
+    } else {
+      this.become2d();
     }
   }
-  return new CanvasRenderer(canvas);
+
+  resize(w: number, h: number): void {
+    this.size = [w, h];
+    this.r?.resize(w, h);
+  }
+  setView(view: View): void {
+    this.view = view;
+    this.r?.setView(view);
+  }
+  pushRow(f: SpectrumFrame): void {
+    this.r?.pushRow(f);
+  }
+  clear(): void {
+    this.r?.clear();
+  }
+  draw(): void {
+    this.r?.draw();
+  }
+
+  private become2d(): void {
+    this.state = "2d";
+    this.adopt(this.make.canvas2d());
+  }
+
+  private adopt(r: Renderer): void {
+    this.r = r;
+    if (this.size) r.resize(this.size[0], this.size[1]);
+    if (this.view) r.setView(this.view);
+  }
+
+  private tryGl(): Renderer | null {
+    try {
+      return this.make.gl();
+    } catch (e) {
+      console.error("waterfall: WebGL2 failed, using 2D", e);
+      return null;
+    }
+  }
+}
+
+export function createWaterfall(first: HTMLCanvasElement): WaterfallHost {
+  let canvas = first;
+  let used = false;
+  // A canvas that has handed out a webgl2 context cannot give a 2d one, so
+  // each fallback gets a fresh element in the same place.
+  const fresh = () => {
+    if (!used) return canvas;
+    const c = canvas.cloneNode(false) as HTMLCanvasElement;
+    canvas.replaceWith(c);
+    canvas = c;
+    return c;
+  };
+  let host: WaterfallHost | null = null;
+  host = new WaterfallHost(
+    {
+      gl: () => {
+        const c = used ? canvas : fresh();
+        used = true;
+        const gl = c.getContext("webgl2", { antialias: false, alpha: false, preserveDrawingBuffer: false });
+        if (!gl || gl.isContextLost()) return null;
+        return new GlRenderer(c, gl);
+      },
+      canvas2d: () => new CanvasRenderer(fresh()),
+    },
+    { setTimeout: (fn, ms) => window.setTimeout(fn, ms), clearTimeout: (h) => window.clearTimeout(h as number) },
+  );
+  canvas.addEventListener("webglcontextlost", (e) => {
+    // Without preventDefault the browser never offers the context back.
+    e.preventDefault();
+    console.warn("waterfall: WebGL context lost");
+    host?.contextLost();
+  });
+  canvas.addEventListener("webglcontextrestored", () => {
+    console.warn("waterfall: WebGL context restored");
+    host?.contextRestored();
+  });
+  return host;
 }

@@ -8,6 +8,7 @@ import {
   encodeCommand,
   isReply,
   parseServerMessage,
+  PING_INTERVAL_MS,
   Tag,
   type EventName,
   type GatewayEvent,
@@ -21,6 +22,14 @@ import {
 export const BACKOFF_MIN_MS = 500;
 export const BACKOFF_MAX_MS = 8000;
 export const RESUME_KEY = "revenant.resume";
+// A request with no reply in this long is given up on: the socket may be one
+// iOS kept open across a lock with nobody on the other end.
+export const REQUEST_TIMEOUT_MS = 10_000;
+// Silence for two ping intervals means the socket is dead whatever it claims.
+export const STALE_MS = 2 * PING_INTERVAL_MS;
+// The backoff starts over only once a link has stayed up this long, so a
+// gateway that accepts and immediately drops does not get hammered.
+export const STABLE_MS = 5_000;
 
 // The subset of WebSocket the link uses, so tests can hand it a fake.
 export interface SocketLike {
@@ -50,6 +59,8 @@ export interface LinkDeps {
   socket: (url: string) => SocketLike;
   timers: Timers;
   store: KeyStore;
+  // Milliseconds, monotonic enough for staleness checks.
+  now: () => number;
 }
 
 // Every gateway event by name, plus the link's own: "ready" once the socket is
@@ -83,9 +94,8 @@ export class LinkError extends Error {}
 interface Pending {
   resolve: (v: JsonValue) => void;
   reject: (e: Error) => void;
+  timer: unknown;
 }
-
-const OPEN = 1;
 
 export class Link {
   private ws: SocketLike | null = null;
@@ -100,6 +110,9 @@ export class Link {
   // hello offered on this socket, kept in case the resume is refused.
   private resumeId: number | null = null;
   private freshToken: string | null = null;
+  private lastHeard = 0;
+  private watchdog: unknown = null;
+  private stableTimer: unknown = null;
 
   constructor(private readonly deps: LinkDeps) {}
 
@@ -110,11 +123,14 @@ export class Link {
   start(): void {
     this.stopped = false;
     this.open();
+    this.armWatchdog();
   }
 
   stop(): void {
     this.stopped = true;
     this.cancelRetry();
+    if (this.watchdog !== null) this.deps.timers.clearTimeout(this.watchdog);
+    this.watchdog = null;
     const ws = this.ws;
     this.ws = null;
     if (ws) {
@@ -125,10 +141,13 @@ export class Link {
   }
 
   // Called when the app returns to the foreground or the network comes back:
-  // a reconnect waiting out its backoff goes now.
+  // a reconnect waiting out its backoff goes now, and a socket that has heard
+  // nothing for too long (iOS often leaves one half open across a lock) is
+  // replaced rather than trusted.
   wake(): void {
     if (this.stopped) return;
     this.backoff = BACKOFF_MIN_MS;
+    if (this.ws !== null && this.isStale()) this.drop(this.ws);
     if (this.ws === null) {
       this.cancelRetry();
       this.open();
@@ -168,7 +187,10 @@ export class Link {
       return Promise.reject(e instanceof Error ? e : new Error(String(e)));
     }
     return new Promise<JsonValue>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = this.deps.timers.setTimeout(() => {
+        if (this.pending.delete(id)) reject(new LinkError(`${op}: no reply in ${REQUEST_TIMEOUT_MS / 1000} s`));
+      }, REQUEST_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
       ws.send(text);
     });
   }
@@ -183,6 +205,8 @@ export class Link {
       return;
     }
     this.ws = ws;
+    // A connect that never completes is as stale as a socket gone quiet.
+    this.lastHeard = this.deps.now();
     ws.binaryType = "arraybuffer";
     ws.onopen = () => this.opened(ws);
     ws.onmessage = (ev) => this.message(ws, ev.data);
@@ -192,6 +216,7 @@ export class Link {
 
   private opened(ws: SocketLike): void {
     if (ws !== this.ws) return;
+    this.lastHeard = this.deps.now();
     const token = this.deps.store.getItem(RESUME_KEY);
     if (token === null) {
       this.becomeReady(false);
@@ -204,7 +229,15 @@ export class Link {
     this.resumeId = this.nextId - 1;
     p.then(
       () => this.resumeSettled(ws, true),
-      () => this.resumeSettled(ws, false),
+      (e: unknown) => {
+        // No answer is not a refusal: the session may still be waiting on the
+        // gateway, so keep the token and try again on a new socket.
+        if (e instanceof LinkError) {
+          if (ws === this.ws) this.drop(ws);
+          return;
+        }
+        this.resumeSettled(ws, false);
+      },
     );
   }
 
@@ -222,12 +255,16 @@ export class Link {
 
   private becomeReady(resumed: boolean): void {
     this.isReady = true;
-    this.backoff = BACKOFF_MIN_MS;
+    this.stableTimer = this.deps.timers.setTimeout(() => {
+      this.stableTimer = null;
+      this.backoff = BACKOFF_MIN_MS;
+    }, STABLE_MS);
     this.emit("ready", { resumed });
   }
 
   private message(ws: SocketLike, data: unknown): void {
     if (ws !== this.ws) return;
+    this.lastHeard = this.deps.now();
     if (data instanceof ArrayBuffer) {
       const f = decodeBinary(data);
       if (f === null) return;
@@ -242,6 +279,7 @@ export class Link {
       const p = this.pending.get(m.id);
       if (!p) return;
       this.pending.delete(m.id);
+      this.deps.timers.clearTimeout(p.timer);
       if (m.ok) p.resolve(m.result);
       else p.reject(new Error(m.error));
       return;
@@ -260,10 +298,29 @@ export class Link {
 
   private closed(ws: SocketLike): void {
     if (ws !== this.ws) return;
+    this.drop(ws);
+  }
+
+  // Abandons the current socket and schedules the next attempt.
+  private drop(ws: SocketLike): void {
     this.detach(ws);
+    if (ws.readyState < 2) ws.close();
     this.ws = null;
     this.lost();
     if (!this.stopped) this.scheduleRetry();
+  }
+
+  private isStale(): boolean {
+    return this.deps.now() - this.lastHeard > STALE_MS;
+  }
+
+  private armWatchdog(): void {
+    this.watchdog = this.deps.timers.setTimeout(() => {
+      this.watchdog = null;
+      if (this.stopped) return;
+      if (this.ws !== null && this.isStale()) this.drop(this.ws);
+      this.armWatchdog();
+    }, PING_INTERVAL_MS);
   }
 
   private lost(): void {
@@ -271,9 +328,16 @@ export class Link {
     this.freshToken = null;
     const wasReady = this.isReady;
     this.isReady = false;
+    if (this.stableTimer !== null) {
+      this.deps.timers.clearTimeout(this.stableTimer);
+      this.stableTimer = null;
+    }
     const pending = this.pending;
     this.pending = new Map();
-    for (const p of pending.values()) p.reject(new LinkError("connection lost"));
+    for (const p of pending.values()) {
+      this.deps.timers.clearTimeout(p.timer);
+      p.reject(new LinkError("connection lost"));
+    }
     if (wasReady) this.emit("down", {});
   }
 

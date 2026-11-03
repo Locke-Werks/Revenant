@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BACKOFF_MAX_MS, Link, RESUME_KEY, wireLifecycle, type SocketLike } from "../src/link";
-import { encodeSpectrum } from "../src/protocol";
+import { BACKOFF_MAX_MS, LinkError, REQUEST_TIMEOUT_MS, STABLE_MS, Link, RESUME_KEY, wireLifecycle, type SocketLike } from "../src/link";
+import { encodeSpectrum, PING_INTERVAL_MS } from "../src/protocol";
 
 class FakeSocket implements SocketLike {
   binaryType = "blob";
@@ -87,6 +87,7 @@ function rig(token?: string) {
     },
     timers,
     store,
+    now: () => timers.now,
   });
   const ready: boolean[] = [];
   link.on("ready", (r) => ready.push(r.resumed));
@@ -176,6 +177,15 @@ test("a refused resume falls back to the fresh session's token", async () => {
   assert.equal(link.ready, true);
 });
 
+// Drops the current socket and returns how long the next one took to appear.
+function dropAndWait(sockets: FakeSocket[], timers: FakeTimers): number {
+  const before = sockets.length;
+  sockets[sockets.length - 1]!.drop();
+  const t0 = timers.now;
+  while (sockets.length === before) timers.advance(50);
+  return timers.now - t0;
+}
+
 test("reconnects with backoff from 0.5 s doubling to 8 s, reset once ready", () => {
   const { link, sockets, timers } = rig();
   link.start();
@@ -189,11 +199,13 @@ test("reconnects with backoff from 0.5 s doubling to 8 s, reset once ready", () 
   }
   assert.deepEqual(delays, [500, 1000, 2000, 4000, 8000, 8000, 8000]);
   assert.equal(BACKOFF_MAX_MS, 8000);
+  // Ready but dropped at once: the backoff does not start over.
   sockets[sockets.length - 1]!.open();
-  sockets[sockets.length - 1]!.drop();
-  const before = sockets.length;
-  timers.advance(500);
-  assert.equal(sockets.length, before + 1);
+  assert.equal(dropAndWait(sockets, timers), 8000);
+  // Up for STABLE_MS: it does.
+  sockets[sockets.length - 1]!.open();
+  timers.advance(STABLE_MS);
+  assert.equal(dropAndWait(sockets, timers), 500);
 });
 
 test("coming back to the foreground or online reconnects at once", () => {
@@ -203,10 +215,7 @@ test("coming back to the foreground or online reconnects at once", () => {
   const doc = { visibilityState: "hidden", addEventListener: (e: string, f: () => void) => void (docL[e] = f) };
   wireLifecycle(link, doc, { addEventListener: (e: string, f: () => void) => void (winL[e] = f) });
   link.start();
-  for (let i = 0; i < 4; i++) {
-    sockets[sockets.length - 1]!.drop();
-    timers.advance(100_000);
-  }
+  for (let i = 0; i < 4; i++) dropAndWait(sockets, timers);
   sockets[sockets.length - 1]!.drop(); // now waiting 8 s
   const n = sockets.length;
   docL["visibilitychange"]!();
@@ -214,7 +223,9 @@ test("coming back to the foreground or online reconnects at once", () => {
   doc.visibilityState = "visible";
   docL["visibilitychange"]!();
   assert.equal(sockets.length, n + 1);
-  assert.equal(timers.count, 0, "the pending retry was cancelled");
+  sockets[sockets.length - 1]!.open();
+  timers.advance(8000);
+  assert.equal(sockets.length, n + 1, "the pending retry was cancelled");
   sockets[sockets.length - 1]!.drop();
   timers.advance(499);
   winL["online"]!();
@@ -263,4 +274,55 @@ test("stop closes the socket and does not reconnect", () => {
   assert.equal(downs.length, 1);
   timers.advance(60_000);
   assert.equal(sockets.length, 1);
+});
+
+test("a socket silent past two ping intervals is replaced on wake", () => {
+  const { link, sockets, timers, cur } = rig();
+  link.start();
+  cur().open();
+  timers.advance(PING_INTERVAL_MS);
+  cur().json({ event: "ping" });
+  // Heard recently: wake keeps it.
+  link.wake();
+  assert.equal(sockets.length, 1);
+  // Half open: nothing more arrives. Wake before the watchdog's next look.
+  timers.now += 2 * PING_INTERVAL_MS + 1;
+  link.wake();
+  assert.equal(sockets.length, 2);
+  assert.equal(sockets[0]!.closedByApp, true);
+});
+
+test("the watchdog replaces a silent socket without a wake", () => {
+  const { link, sockets, timers, cur } = rig();
+  link.start();
+  cur().open();
+  timers.advance(3 * PING_INTERVAL_MS + 1000);
+  assert.equal(sockets.length >= 2, true);
+  assert.equal(sockets[0]!.closedByApp, true);
+});
+
+test("a request on a dead socket rejects on timeout", async () => {
+  const { link, timers, cur } = rig();
+  link.start();
+  cur().open();
+  const p = link.request("tune", { vrx: 1, hz: 1 });
+  timers.advance(REQUEST_TIMEOUT_MS - 1);
+  let settled = false;
+  p.catch(() => {}).finally(() => void (settled = true));
+  await tick();
+  assert.equal(settled, false);
+  timers.advance(1);
+  await assert.rejects(p, /no reply/);
+  await p.catch((e: unknown) => assert.equal(e instanceof LinkError, true));
+});
+
+test("a resume that times out keeps the token and reconnects", async () => {
+  const { link, sockets, timers, store, cur } = rig("tok-keep");
+  link.start();
+  cur().open();
+  timers.advance(REQUEST_TIMEOUT_MS);
+  await tick();
+  assert.equal(store.getItem(RESUME_KEY), "tok-keep");
+  timers.advance(500);
+  assert.equal(sockets.length, 2);
 });
