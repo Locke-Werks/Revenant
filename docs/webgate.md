@@ -404,6 +404,12 @@ is on the same network, and the firewall. The gateway's log is
 the engine for it (see Cold start). Later phones within the engine's life do
 not wait.
 
+**"Background audio failed: background audio unavailable on this Windows
+edition".** Keep listening encodes AAC with Media Foundation, which Windows N
+editions do not include. Install the Media Feature Pack from Optional
+features. The gateway delay-loads Media Foundation, so everything else,
+including live audio, works without it.
+
 **The install fails at "stop-phone-gateway".** A gateway did not exit within
 10 s of `--stop`, or is a version from before `--stop` existed (0.3.14 and
 earlier). End `revenant-webgate.exe` in Task Manager and run the installer

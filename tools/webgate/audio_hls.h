@@ -22,6 +22,10 @@ namespace revenant::webgate {
 //
 // Not thread safe. Use it from one thread; it initialises COM and Media
 // Foundation on the calling thread.
+// Whether Media Foundation can be loaded. Asked once and remembered; the
+// first false is logged. AacEncoder::create asks it before touching MF.
+[[nodiscard]] bool media_foundation_present();
+
 class AacEncoder {
 public:
     // The MFT offers 44100 and 48000 Hz; any other rate is an error rather

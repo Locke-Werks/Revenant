@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <format>
 #include <string>
@@ -295,7 +296,32 @@ AacEncoder::AacEncoder(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
 AacEncoder::~AacEncoder() = default;
 
+bool media_foundation_present() {
+    // MFPlat.dll is delay-loaded (tools/webgate/CMakeLists.txt), so the
+    // gateway starts on a Windows N edition that has none, and the installer's
+    // --stop hook with it. A delay-load that fails raises a structured
+    // exception at the first call, so the first call is never made without
+    // this check. System32 only: a copy beside the exe is not Windows'.
+    static const bool present = [] {
+        HMODULE module = LoadLibraryExW(L"mfplat.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (module == nullptr) {
+            std::fprintf(stderr,
+                         "revenant-webgate: Media Foundation is not installed (a Windows N "
+                         "edition?), so background audio is unavailable; everything else "
+                         "works\n");
+            return false;
+        }
+        // Kept loaded: the delay-load helper resolves against this module.
+        return true;
+    }();
+    return present;
+}
+
 Expected<std::unique_ptr<AacEncoder>> AacEncoder::create(std::uint32_t sample_rate) {
+    if (!media_foundation_present()) {
+        return std::unexpected(Error{"background audio unavailable on this Windows edition", 0,
+                                     ErrorCategory::Unclassified});
+    }
     auto impl = std::make_unique<Impl>();
     if (auto status = impl->init(sample_rate); !status) {
         return std::unexpected(status.error());

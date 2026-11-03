@@ -62,6 +62,16 @@ if(WIN32)
     # mfplat/mfuuid/wmcodecdspuuid: the AAC encoder MFT used by the HLS path.
     target_link_libraries(revenant_webgate_lib PUBLIC iphlpapi ws2_32 crypt32
                           mfplat mfuuid wmcodecdspuuid ole32)
+    # MFPlat.dll is the one Media Foundation DLL imported (mfuuid and
+    # wmcodecdspuuid are GUIDs, linked statically). Windows N has no Media
+    # Foundation, and a load-time import would stop the gateway, and with it
+    # the installer's --stop hook, from starting at all. Delay-loaded, it is
+    # loaded only when the HLS path first makes an encoder, after
+    # media_foundation_present() has checked (audio_hls.h).
+    if(MSVC)
+        target_link_libraries(revenant_webgate_lib PUBLIC delayimp)
+        target_link_options(revenant_webgate_lib PUBLIC /DELAYLOAD:MFPlat.dll)
+    endif()
 endif()
 
 revenant_apply_warnings(revenant_webgate_lib)
