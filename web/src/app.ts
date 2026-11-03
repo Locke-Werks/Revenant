@@ -259,6 +259,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     keep,
     toast,
     audioNote: (text) => notes.set("audio", text),
+    tuneRanges: () => radio.tuneRanges(),
   });
 
   sheet = new Sheet({
@@ -631,8 +632,9 @@ export function mountApp(root: HTMLElement): AppHandle {
         next = Math.max(1, next + dHz);
         // The marker and chip move now; the engine confirms through status.
         // Only a drag that took effect accumulates.
-        if (!receivers.preview(next)) return;
-        dragHz = next;
+        const shown = receivers.preview(next);
+        if (!shown) return;
+        dragHz = shown.hz;
         tuneLimiter.set(dragHz);
         if (view) {
           const lo = view.centerHz - view.spanHz / 2;
@@ -677,6 +679,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     sourceEpoch = e.epoch;
     status.source(e);
     radio.source(e);
+    receivers.setSource(e);
     renderStatus();
     if (e.open !== true || typeof e.centerHz !== "number" || typeof e.rateHz !== "number") {
       band = null;

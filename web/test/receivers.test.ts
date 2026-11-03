@@ -180,7 +180,7 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-function rig() {
+function rig(ranges: { lowHz: number; highHz: number }[] | null = null) {
   const link = new FakeLink();
   const gate = new ReplaceGate(link);
   const audio = new FakeAudio(gate);
@@ -192,6 +192,7 @@ function rig() {
     audio,
     keep,
     toast: (t) => toasts.push(t),
+    tuneRanges: () => ranges,
     audioNote: (t) => notes.push(t),
   });
   return { link, gate, audio, keep, ctl, toasts, notes, chips: () => ctl.list.list().map((r) => `${r.vrx}:${r.hz}:${r.mode}`) };
@@ -207,7 +208,7 @@ test("a tap with no receiver adds one in NFM, selects it and listens", async () 
   const r = rig();
   r.ctl.tap(146_520_000.4);
   assert.equal(r.audio.unlocks, 1);
-  assert.deepEqual(r.link.last(), { op: "addVrx", args: { hz: 146_520_000, mode: DEFAULT_MODE }, timeoutMs: undefined });
+  assert.deepEqual(r.link.last(), { op: "addVrx", args: { hz: 146_520_000, mode: DEFAULT_MODE, bandwidthHz: 0 }, timeoutMs: undefined });
   r.link.reply(status(1, 146_520_000));
   await flush();
   assert.deepEqual(r.chips(), ["1:146520000:nfm"]);
@@ -934,4 +935,82 @@ test("a row removed during a hold leaves at once", () => {
   const p = s.apply([det("2", 10)], text);
   assert.deepEqual(p.removed, ["1"]);
   assert.deepEqual(p.order, ["2"]);
+});
+
+// ---- The band edge -----------------------------------------------------------
+
+const FM_BAND = { open: true, centerHz: 98_100_000, rateHz: 2_400_000, epoch: 1 };
+
+async function edgeRig(ranges: { lowHz: number; highHz: number }[] | null = null) {
+  const r = rig(ranges);
+  r.ctl.setSource(FM_BAND);
+  r.ctl.tap(99_200_000);
+  r.link.reply(status(1, 99_200_000));
+  await flush();
+  return r;
+}
+
+test("a drag past the band's edge recentres the radio, holding tunes until it answers", async () => {
+  const r = await edgeRig();
+  r.ctl.preview(99_310_000);
+  r.ctl.tuneDragged(99_310_000);
+  // 25% in from the top edge: centre 0.6 MHz below the receiver.
+  assert.deepEqual(r.link.last(), { op: "setCenter", args: { hz: 98_710_000 }, timeoutMs: undefined });
+  r.ctl.tuneDragged(99_400_000);
+  assert.equal(r.link.sent.length, 2);
+  r.link.reply({ grantedHz: 98_710_000, removed: [] });
+  await flush();
+  assert.deepEqual(r.link.last(), { op: "tune", args: { vrx: 1, hz: 99_400_000 }, timeoutMs: undefined });
+});
+
+test("a refused recentre clamps at the edge from then on", async () => {
+  const r = await edgeRig();
+  r.ctl.tuneDragged(99_310_000);
+  r.link.refuse("set_source_center: no");
+  await flush();
+  assert.deepEqual(r.link.last(), { op: "tune", args: { vrx: 1, hz: 99_293_750 }, timeoutMs: undefined });
+  assert.equal(r.ctl.preview(99_500_000)!.hz, 99_293_750);
+});
+
+test("a source that cannot be retuned clamps without asking", async () => {
+  const r = await edgeRig([]);
+  r.ctl.tuneDragged(99_310_000);
+  assert.deepEqual(r.link.last(), { op: "tune", args: { vrx: 1, hz: 99_293_750 }, timeoutMs: undefined });
+});
+
+test("typed entry far outside the band recentres, and re-adds a receiver the move dropped", async () => {
+  const r = await edgeRig();
+  r.ctl.tap(150_000_000);
+  assert.equal(r.link.last().op, "setCenter");
+  r.link.reply({ grantedHz: Number(r.link.last().args!.hz), removed: [1] });
+  await flush();
+  assert.deepEqual(r.link.last(), { op: "addVrx", args: { hz: 150_000_000, mode: "nfm", bandwidthHz: 0 }, timeoutMs: undefined });
+});
+
+test("a refused tune puts the chip back where the engine last confirmed", async () => {
+  const r = await edgeRig();
+  r.ctl.tap(99_000_000);
+  r.link.refuse("place: centre -1515153 Hz is outside the source's baseband span");
+  await flush();
+  assert.deepEqual(r.chips(), ["1:99200000:nfm"]);
+  assert.equal(r.toasts.length, 1);
+});
+
+test("a refused drag tune rolls the preview back when the drag ends", async () => {
+  const r = await edgeRig();
+  r.ctl.preview(99_100_000);
+  r.ctl.tuneDragged(99_100_000);
+  r.link.refuse("nope");
+  await flush();
+  assert.deepEqual(r.chips(), ["1:99100000:nfm"]);
+  r.ctl.endDrag();
+  assert.deepEqual(r.chips(), ["1:99200000:nfm"]);
+});
+
+test("a receiver added at the mode's default width reads back as that default", async () => {
+  const r = rig();
+  r.ctl.tap(98_100_000);
+  r.link.reply(status(1, 98_100_000, "wfm", { bandwidthHz: 0 }));
+  await flush();
+  assert.equal(r.ctl.list.get(1)!.bandwidthHz, null);
 });

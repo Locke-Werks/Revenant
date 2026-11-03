@@ -4,6 +4,7 @@
 import type { JsonValue, SourceEvent } from "../protocol";
 import type { GateLink } from "./receivers";
 import { formatMHz, readFrequency } from "./receivers";
+import type { TuneRange } from "../band_edge";
 
 // Opening a device or enumerating them waits on USB and driver start-up,
 // which can run well past an ordinary request's 10 s.
@@ -18,10 +19,6 @@ interface GainStage {
   inForceAuto: boolean;
 }
 
-interface TuneRange {
-  lowHz: number;
-  highHz: number;
-}
 
 interface SourceEntry {
   uri: string;
@@ -140,6 +137,11 @@ export class RadioPanel {
         if (ok) this.center.blur();
       });
     });
+  }
+
+  // What the open tuner can reach, known only for a source this phone opened.
+  tuneRanges(): TuneRange[] | null {
+    return this.current ? this.current.tuneRanges ?? [] : null;
   }
 
   source(e: SourceEvent): void {

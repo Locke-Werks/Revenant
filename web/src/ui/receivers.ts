@@ -12,6 +12,8 @@
 
 import type { GatewayEvent, JsonValue, LinkEvent, Op } from "../protocol";
 import type { LinkEvents, RequestOptions } from "../link";
+import { clampInto, fits, recentreFor, shift, usableSpan, type Offsets, type Span, type TuneRange } from "../band_edge";
+import { passbandHz } from "../markers";
 
 export const MODES = ["nfm", "am", "wfm", "usb", "lsb", "cw", "dsb", "sam", "raw"] as const;
 export const DEFAULT_MODE = "nfm";
@@ -254,8 +256,11 @@ export interface ControllerDeps {
   link: ReplaceGate;
   audio: ControllerAudio;
   keep: ControllerKeep;
-  // A sentence that comes and goes.
-  toast(text: string): void;
+  // A sentence that comes and goes. A key keeps one of its kind on screen.
+  toast(text: string, key?: string): void;
+  // What the open tuner can reach: null when unknown, empty when it cannot
+  // be retuned at all (a recording).
+  tuneRanges?(): TuneRange[] | null;
   // A sentence about live audio that stays until it no longer holds; null
   // clears it.
   audioNote(text: string | null): void;
@@ -271,6 +276,25 @@ function num(v: JsonValue | undefined): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
+const TUNE_TOAST = "tune";
+
+// The source as the controller needs it for the band edge.
+export interface SourceBand {
+  open: boolean;
+  centerHz?: number;
+  rateHz?: number;
+  dataLowHz?: number;
+  dataHighHz?: number;
+  epoch?: number;
+}
+
+type Placement = { hz: number } | { recentre: number };
+
+function offsetsOf(r: { mode: string; bandwidthHz: number | null }): Offsets {
+  const p = passbandHz(r.mode, 0, r.bandwidthHz);
+  return { lowOff: p.lowHz, highOff: p.highHz };
+}
+
 export class ReceiverController {
   readonly list = new ReceiverList();
   // Removals this phone asked for, so their events are not reported as news.
@@ -280,7 +304,18 @@ export class ReceiverController {
   private replacing = new Set<number>();
   private tuneSeq = 0;
   private dragging = false;
-  private heldReply: { seq: number; reply: JsonValue } | null = null;
+  private heldReply: { seq: number; reply?: JsonValue; failed?: { vrx: number; e: unknown } } | null = null;
+  // The last frequency the engine answered with per receiver, which a
+  // refused tune's preview falls back to.
+  private confirmed = new Map<number, number>();
+  // The band the receivers must stay inside, and the move in flight that
+  // shifts it. Tunes wait for the move rather than racing it.
+  private span: Span | null = null;
+  private centreHz: number | null = null;
+  private epoch: number | undefined = undefined;
+  private recentring: Promise<number[] | null> | null = null;
+  private cannotRecentre = false;
+  private heldTune: { hz: number; vrx: number } | null = null;
   private goneFns = new Set<(vrx: number) => void>();
   private remapFns = new Set<(pairs: { old: number; new: number }[]) => void>();
 
@@ -313,6 +348,80 @@ export class ReceiverController {
     link.on("link", (e) => this.onLink(e));
   }
 
+  // The band the receivers live in. Called on every source event.
+  setSource(e: SourceBand): void {
+    if (!e.open || typeof e.centerHz !== "number" || typeof e.rateHz !== "number") {
+      this.span = null;
+      this.centreHz = null;
+      return;
+    }
+    // A failed retune says nothing about the next stream.
+    if (e.epoch !== this.epoch) {
+      this.epoch = e.epoch;
+      this.cannotRecentre = false;
+    }
+    this.span = usableSpan(e.centerHz, e.rateHz, e.dataLowHz, e.dataHighHz);
+    this.centreHz = e.centerHz;
+  }
+
+  // Where hz may go for a receiver shaped like r: as asked, clamped to the
+  // edge, or a recentre of the radio first.
+  private place(hz: number, r: { mode: string; bandwidthHz: number | null }, mayRecentre: boolean): Placement {
+    const span = this.span;
+    const centre = this.centreHz;
+    if (!span || centre === null) return { hz };
+    const off = offsetsOf(r);
+    if (fits(span, off, hz)) return { hz };
+    const ranges = this.deps.tuneRanges?.() ?? null;
+    if (mayRecentre && !this.cannotRecentre && !(ranges !== null && ranges.length === 0)) {
+      const c = recentreFor(span, centre, hz, ranges);
+      if (c !== centre) return { recentre: c };
+    }
+    return { hz: Math.round(clampInto(span, off, hz)) };
+  }
+
+  // Moves the radio. Resolves with the receiver ids the move dropped, or null
+  // when the engine refused, after which tunes clamp at the edge instead.
+  private recentre(hz: number): Promise<number[] | null> {
+    const before = this.centreHz;
+    const p = this.deps.link.request("setCenter", { hz }).then(
+      (reply) => {
+        this.recentring = null;
+        const o = reply !== null && typeof reply === "object" && !Array.isArray(reply) ? reply : {};
+        const granted = num(o.grantedHz) ?? hz;
+        if (this.span && before !== null) this.span = shift(this.span, granted - before);
+        this.centreHz = granted;
+        return Array.isArray(o.removed) ? o.removed.map((v) => Number(v)).filter(Number.isFinite) : [];
+      },
+      (e: unknown) => {
+        this.recentring = null;
+        this.cannotRecentre = true;
+        this.deps.toast(errorText(e), TUNE_TOAST);
+        return null;
+      },
+    );
+    this.recentring = p;
+    return p;
+  }
+
+  // Runs fn with where hz may go, at once when the band allows it, after a
+  // recentre when it does not.
+  private placed(hz: number, r: { mode: string; bandwidthHz: number | null }, fn: (hz: number, dropped: number[]) => void): void {
+    if (this.recentring) {
+      void this.recentring.then(() => this.placed(hz, r, fn));
+      return;
+    }
+    const p = this.place(hz, r, true);
+    if ("hz" in p) {
+      fn(p.hz, []);
+      return;
+    }
+    void this.recentre(p.recentre).then((dropped) => {
+      const q = this.place(hz, r, false);
+      fn("hz" in q ? q.hz : hz, dropped ?? []);
+    });
+  }
+
   // Tap on the waterfall: tune the active receiver, or add one there. Runs
   // inside the gesture, which is where iOS lets audio start.
   tap(hz: number): void {
@@ -323,10 +432,26 @@ export class ReceiverController {
       return;
     }
     if (this.replacing.has(active)) return;
+    const was = this.list.get(active)!;
     // Supersedes any drag reply still in flight.
     this.tuneSeq++;
-    this.call("tune", { vrx: active, hz: Math.round(hz) }).then((r) => {
-      if (r) this.nowPlaying(r);
+    this.placed(hz, was, (to, dropped) => {
+      // A jump far enough that the move dropped the receiver: one like it
+      // takes its place where it was asked to go.
+      if (dropped.includes(active)) {
+        this.add(to, was.mode);
+        return;
+      }
+      const seq = ++this.tuneSeq;
+      this.deps.link.request("tune", { vrx: active, hz: Math.round(to) }).then(
+        (reply) => {
+          const r = this.fromReply(reply);
+          if (r) this.nowPlaying(r);
+        },
+        (e: unknown) => {
+          if (seq === this.tuneSeq) this.refused(active, e);
+        },
+      );
     });
   }
 
@@ -348,12 +473,14 @@ export class ReceiverController {
 
   // A drag shows the active receiver at hz at once; the engine's answer comes
   // later and replaces it. Returns the receiver, or null when there is none to
-  // drag or it is mid-replace.
+  // drag or it is mid-replace. Where the band ends and the radio cannot move,
+  // the preview stops at the edge too.
   preview(hz: number): Receiver | null {
     const vrx = this.list.active;
     if (vrx === null || this.replacing.has(vrx)) return null;
     this.dragging = true;
-    return this.list.upsert({ vrx, hz: Math.round(hz) });
+    const p = this.place(hz, this.list.get(vrx)!, true);
+    return this.list.upsert({ vrx, hz: Math.round("hz" in p ? p.hz : hz) });
   }
 
   // Call after the final flush has been sent. Replies were being held back;
@@ -363,12 +490,24 @@ export class ReceiverController {
     this.dragging = false;
     const held = this.heldReply;
     this.heldReply = null;
-    if (held && held.seq === this.tuneSeq) this.applyTuneReply(held.reply);
+    if (!held || held.seq !== this.tuneSeq) return;
+    if (held.failed) this.refused(held.failed.vrx, held.failed.e);
+    else this.applyTuneReply(held.reply ?? null);
   }
 
   private applyTuneReply(reply: JsonValue): void {
     const r = this.fromReply(reply);
     if (r) this.nowPlaying(r);
+  }
+
+  // A refused tune: say so once, and put the receiver back where the engine
+  // last said it was rather than where the refused request wanted it.
+  private refused(vrx: number, e: unknown): void {
+    this.deps.toast(errorText(e), TUNE_TOAST);
+    const hz = this.confirmed.get(vrx);
+    if (hz === undefined || !this.list.has(vrx)) return;
+    const r = this.list.upsert({ vrx, hz, statusUnavailable: this.list.get(vrx)!.statusUnavailable });
+    this.nowPlaying(r);
   }
 
   // One tune of a drag. Replies arrive out of step with the finger, so only
@@ -379,8 +518,30 @@ export class ReceiverController {
   tuneDragged(hz: number, target: number | null = this.list.active): void {
     const vrx = target;
     if (vrx === null || !this.list.has(vrx) || this.replacing.has(vrx)) return;
+    // The radio is moving: only the newest value matters once it lands.
+    if (this.recentring) {
+      this.heldTune = { hz, vrx };
+      return;
+    }
+    const p = this.place(hz, this.list.get(vrx)!, true);
+    if ("recentre" in p) {
+      this.heldTune = { hz, vrx };
+      void this.recentre(p.recentre).then(() => {
+        const h = this.heldTune;
+        this.heldTune = null;
+        if (h) this.sendDragTune(h.hz, h.vrx);
+      });
+      return;
+    }
+    this.sendDragTune(p.hz, vrx);
+  }
+
+  private sendDragTune(hz: number, vrx: number): void {
+    if (!this.list.has(vrx) || this.replacing.has(vrx)) return;
+    const p = this.place(hz, this.list.get(vrx)!, false);
+    const to = "hz" in p ? p.hz : hz;
     const seq = ++this.tuneSeq;
-    this.deps.link.request("tune", { vrx, hz: Math.round(hz) }).then(
+    this.deps.link.request("tune", { vrx, hz: Math.round(to) }).then(
       (reply) => {
         if (seq !== this.tuneSeq) return;
         // The limiter may hold a newer value than this reply answers, so
@@ -392,7 +553,12 @@ export class ReceiverController {
         this.applyTuneReply(reply);
       },
       (e: unknown) => {
-        if (seq === this.tuneSeq) this.deps.toast(errorText(e));
+        if (seq !== this.tuneSeq) return;
+        if (this.dragging) {
+          this.heldReply = { seq, failed: { vrx, e } };
+          return;
+        }
+        this.refused(vrx, e);
       },
     );
   }
@@ -456,8 +622,15 @@ export class ReceiverController {
     );
   }
 
-  private add(hz: number): void {
-    void this.call("addVrx", { hz: Math.round(hz), mode: DEFAULT_MODE }).then((r) => {
+  // A width of zero asks the engine for the mode's own default passband, the
+  // same table the desktop uses; no single width the phone could send says
+  // USB's 300 to 2700 Hz.
+  private add(hz: number, mode: string = DEFAULT_MODE): void {
+    this.placed(hz, { mode, bandwidthHz: null }, (to) => this.addAt(to, mode));
+  }
+
+  private addAt(hz: number, mode: string): void {
+    void this.call("addVrx", { hz: Math.round(hz), mode, bandwidthHz: 0 }).then((r) => {
       if (!r) return;
       this.list.select(r.vrx);
       this.nowPlaying(r);
@@ -529,7 +702,8 @@ export class ReceiverController {
       vrx,
       hz: num(reply.hz),
       mode: typeof reply.mode === "string" ? reply.mode : undefined,
-      bandwidthHz: num(reply.bandwidthHz),
+      // Zero is "the mode's default", drawn from the same table.
+      bandwidthHz: (num(reply.bandwidthHz) ?? 0) > 0 ? num(reply.bandwidthHz) : undefined,
       squelchDbfs: num(reply.squelchDbfs),
       statusUnavailable: reply.statusUnavailable === true,
       transcribe: choiceOf(reply.transcribe),
@@ -539,6 +713,7 @@ export class ReceiverController {
       const why = typeof reply.clampReason === "string" && reply.clampReason !== "" ? reply.clampReason : "the engine clamped this receiver";
       this.deps.toast(why);
     }
+    this.confirmed.set(r.vrx, r.hz);
     return r;
   }
 
@@ -582,6 +757,12 @@ export class ReceiverController {
       this.deps.toast(`Receiver ${where} lost when the engine restarted: ${l.reason}`);
     }
     this.list.remap(e.recreated ?? []);
+    const moved = new Map<number, number>();
+    for (const [id, hz] of this.confirmed) {
+      const to = (e.recreated ?? []).find((p) => p.old === id)?.new ?? id;
+      if (this.list.has(to)) moved.set(to, hz);
+    }
+    this.confirmed = moved;
     this.remapped(e.recreated ?? []);
   }
 }
