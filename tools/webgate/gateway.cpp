@@ -167,13 +167,31 @@ namespace {
 }  // namespace
 
 Gateway::Gateway(kj::AsyncIoContext& io, NewSession new_session, HlsRegistry& hls,
-                 HubTiming timing)
+                 HubTiming timing, NewSession session_now)
     : io_(io),
       new_session_(std::move(new_session)),
       hls_(&hls),
-      hub_(strand_, streams_config(hls), timing, new_session_)
+      hub_(strand_, streams_config(hls), timing,
+           session_now ? std::move(session_now) : new_session_)
 {
     hls.on_fetch = [this](std::uint64_t vrx) { hub_.hls_fetched(vrx); };
+    hub_.set_claim_runner([this](rpc::LoginMode mode, std::string holder,
+                                 std::function<void(Expected<std::unique_ptr<rpc::Client>>)> done) {
+        prune_claims();
+        claims_.push_back(Claim{});
+        Claim& claim = claims_.back();
+        claim.done = std::make_shared<std::atomic<bool>>(false);
+        claim.thread = std::thread([this, new_session = new_session_, mode,
+                                    holder = std::move(holder), done = std::move(done),
+                                    finished = claim.done]() mutable {
+            auto result = std::make_shared<Expected<std::unique_ptr<rpc::Client>>>(
+                new_session(mode, holder));
+            // Back on the loop, where the hub lives. A result nobody takes
+            // (the gateway shut down first) is destroyed with the task.
+            strand_.post([done = std::move(done), result] { done(std::move(*result)); });
+            finished->store(true);
+        });
+    });
 }
 
 Gateway::~Gateway()
@@ -283,10 +301,6 @@ void Gateway::join_claims()
     claims_.clear();
 }
 
-std::string engine_starting_event()
-{
-    return event("engine", JsonObject().add_string("state", "starting"));
-}
 
 kj::Promise<void> Gateway::receive(Connection& connection)
 {

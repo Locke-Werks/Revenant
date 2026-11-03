@@ -112,6 +112,11 @@ std::optional<LeaseRefusal> parse_lease_refusal(std::string_view message)
                         std::string(message.substr(at))};
 }
 
+std::string engine_starting_event()
+{
+    return event("engine", JsonObject().add_string("state", "starting"));
+}
+
 std::string link_event(LinkState state, const std::string& detail)
 {
     return event("link",
@@ -360,6 +365,12 @@ void PhoneHub::text(std::uint64_t id, std::string_view text)
     if (command && command->op == "pong") {
         return;
     }
+    if (connection.taking_over) {
+        // Replayed in order once the takeOver lands, against the session it
+        // brings or the refusal it ends in.
+        connection.held.emplace_back(text);
+        return;
+    }
     const bool first = !connection.commanded;
     connection.commanded = true;
 
@@ -399,14 +410,55 @@ void PhoneHub::take_over(std::uint64_t id, Connection& connection, const Command
         send_bare(id, error_reply(command.id, "takeOver: this gateway has no engine connection to give"));
         return;
     }
-    auto client = new_session_(rpc::LoginMode::TakeOver, connection.holder);
-    if (!client) {
-        send_bare(id, error_reply(command.id, client.error().message));
+    if (!claim_runner_) {
+        taken_over(id, command.id, new_session_(rpc::LoginMode::TakeOver, connection.holder));
         return;
     }
-    std::fprintf(stderr, "revenant-webgate: %s took the engine over\n", connection.holder.c_str());
-    Resident& resident = seat(id, std::move(*client), connection.holder);
-    resident.streams->send_event(ok_reply(command.id, JsonObject().add_bool("held", true).str()));
+    // The engine the phone was refused by may have gone since, and then this
+    // claim starts one, which takes seconds: off the loop, like the first
+    // claim in Gateway::accept.
+    if (link_state_ != LinkState::Up) {
+        send_bare(id, engine_starting_event());
+    }
+    connection.taking_over = command.id;
+    claim_runner_(rpc::LoginMode::TakeOver, connection.holder,
+                  [this, id, command_id = command.id](
+                      Expected<std::unique_ptr<rpc::Client>> client) {
+                      taken_over(id, command_id, std::move(client));
+                  });
+}
+
+void PhoneHub::taken_over(std::uint64_t id, std::uint64_t command_id,
+                          Expected<std::unique_ptr<rpc::Client>> client)
+{
+    const auto it = connections_.find(id);
+    if (it == connections_.end()) {
+        // The phone left while the engine started. Dropping the Client ends
+        // the lease it claimed.
+        return;
+    }
+    auto& connection = it->second;
+    connection.taking_over.reset();
+    if (!client) {
+        send_bare(id, error_reply(command_id, client.error().message));
+    } else if (connection.resident != nullptr) {
+        // Resumed into a session meanwhile; the takeOver is moot.
+        send_bare(id, ok_reply(command_id, JsonObject().add_bool("held", true).str()));
+    } else {
+        std::fprintf(stderr, "revenant-webgate: %s took the engine over\n",
+                     connection.holder.c_str());
+        Resident& resident = seat(id, std::move(*client), connection.holder);
+        resident.streams->send_event(
+            ok_reply(command_id, JsonObject().add_bool("held", true).str()));
+    }
+    auto held = std::move(connection.held);
+    connection.held.clear();
+    for (const auto& text : held) {
+        this->text(id, text);
+        if (!connections_.contains(id)) {
+            return;
+        }
+    }
 }
 
 void PhoneHub::resume(std::uint64_t id, Connection& connection, const Command& command)

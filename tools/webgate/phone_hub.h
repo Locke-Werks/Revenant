@@ -76,6 +76,11 @@ namespace revenant::webgate {
 // the same as later ones.
 [[nodiscard]] std::string link_event(LinkState state, const std::string& detail);
 
+// {"event":"engine","state":"starting"}: sent to a phone whose claim (first
+// connect or takeOver) is waiting for an engine to be started for it. The app
+// shows "Starting the engine..." until the link reports up.
+[[nodiscard]] std::string engine_starting_event();
+
 struct HubTiming {
     std::chrono::milliseconds detached_linger{30'000};
     std::chrono::milliseconds empty_linger{30'000};
@@ -95,6 +100,14 @@ struct HubTiming {
 // when the engine restarted. holder is the phone's lease holder text.
 using NewSession = std::function<Expected<std::unique_ptr<rpc::Client>>(
     rpc::LoginMode mode, const std::string& holder)>;
+
+// A claim that may wait for an engine to be started, so it must not run on
+// the event loop: run it elsewhere and call done on the hub's strand with the
+// result. The gateway runs it on a worker thread; tests hold it to see the
+// loop keep serving. Empty means the hub calls new_session in place.
+using ClaimRunner = std::function<void(
+    rpc::LoginMode mode, std::string holder,
+    std::function<void(Expected<std::unique_ptr<rpc::Client>>)> done)>;
 
 // The holder text a phone's sessions log in with, from its address.
 [[nodiscard]] std::string phone_holder(std::string_view peer);
@@ -171,6 +184,10 @@ public:
     // borrow still exists.
     void clear();
 
+    // takeOver runs through this when set; see ClaimRunner. Set before the
+    // first connection.
+    void set_claim_runner(ClaimRunner runner) { claim_runner_ = std::move(runner); }
+
     // For tests and the gateway.
     [[nodiscard]] std::size_t sessions() const { return residents_.size(); }
     [[nodiscard]] PhoneSession* session(std::uint64_t connection) const;
@@ -209,11 +226,18 @@ private:
         std::string holder;
         std::string refusal;
         std::deque<std::string> outbox;
+        // A takeOver on the claim runner: its command id, and the commands
+        // that arrived meanwhile, replayed once it lands.
+        std::optional<std::uint64_t> taking_over;
+        std::deque<std::string> held;
     };
 
     [[nodiscard]] std::chrono::steady_clock::time_point now() const;
     void resume(std::uint64_t id, Connection& connection, const Command& command);
     void take_over(std::uint64_t id, Connection& connection, const Command& command);
+    // A takeOver's claim has landed, on the strand. The connection may be gone.
+    void taken_over(std::uint64_t id, std::uint64_t command_id,
+                    Expected<std::unique_ptr<rpc::Client>> client);
     // A session for client under holder, put on connection id: lease held,
     // hello, start, link event.
     Resident& seat(std::uint64_t id, std::unique_ptr<rpc::Client> client, std::string holder);
@@ -244,6 +268,7 @@ private:
     StreamsConfig base_;
     HubTiming timing_;
     NewSession new_session_;
+    ClaimRunner claim_runner_;
     std::map<std::string, std::unique_ptr<Resident>> residents_;
     std::map<std::uint64_t, Connection> connections_;
     std::uint64_t next_connection_ = 1;

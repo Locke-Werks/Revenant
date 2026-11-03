@@ -60,8 +60,12 @@ public:
     // hls is the HttpServer's registry; this gateway's sessions fill it and
     // hear about every request it answers.
     // new_session also rebuilds each phone's session after an engine restart.
+    // new_session may wait for an engine to start, so it runs on worker
+    // threads (first claim and takeOver). session_now must not wait: the hub
+    // calls it on the loop to rebuild sessions after an engine restart, and
+    // tries again on a later tick when it fails. Empty means new_session.
     Gateway(kj::AsyncIoContext& io, NewSession new_session, HlsRegistry& hls,
-            HubTiming timing = {});
+            HubTiming timing = {}, NewSession session_now = {});
 
     // Calls shutdown().
     ~Gateway();
@@ -110,9 +114,5 @@ private:
     std::list<Claim> claims_;
 };
 
-// {"event":"engine","state":"starting"}: sent to a phone whose claim is
-// waiting for an engine to be started for it, ahead of hello. The app shows
-// "Starting the engine..." until the link reports up.
-[[nodiscard]] std::string engine_starting_event();
 
 }  // namespace revenant::webgate

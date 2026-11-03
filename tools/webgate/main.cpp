@@ -317,7 +317,10 @@ int main(int argc, char** argv) {
             [link](revenant::rpc::LoginMode mode, const std::string& holder) {
                 return link->phone_session(mode, holder);
             },
-            rt.server->hls, timing);
+            rt.server->hls, timing,
+            [link](revenant::rpc::LoginMode mode, const std::string& holder) {
+                return link->phone_session_now(mode, holder);
+            });
         auto* gateway = rt.gateway.get();
         link->on_state([gateway](revenant::webgate::LinkState state, std::string detail) {
             gateway->on_link_state(state, std::move(detail));

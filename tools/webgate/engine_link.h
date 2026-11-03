@@ -228,6 +228,12 @@ public:
 
     [[nodiscard]] LinkState state() const;
 
+    // phone_session without the wait: asks for the engine and connects to
+    // whatever answers now. For the event loop, where a caller that fails
+    // tries again on a later tick (the hub's session rebuild).
+    [[nodiscard]] Expected<std::unique_ptr<rpc::Client>> phone_session_now(
+        rpc::LoginMode mode, std::string_view holder);
+
     // Releases every phone_session waiting for an engine, now and later, so
     // a shutdown can join the threads waiting in it. Any thread.
     void cancel_waits();

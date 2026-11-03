@@ -84,6 +84,40 @@ LinkState EngineLink::state() const
     return state_;
 }
 
+Expected<std::unique_ptr<rpc::Client>> EngineLink::phone_session_now(rpc::LoginMode mode,
+                                                                     std::string_view holder)
+{
+    if (mode != rpc::LoginMode::Observe && config_.on_demand) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        last_demand_ = std::chrono::steady_clock::now();
+        demanded_ = true;
+        poked_ = true;
+        if (stopping_) {
+            // The engine is being ended; connecting now would reach it on
+            // its way out. The caller tries again, and by then there is a
+            // new one.
+            Error busy;
+            busy.message = "the engine is restarting for this phone";
+            busy.category = ErrorCategory::Unreachable;
+            wake_.notify_all();
+            return std::unexpected(busy);
+        }
+    }
+    wake_.notify_all();
+    auto client = new_session(mode, holder);
+    if (client) {
+        bool fresh = false;
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            fresh = std::exchange(fresh_, false);
+        }
+        if (fresh && config_.reopen) {
+            config_.reopen(**client);
+        }
+    }
+    return client;
+}
+
 void EngineLink::cancel_waits()
 {
     {
@@ -323,6 +357,14 @@ void EngineLink::supervise(const std::stop_token& stop)
                 std::unique_ptr<rpc::Client> gone;
                 lock.lock();
                 gone = std::move(client_);
+                // Free at the last reading means no phone held it: an engine
+                // that died then is not one anybody is waiting on, so it is
+                // not started again until a phone asks.
+                if (idle_.free_since &&
+                    (!last_demand_ ||
+                     std::chrono::steady_clock::now() - *last_demand_ >= config_.idle_grace)) {
+                    demanded_ = false;
+                }
                 lock.unlock();
                 gone.reset();
                 idle_.reset();
