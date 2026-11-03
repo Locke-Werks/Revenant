@@ -216,7 +216,7 @@ export function mountApp(root: HTMLElement): AppHandle {
   const stage = root.querySelector<HTMLElement>("#stage")!;
   const toasts = new Toasts(root.querySelector<HTMLElement>("#toasts")!);
   const notes = new Notes(root.querySelector<HTMLElement>("#notes")!);
-  const toast = (text: string) => toasts.show(text);
+  const toast = (text: string, key?: string) => toasts.show(text, key);
 
   // LiveAudio, keep listening and the receivers all see vrxRemoved through the
   // gate, which holds a replaced id's removal until the reply has moved them.

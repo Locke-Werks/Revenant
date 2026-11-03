@@ -1,19 +1,34 @@
 // Sentences that come and go (a refused command, a removal) and notes that
 // stay until whatever they describe stops being true.
 
+import { shortError, ToastGate } from "./errors";
+
 export const TOAST_MS = 5_000;
 export const MAX_TOASTS = 3;
 
 export class Toasts {
+  private readonly gate = new ToastGate();
+  private keyed = new Map<string, HTMLElement>();
+
   constructor(
     private readonly el: HTMLElement,
     private readonly setTimeout: (fn: () => void, ms: number) => unknown = (fn, ms) => window.setTimeout(fn, ms),
+    private readonly now: () => number = () => performance.now(),
   ) {}
 
-  show(text: string): void {
+  // A key keeps one toast of its kind: a run of refused tunes shows the
+  // newest, not a stack.
+  show(raw: string, key?: string): void {
+    const text = shortError(raw);
+    if (text !== raw) console.warn(raw);
+    if (!this.gate.admit(text, this.now())) return;
+    if (key !== undefined) {
+      this.keyed.get(key)?.remove();
+    }
     const t = document.createElement("div");
     t.className = "toast";
     t.textContent = text;
+    if (key !== undefined) this.keyed.set(key, t);
     this.el.append(t);
     while (this.el.childElementCount > MAX_TOASTS) this.el.firstElementChild?.remove();
     this.setTimeout(() => t.remove(), TOAST_MS);
