@@ -13,6 +13,22 @@ test("passbands straddle the carrier except for sidebands", () => {
   assert.deepEqual(passbandHz("wfm", 1_000_000, null), { lowHz: 900_000, highHz: 1_100_000 });
 });
 
+test("default passbands match the desktop's per-mode defaults", () => {
+  const f = 1_000_000;
+  const at = (m: string) => {
+    const p = passbandHz(m, f, null);
+    return [p.lowHz - f, p.highHz - f];
+  };
+  assert.deepEqual(at("am"), [-5_000, 5_000]);
+  assert.deepEqual(at("nfm"), [-8_000, 8_000]);
+  assert.deepEqual(at("wfm"), [-100_000, 100_000]);
+  assert.deepEqual(at("usb"), [300, 2_700]);
+  assert.deepEqual(at("lsb"), [-2_700, -300]);
+  assert.deepEqual(at("dsb"), [-3_000, 3_000]);
+  assert.deepEqual(at("cw"), [-250, 250]);
+  assert.deepEqual(at("raw"), [-6_000, 6_000]);
+});
+
 test("passband pixels follow the view and the canvas width", () => {
   const p = passbandPx(v, 1000, { hz: v.centerHz + 100_000, mode: "nfm", bandwidthHz: 20_000 })!;
   assert.deepEqual(p, { x0: 590, x1: 610, xc: 600 });

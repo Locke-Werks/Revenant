@@ -44,22 +44,29 @@ export function detectionBoxes(d: readonly Detection[]): DetectionBox[] {
   return out;
 }
 
-// What a receiver demodulates when the gateway has not said its bandwidth.
-const DEFAULT_BW: Record<string, number> = {
-  nfm: 12_500,
-  am: 10_000,
-  sam: 10_000,
-  dsb: 6_000,
-  wfm: 200_000,
-  usb: 3_000,
-  lsb: 3_000,
-  cw: 500,
-  raw: 25_000,
+// What a receiver demodulates when the gateway has not said its bandwidth:
+// the desktop CLI's per-mode defaults, as offsets from the carrier, so the
+// phone and the desktop draw the same passband for the same receiver.
+const DEFAULT_PASSBAND: Record<string, [number, number]> = {
+  am: [-5_000, 5_000],
+  sam: [-5_000, 5_000],
+  nfm: [-8_000, 8_000],
+  wfm: [-100_000, 100_000],
+  usb: [300, 2_700],
+  lsb: [-2_700, -300],
+  dsb: [-3_000, 3_000],
+  cw: [-250, 250],
+  raw: [-6_000, 6_000],
 };
+const FALLBACK_PASSBAND: [number, number] = [-6_000, 6_000];
 
 // Sidebands sit on one side of the carrier; everything else straddles it.
 export function passbandHz(mode: string, hz: number, bandwidthHz: number | null): { lowHz: number; highHz: number } {
-  const bw = bandwidthHz !== null && bandwidthHz > 0 ? bandwidthHz : (DEFAULT_BW[mode] ?? 12_500);
+  if (bandwidthHz === null || !(bandwidthHz > 0)) {
+    const [lo, hi] = DEFAULT_PASSBAND[mode] ?? FALLBACK_PASSBAND;
+    return { lowHz: hz + lo, highHz: hz + hi };
+  }
+  const bw = bandwidthHz;
   if (mode === "usb") return { lowHz: hz, highHz: hz + bw };
   if (mode === "lsb") return { lowHz: hz - bw, highHz: hz };
   return { lowHz: hz - bw / 2, highHz: hz + bw / 2 };
