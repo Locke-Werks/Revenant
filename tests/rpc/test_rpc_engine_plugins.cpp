@@ -579,3 +579,61 @@ TEST_CASE("a client is told of a plugin's receiver as the plugin's, by name",
 
     harness.client().unsubscribe_vrx_events();
 }
+
+TEST_CASE("any session of the lease holder tunes and removes a plugin's receiver",
+          "[gpu][rpc][plugin][lease]") {
+    REVENANT_NEEDS_GPU();
+
+    // No receiver belongs to anybody but the one user since 2026-11-03, a
+    // plugin's included; docs/rpc.md has the lease. The plugin keeps running
+    // and outlives every client, so the lease ending must not take its
+    // receiver either.
+    const auto dir = plugin_directory("lease", {kRpcTestEnginePluginGood});
+    const plugin::EnginePluginSet set = scan(dir);
+    REQUIRE(set.modules().size() == 1);
+
+    PluginLog log;
+    HarnessOptions options;
+    options.engine_plugins = &set;
+    options.plugin_log = log.sink();
+    options.connect_client = false;
+    Harness harness;
+    const auto ready = harness.open(options);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    // The plugin opens its receiver from the source-opened replay, on the
+    // server's loop, so it may not be there the moment open returns.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (harness.engine().vrx_ids().empty() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    std::uint64_t vrx = 0;
+    {
+        auto first = harness.connect_as(rpc::LoginMode::Claim, "desk");
+        INFO(test::message_of(first));
+        REQUIRE(first.has_value());
+        const auto ids = (*first)->vrx_ids();
+        REQUIRE(ids.has_value());
+        REQUIRE(ids->size() == 1);
+        vrx = ids->front();
+    }
+    // Long enough for the lease ending to have been acted on.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    REQUIRE(harness.engine().vrx_ids().size() == 1);
+
+    auto other = harness.connect_as(rpc::LoginMode::Claim, "desk");
+    INFO(test::message_of(other));
+    REQUIRE(other.has_value());
+    auto status = (*other)->vrx_status(vrx);
+    REQUIRE(status.has_value());
+    rpc::VrxParams moved = status->params;
+    moved.center += 1'000;
+    CHECK((*other)->set_vrx_params(vrx, moved).has_value());
+    auto after = (*other)->vrx_status(vrx);
+    REQUIRE(after.has_value());
+    CHECK(after->params.center == moved.center);
+    CHECK((*other)->remove_vrx(vrx).has_value());
+    CHECK(harness.engine().vrx_ids().empty());
+}

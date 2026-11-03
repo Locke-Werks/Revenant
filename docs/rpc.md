@@ -2454,7 +2454,65 @@ an exception. `rpc.capnp` argues this under its own `Exception` struct:
 exceptions should not be used to flag conditions a client is expected to handle
 in an application-specific way.
 
+## One user at a time: the lease
+
+The owner's decision, 2026-11-03, specified in
+`docs/superpowers/specs/2026-11-03-single-user-engine-design.md`: once a client
+is using the engine, it is that one user or nothing. `login` takes two more
+arguments, `holder :Text` (who is asking, shown to the next client refused)
+and `mode :LoginMode`:
+
+- `claim` takes the lease if it is free, or joins it when the holder text is
+  the same. Otherwise login is refused with `in use: <holder> since <time>`,
+  the time ISO 8601 local with its offset (`2026-11-03T14:05:09-05:00`). The
+  text is fixed because clients parse it. `core/rpc/client.cpp` does not mark
+  this refusal `Unauthenticated`: the token was good.
+- `takeOver` takes the lease whoever has it. Every receiver-event subscriber
+  of the old holder is sent `VrxEventReceiver.leaseLost(newHolder)`, then the
+  old holder's connections are closed, after the notices are answered or two
+  seconds, whichever is first. In between, its sessions are refused every
+  call. The receivers stay: the new holder inherits the radio as it is.
+- `observe` takes nothing. The session may call `info`, `listSources` and
+  `leaseStatus`; every other call is refused with "observing only". For
+  probes and an idle gateway.
+
+An older client sends neither field, which reads as `claim` by "unknown
+client". The client library's `Client::connect` takes the mode and holder as
+defaulted parameters, claim and empty, so every caller written before the
+lease joins one "unknown client" lease and keeps working until it says who it
+is.
+
+**The lease is joined by holder text, across connections.** The spec says a
+lease belongs to one connection, and that webgate's phone sessions share one.
+They do not: every `rpc::Client` is its own connection, and webgate makes one
+per phone. So a claim with the holder text of the current lease joins it from
+any connection, and a takeover closes every connection carrying one of the
+old holder's sessions.
+
+**It ends when the holder's last claiming session goes**, which includes every
+connection carrying one closing, a crash included, or on a takeover. Never on
+a timer. Ending without a takeover removes the receivers clients opened with
+`addVrx` and did not `keep`; receivers a plugin or the trunk follower opened
+stay with their opener.
+
+**Per connection.** The server no longer uses `TwoPartyServer::listen`, whose
+single shared bootstrap could not tell one connection from another.
+`ServerImpl::accept_loop` gives each accepted stream its own `TwoPartyServer`
+and an `Authenticator` carrying the connection's number, and erasing that
+entry is how a takeover closes a connection.
+
+**The check is in `SessionImpl::dispatchCall`**, once, for the reason the
+login section gives against a check at the top of every method.
+
 ## Receivers belong to the session that made them
+
+SUPERSEDED 2026-11-03 by the lease above. A receiver no longer goes with the
+session that created it: any session of the lease holder may list, tune,
+subscribe to and remove every receiver, including ones another session, a
+plugin or the trunk follower opened, and a session leaving takes nothing while
+its holder still has another. `creatorSession`, `ownedByCaller` and
+`ownerKind` are still reported, as provenance. What follows is the rule as it
+stood from 2026-09-22.
 
 The owner's decision, recorded 2026-09-22: a receiver belongs to the session
 that created it and is removed when that session ends, unless it was created
