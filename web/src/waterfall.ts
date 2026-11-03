@@ -14,7 +14,7 @@
 // drawn keep theirs until they scroll off.
 
 import { DEFAULT_DISPLAY } from "./display";
-import { boxPx, parseHexColor, type DetectionBox } from "./markers";
+import { boxPx, parseHexColor, pickBox, type DetectionBox } from "./markers";
 import type { SpectrumFrame } from "./protocol";
 import { MAX_WIDTH_PX, rowTransform, type RowTransform, type View } from "./view";
 
@@ -46,6 +46,16 @@ export function rowTop(k: number, shift: number): number {
 export function rowAt(down: number, shift: number): number {
   return Math.floor(down - shift);
 }
+// The ring slot drawn at a height given as a fraction of the waterfall: the
+// inverse of how drawBoxes places a slot. Screen row k is rowAt of the height
+// in rows, and k rows back from the head is its slot. Null past either end.
+export function slotAtY(head: number, yFrac: number, shift: number): number | null {
+  if (head < 0) return null;
+  const k = rowAt(yFrac * RING_ROWS, shift);
+  if (k < 0 || k >= RING_ROWS) return null;
+  return (head - k + RING_ROWS) % RING_ROWS;
+}
+
 const NO_BOXES: readonly DetectionBox[] = [];
 
 // Where each slot's row came from, and the per-slot transform for the view on
@@ -99,6 +109,13 @@ export class RowRing {
     return out;
   }
 
+  // The box a tap lands in on one slot, through the view on screen now.
+  boxAt(slot: number, view: View, widthPx: number, x: number, slackPx: number): DetectionBox | null {
+    if (this.width[slot] === 0) return null;
+    const row = { centerHz: this.center[slot]!, spanHz: this.span[slot]! };
+    return boxInRow(this.boxes[slot]!, view, widthPx, row, x, slackPx);
+  }
+
   // Recomputes one slot's transform, or all of them when the view moved.
   place(view: View, slot?: number): void {
     const from = slot ?? 0;
@@ -148,6 +165,27 @@ export interface Renderer {
   // waterfall, at the shift the waterfall was drawn at. A renderer that burns
   // them into its own pixels does nothing.
   drawBoxes(ctx: CanvasRenderingContext2D, accent: string, shift?: number): void;
+  // The detection box under a point given as fractions of the waterfall,
+  // looking through the row's own view so a box on an old row is found where
+  // it is drawn now. slackFrac is BOX_TAP_SLACK_PX as a fraction of the width.
+  boxAt(xFrac: number, yFrac: number, shift: number, slackFrac: number): DetectionBox | null;
+}
+
+// The box on one row a tap at x (pixels across widthPx) lands in.
+function boxInRow(
+  boxes: readonly DetectionBox[],
+  view: View,
+  widthPx: number,
+  row: { centerHz: number; spanHz: number },
+  x: number,
+  slackPx: number,
+): DetectionBox | null {
+  const hits: { x0: number; x1: number; box: DetectionBox }[] = [];
+  for (const box of boxes) {
+    const p = boxPx(view, widthPx, row, box);
+    if (p) hits.push({ x0: p.x0, x1: p.x1, box });
+  }
+  return pickBox(hits, x, slackPx);
 }
 
 const VS = `#version 300 es
@@ -326,6 +364,16 @@ class GlRenderer implements Renderer {
     ctx.globalAlpha = 1;
   }
 
+  boxAt(xFrac: number, yFrac: number, shift: number, slackFrac: number): DetectionBox | null {
+    const ring = this.ring;
+    const view = this.view;
+    if (!view || ring.head < 0) return null;
+    const slot = slotAtY(ring.head, yFrac, shift);
+    if (slot === null) return null;
+    const w = this.canvas.width;
+    return ring.boxAt(slot, view, w, xFrac * w, slackFrac * w);
+  }
+
   private uploadMeta(slot?: number): void {
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE1);
@@ -381,6 +429,11 @@ class CanvasRenderer implements Renderer {
   private t: RowTransform = { a: 0, b: 0, limit: 0 };
   private carry: readonly DetectionBox[] = NO_BOXES;
   private carryLeft = 0;
+  // What each drawn row was cut for, newest at hHead. Pixels here never move,
+  // so a tap is tested against the view the row was drawn with, not the one
+  // on screen now.
+  private hist: ({ view: View; centerHz: number; spanHz: number; boxes: readonly DetectionBox[] } | null)[] = [];
+  private hHead = 0;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -395,6 +448,8 @@ class CanvasRenderer implements Renderer {
     this.canvas.width = w;
     this.canvas.height = h;
     this.line = this.ctx.createImageData(w, 1);
+    this.hist = new Array<null>(Math.ceil(h / ROW_PX)).fill(null);
+    this.hHead = 0;
     this.clear();
   }
 
@@ -422,6 +477,10 @@ class CanvasRenderer implements Renderer {
     // the row as it is drawn and scroll off with it.
     const boxes = this.carryLeft > 0 ? this.carry : NO_BOXES;
     if (this.carryLeft > 0) this.carryLeft--;
+    if (this.hist.length > 0) {
+      this.hHead = (this.hHead + 1) % this.hist.length;
+      this.hist[this.hHead] = { view, centerHz: f.centerHz, spanHz: f.spanHz, boxes };
+    }
     const [ar, ag, ab] = this.accent;
     for (const box of boxes) {
       const p = boxPx(view, w, f, box);
@@ -447,6 +506,7 @@ class CanvasRenderer implements Renderer {
 
   // Entry 0, the desktop's map bottom, so an empty history is an empty band.
   clear(): void {
+    this.hist.fill(null);
     const p = this.pal;
     this.ctx.fillStyle = `rgb(${p[0]}, ${p[1]}, ${p[2]})`;
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
@@ -462,6 +522,16 @@ class CanvasRenderer implements Renderer {
   }
 
   drawBoxes(): void {}
+
+  boxAt(xFrac: number, yFrac: number, _shift: number, slackFrac: number): DetectionBox | null {
+    const n = this.hist.length;
+    const k = Math.floor((yFrac * this.canvas.height) / ROW_PX);
+    if (k < 0 || k >= n) return null;
+    const h = this.hist[(this.hHead - k + n) % n];
+    if (!h) return null;
+    const w = this.canvas.width;
+    return boxInRow(h.boxes, h.view, w, h, xFrac * w, slackFrac * w);
+  }
 }
 
 // How long a lost WebGL context gets to come back before the 2D renderer
@@ -547,6 +617,9 @@ export class WaterfallHost implements Renderer {
   }
   drawBoxes(ctx: CanvasRenderingContext2D, accent: string, shift = 0): void {
     this.r?.drawBoxes(ctx, accent, shift);
+  }
+  boxAt(xFrac: number, yFrac: number, shift: number, slackFrac: number): DetectionBox | null {
+    return this.r?.boxAt(xFrac, yFrac, shift, slackFrac) ?? null;
   }
 
   private become2d(): void {

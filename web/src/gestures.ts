@@ -16,7 +16,9 @@ export interface GestureSink {
   // Two fingers move the view.
   pan(dHz: number): void;
   zoom(factor: number, anchorHz: number): void;
-  tap(hz: number): void;
+  // x and y are where the finger went down in the element's CSS pixels, for a
+  // tap that lands on a drawn box rather than on a frequency.
+  tap(hz: number, x: number, y: number): void;
   longPress(hz: number): void;
 }
 
@@ -130,7 +132,7 @@ export class GestureClassifier {
     if (this.pts.size > 0) return;
     this.cancelTimer();
     this.endDrag();
-    if (!this.spent && this.start) this.sink.tap(this.hzAt(this.start.x));
+    if (!this.spent && this.start) this.sink.tap(this.hzAt(this.start.x), this.start.x, this.start.y);
     this.spent = false;
     this.start = null;
   }

@@ -4,13 +4,13 @@
 import { HlsPlayer, silentWavUrl } from "./audio/hls_player";
 import { browserMediaSession, KeepListening } from "./audio/keep_listening";
 import { browserLiveAudioDeps, LiveAudio } from "./audio/live";
-import { labelAt, labelText, parseDetections, snapTap, type Detection } from "./detections";
+import { labelAt, LingerTracker, labelText, parseDetections, snapTap, type Detection } from "./detections";
 import { encryptedFlag, modeLabel, parseCatalogue, voiceStatus, type DecoderCatalogue } from "./decoders";
 import { attachGestures } from "./gestures";
 import { TuneLimiter } from "./tune_limiter";
 import { Link, socketUrl, wireLifecycle, type KeyStore, type SocketLike } from "./link";
 import { parseDisplay } from "./display";
-import { DEFAULT_ACCENT, DETECTION_COLOR, detectionBoxes, passbandHz } from "./markers";
+import { BOX_TAP_SLACK_PX, DEFAULT_ACCENT, DETECTION_COLOR, detectionBoxes, passbandHz } from "./markers";
 import { drawReceivers, type ReceiverMark } from "./overlay";
 import { RdsModel } from "./rds";
 import { RowPacer } from "./smooth";
@@ -23,7 +23,7 @@ import { decodedEntry, FeedModel, FeedView, transcriptEntry } from "./ui/feed";
 import { RadioPanel } from "./ui/radio_panel";
 import { formatMHz, ReceiverController, ReplaceGate } from "./ui/receivers";
 import { readTab, Sheet, TAB_KEY, type SheetTab } from "./ui/sheet";
-import { readConfidence, SignalsPanel } from "./ui/signals";
+import { readConfidence, SignalsPanel, tapWaterfall, type PickDeps } from "./ui/signals";
 import { SpeechModel, speechLine, SpeechSwitch } from "./ui/speech_switch";
 import { StatusModel } from "./ui/status";
 import { Notes, Toasts } from "./ui/toast";
@@ -318,7 +318,9 @@ export function mountApp(root: HTMLElement): AppHandle {
   const sendConfidence = (v: number) => {
     link.request("setDetection", { minConfidence: v }).catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)));
   };
-  const signals = new SignalsPanel({
+  // Shared by a Signals row and a waterfall tap on a detection box, so both
+  // open the same receiver the same way.
+  const pickDeps: PickDeps = {
     receivers: () => receivers.list.list(),
     select: (vrx) => receivers.select(vrx),
     spawn: (hz, mode, bw, dec) => receivers.spawn(hz, mode, bw, dec),
@@ -329,6 +331,9 @@ export function mountApp(root: HTMLElement): AppHandle {
       const hi = view.centerHz + view.spanHz / 2;
       if (hz < lo || hz > hi) apply(panBy(view, hz - view.centerHz));
     },
+  };
+  const signals = new SignalsPanel({
+    ...pickDeps,
     setMinConfidence: sendConfidence,
     initialConfidence: readConfidence(prefs.getItem(CONFIDENCE_KEY)),
     saveConfidence: (v) => {
@@ -714,12 +719,33 @@ export function mountApp(root: HTMLElement): AppHandle {
       chipLabel = nextLabel;
       renderReceivers();
     }
-    signals.update(detections);
-    const boxes = detectionBoxes(detections);
-    waterfall.setDetections(boxes, boxCarryRows(pacer.interval));
-    trace.setDetections(boxes);
+    linger.update(detections, performance.now());
+    showListed();
+    // The waterfall gets only what the gateway lists now: a lost signal
+    // stamped down the rows would claim it was there.
+    waterfall.setDetections(detectionBoxes(detections), boxCarryRows(pacer.interval));
     requestDraw();
   });
+  // The list and the spectrum trace keep lost signals for a while, fading.
+  // The gateway sends nothing for a signal that is gone, so the fade is
+  // driven by this tick instead of by events.
+  const linger = new LingerTracker();
+  const showListed = () => {
+    const listed = linger.view(performance.now());
+    signals.update(listed);
+    trace.setDetections(detectionBoxes(listed));
+    requestDraw();
+    if (lingerTick === null && linger.hasLost()) {
+      lingerTick = window.setInterval(() => {
+        showListed();
+        if (!linger.hasLost() && lingerTick !== null) {
+          window.clearInterval(lingerTick);
+          lingerTick = null;
+        }
+      }, 1000);
+    }
+  };
+  let lingerTick: number | null = null;
 
   const tuneLimiter = new TuneLimiter(
     (hz) => receivers.tuneDragged(hz),
@@ -791,10 +817,18 @@ export function mountApp(root: HTMLElement): AppHandle {
       zoom: (factor, anchorHz) => {
         if (view && Number.isFinite(anchorHz)) apply(zoomAt(view, factor, anchorHz));
       },
-      tap: (hz) => {
+      tap: (hz, x, y) => {
         if (!Number.isFinite(hz)) return;
-        dial.stop();
-        receivers.tap(snapTap(hz, detections));
+        const w = body.clientWidth;
+        const h = body.clientHeight;
+        // The shift draw() last used, so the row under the finger is the row
+        // the finger sees while the history is mid-scroll.
+        const shift = waterfall.scrolls ? pacer.phase(performance.now()) - 1 : 0;
+        const box = w > 0 && h > 0 ? waterfall.boxAt(x / w, y / h, shift, BOX_TAP_SLACK_PX / w) : null;
+        tapWaterfall(box, pickDeps, () => {
+          dial.stop();
+          receivers.tap(snapTap(hz, detections));
+        });
       },
       longPress: (hz) => {
         if (!Number.isFinite(hz)) return;

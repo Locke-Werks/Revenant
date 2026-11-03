@@ -2,7 +2,7 @@
 // and receiver passbands. Pure, so the hertz-to-pixel arithmetic is tested
 // without a canvas.
 
-import type { Detection } from "./detections";
+import { compareId, lostOpacity, type Detection, type Listed } from "./detections";
 import { hzToPx, type View } from "./view";
 
 // Used when the --accent CSS variable is missing or not a hex colour.
@@ -23,6 +23,12 @@ export interface DetectionBox {
   alpha: number;
   held: boolean;
   label: string;
+  // The detection the box was drawn from, so a tap on an old row can tune
+  // what was there. Absent on boxes built without one.
+  detection?: Detection;
+  // 1 for a listed detection, lower while it lingers as lost. alpha already
+  // carries it; the edges and label, which have their own alpha, scale by it.
+  fade?: number;
 }
 
 // Detections are drawn in a cool grey, apart from the accent (receivers) and
@@ -36,14 +42,25 @@ const MAX_ALPHA = 0.12;
 // Held tracks are the engine's memory of a signal that has gone quiet.
 const HELD_FACTOR = 0.5;
 
-export function detectionBoxes(d: readonly Detection[]): DetectionBox[] {
+// A lost detection fades with the list row beside it, so the trace and the
+// list agree.
+export function detectionBoxes(d: readonly Listed[]): DetectionBox[] {
   const out: DetectionBox[] = [];
   for (const x of d) {
     const half = Math.max(0, x.bandwidthHz) / 2;
     const c = Math.min(1, Math.max(0, x.confidence));
     let alpha = MIN_ALPHA + (MAX_ALPHA - MIN_ALPHA) * c;
     if (x.state === "held") alpha *= HELD_FACTOR;
-    out.push({ lowHz: x.centerHz - half, highHz: x.centerHz + half, alpha, held: x.state === "held", label: x.label });
+    alpha *= lostOpacity(x.lostForMs);
+    out.push({
+      lowHz: x.centerHz - half,
+      highHz: x.centerHz + half,
+      alpha,
+      held: x.state === "held",
+      label: x.label,
+      detection: x,
+      fade: lostOpacity(x.lostForMs),
+    });
   }
   return out;
 }
@@ -74,6 +91,43 @@ export function passbandHz(mode: string, hz: number, bandwidthHz: number | null)
   if (mode === "usb") return { lowHz: hz, highHz: hz + bw };
   if (mode === "lsb") return { lowHz: hz - bw, highHz: hz };
   return { lowHz: hz - bw / 2, highHz: hz + bw / 2 };
+}
+
+// ui::kDetectionClickSlackPx: a box's tappable half-width never falls below
+// this, so a sliver of a track is reached by position and not by being the
+// narrowest. The desktop's value; a fingertip is wider, but 6 css px each
+// side already makes a 12 px target.
+export const BOX_TAP_SLACK_PX = 6;
+
+// The box a tap at x lands in, from one row's boxes already in pixels. The
+// desktop's depth rule (ui::detection_depth): distance from the box centre
+// over its tappable half-width, nearest to the centre wins, ties go to the
+// louder and then the lower id. It does not cycle through overlapping boxes
+// on repeat taps; a tap is aimed with a finger, not a pointer.
+export function pickBox(
+  hits: readonly { x0: number; x1: number; box: DetectionBox }[],
+  x: number,
+  slackPx: number,
+): DetectionBox | null {
+  let best: DetectionBox | null = null;
+  let bestDepth = Infinity;
+  for (const h of hits) {
+    const det = h.box.detection;
+    if (!det) continue;
+    const half = Math.max((h.x1 - h.x0) / 2, slackPx);
+    const depth = Math.abs(x - (h.x0 + h.x1) / 2) / half;
+    if (depth > 1) continue;
+    const bd = best?.detection;
+    const better =
+      !bd ||
+      depth < bestDepth ||
+      (depth === bestDepth && (det.snrDb > bd.snrDb || (det.snrDb === bd.snrDb && compareId(det.id, bd.id) < 0)));
+    if (better) {
+      best = h.box;
+      bestDepth = depth;
+    }
+  }
+  return best;
 }
 
 export interface PassbandPx {
