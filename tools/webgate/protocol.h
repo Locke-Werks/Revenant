@@ -72,6 +72,14 @@ inline constexpr std::string_view kOps[] = {
 // session the gateway rebuilt also carries "recreated":[{"old":a,"new":b}]
 // and "lost":[{"vrx":a,"reason":"..."}] (phone_hub.h); a lost id also gets a
 // vrxRemoved. web/src/protocol.ts LinkEvent is the phone's copy.
+//
+// "source" is {open} and, while open, {rateHz, centerHz, epoch,
+// realtimeFactor, pacedBy}: the engine's capture seconds per wall second over
+// its recent window (0 is not measured yet) and the pace in force (0 is
+// unthrottled). It goes out when the stream, the centre, or the factor by
+// kRealtimeReportStep or more changes, so a source falling behind real time
+// reaches the phone within the one second poll. SourceEvent in
+// web/src/protocol.ts is the phone's copy.
 inline constexpr std::string_view kEvents[] = {
     "vrxStatus", "decoded", "transcript", "transcriptionStatus",
     "source",    "link",    "vrxRemoved", "hls",
@@ -170,5 +178,14 @@ private:
 
 // {"event":"<name>", ...fields}.
 [[nodiscard]] std::string event(std::string_view name, const JsonObject& fields = {});
+
+// The smallest move in the realtime factor that sends a new "source" event.
+// Finer than the phone's 0.98 threshold needs, coarse enough that a factor
+// wandering in its third decimal does not send an event every second.
+inline constexpr double kRealtimeReportStep = 0.01;
+
+// Whether a factor of now is worth an event after last_sent went out. A
+// change between measured and not measured (zero) always is.
+[[nodiscard]] bool realtime_report_due(double last_sent, double now);
 
 }  // namespace revenant::webgate

@@ -327,7 +327,9 @@ std::string PhoneStreams::source_event() const
     if (source_open_) {
         fields.add_u64("rateHz", source_rate_)
             .add_i64("centerHz", source_center_)
-            .add_u64("epoch", source_epoch_);
+            .add_u64("epoch", source_epoch_)
+            .add_double("realtimeFactor", realtime_factor_)
+            .add_double("pacedBy", paced_by_);
     }
     return event("source", fields);
 }
@@ -337,6 +339,7 @@ void PhoneStreams::announce_state()
     // A resumed session may land in a page that was launched after these
     // events went out, so it has seen none of them.
     if (source_known_) {
+        sent_realtime_factor_ = realtime_factor_;
         queue_text(source_event());
     }
     if (announced_hls_) {
@@ -361,7 +364,8 @@ void PhoneStreams::refresh_source()
     const bool stream_changed = !source_known_ || open != source_open_ ||
                                 info->source_epoch != source_epoch_ ||
                                 info->source_rate != source_rate_;
-    const bool changed = stream_changed || info->source_center != source_center_;
+    const bool moved = stream_changed || info->source_center != source_center_;
+    const bool pace_report = open && realtime_report_due(sent_realtime_factor_, info->realtime_factor);
 
     source_known_ = true;
     source_open_ = open;
@@ -369,8 +373,15 @@ void PhoneStreams::refresh_source()
     source_center_ = info->source_center;
     source_epoch_ = info->source_epoch;
     spectrum_enabled_ = info->spectrum.enabled();
+    realtime_factor_ = info->realtime_factor;
+    paced_by_ = info->source_paced_by;
 
-    if (!changed) {
+    if (!moved) {
+        // Only the factor moved: the stream and the frames in flight stand.
+        if (pace_report) {
+            sent_realtime_factor_ = realtime_factor_;
+            queue_text(source_event());
+        }
         return;
     }
     // A frame waiting to be sent was cut from the old stream or labelled with
@@ -382,6 +393,7 @@ void PhoneStreams::refresh_source()
         inbox_->spectrum.reset();
     }
 
+    sent_realtime_factor_ = realtime_factor_;
     queue_text(source_event());
 
     if (!stream_changed) {

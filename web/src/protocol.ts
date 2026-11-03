@@ -197,6 +197,21 @@ export interface LinkEvent {
   lost?: { vrx: number; reason: string }[];
 }
 
+// "source". While open it carries the band and the engine's pacing:
+// realtimeFactor is capture seconds per wall second over the engine's recent
+// window (0 means not measured yet, not stalled) and pacedBy the pace in force
+// (0 unthrottled). The gateway sends it on a stream or centre change and when
+// the factor moves by 0.01 or more (kRealtimeReportStep in protocol.h).
+export interface SourceEvent {
+  event: "source";
+  open: boolean;
+  rateHz?: number;
+  centerHz?: number;
+  epoch?: number;
+  realtimeFactor?: number;
+  pacedBy?: number;
+}
+
 export function encodeCommand(cmd: Command): string {
   const text = JSON.stringify(cmd);
   if (text.length > MAX_COMMAND_BYTES) {

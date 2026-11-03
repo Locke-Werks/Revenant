@@ -377,4 +377,11 @@ std::string event(std::string_view name, const JsonObject& fields) {
     return out;
 }
 
+bool realtime_report_due(double last_sent, double now) {
+    if ((last_sent == 0.0) != (now == 0.0)) {
+        return true;
+    }
+    return std::abs(now - last_sent) >= kRealtimeReportStep;
+}
+
 }  // namespace revenant::webgate

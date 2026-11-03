@@ -321,6 +321,44 @@ TEST_CASE("openSource at a new rate recomputes everyNth", "[gpu][webgate][stream
     CHECK(fast <= 25.0);
 }
 
+TEST_CASE("the source event carries the engine's realtime factor", "[gpu][webgate][streams]")
+{
+    REVENANT_NEEDS_GPU();
+    Rig rig;
+    auto options = still_engine();
+    options.pace = 1.0;
+    options.samples = 2'400'032LL * 20;
+    rig.open(options);
+    rig.attach();
+
+    // Before the run the engine has measured nothing, and says zero.
+    std::string first;
+    for (const auto& m : rig.socket.sent) {
+        if (m.kind == Kind::Text && contains(m.text, R"("event":"source")")) {
+            first = m.text;
+        }
+    }
+    INFO(first);
+    REQUIRE(contains(first, R"("realtimeFactor":0,)"));
+    CHECK(contains(first, R"("pacedBy":)"));
+
+    REQUIRE(rig.harness.start_engine().has_value());
+    rig.pump_for(std::chrono::milliseconds(2500));
+
+    // Once measured, the factor alone sends a new event without the centre
+    // or the stream changing.
+    std::string last;
+    for (const auto& m : rig.socket.sent) {
+        if (m.kind == Kind::Text && contains(m.text, R"("event":"source")")) {
+            last = m.text;
+        }
+    }
+    INFO(last);
+    CHECK(last != first);
+    CHECK(contains(last, R"("realtimeFactor":)"));
+    CHECK_FALSE(contains(last, R"("realtimeFactor":0,)"));
+}
+
 TEST_CASE("slow socket drops oldest Opus", "[gpu][webgate][streams]")
 {
     REVENANT_NEEDS_GPU();

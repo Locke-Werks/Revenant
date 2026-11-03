@@ -276,3 +276,13 @@ TEST_CASE("A built reply parses back through the codec", "[webgate][protocol]") 
     REQUIRE(root.which() == capnp::JsonValue::OBJECT);
     CHECK(root.getObject().size() == 3);
 }
+
+TEST_CASE("A realtime factor is reported when it moves a step or starts", "[webgate][protocol]") {
+    CHECK(wg::realtime_report_due(0.0, 0.5));
+    CHECK(wg::realtime_report_due(1.0, 0.0));
+    CHECK_FALSE(wg::realtime_report_due(0.0, 0.0));
+    CHECK_FALSE(wg::realtime_report_due(1.0, 0.995));
+    CHECK(wg::realtime_report_due(1.0, 0.97));
+    CHECK(wg::realtime_report_due(0.97, 1.0));
+    CHECK_FALSE(wg::realtime_report_due(0.97, 0.975));
+}

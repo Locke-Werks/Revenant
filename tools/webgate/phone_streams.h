@@ -287,6 +287,10 @@ private:
     std::uint32_t source_rate_ = 0;
     std::int64_t source_center_ = 0;
     std::uint64_t source_epoch_ = 0;
+    double realtime_factor_ = 0.0;
+    double paced_by_ = 0.0;
+    // The factor in the last source event, so a small wander sends nothing.
+    double sent_realtime_factor_ = 0.0;
     bool spectrum_enabled_ = false;
     std::optional<std::chrono::steady_clock::time_point> last_refresh_;
 
