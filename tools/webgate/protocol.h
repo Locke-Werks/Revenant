@@ -76,7 +76,7 @@ inline constexpr std::string_view kOps[] = {
 // "source" is {open} and, while open, {rateHz, centerHz, epoch,
 // realtimeFactor, pacedBy}: the engine's capture seconds per wall second over
 // its recent window (0 is not measured yet) and the pace in force (0 is
-// unthrottled). It goes out when the stream, the centre, or the factor by
+// unthrottled). It goes out when the stream, the centre or the pace changes, or the factor by
 // kRealtimeReportStep or more changes, so a source falling behind real time
 // reaches the phone within the one second poll. SourceEvent in
 // web/src/protocol.ts is the phone's copy.
@@ -187,5 +187,10 @@ inline constexpr double kRealtimeReportStep = 0.01;
 // Whether a factor of now is worth an event after last_sent went out. A
 // change between measured and not measured (zero) always is.
 [[nodiscard]] bool realtime_report_due(double last_sent, double now);
+
+// Whether the pacing part of a "source" event has changed enough to send: the
+// factor by realtime_report_due, or any change of pace, which alters how the
+// factor reads (0.5 is a fault unpaced and the setting at pace 0.5).
+[[nodiscard]] bool pacing_report_due(double sent_factor, double sent_pace, double factor, double pace);
 
 }  // namespace revenant::webgate

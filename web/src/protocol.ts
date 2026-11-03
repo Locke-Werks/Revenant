@@ -200,7 +200,7 @@ export interface LinkEvent {
 // "source". While open it carries the band and the engine's pacing:
 // realtimeFactor is capture seconds per wall second over the engine's recent
 // window (0 means not measured yet, not stalled) and pacedBy the pace in force
-// (0 unthrottled). The gateway sends it on a stream or centre change and when
+// (0 unthrottled). The gateway sends it on a stream, centre or pace change and when
 // the factor moves by 0.01 or more (kRealtimeReportStep in protocol.h).
 export interface SourceEvent {
   event: "source";

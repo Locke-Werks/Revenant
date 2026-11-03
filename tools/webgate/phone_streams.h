@@ -291,6 +291,7 @@ private:
     double paced_by_ = 0.0;
     // The factor in the last source event, so a small wander sends nothing.
     double sent_realtime_factor_ = 0.0;
+    double sent_paced_by_ = 0.0;
     bool spectrum_enabled_ = false;
     std::optional<std::chrono::steady_clock::time_point> last_refresh_;
 

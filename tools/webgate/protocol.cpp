@@ -384,4 +384,8 @@ bool realtime_report_due(double last_sent, double now) {
     return std::abs(now - last_sent) >= kRealtimeReportStep;
 }
 
+bool pacing_report_due(double sent_factor, double sent_pace, double factor, double pace) {
+    return realtime_report_due(sent_factor, factor) || pace != sent_pace;
+}
+
 }  // namespace revenant::webgate

@@ -286,3 +286,10 @@ TEST_CASE("A realtime factor is reported when it moves a step or starts", "[webg
     CHECK(wg::realtime_report_due(0.97, 1.0));
     CHECK_FALSE(wg::realtime_report_due(0.97, 0.975));
 }
+
+TEST_CASE("A pace change is reported even when the factor holds", "[webgate][protocol]") {
+    CHECK(wg::pacing_report_due(1.0, 1.0, 1.0, 0.5));
+    CHECK(wg::pacing_report_due(1.0, 0.0, 1.0, 1.0));
+    CHECK_FALSE(wg::pacing_report_due(1.0, 1.0, 1.002, 1.0));
+    CHECK(wg::pacing_report_due(1.0, 1.0, 0.9, 1.0));
+}

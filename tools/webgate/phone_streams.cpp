@@ -340,6 +340,7 @@ void PhoneStreams::announce_state()
     // events went out, so it has seen none of them.
     if (source_known_) {
         sent_realtime_factor_ = realtime_factor_;
+        sent_paced_by_ = paced_by_;
         queue_text(source_event());
     }
     if (announced_hls_) {
@@ -365,7 +366,8 @@ void PhoneStreams::refresh_source()
                                 info->source_epoch != source_epoch_ ||
                                 info->source_rate != source_rate_;
     const bool moved = stream_changed || info->source_center != source_center_;
-    const bool pace_report = open && realtime_report_due(sent_realtime_factor_, info->realtime_factor);
+    const bool pace_report = open && pacing_report_due(sent_realtime_factor_, sent_paced_by_,
+                                                       info->realtime_factor, info->source_paced_by);
 
     source_known_ = true;
     source_open_ = open;
@@ -380,6 +382,7 @@ void PhoneStreams::refresh_source()
         // Only the factor moved: the stream and the frames in flight stand.
         if (pace_report) {
             sent_realtime_factor_ = realtime_factor_;
+            sent_paced_by_ = paced_by_;
             queue_text(source_event());
         }
         return;
@@ -394,6 +397,7 @@ void PhoneStreams::refresh_source()
     }
 
     sent_realtime_factor_ = realtime_factor_;
+    sent_paced_by_ = paced_by_;
     queue_text(source_event());
 
     if (!stream_changed) {
