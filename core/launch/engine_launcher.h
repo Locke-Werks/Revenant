@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -95,6 +96,10 @@ private:
     std::string command_line_;
 
     std::thread reader_;
+
+    // Set by stop() when it gave up waiting on a process stuck in a driver,
+    // so the reader stops waiting on it too.
+    std::atomic<bool> abandon_{false};
 
     mutable std::mutex mutex_;
     std::vector<std::string> tail_;  // guarded by mutex_

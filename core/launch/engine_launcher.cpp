@@ -16,6 +16,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include <chrono>
 #include <cstddef>
 #include <vector>
 
@@ -36,6 +37,29 @@ constexpr long kProbeWaitMicroseconds = 250'000;
 // name, and the fatal paths in tools/engined/main.cpp write at most two lines
 // after it.
 constexpr std::size_t kTailLines = 8;
+
+// How long stop() waits for every process in the job to be gone.
+constexpr std::chrono::milliseconds kJobEmptyWait{10'000};
+
+// Whether the job has no live process, polled from its accounting.
+[[nodiscard]] bool wait_job_empty(void* job, std::chrono::milliseconds limit)
+{
+    const auto until = std::chrono::steady_clock::now() + limit;
+    for (;;) {
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+        if (QueryInformationJobObject(static_cast<HANDLE>(job), JobObjectBasicAccountingInformation,
+                                      &accounting, sizeof accounting, nullptr) == 0) {
+            return true;  // Nothing to ask; the close that follows is all there is.
+        }
+        if (accounting.ActiveProcesses == 0) {
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= until) {
+            return false;
+        }
+        Sleep(20);
+    }
+}
 
 // A line longer than this with no newline is kept as a line of its own rather
 // than grown without bound. The engine writes nothing that long; the cap is
@@ -138,15 +162,34 @@ void EngineLauncher::stop()
         // The explicit terminate is the ordinary exit; the flag is for the
         // exit that runs no destructor.
         TerminateJobObject(static_cast<HANDLE>(job_), 1);
+        // Termination is asynchronous: a process inside a driver call ends
+        // only when the driver lets go, and the radio and the GPU are released
+        // then and not before. So wait for the job to be empty, every member
+        // and not just the engine, but bounded, because a driver that never
+        // lets go would otherwise hang whoever is stopping.
+        if (!wait_job_empty(job_, kJobEmptyWait)) {
+            std::fprintf(stderr,
+                         "revenant: the engine's processes did not exit within %lld s of being "
+                         "terminated; something is stuck in a driver (the radio or the GPU may "
+                         "stay held until it lets go)\n",
+                         static_cast<long long>(kJobEmptyWait.count() / 1000));
+            abandon_ = true;
+        }
         close_handle(job_);
     }
 
     // The engine is gone or going, so its end of the pipe closes and the
     // reader's ReadFile returns. The reader then waits on the process handle,
-    // which is why that handle is closed only after the join.
+    // which is why that handle is closed only after the join. When the stop
+    // gave up on a stuck process the pipe may never close, so the read is
+    // cancelled and the reader stops waiting.
     if (reader_.joinable()) {
+        if (abandon_.load()) {
+            CancelSynchronousIo(reader_.native_handle());
+        }
         reader_.join();
     }
+    abandon_ = false;
     close_handle(process_);
     close_handle(stderr_read_);
     pid_ = 0;
@@ -360,7 +403,13 @@ void EngineLauncher::drain()
     // The pipe ends when the engine's last handle to it closes, which is its
     // exit in every case this engine can reach. The wait makes the exit code
     // a real one rather than STILL_ACTIVE read a moment too early.
-    WaitForSingleObject(static_cast<HANDLE>(process_), INFINITE);
+    // In slices, so a stop() that has given up on a process stuck in a driver
+    // (abandon_) can still join this thread.
+    while (WaitForSingleObject(static_cast<HANDLE>(process_), 100) == WAIT_TIMEOUT) {
+        if (abandon_.load()) {
+            break;
+        }
+    }
     DWORD code = 0;
     GetExitCodeProcess(static_cast<HANDLE>(process_), &code);
 
