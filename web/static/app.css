@@ -22,6 +22,15 @@ html, body {
   -webkit-text-size-adjust: 100%;
 }
 
+/* iOS widens the layout viewport to the widest thing in the first layouts
+   and never narrows it again, so from first paint nothing at the top may be
+   wider than the screen. Horizontal only: a setup screen taller than a small
+   phone must still scroll. */
+html, body, #app, #app > * {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
 /* viewport-fit=cover draws under the notch and home indicator, so the setup
    screens pad themselves by the insets. The running app is fixed and pads
    its own bars instead. */

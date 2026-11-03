@@ -40,6 +40,21 @@
   function frame() {
     look();
     if (Date.now() - t0 < 3000) requestAnimationFrame(frame);
+    else save();
+  }
+  // Every launch is kept, the last three, so the ruler (which reloads with
+  // the overlay on) can show what a launch without it looked like.
+  function save() {
+    try {
+      var overlay = location.search.indexOf("insets") >= 0 || localStorage.getItem("revenant.insets") === "1";
+      var list = JSON.parse(localStorage.getItem("revenant.wideLaunches") || "[]");
+      if (!Array.isArray(list)) list = [];
+      list.push({ t: t0, overlay: overlay, maxScrollWidth: w.maxScrollWidth, at: w.at, items: w.items,
+        scale: window.visualViewport ? visualViewport.scale : null, innerWidth: window.innerWidth });
+      localStorage.setItem("revenant.wideLaunches", JSON.stringify(list.slice(-3)));
+    } catch (e) {
+      // No storage: the current launch is still in window.__wideAtLoad.
+    }
   }
   document.addEventListener("DOMContentLoaded", look);
   window.addEventListener("load", look);

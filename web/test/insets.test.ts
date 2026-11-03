@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { needsRepin, rulerMarks, widest } from "../src/insets";
+import { needsRepin, previousNormal, rulerMarks, widest, type LaunchCapture } from "../src/insets";
 
 test("ruler lines fall every 100 px below the height, none at 0", () => {
   assert.deepEqual(rulerMarks(450), [100, 200, 300, 400]);
@@ -48,4 +48,11 @@ test("a zoomed-out page or a root wider than the device asks for a re-pin", () =
   assert.equal(needsRepin({ ...g, scale: 0.85 }), true);
   assert.equal(needsRepin({ ...g, clientWidth: 518, scale: null }), true);
   assert.equal(needsRepin({ ...g, clientWidth: 956, landscape: true }), false);
+});
+
+test("the previous normal launch is the newest without the overlay from before this load", () => {
+  const c = (t: number, overlay: boolean): LaunchCapture => ({ t, overlay, maxScrollWidth: 484, at: 300, items: [], scale: 0.91, innerWidth: 484 });
+  assert.equal(previousNormal([c(1, false), c(2, false), c(3, true)], 10)!.t, 2);
+  assert.equal(previousNormal([c(1, false), c(20, false)], 10)!.t, 1);
+  assert.equal(previousNormal([c(3, true)], 10), null);
 });

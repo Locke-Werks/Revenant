@@ -68,6 +68,38 @@ function wideAtLoad(win: Window): string {
   return `scrollWidth ${w.maxScrollWidth} at ${w.at} ms: ${items || "nothing past the screen"}`;
 }
 
+// Launches recorded by the head script in index.html, newest last. The
+// current launch writes its own entry 3 s in, so the newest without the
+// overlay that was written before this page loaded is the previous one.
+export interface LaunchCapture {
+  t: number;
+  overlay: boolean;
+  maxScrollWidth: number;
+  at: number;
+  items: { label: string; width: number; css: string }[];
+  scale: number | null;
+  innerWidth: number;
+}
+
+export function previousNormal(list: LaunchCapture[], loadedAt: number): LaunchCapture | null {
+  for (let i = list.length - 1; i >= 0; i--) if (!list[i]!.overlay && list[i]!.t < loadedAt) return list[i]!;
+  return null;
+}
+
+function previousLaunch(win: Window): string {
+  let list: LaunchCapture[] = [];
+  try {
+    list = JSON.parse(win.localStorage.getItem("revenant.wideLaunches") ?? "[]") as LaunchCapture[];
+  } catch {
+    return "not stored";
+  }
+  const loadedAt = Date.now() - win.performance.now();
+  const p = previousNormal(Array.isArray(list) ? list : [], loadedAt);
+  if (!p) return "none recorded";
+  const items = p.items.map((x) => `${x.label} ${x.width.toFixed(1)} (${x.css})`).join("; ");
+  return `scrollWidth ${p.maxScrollWidth} at ${p.at} ms, scale ${p.scale ?? "n/a"} innerWidth ${p.innerWidth} at 3 s: ${items || "nothing past the screen"}`;
+}
+
 function repins(win: Window): string {
   const log = (win as unknown as { __repins?: Repin[] }).__repins ?? [];
   return log.map((r) => `${r.at} ms ${r.before?.toFixed(3) ?? "n/a"} -> ${r.after?.toFixed(3) ?? "n/a"}`).join("; ") || "none";
@@ -86,7 +118,7 @@ export function showInsets(doc: Document, win: Window): void {
   const wideBefore = overWide(doc, win.screen.width);
   const layer = doc.createElement("div");
   layer.className = "insets-layer";
-  layer.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:100;pointer-events:none;";
+  layer.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:100;pointer-events:none;overflow:hidden;";
   doc.body.append(layer);
 
   const probe = doc.createElement("div");
@@ -121,6 +153,9 @@ export function showInsets(doc: Document, win: Window): void {
   const lines = doc.createElement("div");
   const text = doc.createElement("pre");
   text.className = "insets-debug";
+  // Inline, so the text wraps from the moment it is inserted, before app.css
+  // rules could be late; unwrapped it widened the page to 1137 px at load.
+  text.style.cssText = "white-space:pre-wrap;overflow-wrap:anywhere;max-width:calc(100vw - 16px);box-sizing:border-box;";
   const close = doc.createElement("button");
   close.type = "button";
   close.textContent = "Close ruler";
@@ -175,6 +210,7 @@ export function showInsets(doc: Document, win: Window): void {
       `wider than screen at open: ${wideBefore.join("; ") || "none"}`,
       `wider than screen now: ${overWide(doc, win.screen.width).join("; ") || "none"}`,
       `widest during load: ${wideAtLoad(win)}`,
+      `previous normal launch: ${previousLaunch(win)}`,
       `viewport re-pins: ${repins(win)}`,
       `scale ${vv ? vv.scale.toFixed(3) : "n/a"}  scrollWidth ${root.scrollWidth}  innerWidth ${win.innerWidth}`,
     ].join("\n");
