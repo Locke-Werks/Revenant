@@ -25,6 +25,7 @@ add_library(revenant_webgate_lib STATIC
     engine_link.cpp
     spectrum_reducer.cpp
     display_sync.cpp
+    voice_gain.cpp
     audio_opus.cpp
     protocol.cpp
     session.cpp

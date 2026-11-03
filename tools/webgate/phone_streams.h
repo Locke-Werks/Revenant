@@ -61,6 +61,7 @@
 #include "tools/webgate/display_sync.h"
 #include "tools/webgate/session.h"
 #include "tools/webgate/spectrum_reducer.h"
+#include "tools/webgate/voice_gain.h"
 
 namespace revenant::webgate {
 
@@ -180,6 +181,10 @@ struct StreamsConfig {
     // DisplaySettingsSource, and tests supply their own.
     std::function<ui::DisplaySettings()> display_settings;
 
+    // The desktop's digital voice boost in whole decibels, read per audio
+    // chunk. Empty is zero, which leaves decoded voice at the engine's level.
+    std::function<double()> voice_gain_db;
+
     // Shared by every phone the hub makes, so the whole-frame half of the
     // zoomed view offsets is measured once a frame and not once a phone. Null
     // measures it per phone.
@@ -280,6 +285,9 @@ private:
         // Ahead of both encoders, so Opus and HLS hear one resampled stream
         // and a receiver re-created under a new id starts a fresh filter.
         PhoneRateConverter rate;
+        // After the resample and ahead of both encoders, for decoded voice
+        // only: the desktop's boost and soft limiter.
+        VoiceGainStage voice;
         std::uint32_t next_seq = 0;
         bool reported_error = false;
     };

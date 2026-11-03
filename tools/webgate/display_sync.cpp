@@ -125,9 +125,14 @@ ui::DisplaySettings read_display_settings(const DisplayValueReader& read)
 
 DisplayValueReader registry_display_reader()
 {
+    return registry_key_reader("display");
+}
+
+DisplayValueReader registry_key_reader(std::string_view subkey)
+{
 #ifdef _WIN32
-    return [](std::string_view name) -> std::optional<std::string> {
-        const std::wstring key = L"Software\\Locke Werks\\Revenant\\display";
+    return [key = L"Software\\Locke Werks\\Revenant\\" + std::wstring(subkey.begin(), subkey.end())](
+               std::string_view name) -> std::optional<std::string> {
         const std::wstring value(name.begin(), name.end());
         constexpr DWORD kTypes = RRF_RT_REG_SZ | RRF_RT_REG_DWORD | RRF_RT_REG_QWORD;
         DWORD type = 0;
@@ -164,6 +169,7 @@ DisplayValueReader registry_display_reader()
         return out;
     };
 #else
+    static_cast<void>(subkey);
     return [](std::string_view) { return std::optional<std::string>{}; };
 #endif
 }

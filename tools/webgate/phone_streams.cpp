@@ -1213,6 +1213,10 @@ void PhoneStreams::handle_audio(std::uint64_t vrx, const rpc::AudioChunk& chunk)
         mono = downmixed;
     }
     mono = path.rate.convert(chunk.sample_rate, mono);
+    if (const auto* params = session_.last_params(vrx);
+        params != nullptr && is_digital_voice(params->demod)) {
+        mono = path.voice.process(config_.voice_gain_db ? config_.voice_gain_db() : 0.0, mono);
+    }
 
     if (session_.audio_vrx() == vrx && attached()) {
         if (!path.opus) {

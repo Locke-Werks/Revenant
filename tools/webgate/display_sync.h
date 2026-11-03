@@ -58,6 +58,10 @@ using DisplayValueReader = std::function<std::optional<std::string>(std::string_
 // Windows.
 [[nodiscard]] DisplayValueReader registry_display_reader();
 
+// The same read for another key under HKCU\Software\Locke Werks\Revenant,
+// by its name ("audio").
+[[nodiscard]] DisplayValueReader registry_key_reader(std::string_view subkey);
+
 // The settings, re-read at most once an interval however often they are
 // asked for. Any thread.
 class DisplaySettingsSource {

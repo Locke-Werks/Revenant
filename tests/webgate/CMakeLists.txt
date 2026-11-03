@@ -7,6 +7,7 @@ add_executable(test_webgate
     test_spectrum_reducer.cpp
     test_display_sync.cpp
     test_display_bench.cpp
+    test_voice_gain.cpp
     test_audio_opus.cpp
     test_audio_rate.cpp
     test_protocol.cpp

@@ -19,7 +19,9 @@
 #include <thread>
 #include <vector>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <opus.h>
 
 // gateway.h carries kj-http, which has to precede anything that pulls in
 // <windows.h>.
@@ -66,6 +68,8 @@ struct Rig {
     std::function<revenant::Expected<revenant::rpc::DetectionList>(double, double)> detections;
     // Stands in for the desktop's registry when set.
     std::function<revenant::ui::DisplaySettings()> display;
+    // Stands in for the desktop's audio/voiceGainDb when set.
+    std::function<double()> voice_gain_db;
     std::unique_ptr<PhoneSession> session;
     std::unique_ptr<PhoneStreams> streams;
 
@@ -91,6 +95,7 @@ struct Rig {
         config.transcription_status = speech;
         config.detections = detections;
         config.display_settings = display;
+        config.voice_gain_db = voice_gain_db;
         streams =std::make_unique<PhoneStreams>(*session, &socket, strand, config);
         streams->start();
         strand.run_pending();
@@ -716,6 +721,83 @@ TEST_CASE("8000 S/s digital voice reaches Opus and HLS", "[gpu][webgate][streams
     CHECK_FALSE(refused);
     CHECK(segmenter->ok());
     CHECK_FALSE(segmenter->playlist().empty());
+}
+
+namespace {
+
+// The RMS of what the phone was sent as Opus on the last 100 packets, so the
+// encoder's start-up and the limiter's first frames are out of the figure.
+[[nodiscard]] double opus_rms(const FakeSocket& socket)
+{
+    int err = 0;
+    ::OpusDecoder* decoder = opus_decoder_create(48000, 1, &err);
+    REQUIRE(err == OPUS_OK);
+    std::vector<float> samples;
+    for (const auto& m : socket.sent) {
+        if (m.kind != Kind::Opus) {
+            continue;
+        }
+        std::vector<float> frame(960);
+        const int n = opus_decode_float(
+            decoder, m.binary.data() + revenant::webgate::kOpusHeaderSize,
+            static_cast<opus_int32>(m.binary.size() - revenant::webgate::kOpusHeaderSize),
+            frame.data(), 960, 0);
+        REQUIRE(n == 960);
+        samples.insert(samples.end(), frame.begin(), frame.end());
+    }
+    opus_decoder_destroy(decoder);
+    REQUIRE(samples.size() > 960 * 100);
+    double sum = 0.0;
+    for (std::size_t i = samples.size() - 960 * 100; i < samples.size(); ++i) {
+        sum += static_cast<double>(samples[i]) * samples[i];
+    }
+    return std::sqrt(sum / (960.0 * 100.0));
+}
+
+// Four seconds of a quiet 8 kHz tone to one receiver, the way a vocoder
+// delivers it, then the Opus the phone got back.
+[[nodiscard]] double listen_to_quiet_tone(std::string_view mode, double gain_db)
+{
+    Rig rig;
+    rig.voice_gain_db = [gain_db] { return gain_db; };
+    rig.open(still_engine());
+    rig.attach();
+    rig.command(R"({"id":1,"op":"addVrx","args":{"hz":100100000,"mode":")" + std::string(mode) +
+                R"("}})");
+    const auto vrx = vrx_of(reply_to(rig.socket, 1));
+    rig.command(R"({"id":2,"op":"audio","args":{"vrx":)" + std::to_string(vrx) + "}}");
+    revenant::rpc::AudioChunk chunk;
+    chunk.sample_rate = 8000;
+    chunk.channel_count = 1;
+    double phase = 0.0;
+    for (int c = 0; c < 200; ++c) {
+        chunk.samples.assign(160, 0.0F);
+        for (float& s : chunk.samples) {
+            s = 0.05F * static_cast<float>(std::sin(phase));
+            phase += 2.0 * 3.14159265358979323846 * 1000.0 / 8000.0;
+        }
+        chunk.sample_index = static_cast<std::uint64_t>(c) * 160;
+        rig.streams->deliver_audio(vrx, chunk);
+        rig.strand.run_pending();
+    }
+    return opus_rms(rig.socket);
+}
+
+}  // namespace
+
+TEST_CASE("digital voice reaches the phone boosted and analogue does not",
+          "[gpu][webgate][streams][voicegain]")
+{
+    REVENANT_NEEDS_GPU();
+    const double analogue = listen_to_quiet_tone("am", 18.0);
+    const double analogue_flat = listen_to_quiet_tone("am", 0.0);
+    const double voice = listen_to_quiet_tone("p25p1", 18.0);
+    const double voice_flat = listen_to_quiet_tone("p25p1", 0.0);
+
+    // 18 dB is x7.94 on the decoded voice, whatever the lossy codec does to it.
+    CHECK(voice / voice_flat == Catch::Approx(7.943).epsilon(0.05));
+    // An analogue receiver ignores the setting entirely.
+    CHECK(analogue / analogue_flat == Catch::Approx(1.0).epsilon(0.02));
 }
 
 TEST_CASE("a receiver removed elsewhere is reported to its phone", "[gpu][webgate][streams]")
