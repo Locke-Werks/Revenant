@@ -23,11 +23,27 @@ remove receivers, hear the audio and read the decoded text.**
   page from an origin that is not the gateway's own, so a web page open in
   another browser tab on the LAN cannot drive the radio. That limits browsers.
   It does not limit a script or another program, which sends no `Origin`.
+- Live audio is open too. The HLS streams under `/hls/<vrx>/` that carry
+  Keep listening audio can be fetched by any device on the LAN that can reach
+  port 17700, without a WebSocket and without the phone's session, for as long
+  as the receiver exists. Treat everything a receiver hears as audible to the
+  whole network.
+- The certificate profile at `/ca` is served over plain HTTP on 17701, because
+  the phone cannot trust HTTPS until it has it. Someone on the network could
+  swap it in transit, so install the profile only on a network you trust.
 - The gateway reaches the engine on loopback with the engine's token. The phone
   never sees the token (`docs/rpc.md`, "Where the token lives").
 - The certificate authority key stays in `%LOCALAPPDATA%\Revenant\webgate\certs`.
   Anyone who can read it can issue a certificate your phone trusts, so do not
-  copy that folder anywhere.
+  copy that folder anywhere. The CA is name-constrained: it can only vouch for
+  this computer's name, names ending in `.local`, and the private IPv4 ranges
+  10.0.0.0/8, 172.16.0.0/12 and 192.168.0.0/16, so a stolen key cannot
+  impersonate a site on the internet to your phone. The server certificate
+  leaves out any of this computer's addresses outside those ranges.
+- The gateway replaces a CA that lacks those constraints, or that was made for
+  a different computer name, and prints a line saying so. Every phone then has
+  to delete the old profile and install the new one (see Installing on the
+  iPhone).
 - IPv4 only. The gateway does not listen on IPv6 and the certificate carries no
   IPv6 names.
 
@@ -92,7 +108,8 @@ does through Bonjour.
 2. Settings, General, VPN & Device Management: tap the downloaded profile and
    install it.
 3. Settings, General, About, Certificate Trust Settings: turn on full trust for
-   the "Revenant Local CA" certificate.
+   the "Revenant Local CA (<computer name>)" certificate, where the computer
+   name is the host name in lower case.
 4. In Safari, open `https://<host>.local:17700/`. There is no certificate
    warning now.
 5. Share, Add to Home Screen. Open Revenant from the new icon. The app only
@@ -156,6 +173,13 @@ itself when an engine appears. Start the engine, or open a source from the
 radio panel. A black screen with no message and nothing in the app usually means
 the gateway cannot be reached; see the next two items.
 
+**Background and live audio stop, the app still shows the link up.** The
+engine is hung rather than dead: it holds the connection open but does not
+answer. The gateway has no timeout on engine calls yet, so Keep listening and
+live audio stay silent until the engine answers again or its process exits,
+after which the gateway recovers on its own. End `revenant-engine.exe` in Task
+Manager if it does not come back.
+
 **"Revenant is not reachable".** The app opened but the gateway did not answer
 within 4 seconds. Check that `revenant-webgate.exe` is running, that the phone
 is on the same network, and the firewall.
@@ -188,6 +212,31 @@ device that cannot keep up at the chosen rate. Lower the rate or the load.
 
 **Audio breaks up on Wi-Fi.** Try Keep listening, which buffers about 3
 seconds. Live audio buffers about 80 ms and grows when it underruns.
+
+**A phone is refused with "too many phones connected".** The gateway holds at
+most 16 phone sessions. A new connection evicts the session that dropped
+longest ago; it is refused only when all 16 are connected right now.
+
+## Protocol notes
+
+- `openSource` closes whatever source is open first, the desktop client's
+  included. A phone can switch the radio out from under someone at the
+  computer, and the desktop client sees its source close.
+- Liveness is app-level, since kj does not expose WebSocket pings. The gateway
+  sends a `ping` event every 15 seconds and the app answers with a `pong`
+  command; any message from the phone counts. A socket the gateway has heard
+  nothing on for 45 seconds is closed, which detaches its session.
+- Every WebSocket opens its own engine session. When the socket drops, the
+  session detaches and lingers so the phone can resume it:
+  - with no receivers and Keep listening off, for 30 seconds;
+  - otherwise for 10 minutes;
+  - with Keep listening on, also until 60 seconds after the last HLS request
+    for one of its receivers, whichever is later.
+
+  `--session-linger-ms` shortens the 10 minute figure (and the 30 second one
+  with it, when smaller). At most 16 sessions exist at once: a connection past
+  that evicts the oldest detached session, or is closed with code 1013 and a
+  reason saying too many phones are connected when every session is attached.
 
 ## Cost to the engine
 
