@@ -335,6 +335,20 @@ TEST_CASE("auto DV opens one receiver per DV signal, never twice, never takes on
     CHECK(t.session->has_receiver(spawned));
 }
 
+TEST_CASE("a receiver auto DV opens is heard with no receiver selected", "[gpu][webgate][dv][mix]")
+{
+    REVENANT_NEEDS_GPU();
+    DvRig t;
+    t.command(R"({"id":1,"op":"audio","args":{"on":true}})");
+    CHECK(contains(t.last(R"("id":1,)"), R"("ok":true)"));
+    t.list.detections = {dv(kCentre + 50'000)};
+    t.command(R"({"id":2,"op":"autoDv","args":{"on":true}})");
+    REQUIRE(t.session->receiver_ids().size() == 1);
+    const auto spawned = t.session->receiver_ids().front();
+    CHECK_FALSE(t.session->audio_vrx().has_value());
+    CHECK(t.streams->audio_subscriptions() == std::set<std::uint64_t>{spawned});
+}
+
 TEST_CASE("auto DV keeps opening receivers with no view and resumes on a rebuilt stream",
           "[gpu][webgate][dv]")
 {

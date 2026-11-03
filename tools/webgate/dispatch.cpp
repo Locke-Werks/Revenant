@@ -655,6 +655,15 @@ template <class Edit>
         }
         on = *value;
     }
+    // No receiver named is the phone's switch alone: on keeps whatever leads,
+    // off silences the phone and forgets the lead.
+    if (!command.has("vrx")) {
+        session.set_audio_on(on);
+        if (!on) {
+            session.set_audio_vrx(std::nullopt);
+        }
+        return JsonObject().add_bool("on", on).str();
+    }
     const auto vrx = receiver_arg(session, command);
     if (!vrx) {
         // Turning audio off for a receiver that is already gone is not worth
@@ -662,6 +671,7 @@ template <class Edit>
         if (!on) {
             if (const auto id = command.get_u64("vrx"); id && session.audio_vrx() == *id) {
                 session.set_audio_vrx(std::nullopt);
+                session.set_audio_on(false);
                 return JsonObject().add_u64("vrx", *id).add_bool("on", false).str();
             }
         }
@@ -669,10 +679,14 @@ template <class Edit>
     }
     if (on) {
         session.set_audio_vrx(*vrx);
+        session.set_audio_on(true);
     } else if (session.audio_vrx() == *vrx) {
         session.set_audio_vrx(std::nullopt);
+        session.set_audio_on(false);
     }
-    return JsonObject().add_u64("vrx", *vrx).add_bool("on", on).str();
+    // The switch as it now stands: an off for a receiver that is not the lead
+    // leaves the phone's audio on.
+    return JsonObject().add_u64("vrx", *vrx).add_bool("on", session.audio_on()).str();
 }
 
 [[nodiscard]] Result op_keep_listening(PhoneSession& session, const Command& command)

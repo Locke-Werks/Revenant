@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { LiveAudio, type AudioContextLike, type AudioSink, type LiveAudioDeps, type LiveLink } from "../src/audio/live";
 import type { PcmDecoder } from "../src/audio/opus_decoder";
 import type { WorkletState } from "../src/audio/messages";
-import type { JsonValue, OpusFrame } from "../src/protocol";
+import { MIX_STREAM, type JsonValue, type OpusFrame } from "../src/protocol";
+
+const MIX = Number(MIX_STREAM);
 
 class FakeLink implements LiveLink {
   requests: { op: string; args: unknown }[] = [];
@@ -109,23 +111,34 @@ test("live: start resumes the context inside the gesture, before anything awaits
   assert.equal(audio.vrx, 7);
 });
 
-test("live: frames for the active receiver are decoded and pushed, others ignored", async () => {
+test("live: frames for the mix are decoded and pushed, others ignored", async () => {
   const { audio, link, sink, frame } = setup();
-  link.emit("opus", frame(7, 1));
+  link.emit("opus", frame(MIX, 1));
   assert.deepEqual(sink.pushed, []);
   await audio.start(7);
-  link.emit("opus", frame(7, 2));
-  link.emit("opus", frame(9, 3));
-  link.emit("opus", frame(7, 4));
+  link.emit("opus", frame(MIX, 2));
+  link.emit("opus", frame(7, 3));
+  link.emit("opus", frame(MIX, 4));
   assert.deepEqual(sink.pushed, [2, 4]);
   assert.equal(audio.stats.ignored, 2);
+});
+
+test("live: the mix plays with no receiver selected", async () => {
+  const { audio, link, sink, frame } = setup();
+  await audio.start();
+  assert.deepEqual(link.requests, [{ op: "audio", args: { on: true } }]);
+  assert.equal(audio.vrx, null);
+  assert.equal(audio.on, true);
+  link.emit("opus", frame(MIX, 1));
+  link.emit("opus", frame(MIX, 2));
+  assert.deepEqual(sink.pushed, [1, 2]);
 });
 
 test("live: a packet the decoder refuses is skipped and counted", async () => {
   const { audio, link, sink, frame } = setup();
   await audio.start(7);
-  link.emit("opus", frame(7, 1, 0));
-  link.emit("opus", frame(7, 2));
+  link.emit("opus", frame(MIX, 1, 0));
+  link.emit("opus", frame(MIX, 2));
   assert.deepEqual(sink.pushed, [2]);
   assert.equal(audio.stats.undecodable, 1);
 });
@@ -138,27 +151,27 @@ test("live: nothing is queued while the context is not running", async () => {
   assert.deepEqual(sink.pushed, []);
 });
 
-test("live: switching receivers resets the buffer and the decoder", async () => {
+test("live: a new lead is the same mix stream, so nothing is reset", async () => {
   const { audio, link, sink, frame, decoderResets } = setup();
   await audio.start(7);
-  link.emit("opus", frame(7, 1));
+  link.emit("opus", frame(MIX, 1));
   const before = sink.resets;
   await audio.start(8);
-  assert.equal(sink.resets, before + 1);
-  assert.equal(decoderResets(), 1);
+  assert.equal(sink.resets, before);
+  assert.equal(decoderResets(), 0);
   assert.deepEqual(link.requests.at(-1), { op: "audio", args: { vrx: 8, on: true } });
-  link.emit("opus", frame(7, 2));
-  link.emit("opus", frame(8, 3));
-  assert.deepEqual(sink.pushed, [1, 3]);
+  link.emit("opus", frame(MIX, 2));
+  assert.deepEqual(sink.pushed, [1, 2]);
 });
 
-test("live: stop turns the stream off and later frames are ignored", async () => {
+test("live: stop turns the phone's audio off and later frames are ignored", async () => {
   const { audio, link, sink, frame } = setup();
   await audio.start(7);
   audio.stop();
-  assert.deepEqual(link.requests.at(-1), { op: "audio", args: { vrx: 7, on: false } });
+  assert.deepEqual(link.requests.at(-1), { op: "audio", args: { on: false } });
   assert.equal(audio.vrx, null);
-  link.emit("opus", frame(7, 1));
+  assert.equal(audio.on, false);
+  link.emit("opus", frame(MIX, 1));
   assert.deepEqual(sink.pushed, []);
   assert.ok(sink.resets >= 1);
 });
@@ -222,17 +235,18 @@ test("live: the audio op is sent again when the link comes back", async () => {
   assert.equal(sink.resets, before + 1);
 });
 
-test("live: a recreated receiver keeps playing under its new id; a removed one stops", async () => {
+test("live: a recreated lead keeps its new id; a removed one leaves the mix playing", async () => {
   const { audio, link, sink, frame } = setup();
   await audio.start(7);
   link.emit("link", { event: "link", state: "up", detail: "", recreated: [{ old: 7, new: 12 }] });
   assert.equal(audio.vrx, 12);
-  link.emit("opus", frame(12, 1));
+  link.emit("opus", frame(MIX, 1));
   assert.deepEqual(sink.pushed, [1]);
   link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 12 });
   assert.equal(audio.vrx, null);
-  link.emit("opus", frame(12, 2));
-  assert.deepEqual(sink.pushed, [1]);
+  assert.equal(audio.on, true);
+  link.emit("opus", frame(MIX, 2));
+  assert.deepEqual(sink.pushed, [1, 2]);
 });
 
 test("live: a restart map is applied once, so a swap or a lost old id equal to a new one keeps playing", async () => {
@@ -266,7 +280,7 @@ test("live: a stop during start's audio op turns the stream off again", async ()
   await p;
   assert.deepEqual(link.requests, [
     { op: "audio", args: { vrx: 7, on: true } },
-    { op: "audio", args: { vrx: 7, on: false } },
+    { op: "audio", args: { on: false } },
   ]);
   assert.equal(audio.vrx, null);
 });
@@ -281,16 +295,17 @@ test("live: a newer start during an older one's audio op sends no off", async ()
   assert.equal(audio.vrx, 8);
 });
 
-test("live: retarget flushes the buffer and resets the decoder", async () => {
+test("live: retarget moves the lead and leaves the mix stream alone", async () => {
   const { audio, link, sink, frame, decoderResets } = setup();
   await audio.start(7);
-  link.emit("opus", frame(7, 900));
+  link.emit("opus", frame(MIX, 900));
   const before = sink.resets;
   audio.retarget(7, 12);
-  assert.equal(sink.resets, before + 1);
-  assert.equal(decoderResets(), 1);
-  link.emit("opus", frame(12, 0));
-  assert.deepEqual(sink.pushed, [900, 0]);
+  assert.equal(audio.vrx, 12);
+  assert.equal(sink.resets, before);
+  assert.equal(decoderResets(), 0);
+  link.emit("opus", frame(MIX, 901));
+  assert.deepEqual(sink.pushed, [900, 901]);
 });
 
 test("live: hold drops frames and keeps the gateway's audio selection", async () => {
@@ -312,7 +327,7 @@ test("live: release fills muted and fadeIn ramps it up", async () => {
   audio.hold();
   audio.release();
   assert.deepEqual(sink.gains, [[0, 0]]);
-  link.emit("opus", frame(7, 1));
+  link.emit("opus", frame(MIX, 1));
   assert.deepEqual(sink.pushed, [1]);
   audio.fadeIn(40);
   assert.deepEqual(sink.gains, [[0, 0], [1, 40]]);

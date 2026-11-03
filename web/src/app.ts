@@ -4,6 +4,7 @@
 import { HlsPlayer, silentWavUrl } from "./audio/hls_player";
 import { browserMediaSession, KeepListening } from "./audio/keep_listening";
 import { browserLiveAudioDeps, LiveAudio } from "./audio/live";
+import { AutoAudio } from "./audio/auto_audio";
 import { labelAt, LingerTracker, labelText, parseDetections, snapTap, type Detection } from "./detections";
 import { encryptedFlag, modeLabel, parseCatalogue, voiceStatus, type DecoderCatalogue } from "./decoders";
 import { attachGestures } from "./gestures";
@@ -22,7 +23,7 @@ import type { SourceEvent } from "./protocol";
 import { captionFromEvent, CaptionLayer, CaptionStore, RowClock } from "./ui/captions";
 import { decodedEntry, FeedModel, FeedView, transcriptEntry } from "./ui/feed";
 import { RadioPanel } from "./ui/radio_panel";
-import { formatMHz, ReceiverController, ReplaceGate } from "./ui/receivers";
+import { formatMHz, NOT_STARTED, ReceiverController, ReplaceGate } from "./ui/receivers";
 import { readTab, Sheet, TAB_KEY, type SheetTab } from "./ui/sheet";
 import { readConfidence, SignalsPanel, tapWaterfall, type PickDeps } from "./ui/signals";
 import { SpeechModel, speechLine, SpeechSwitch } from "./ui/speech_switch";
@@ -410,11 +411,18 @@ export function mountApp(root: HTMLElement): AppHandle {
   });
   sheet.dvHost.append(dvPanel.el);
   sheet.alwaysHost.append(dvPanel.autoBtn);
+  const autoAudio = new AutoAudio({ audio, note: (text) => notes.set("audio", text), notStarted: NOT_STARTED });
+  link.on("ready", () => {
+    autoAudio.newSession();
+    syncDv();
+  });
   const syncDv = () => {
     const list = receivers.list.list();
     // Auto DV on with nothing found yet still shows the tab, so the empty call
     // tables say it is listening; the switch itself is always in Tune.
-    sheet!.setDvShown(hasDvReceiver(list) || dvState.autoDv);
+    const dv = hasDvReceiver(list) || dvState.autoDv;
+    sheet!.setDvShown(dv);
+    autoAudio.update(dv);
     const id = receivers.list.active;
     const r = id === null ? undefined : receivers.list.get(id);
     dvPanel.setActive(r ? { vrx: r.vrx, mode: r.mode } : null);
@@ -777,7 +785,12 @@ export function mountApp(root: HTMLElement): AppHandle {
   // phone's sound stops with the session the gateway destroyed.
   new LeaseScreen(root.querySelector<HTMLElement>("#lease")!, link);
   link.on("lease", (e) => {
-    if (e.state === "held") return;
+    if (e.state === "held") {
+      // Taken back: a new session, which auto audio may turn on again.
+      autoAudio.newSession();
+      syncDv();
+      return;
+    }
     audio.stop();
     keep.off();
   });

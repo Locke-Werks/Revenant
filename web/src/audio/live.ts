@@ -1,4 +1,6 @@
-// Live audio for one receiver: asks the gateway for its Opus stream, decodes
+// Live audio for the phone: asks the gateway for its mix of every receiver
+// (one Opus stream, tagged MIX_STREAM, led by the selected receiver if any;
+// Auto DV's receivers are heard with none selected), decodes
 // each packet on the main thread (see opus_decoder.ts for why) and hands the
 // PCM to the AudioWorklet, which owns the jitter buffer and plays it.
 //
@@ -8,7 +10,7 @@
 // directly from the tap handler. resume() is for later attempts (returning to
 // the foreground) and reports whether the context is actually running.
 
-import type { LinkEvent, JsonValue, OpusFrame, GatewayEvent } from "../protocol";
+import { MIX_STREAM, type LinkEvent, type JsonValue, type OpusFrame, type GatewayEvent } from "../protocol";
 import { createPcmDecoder, loadOpusModule, type PcmDecoder } from "./opus_decoder";
 import { PROCESSOR_NAME, WORKLET_URL, type ToWorklet, type WorkletState } from "./messages";
 import { SAMPLE_RATE } from "./jitter";
@@ -48,7 +50,7 @@ export interface LiveAudioDeps {
 }
 
 export interface LiveStats {
-  // Opus frames for a receiver other than the one playing.
+  // Opus frames not for the mix, or with the phone's audio off.
   ignored: number;
   // Packets the decoder refused; the jitter buffer plays them as silence.
   undecodable: number;
@@ -64,14 +66,17 @@ export class LiveAudio {
   private decoderP: Promise<PcmDecoder> | null = null;
   private sink: AudioSink | null = null;
   private decoder: PcmDecoder | null = null;
+  // The receiver leading the mix, or null with none selected.
   private active: number | null = null;
+  // The gateway has the phone's audio on.
+  private playing = false;
   // Bumped by every start and stop, so a start that finishes after a newer
   // call does not claim the stream.
   private gen = 0;
-  // The receiver whose packets the decoder's state came from.
-  private decodedVrx: number | null = null;
-  // What the caller last asked for: start's vrx, or null after stop.
-  private wanted: number | null = null;
+  // What the caller last asked for: start's lead (null for none) while on,
+  // undefined after stop.
+  private wanted: number | null | undefined = undefined;
+  private runningFns: (() => void)[] = [];
   // Keep listening has HLS playing instead: frames are dropped, but the
   // gateway's audio selection stays, because HLS follows it.
   private held = false;
@@ -84,9 +89,9 @@ export class LiveAudio {
       // A gateway that could not resume the session has no audio selection;
       // one that could does not mind hearing it again. Either way the old
       // stream's tail is stale.
-      if (this.active === null) return;
+      if (!this.playing) return;
       this.flush();
-      void deps.link.request("audio", { vrx: this.active, on: true }).catch(() => {});
+      void deps.link.request("audio", this.args(this.active, true)).catch(() => {});
     });
     deps.link.on("link", (e) => {
       // Both lists name OLD ids, and a fresh engine numbers from 1, so a new
@@ -94,20 +99,33 @@ export class LiveAudio {
       const active = this.active;
       if (active === null) return;
       if ((e.lost ?? []).some((l) => l.vrx === active)) {
-        this.clear();
+        this.active = null;
         return;
       }
       const to = (e.recreated ?? []).find((r) => r.old === active);
       if (to) this.retarget(to.old, to.new);
     });
+    // The lead going leaves the rest of the mix playing; the gateway forgets
+    // the lead with the receiver.
     deps.link.on("vrxRemoved", (e) => {
-      if (typeof e.vrx === "number" && e.vrx === this.active) this.clear();
+      if (typeof e.vrx === "number" && e.vrx === this.active) this.active = null;
     });
   }
 
-  // The receiver playing, or null.
+  // The receiver leading the mix, or null.
   get vrx(): number | null {
     return this.active;
+  }
+
+  // The phone's audio is on, or being turned on.
+  get on(): boolean {
+    return this.playing || this.wanted !== undefined;
+  }
+
+  // Called each time the context starts running, so a "tap to play" note
+  // can go once a gesture has unlocked it.
+  onRunning(fn: () => void): void {
+    this.runningFns.push(fn);
   }
 
   // Audio is coming out: the context runs and the jitter buffer has filled.
@@ -115,7 +133,8 @@ export class LiveAudio {
     return this.ctx?.state === "running" && this.worklet?.playing === true;
   }
 
-  async start(vrx: number): Promise<void> {
+  // Turns the phone's audio on with vrx leading the mix, or none.
+  async start(vrx: number | null = null): Promise<void> {
     const gen = ++this.gen;
     this.wanted = vrx;
     const ctx = this.context();
@@ -133,43 +152,47 @@ export class LiveAudio {
     try {
       await Promise.all([this.sinkP, this.decoderP, resumed]);
       if (gen !== this.gen) return;
-      if (this.active !== vrx) {
-        this.active = null;
-        this.flush();
-        // Opus decoding carries state from packet to packet; another
-        // receiver's stream must not start from it.
-        if (this.decodedVrx !== null && this.decodedVrx !== vrx) {
-          this.decodedVrx = null;
-          await this.decoder?.reset();
-        }
-      }
-      await this.deps.link.request("audio", { vrx, on: true });
+      // A new lead is the same mix stream, so the buffer and the decoder
+      // carry on through it.
+      await this.deps.link.request("audio", this.args(vrx, true));
       if (gen !== this.gen) {
         // A stop() came in while the gateway was turning this on: turn it
-        // off again. A newer start() owns the selection itself, and an off
-        // for this id could clear what it just chose.
-        if (this.wanted === null) void this.deps.link.request("audio", { vrx, on: false }).catch(() => {});
+        // off again. A newer start() owns the selection itself.
+        if (this.wanted === undefined) void this.deps.link.request("audio", { on: false }).catch(() => {});
         return;
       }
       this.active = vrx;
+      this.playing = true;
     } catch (e) {
       // A failed setup is not cached, so the next tap tries again.
       if (!this.sink) this.sinkP = null;
       if (!this.decoder) this.decoderP = null;
-      if (gen === this.gen) this.active = null;
+      if (gen === this.gen) {
+        this.wanted = this.playing ? this.active : undefined;
+        if (!this.playing) this.active = null;
+      }
       throw e;
     }
   }
 
   stop(): void {
     ++this.gen;
-    this.wanted = null;
+    this.wanted = undefined;
     // A stopped path is not held: the next start must be heard.
     this.held = false;
     this.setLevel(1, 0);
-    const vrx = this.active;
+    const was = this.playing;
+    this.playing = false;
     this.clear();
-    if (vrx !== null) void this.deps.link.request("audio", { vrx, on: false }).catch(() => {});
+    if (was) {
+      void this.deps.link.request("audio", { on: false }).catch(() => {});
+      // The next on is a new stream from seq 0.
+      void this.decoder?.reset();
+    }
+  }
+
+  private args(vrx: number | null, on: boolean): { [key: string]: JsonValue } {
+    return vrx === null ? { on } : { vrx, on };
   }
 
   // Creates and resumes the context. For a gesture whose start() must wait
@@ -214,15 +237,10 @@ export class LiveAudio {
 
   // The gateway moved the audio selection to a new id (setMode, setBandwidth,
   // or an engine restart); the stream carries on under it.
-  // The new receiver's stream starts again from seq 0 and is a separate
-  // Opus stream, so the buffer and the decoder start over too.
+  // Only the lead moves: the mix stream is the same one.
   retarget(oldVrx: number, newVrx: number): void {
     if (this.wanted === oldVrx) this.wanted = newVrx;
-    if (this.active !== oldVrx) return;
-    this.active = newVrx;
-    this.flush();
-    this.decodedVrx = null;
-    void this.decoder?.reset();
+    if (this.active === oldVrx) this.active = newVrx;
   }
 
   private context(): AudioContextLike {
@@ -232,6 +250,7 @@ export class LiveAudio {
         // Suspended or interrupted: what is buffered is old by the time
         // output comes back, so start that from an empty buffer.
         if (ctx.state !== "running") this.flush();
+        else for (const fn of this.runningFns) fn();
       });
       this.ctx = ctx;
     }
@@ -255,14 +274,13 @@ export class LiveAudio {
 
   private onOpus(f: OpusFrame): void {
     if (this.held) return;
-    if (this.active === null || f.vrx !== BigInt(this.active)) {
+    if (!this.playing || f.vrx !== MIX_STREAM) {
       this.stats.ignored++;
       return;
     }
     // Packets are not queued for a context that is not playing: they would
     // all be stale, and nothing would drain them.
     if (!this.sink || !this.decoder || this.ctx?.state !== "running") return;
-    this.decodedVrx = this.active;
     const pcm = this.decoder.decode(f.packet);
     if (!pcm) {
       this.stats.undecodable++;

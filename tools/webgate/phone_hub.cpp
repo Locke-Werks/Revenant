@@ -722,6 +722,7 @@ bool PhoneHub::rebuild_on(Resident& resident, JsonObject& fields,
         fresh->set_view(*old_session.view());
     }
     fresh->set_keep_listening(old_session.keep_listening());
+    fresh->set_audio_on(old_session.audio_on());
     fresh->set_min_confidence(old_session.min_confidence());
     // The DV tab's switches go with the session; streams' start() puts them
     // back on the new engine. Receiver ids are mapped below as they come back.

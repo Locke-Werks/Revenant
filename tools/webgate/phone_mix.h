@@ -1,8 +1,9 @@
 // One mixed audio stream per phone session.
 //
-// The owner's decision of 2026-11-03: a phone hears what the desktop hears,
-// which is every digital voice receiver at once with the one it is listening
-// to, not only the one. The desktop does this in ui/audio/audio_mix.h at the
+// The owner's decision of 2026-11-03: a phone hears every receiver on the
+// engine at once, analog and digital voice, with the one it is listening to as
+// the lead, not only the one. Several analog receivers at full level is what
+// the limiter on the sum is for. The desktop does this in ui/audio/audio_mix.h at the
 // sound card's rate. This is the phone's version at 48 kHz mono, with the
 // desktop's rules reused where they are pure: the digital voice boost
 // (voice_gain.h, from ui/audio/voice_gain.h) on each digital voice stream and

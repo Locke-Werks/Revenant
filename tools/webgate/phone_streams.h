@@ -227,6 +227,11 @@ struct StreamCounters {
     std::uint64_t text_dropped = 0;
 };
 
+// The most receivers one phone mix holds: the desktop's rack limit. Lead
+// first, then digital voice, then analogue. The rack cannot hold more, so this
+// bounds a gateway bug rather than being a rule anyone should hear.
+inline constexpr std::size_t kMaxMixMembers = 64;
+
 class PhoneStreams {
 public:
     // socket may be null: a session can exist without a connection.
@@ -317,16 +322,18 @@ private:
         bool reported_error = false;
     };
 
-    // A receiver in the mix and whether its audio is decoded voice.
+    // A receiver in the mix and whether its audio is decoded voice, which
+    // takes the desktop's voice boost; analog enters at the engine's level.
     struct MixMember {
         std::uint64_t vrx = 0;
         bool digital_voice = false;
     };
 
-    // WHO THE PHONE HEARS, in one place. The receiver it is listening to, and
-    // every digital voice receiver on the engine, whoever opened it, while audio
-    // is on. A different rule for who is heard changes this function and
-    // nothing else: the mixer is told what it is given.
+    // WHO THE PHONE HEARS, in one place. Every receiver on the engine, analog
+    // and digital voice, whoever opened it, with the selected one first as the
+    // lead, while the phone's audio is on or keep listening has its stream up.
+    // A different rule for who is heard changes this function and nothing
+    // else: the mixer is told what it is given.
     [[nodiscard]] std::vector<MixMember> mix_members() const;
     // Mixed samples out to the Opus encoder and the HLS segmenter.
     void emit_mix(std::span<const float> mixed, const std::function<void(const std::string&)>& report);
@@ -479,14 +486,14 @@ private:
     std::optional<std::uint64_t> announced_hls_;
 
     // The sum of every mixed receiver, and the one Opus stream cut from it.
-    // The encoder and its sequence start again when the receiver the phone
-    // listens to changes, which is a new stream to the phone.
+    // It is tagged kPhoneMixStream whichever receiver leads, so a new lead is
+    // the same stream; the encoder and sequence start again when the phone's
+    // audio is turned off (reconcile_audio).
     PhoneMixer mixer_;
     // The desktop's boost as of the last start() or tick().
     double voice_gain_db_ = 0.0;
     std::unique_ptr<LiveOpusEncoder> mix_opus_;
     std::uint32_t mix_opus_seq_ = 0;
-    std::optional<std::uint64_t> mix_opus_for_;
     // Per receiver: the decoder set last applied, and which of it the engine
     // took. A set is applied once; a refusal is reported and not retried
     // until the phone changes the set or the receiver is recreated.

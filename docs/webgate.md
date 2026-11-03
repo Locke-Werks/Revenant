@@ -312,21 +312,42 @@ levels them.
 
 ### What the phone hears
 
-The phone hears one mixed stream, as the desktop does: the receiver it is
-listening to plus every digital voice receiver (p25p1, dmr, dstar, tetra) on the
-engine, whoever opened it, while audio is on. Each is resampled to 48 kHz, the digital voice
-ones are boosted by `audio/voiceGainDb`, they are summed, and the desktop's soft
+The phone hears one mixed stream: every receiver on the engine, analogue and
+digital voice, whoever opened it, while the phone's audio is on. The selected
+receiver, if any, is the lead. Each is resampled to 48 kHz, the digital voice
+ones (p25p1, dmr, dstar, tetra) are boosted by `audio/voiceGainDb` while
+analogue enters at the engine's level, they are summed, and the desktop's soft
 limiter holds the sum under -1 dBFS (`tools/webgate/phone_mix.h`, reusing
 `ui/audio/mix_stages.h`). Silence between calls is a voice stream that sends
-nothing, so the sound is the receiver being listened to. The same mix feeds
-live audio and Keep listening, so both play the same thing.
+nothing. The same mix feeds live audio and Keep listening, so both play the
+same thing.
 
-- The gateway subscribes audio for each digital voice receiver while the phone
-  is listening to a receiver, or Keep listening has its stream up, and
-  unsubscribes when the receiver is removed or either ends. The 30 second
-  linger after Keep listening ends does not hold them. Analogue receivers other
-  than the one listened to are not mixed. Which receivers are mixed is decided
-  in one function, `PhoneStreams::mix_members`.
+- Audio is a phone-level switch kept per session. `audio {on:true}` with no
+  `vrx` turns it on with no lead; with a `vrx` it also makes that receiver the
+  lead. `audio {on:false}` turns it off and forgets the lead. So the receivers
+  Auto DV opens are heard with nothing selected. The phone turns its audio on
+  by itself when a DV receiver exists or Auto DV is on
+  (`web/src/audio/auto_audio.ts`); outside a tap iOS will not start the
+  AudioContext, so the "tap to play" note shows until a tap does.
+- The gateway subscribes audio for every receiver while the phone's audio is
+  on, or Keep listening has its stream up, and unsubscribes when the receiver
+  is removed or either ends. The 30 second linger after Keep listening ends
+  does not hold them. Removing the lead leaves the rest playing. Which
+  receivers are mixed is decided in one function, `PhoneStreams::mix_members`,
+  capped at the desktop's rack limit of 64: lead first, then digital voice,
+  then analogue.
+- Gain staging is the desktop's (`ui/audio/audio_mix.h`,
+  `ui/audio/audio_player.cpp`): every stream arrives levelled by the engine
+  (`core/engine/listener_level.h`), digital voice is scaled by the voice boost,
+  the streams are summed plainly with no per-stream headroom, and the soft
+  limiter is the only stage on the sum. The desktop's per-strip gain is not
+  known to the gateway and is taken as unity. Squelch needs nothing here: the
+  engine writes zeros into a subscription while a receiver's squelch is
+  closed, so a closed receiver adds silence.
+- With 20 receivers, eighteen of them analogue on open-squelch noise at the
+  engine's level, the test "twenty receivers sum bounded" measures the sum
+  held under full scale and the lead's tone and a DV tone each well above the
+  noise bed in their own bin, and prints the gateway's cost per 20 ms block.
 - The engine delivers voice continuously, not an LDU at a time: one chunk per
   receiver chunk covering the same time, zeros between calls
   (`core/rpc/voice_audio.h`). The mix is built to take a burst of an LDU
@@ -348,7 +369,14 @@ live audio and Keep listening, so both play the same thing.
   kept. If the receiver being listened to stalls, or there is none, the voice
   streams are paced by the wall clock, one block per 20 ms, so the mix never
   runs ahead of real time.
-- Live Opus packets are tagged with the receiver being listened to. Keep
+- Live Opus packets carry the fixed stream id 0 (`kPhoneMixStream`,
+  `tools/webgate/protocol.h`; `MIX_STREAM` in `web/src/protocol.ts`), meaning
+  the phone's mix, whichever receiver leads or none. Engine receiver ids start
+  at 1. A new lead is the same stream. The encoder and sequence are reset when
+  audio is turned off, so every on starts at seq 0 against the decoder the
+  phone reset on off. A page cached from before this release filters Opus by
+  receiver id and would drop the mix; the service worker reloads the page on
+  update, so it does not outlive the upgrade. Keep
   listening has one playlist per session, `/hls/<id>/live.m3u8`; the `hls`
   event gives the id, and the URL stays the same when the listener moves to
   another receiver, so the player is not reloaded. An engine restart builds a
@@ -573,7 +601,7 @@ clamped, clampReason?, transcribe, transcribing, decoders}`.
 | `listSources` | none | `{sources}` |
 | `openSource` | `uri` | `{source}` |
 | `setView` | `centerHz`, `spanHz`, `widthPx` | `{centerHz, spanHz, widthPx}` |
-| `audio` | `vrx`, `on` | `{vrx, on}` |
+| `audio` | `on`, optional `vrx` (the lead) | `{vrx, on}`, or `{on}` with no `vrx` |
 | `keepListening` | `on` | `{on}` |
 | `setTranscription` | `on` | the speech state, as `transcriptionStatus` |
 | `setDetection` | `minConfidence`, 0 to below 1 | `{minConfidence}` |
