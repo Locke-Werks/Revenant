@@ -1,7 +1,7 @@
 import { chooseScreen, installScreenHtml, type StandaloneEnv } from "./install";
 import { gatewayReachable, offlineScreenHtml, type Probe } from "./offline";
 import { appScreenHtml, mountApp } from "./app";
-import { insetsToggle, isEditable, pinViewport, reloadIfShort, trackShortViewport, showInsets, wantsInsets } from "./insets";
+import { insetsToggle, isEditable, pinViewport, trackShortViewport, showInsets, wantsInsets } from "./insets";
 import { reloadOnUpdate } from "./sw_reload";
 
 export interface Host {
@@ -30,9 +30,9 @@ export async function render(host: Host): Promise<void> {
 }
 
 // Skipped under node, where the tests import this module without a page.
-// Before the socket, audio and the service worker: a reload here loses
-// nothing, and the shared guard keeps the worker from reloading as well.
-if (typeof document !== "undefined" && !reloadIfShort(window)) {
+// A launch reload (reloadIfShort) was tried for the short viewport and left
+// it 72.7 px short, so it is not called; --short-fix remains the fallback.
+if (typeof document !== "undefined") {
   if ("serviceWorker" in navigator) {
     let fingers = 0;
     const count = (ev: TouchEvent) => void (fingers = ev.touches.length);
