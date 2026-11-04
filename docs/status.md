@@ -4,8 +4,9 @@ M1 to M4 are done: v0.1.0, the first public release, shipped on
 2026-09-27, and the release page has every one since. M4, the rolling
 capture, was done on 2026-10-16: recording, retention, search and replay work
 from the command line and the client. M5, device support, is next.
-There are two things to run: a command line, and a Qt client that reaches a
-running engine over a socket.
+There are three things to run: a command line, a Qt client that reaches a
+running engine over a socket, and, since 0.4.0, a gateway that serves the same
+engine to an iPhone web app.
 
 ```
 revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20" \
@@ -81,11 +82,13 @@ runs both trees. The counts move with nearly every commit, so they are dated
 rather than kept current: on 2026-09-23 `ctest -N` listed 841 tests in the
 engine tree and 334 in `ui/`.
 
-Sixteen decoders run on a live receiver, in the engine, from
-`revenant-cli --decode` and over the wire through `Session.subscribeDecoded`:
-P25 Phase 1, D-STAR, TETRA, DMR and M17 on complex baseband, and RTTY, SITOR-B,
-NAVTEX, PSK31, PSK63, QPSK31, CW, AX.25 with APRS, POCSAG, AIS and VHF DSC on
-receiver audio. P25 Phase 1 reads the trunking control channel as well as
+Decoders run on a live receiver, in the engine, from
+`revenant-cli --decode` and over the wire through `Session.subscribeDecoded`.
+The registry in `core/rpc/decoders.h` lists every decoder; `docs/modes.md`
+says which modes are done and where each stops. The ones this page was first
+written about are P25 Phase 1, D-STAR, TETRA, DMR and M17 on complex baseband,
+and RTTY, SITOR-B, NAVTEX, PSK31, PSK63, QPSK31, CW, AX.25 with APRS, POCSAG,
+AIS and VHF DSC on receiver audio. P25 Phase 1 reads the trunking control channel as well as
 voice channels: a receiver on a control channel reports the site's grants,
 identifier updates and status broadcasts, with grant channels resolved to
 frequencies, and every voice LDU publishes its Link Control and encryption
@@ -135,13 +138,37 @@ nfm receivers it lost nothing; `docs/rpc.md`, "Speech to text", has those
 measurements and the one that costs, which is a GPU-bound engine's headroom,
 halved while Whisper runs flat out.
 
-A receiver belongs to the session that made it, and goes when that session
-ends unless it was added with `keep`, which is what a headless recorder asks
-for. `revenant-engine` listens on port 17690 by default, which is where
+The engine serves one user at a time, since 0.4.0. A client claims a lease on
+login; the desktop client, the phone and a script share one engine through it,
+and a second client is refused with who holds it and since when, unless it
+takes over, which ends the holder's use and leaves the receivers as they are.
+Every session of the holder sees and may change every receiver, whoever
+opened it. When the lease ends, receivers added without `keep` go with it, and
+`keep` is what a headless recorder asks for. `docs/rpc.md`, "One user at a
+time", has the rules. `revenant-engine` listens on port 17690 by default, which is where
 `revenant-ui` looks, and binds it exclusively. The engine also places probe
 receivers of its own on detections, to name a signal's family; they are
 internal, nothing on the wire can add or see one, and `docs/detection.md` has
 what they get right and wrong.
+
+The phone web app, since 0.4.0, runs through `revenant-webgate`, which sits
+between an iPhone and the engine ([webgate.md](webgate.md)). It draws the
+waterfall and spectrum in the desktop's colours, tunes and adds receivers by
+touch, lists detections and decoded text, shows RDS, runs the speech switch,
+and plays audio: the active receiver and every digital voice receiver mixed
+into one stream. It has a DV tab with Auto DV, trunk Follow and the call log,
+and screens for "in use by" and "taken over" when the lease moves. The gateway
+starts at sign-in by default, starts an engine when a phone connects and none
+is running, stops that engine once no phone holds it, and gives every engine
+call a deadline so a stalled engine cannot hang it. It has no authentication
+of its own and is for a trusted home network. Android is not supported. `docs/webgate.md`
+has its cost to the engine.
+
+Signal identification ranks what it probes: viewed, strong and new detections
+first with a starvation bound, identification dwells ahead of re-looks, and
+two finishing threads and a budget of two cores. Captions stay on the
+waterfall after their receiver goes. `docs/detection.md` says that the
+latency figures it records were taken before this schedule.
 
 The band can be stored. `--capture` on either tool writes everything the radio
 delivers to disk as SigMF segments in its own sample format, keeps a bounded

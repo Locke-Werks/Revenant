@@ -55,7 +55,7 @@ open, then `VRX_ADDED` for every existing receiver. After that, changes:
 | Event | Carries |
 | --- | --- |
 | `SOURCE_OPENED`, `SOURCE_CLOSED` | centre |
-| `SOURCE_RETUNED` | new centre, retune count, each receiver the retune removed and why |
+| `SOURCE_RETUNED` | new centre, epoch (the front-end retune count), each receiver the retune removed and why |
 | `VRX_ADDED`, `VRX_CHANGED` | receiver, owner, absolute centre, bandwidth, mode |
 | `VRX_REMOVED` | receiver, owner, reason |
 | `DECODED` | one decoded message: decoder, kind, samples, sequence, text, fields |
@@ -79,7 +79,10 @@ with their raw octets.
 - Retune the front end. Every receiver moves, and any that no longer fit are
   removed, exactly as when a client retunes.
 
-Receivers a plugin opened are removed when the engine stops it.
+Receivers a plugin opened are removed when the engine stops it. They are not
+tied to the single-user lease (`docs/rpc.md`, "One user at a time"): the lease
+ending leaves them, and a client holding the lease can see, tune and remove
+them, in which case the plugin hears `VRX_REMOVED`.
 
 ## Plugins in this tree
 

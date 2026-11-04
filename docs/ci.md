@@ -72,12 +72,12 @@ merging. A conformance result nobody can trust is worth less than one that is la
 | Job | Runner | What it does |
 | --- | --- | --- |
 | `guards` | `ubuntu-latest` | Greps for committed signing metadata, build timestamps, hardcoded credentials and vendored copyleft text, checks the version parses, runs `scripts/check_retired_claims.py`, checks every test target suppresses modal dialogs, and runs the self-tests of `generate_notices.py` and `corresponding_source.py`. Cheap, and it answers even when the workstation is off |
-| `build-and-test` | self-hosted | Configures and builds the `ci` preset, runs the full suite on the RTX 4090 |
+| `build-and-test` | self-hosted | Configures and builds the `ci` preset, which includes `revenant-webgate` and, because Node and npm are on the runner, the phone web app (`revenant_web`); runs the full suite on the RTX 4090, `test_webgate` and `test_webgate_twoprocess` among it. The web app's own `npm test` is not run anywhere in CI |
 | `headless` | self-hosted | Configures the `headless` preset, which fails if anything under `core/` reaches for Qt |
 | `ui` | self-hosted | Configures, builds and tests `ui/`, the Qt client, as its own CMake project |
 | `two-process` | self-hosted | Builds `tests/twoprocess`, a small client compiled `/MD` from `core/rpc/client.cpp`, and runs it in its own process against the `/MT` `revenant-engine.exe` that `build-and-test` staged: login, source list, spectrum frames and a receiver's audio across the two runtimes, and, as a second case since 2026-09-27, an engine started with `--no-source` that the client opens a source on, closes and opens again |
 | `package` | `windows-latest` | Forges an unsigned installer out of the two halves the jobs above upload, checks both carry their licence material, builds the corresponding-source archive, and keeps both as artifacts. Hosted, because forging needs no toolchain, and unreachable from a fork because the jobs it needs are |
-| `release` | `windows-latest` | On a `v*` tag only: checks the tag against the version, signs the payload, forges, signs the installer, and publishes it with the corresponding-source archive and the Qt and FFmpeg source archives. It has published every tag from v0.1.0 on 2026-09-27 to v0.1.6 on 2026-10-03. docs/packaging.md holds the order and why it is that order |
+| `release` | `windows-latest` | On a `v*` tag only: checks the tag against the version, signs the payload, forges, signs the installer, and publishes it with the corresponding-source archive and the Qt and FFmpeg source archives. It has published every tag from v0.1.0 on 2026-09-27 to v0.3.14 on 2026-11-02; the signing list is `revenant-engine.exe`, `revenant-rtl-serial.exe`, `revenant-webgate.exe` and `revenant-ui.exe`. docs/packaging.md holds the order and why it is that order |
 | `sweep` (nightly) | self-hosted | Disabled since 2026-10-02. Sweeps the reference BPSK detector against `tests/baselines/ber-vs-snr.json`, the RDS decoder against `tests/baselines/ber-vs-snr-rds.json`, and eighteen more decoder modes, each against its `tests/baselines/ber-vs-snr-<mode>.json`, failing on a regression in any |
 
 WHAT TWO ROWS OF THIS TABLE USED TO SAY. The `release` row ended "Has never run." It
@@ -132,6 +132,10 @@ ever been without the file is the one in the other CMake project, which is exact
 guard rooted in `tests/` would not look. The `guards` job runs it, and so does `ctest` as
 `modal_dialogs`, the same arrangement the retired-claims ratchet has.
 
+The script matches target names ending `_tests`, so `test_webgate` and
+`test_webgate_twoprocess` are outside it. Both list the file today; nothing checks that
+they keep doing so.
+
 `revenant_ui_tests` is exempt and named in the script. It opens no Vulkan context and holds
 no `abort()` path of its own, and adding the source belongs to `ui/CMakeLists.txt`. The
 point of naming it is that the gap is a decision written in the place that checks, rather
@@ -157,6 +161,9 @@ would turn a gate into a compile check, and the only sign would be a run that go
 Both `ctest` invocations in `ci.yml` carry the flag. It matters most in `ui`, which has
 exactly one test target, so the empty set there is one deleted `add_test` away, where
 the engine tree has nine `*_tests` targets on 2026-10-03.
+
+By 2026-11-03 the engine tree had fifteen `*_tests` targets under `tests/` plus the two
+webgate ones.
 
 WHAT THE LAST SENTENCE USED TO SAY: "one deleted `add_test` away rather than six". True
 on 2026-09-20; `revenant_characterise_tests` and `revenant_labelled_tests` made eight by
@@ -267,6 +274,9 @@ fade and stacking.
 
 ## The `ui` job, and why it is a job rather than a step
 
+The `ui` job's count on 2026-11-03 was 880 `TEST_CASE`s in 86 files, against the 141 in
+14 below.
+
 `ui/` is a second CMake project. Qt 6.8.3 is built against the dynamic CRT and the
 engine is built `/MT`, so one cache cannot hold both: the root `CMakeLists.txt` refuses
 `REVENANT_BUILD_UI` outright and the client configures on its own against the
@@ -341,10 +351,12 @@ not be on this list.** ... It needs a test file and one line in the target, noth
 more." It got both in "Pin either end of the span colour map, and test the scale
 arithmetic", two days after this section was written, and the paragraph stayed.
 
-**`models/engine_launcher.cpp`**, since 2026-09-27. Starting `revenant-engine.exe` in a
-Job object that ends it with the window, and reading its stderr. It talks to Windows,
-which is why it is its own file; the decision whether to start one is
-`models/engine_start.h`, and `tests/test_engine_start.cpp` covers that.
+**`core/launch/engine_launcher.cpp`**, since 2026-09-27 (it lived in `ui/models/` until
+the gateway began sharing it; forwarding headers remain there). Starting
+`revenant-engine.exe` in a Job object that ends it with the window, and reading its
+stderr. It talks to Windows, which is why it is its own file; the decision whether to
+start one is `core/launch/engine_start.h`, and `ui/tests/test_engine_start.cpp` covers
+that.
 
 **`models/engine_link.cpp`, `models/receiver_link.cpp`, `models/audio_link.cpp`,
 `models/transcribe_link.cpp`.** The RPC-facing state: connection lifecycle, reconnect,

@@ -94,6 +94,23 @@ ctest --preset vs
 That is what CI's `ui` job runs. docs/building.md has the prerequisites, Qt
 6.8.3 among them.
 
+The phone web app is under `web/`, TypeScript bundled by esbuild, and needs
+Node and npm. A CMake configure that finds them adds a target that runs
+`npm ci` and the bundle as part of building `revenant-webgate`; without them
+the target is skipped and the gateway has no pages to serve. If your change
+touches `web/`, run its tests from inside it:
+
+```
+npm ci
+npm test
+```
+
+That is `tsc --noEmit` and then `node test.mjs`. The C++ side of the gateway,
+`tools/webgate`, is covered by the cases under `tests/webgate`, which the
+presets above build and run. CI does not run `npm test`. A third-party file
+copied into `web/` rather than installed goes in `web/vendor/README.md` with
+its source and hashes, and its notice in `licenses/notices/`.
+
 If you have more than one supported Vulkan device, run the suite against each,
 by index:
 

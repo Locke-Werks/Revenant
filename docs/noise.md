@@ -21,10 +21,14 @@ wraps and across dispatch boundaries of awkward lengths for the two that
 carry state, and `tests/engine/test_engine_noise.cpp` is where every figure
 below comes from.
 
-One stage is not per receiver: the span-wide impulse excision runs on the
-whole capture ahead of the channelizer and is on by default. It has its own
-section, "Span-wide impulse excision", near the end, and the rest of this
-page up to it does not apply to it.
+A fourth per-receiver stage, the adaptive noise profile, runs on the host and
+has no kernel or twin; it has its own section after "Noise reduction".
+
+Two stages are not per receiver: the span-wide impulse excision and the
+span-wide comb cancellation run on the whole capture ahead of the channelizer
+and are on by default. The excision has its own section, "Span-wide impulse
+excision", near the end, the comb cancellation a short one after it, and the
+rest of this page up to them does not apply to either.
 
 ## What each stage is offered on
 
@@ -108,7 +112,9 @@ A second-order section with a zero pair and a pole pair on the notch's angle
 (Oppenheim and Schafer, chapter 5): the pole radius sets the width and the
 zero radius the depth, scaled to unit gain at whichever of DC and Nyquist is
 further from the notch. Depth in [3, 80] dB, default 40; width in [10, 2000]
-Hz, default 100.
+Hz, default 100. A receiver carries up to four of them (`kMaxNotches`, the
+`notches` list in `VrxParams`, entry 0 being the single notch's own fields), each
+with these ranges and each a section of the same kernel.
 
 Its frequency is signed hertz from the receiver's centre, in the same frame as
 the passband edges, so a display draws it where the interference is. The
@@ -206,6 +212,35 @@ person hears, `docs/rpc.md`, so none of them sees a level the AGC chose.
 
 WHAT THE LAST SENTENCE USED TO SAY: "That matters here because the engine has
 no AGC yet."
+
+## The adaptive noise profile
+
+`core/dsp/noise_profile.h`, `tests/reference/test_noise_profile.cpp`. Learns the
+steady part of a receiver's noise spectrum, hum, whine and birdies, and takes it
+out of the audio the listener hears. It runs on the host, on the completion
+thread, after the device audio stages and after the readback, so it is not on the
+GPU and has no twin. It is offered on the modes noise reduction is.
+
+Half-overlapped square-root Hann frames, a Wiener gain against the estimate
+floored at the strength, smoothed across frames and bins. Strength is the most
+reduction in dB, in [0, 20], default 12. The estimate comes from, in order: a
+"learn now" press (a second of power, frozen until reset), the running average of
+frames taken while the squelch is shut, and minimum statistics over two seconds
+when the squelch has never shut. `learnCount` and `resetCount` on the wire are
+press counters, so a retune that resends the params does not learn again. A
+retune drops the automatic estimate and keeps a learned one.
+
+## Span-wide comb cancellation
+
+`core/dsp/comb_cancel.h`, kernels `comb_project.comp` and `comb_subtract.comp`.
+Finds a comb of evenly spaced interference lines in the capture, from a switching
+supply or a clock, tracks its offset and spacing as they drift, and subtracts it
+from the device ring after the front-end correction and before the impulse
+excision. On by default; it cancels nothing until it has detected and locked to a
+comb. `EngineConfig::comb_cancel`, `setCombCancel` on the wire, `--no-comb` on
+revenant-cli. Spur cancelling (`EngineConfig::spur_cancel`, `setSpurCancel`) runs
+the same trackers on single unkeyed carriers the wideband detector names, never on
+a frequency an open receiver is tuned to. The header has the model and the figures.
 
 ## Measured
 

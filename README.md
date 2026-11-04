@@ -102,6 +102,20 @@ the Qt client instead, which the installer puts in the Start Menu.
 [docs/status.md](docs/status.md) has what works today, what does not, and what
 has been measured.
 
+## Phone and one user at a time
+
+`revenant-webgate` serves a web app that an iPhone installs to the home
+screen and uses as a remote control: waterfall, tuning, receivers, decoded
+text, detections and audio, with the engine doing all the work. It is for a
+home network you trust and has no sign-in of its own; read the security
+section of [docs/webgate.md](docs/webgate.md) before running it. Android is
+not supported.
+
+The engine serves one user at a time. The desktop client, the phone and any
+other client claim a lease on login; a second one is told who holds the
+engine and since when, and can take it over, which ends the first one's use.
+[docs/rpc.md](docs/rpc.md), "One user at a time", has the rules.
+
 ## Requirements
 
 Windows 11, x64.
@@ -136,7 +150,9 @@ bug reports it cannot answer.
 [release page](https://github.com/Locke-Werks/Revenant/releases). It installs
 for all users into `Program Files\Revenant`, so it asks for administrator
 rights, and adds a Start Menu entry for the client. Unattended, `/S`, with
-`/O:desktop_shortcut=on` for a desktop shortcut, which is off by default.
+`/O:desktop_shortcut=on` for a desktop shortcut, which is off by default. The
+phone gateway starts at every sign-in unless `/O:gateway_at_signin=off`; it
+starts no engine until a phone connects.
 
 The Start Menu entry opens the client, and the client starts the engine
 beside it when none is answering on port 17690. Pick your radio in the
@@ -177,6 +193,8 @@ Using it:
 - [docs/detection.md](docs/detection.md), wideband detection, click-to-tune and auto DV
 - [docs/noise.md](docs/noise.md), the impulse blanker, notches and noise reduction
 - [docs/calibration.md](docs/calibration.md), frequency correction, DC removal and I/Q correction
+- [docs/capture.md](docs/capture.md), rolling capture, search and replay
+- [docs/webgate.md](docs/webgate.md), the phone web app and its gateway
 - [docs/plugins.md](docs/plugins.md), engine plugins
 - [docs/ambe.md](docs/ambe.md), why DMR and D-STAR voice need a vocoder plugin
 - [docs/recordings.md](docs/recordings.md), the IQ recordings the engine reads

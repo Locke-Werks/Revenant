@@ -12,7 +12,7 @@ facts about this machine rather than about Qt.
 
 | | |
 | --- | --- |
-| `installer.toml` | The Forge config at the repository root. Product identity, install directory, preflights, the one option and the shortcuts |
+| `installer.toml` | The Forge config at the repository root. Product identity, install directory, preflights, the two options, the shortcuts, the sign-in entry and the two gateway-stop hooks |
 | `scripts/stage-payload.ps1` | Assembles the payload directory out of the two build trees, licence material included |
 | `scripts/generate_notices.py` | Writes each program's third-party notices from the tree that built it |
 | `scripts/corresponding_source.py` | Records which copyleft sources went into the engine, then fetches, checks and zips them. Also fetches and checks the Qt and FFmpeg source archives, and fails a payload holding a DLL none of them covers |
@@ -103,6 +103,17 @@ the payload: the engine downloads it, 1.6 GB, into
 on, and the installer neither fetches it nor removes it. `docs/clean-room.md`,
 "Speech to text, and the first model file", has the pin and the licence
 position.
+
+**The phone gateway, 2026-11-02, added three things to the engine half.**
+`scripts/stage-payload.ps1 -Only engine` now also stages
+`revenant-rtl-serial.exe`, `revenant-webgate.exe`, and the `web/` directory
+the gateway serves (`index.html`, `app.js`, `sw.js`, `manifest.webmanifest`
+and the rest of the bundle), taken from `build/ci/tools/webgate/`. The script
+fails when `web/` is not built, which is what happens to a tree configured
+without Node. `installer.toml` measures the extracted payload at 160.1 MB on
+2026-11-02 and sizes its free-space preflight from that. The table above and
+the counts under it are the earlier measurements and were not redone.
+`docs/webgate.md` says what the gateway is.
 
 ### The licence material
 
@@ -249,7 +260,9 @@ Machine scope, `{ProgramFiles}\Revenant`, elevation required. `installer.toml`
 carries the reasoning for each of these inline; the summary:
 
 - **Preflights.** Windows 11 by build number, 512 MB free on the install
-  volume, and neither `revenant-engine.exe` nor `revenant-ui.exe` running. A
+  volume, and neither `revenant-engine.exe` nor `revenant-ui.exe` running.
+  `revenant-webgate.exe` is deliberately not a preflight: it runs at every
+  sign-in, so the `pre_install` hook below stops it instead. A
   running copy refuses the install with exit 1603 and the person has to close
   it: `restart_manager = true` is set on both and Forge v0.4.0 does nothing
   with it, see the comment in `installer.toml`. The name matches any process
@@ -260,13 +273,29 @@ carries the reasoning for each of these inline; the summary:
   `vulkan-1.dll` and would genuinely fail without it, but the client is a
   remote user interface with every reason to be installed on a machine that
   will never open a GPU.
-- **Actions.** An Add/Remove Programs entry and a Start Menu shortcut to the
-  client. A desktop shortcut behind the one option, `desktop_shortcut`,
-  defaulted off and answerable unattended with `/O:desktop_shortcut=off`.
-- **No service, no file associations, no hooks.** The reasons are in
+- **Actions.** An Add/Remove Programs entry and Start Menu shortcuts to the
+  client and to "Revenant phone gateway". A desktop shortcut behind the option
+  `desktop_shortcut`, defaulted off and answerable unattended with
+  `/O:desktop_shortcut=off`. An `HKLM\...\Run` value, "Revenant phone
+  gateway", behind the option `gateway_at_signin`, defaulted on (the owner's
+  request of 2026-11-03), which starts `revenant-webgate.exe` at every user's
+  sign-in in that user's session. HKLM and not HKCU because the installer runs
+  elevated and HKCU would be the administrator's hive. The gateway starts no
+  engine until a phone connects (`docs/webgate.md`, "Cold start").
+- **Two hooks, both stopping the phone gateway.** `pre_install` and
+  `pre_uninstall` run `revenant-webgate.exe --stop` as the installer
+  (`as = "installer"`, `vital`, 30 s), which signals each running gateway on
+  the machine through its own stop event, waits 10 s and terminates stragglers,
+  so no image is held open while files are swapped or removed. `pre_install`
+  places that one binary first, so it loads nothing from the payload; it
+  depends on Windows DLLs only. Hook phases need Forge v0.4.0 or later.
+- **No firewall rule for the gateway.** Forge has no firewall action and a hook
+  can only run a payload member. The first start raises Windows' own prompt;
+  `docs/webgate.md` has the `netsh` line.
+- **No service, no file associations.** The reasons are in
   `installer.toml`. The short form: the engine holds a GPU and a radio, so it
   runs while somebody is using it rather than as a service, `.wav` belongs to
-  whatever already plays audio, and nothing in the install needs code to run.
+  whatever already plays audio, and nothing else in the install needs code to run.
   Since v0.1.1 the client starts the engine beside it when nothing answers on
   its port, with `--no-source`, ends it with the window, and reopens the last
   radio; `ui/models/engine_start.h` has the rules. An engine somebody started
@@ -298,8 +327,8 @@ carries the reasoning for each of these inline; the summary:
 - **No speech model.** Whisper's weights, 1.6 GB, are fetched by the engine
   on first use into `%LOCALAPPDATA%\Revenant\models` of whoever turned speech
   to text on, under their own token, and verified there. The installer does
-  not carry them and does not check for the space, and with no hooks an
-  uninstall does not reach them: they stay until somebody deletes the folder.
+  not carry them and does not check for the space, and an uninstall, whose
+  only hook stops the gateway, does not reach them: they stay until somebody deletes the folder.
 - **Nothing per-user.** The RPC token the client hands `Authenticator.login`
   lives at `%LOCALAPPDATA%\Revenant\rpc-token` and is created by the engine on
   first run under the invoking user's own token. An elevated installer writing
@@ -355,7 +384,10 @@ signing through a script. The action builds its own metadata on the runner. Do
 not commit the generated file; `guards` fails the build if it appears.
 
 The `release` job first ran on the v0.1.0 tag, 2026-09-27, and signed
-`revenant-engine.exe`, `revenant-ui.exe` and the installer. "Release
+`revenant-engine.exe`, `revenant-ui.exe` and the installer. It now signs
+`revenant-engine.exe`, `revenant-rtl-serial.exe`, `revenant-webgate.exe` and
+`revenant-ui.exe`, and the check after it expects exactly those four to be
+ours and every other binary to keep its publisher's signature. "Release
 readiness", "Owed, not blocking", has what was checked.
 
 This paragraph used to read "Nothing has been signed yet. The `release` job
@@ -532,7 +564,7 @@ under "Release readiness" below. This one was known before it.
 
 **Done, 2026-09-27: the first run of the `release` job**, on the v0.1.0 tag;
 "Owed, not blocking" below has the run. It has published every tag since, to
-v0.1.6, and each release page carries `Revenant-Setup.exe`,
+v0.3.14 on 2026-11-02, and each release page carries `Revenant-Setup.exe`,
 `Revenant-<version>-corresponding-source.zip`, the five Qt and FFmpeg archives
 and `SOURCES-client.txt`, checked on 2026-10-03 with `gh release view`.
 
@@ -612,7 +644,7 @@ pushed or published.
 | Icon in the installer | The same seven images, stamped by `lwforge` from `product.icon` |
 | Icon in the README | The header block points at `assets/revenant.ico`. The release badge was added with the install section on 2026-09-27, in the commit the first tag is made on; this row used to say "No release badge, which is right until there is a release" |
 | Uninstall | Install directory, Add/Remove Programs key and Start Menu shortcut gone. `PendingFileRenameOperations` 60 entries before and after. One file left, `%TEMP%\lwu847B.tmp.exe`, 489,872 bytes: the stub's copy that finishes the removal, which cannot schedule its own deletion without administrator rights. Forge documents it. An elevated machine-scope uninstall queues it for deletion at the next restart instead. Deleted by hand |
-| `FORGE_VERSION` | v0.4.1 in both jobs, moved from v0.4.0 after the second run below. `installer.toml` uses `[[options]]` and `when`, which need v0.3.0, and no hooks, so no key it carries is one either pin would drop |
+| `FORGE_VERSION` | v0.4.1 in both jobs, moved from v0.4.0 after the second run below. `installer.toml` uses `[[options]]` and `when`, which need v0.3.0, and no hooks, so no key it carries is one either pin would drop. Since 2026-11-02 it declares two hooks, whose phases v0.4.0 and v0.4.1 both know |
 | Hooks as the user | None declared, so there is nothing to mark `as = "user"`. Nothing in the install writes into a user profile: the RPC token is made by the engine on first run |
 | Release job | Now checks `installer.toml`'s version against `cmake/RevenantVersion.cmake`, which only the `package` job did and the `release` job does not wait for, and runs `--check-only` on the signed installer it publishes |
 

@@ -172,11 +172,16 @@ One kernel per file, under `core/shaders/`, named for what it does.
 
 Workgroup size is a specialization constant. Never hardcoded, never a `#define`
 patched at build time. One line, and it is the same line in every kernel under
-`core/shaders/`, eighteen of them by the end of 2026-09-23:
+`core/shaders/`, twenty-one of them at v0.4.0:
 
 ```glsl
 layout(local_size_x_id = 0) in;
 ```
+
+WHAT THAT SENTENCE USED TO SAY, AFTER THE ONE BELOW: "eighteen of them by the
+end of 2026-09-23". The comb canceller's `comb_project.comp` and
+`comb_subtract.comp`, and `spectrum_levels.comp`, made it twenty-one, all with
+the same line. Count the directory; the figure goes stale.
 
 WHAT THAT SENTENCE USED TO SAY, LAST: "seventeen of them by the end of
 2026-09-23".

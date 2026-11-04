@@ -286,7 +286,7 @@ its JavaScript descendants inherit the same defect.
 
 | Project | Licence, verified | Notes |
 | --- | --- | --- |
-| `greatscottgadgets/hackrf` (libhackrf) | GPL-2.0 (`COPYING` read) | Not read beyond the licence |
+| `greatscottgadgets/hackrf` (libhackrf) | GPL-2.0 (`COPYING` read). Corrected 2026-10-18: that file covers the firmware, tools and build files; `hackrf.c` and `hackrf.h` carry BSD-3-Clause notices (`docs/hackrf-provenance.md`) | Not read beyond the licence when this survey was done |
 | `airspy/airspyone_host` (libairspy, Airspy R2 and Mini) | **none.** No licence file in the repository; GitHub reports no licence; the README states "This file is part of AirSpy (based on HackRF project ...)" | Derived from a GPL-2.0 codebase with no licence of its own. Treat as GPL and unusable |
 | `airspy/airspyhf` (Airspy HF+) | **BSD-3-Clause** (`LICENSE.BSD`, confirmed via GitHub's licence API) | Genuinely permissive and genuinely readable. Covers the HF+ only |
 | `myriadrf/LimeSuite` | Apache-2.0 (`COPYING` read) | Covers LimeSDR |
@@ -377,7 +377,9 @@ has room for it without a change to the grammar.
 
 **HackRF One. No better than the RTL-SDR, and arguably worse.**
 
-- libhackrf is GPL-2.0, from `COPYING` at the repository root.
+- libhackrf is GPL-2.0, from `COPYING` at the repository root. (Corrected
+  2026-10-18: the two library sources are BSD-3-Clause, and the HackRF backend
+  has since been written against them; see `docs/hackrf-provenance.md`.)
 - The HackRF documentation at hackrf.readthedocs.io has no USB protocol
   reference. Its sections cover the hardware, firmware updates, software tools,
   gateware and Opera Cake. The wire protocol is not presented as documentation;

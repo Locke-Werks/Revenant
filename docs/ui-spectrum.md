@@ -46,10 +46,30 @@ words. On the first connection to that engine the window reopens the radio it
 last opened, `engine/lastSource` in `ui/models/settings.h`, a recording never
 counting. On a first run, or when the radio remembered is refused, the radio
 panel opens for the person to pick one. An engine somebody else started is
-never touched and its source is never changed. `ui/models/engine_start.h`
-has the rules with cases in `ui/tests/test_engine_start.cpp`, and
-`ui/models/engine_launcher.cpp` the part that talks to Windows. A development
-build of `ui/` has no engine beside it and waits for one as it always did.
+never touched and its source is never changed. The rules are in
+`core/launch/engine_start.h` and the command line in
+`core/launch/engine_command.h`, with cases in `ui/tests/test_engine_start.cpp`,
+and `core/launch/engine_launcher.cpp` is the part that talks to Windows. They
+moved out of `ui/` so `revenant-webgate` starts an engine by the same rules;
+`ui/models/engine_start.h` and `ui/models/engine_launcher.h` are thin headers
+that keep the client's names. A development build of `ui/` has no engine beside
+it and waits for one as it always did.
+
+**One user at a time.** The engine serves one user (`docs/superpowers/specs/2026-11-03-single-user-engine-design.md`), and the
+window claims its lease on every connection, with the holder text
+"Revenant desktop on <computer>". A claim the engine refuses, or a lease
+another client takes while the window is open, puts an opaque notice over the
+whole window and the receiver window: "Revenant is in use by <holder> since
+<time>" with "Take over" and "Quit", or "Taken over by <holder>" with "Take
+back" and "Quit". The notice takes every click and key, application shortcuts
+are off under it (`shortcut_live` in `ui/models/lease_gate.h`) and the command
+palette and burst window are closed when it appears. After a takeover the window
+does not log in again by itself; only the button does, once. The state machine
+is `ui/models/lease_gate.h` with cases in `ui/tests/test_lease_gate.cpp`, and
+`ui/qml/Main.qml` draws the notice. Liveness probes that time out under the
+gateway's RPC deadlines (`rpc::CallDeadline`) are counted, and three in a row
+count as the engine gone (`kProbeTimeoutsDown` in `ui/models/engine_link.cpp`);
+one is a stalled engine and costs the window nothing.
 
 **The radio panel** lists the radios and recordings to open, the calibration
 section under them (`docs/calibration.md`), and since 2026-10-02 a vocoders
@@ -333,6 +353,17 @@ WHAT THIS PARAGRAPH USED TO SAY, before 2026-10-02: "a rack of up to eight
 receivers", eight because the palette is eight colours. The owner lifted the
 limit for the automatic P25 receivers; above eight the colours repeat and the
 strip's number tells two of a colour apart.
+
+**Receivers opened elsewhere.** The rack also lists the receivers an engine
+plugin opened, such as the built-in trunk follower's voice calls, and those
+another session opened, the phone's among them, because the engine serves one
+user and they are this operator's. They are named for whoever opened them and
+are otherwise ordinary strips: they can be focused, tuned and removed. One
+leaves the rack when the engine removes it, focused or not. A removed one's
+slot and name are kept for 30 s so its late transcripts still land.
+`ui/models/adopted_receivers.h` has the rules (`rack_adopts`), with cases in
+`ui/tests/test_adopted_receivers.cpp`, and `ui/models/rack_link.cpp` applies
+them.
 
 **What a click does.** On the spectrum, the waterfall or the ruler:
 
@@ -2057,6 +2088,10 @@ ephemeral loopback port with a token file of its own, runs the client as a
 smoke run (no sound card, no settings written) that exits on its own, and
 stops the engine. Without `-Visible` it runs offscreen. `-NoReceiverWindow`
 leaves the receiver window closed, which is a control and not the load.
+`-Phone` also runs `revenant-webgate` against the same engine with a simulated
+phone connected (`-PhonePort`, default 27700). Since the single-user lease
+(2026-11-03) the simulated phone holds the engine and the client draws no
+frames, so `-Phone` no longer measures the client under phone load.
 
 Since the receivers dock in the main window by default, 2026-09-23, the
 script's full load pops them out with `--grab-receivers`, so it measures what

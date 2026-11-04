@@ -13,6 +13,7 @@ machine and what CI runs against.
 | LunarG Vulkan SDK | 1.4.350 | `VULKAN_SDK` must be set. `glslangValidator` and `spirv-val` come from here, and since 2026-10-03 the `glslc` that compiles ggml's shaders. |
 | vcpkg | at `C:\vcpkg` | `VCPKG_ROOT` must be set. Manifest mode, so dependencies come from `vcpkg.json`. |
 | Qt | 6.8.3, kit `msvc2022_64` | The `ui/` build only. The engine, the tools and the tests do not need it and must never find it. |
+| Node and npm | Node 22.23.1, npm 10.9.0 on the development machine | The phone web app, below. No minimum is declared (`web/package.json` has no `engines`). Without them everything else still configures and builds. |
 
 C++23, through `/std:c++latest`. `std::expected`, `std::format` and
 `std::print` are in use across the engine and the tools. `std::mdspan` is the
@@ -95,6 +96,36 @@ trainer registers (CheatHappens) and into the validation layer the Debug test
 fixture enables. Twenty runs with `DISABLE_CH_LAYER=1`, that layer's own off
 switch, crashed none. Release contexts enable no validation and the Release
 runs did not crash. `tests/transcribe/test_whisper.cpp` has the record.
+
+### The phone gateway and its web app
+
+`tools/webgate` builds `revenant-webgate`, the HTTPS and WebSocket front for
+the engine that docs/webgate.md describes. It is part of the main tree and the
+`/MT` triplet. Its dependencies are in `vcpkg.json`: `capnproto` with the
+`openssl` feature (kj-tls, and the certificate code uses the same OpenSSL) and
+`opus`. The AAC encoder for the HLS path is Windows' own Media Foundation
+(`MFPlat.dll`, delay-loaded, so a Windows N machine with no Media Foundation
+still starts the gateway and its `--stop`).
+
+The phone app in `web/` is TypeScript bundled by esbuild. The `revenant_web`
+target builds it as part of `ALL`, in three steps keyed on different inputs:
+`npm ci` when `web/package-lock.json` changes, `node build.mjs` into
+`build/<preset>/tools/webgate/web-dist` when anything under `web/src` or
+`web/static` changes, and a copy to `web/` beside `revenant-webgate.exe` on
+every build of the target. `web/dist` and `web/node_modules` are gitignored.
+
+**A tree configured without Node and npm on `PATH` builds a gateway with no
+phone app.** `tools/webgate/CMakeLists.txt` finds both at configure time and,
+when either is missing, skips the target with one STATUS line. The exe starts
+and serves 404s. `scripts/stage-payload.ps1` is where that fails loudly: it
+refuses to stage an engine half whose `web/` lacks `index.html`, `app.js`,
+`sw.js` or `manifest.webmanifest`. Install Node, reconfigure and build again;
+the first configure after that is the one that runs `npm ci`.
+
+`test_webgate` (label `webgate`) is in the `ci` suite and needs no radio.
+`test_webgate_twoprocess` runs the gateway against a real engine, each in its
+own process. The web app's own tests are `npm test` from `web/`
+(`tsc --noEmit`, then `node test.mjs`). Neither ctest nor `ci.yml` runs them.
 
 ## Presets
 
@@ -354,7 +385,10 @@ condition, because `ui/` builds into its own directory and the engine into
 `build\<preset>\tools\engined`, so a development client waits for an engine
 exactly as it did before. Start one yourself, or stage the payload with
 `scripts/stage-payload.ps1`, which puts the two side by side.
-`ui/models/engine_start.h` has the rules.
+`core/launch/engine_start.h` has the rules, and `core/launch/engine_launcher.cpp`
+the Job object that ends the engine with the window. They moved there so
+`revenant-webgate` starts an engine on the same rules when a phone connects;
+`ui/models/engine_start.h` and `engine_launcher.h` forward to them.
 
 The engine loads vocoder plugins from a folder named `vocoders` beside
 `revenant-engine.exe` when it starts, which in a build tree is
@@ -380,7 +414,8 @@ true until the presets were added on 2026-09-22.
 
 That is `revenant_ui_tests`: the pieces of the client lifted out of Qt types so
 they can be asserted without a window. On 2026-09-22 it was 141 cases in 14
-files, and docs/ci.md says what they cover. It links no Qt: the rule in `ui/CMakeLists.txt` is that
+files; on 2026-11-03, counting `TEST_CASE` in the files its source list names,
+880 in 86. docs/ci.md says what they cover. It links no Qt: the rule in `ui/CMakeLists.txt` is that
 anything pulled out for a test goes in a header or a `.cpp` with no Qt type in
 it, so a test target that started linking Qt would be the sign that rule had
 been broken. The target is skipped, with a message, when Catch2 is missing from
@@ -426,7 +461,8 @@ sentences somebody looking for a certificate needs.
 
 The `release` job in `.github/workflows/ci.yml` signs, on a `v*` tag, and has
 signed every release from v0.1.0 on 2026-09-27 on: `revenant-engine.exe`,
-`revenant-ui.exe` and the installer. `package` produces an unsigned development
+`revenant-rtl-serial.exe`, `revenant-webgate.exe`, `revenant-ui.exe` and the
+installer. `package` produces an unsigned development
 installer on every build. Nothing built locally is signed unless somebody signs
 it.
 

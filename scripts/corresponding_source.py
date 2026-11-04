@@ -44,7 +44,7 @@ libusb (LGPL-2.1-or-later), which vcpkg builds unpatched from the registry,
 and rtlsdr (GPL-2.0-or-later), built since 2026-09-23 from
 vcpkg-overlays/rtlsdr, which applies dependencies.diff, library-linkage.diff,
 tools.diff and Revenant's own cancel-waits-for-transfers.diff to
-osmocom/rtl-sdr at 797f814. The decision record lists libusb's source, the
+osmocom/rtl-sdr at 797f814, and codec2 (LGPL-2.1-only), linked statically. The decision record lists libusb's source, the
 patches and Revenant's own archive. This also carries rtlsdr's upstream
 source, because a patch is a set of changes to a base and without the base it
 is not the source of anything.

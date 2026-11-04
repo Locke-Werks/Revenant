@@ -209,7 +209,9 @@ the spectrum test file claimed `pfb_fft.comp` was clean at 1, 4 and 8
 workgroups and wrong in 3 of 12 runs at 16, 7 of 12 at 32 and 10 of 12 at 64.
 Raising `test_pfb.cpp`'s `kBlocks` from 8 to 64, with its output ring raised
 to match, gives **0 failures in 12 runs on the integrated device and 0 in 12
-on the discrete one**. That claim is withdrawn. It had been used to justify
+on the discrete one**. That claim is withdrawn. (At v0.4.0 `test_pfb.cpp` has
+`kBlocks = 8` and `kOutRingBlocks = 16`, and no commit in the history sets 64,
+so the figures here are the only record of that run.) It had been used to justify
 pinning the spectrum tests to an eight-channel grid, which is how a kernel
 went a day without any test dispatching the configuration the engine runs.
 

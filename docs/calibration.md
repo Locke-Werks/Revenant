@@ -74,6 +74,9 @@ should have read. The server drops the detector's tracks, which were placed
 against the old centre, and leaves the decoders alone. A retune afterwards asks
 for the corrected frequency.
 
+`setCalibration` waits on the GPU, so it carries the 15 s call deadline
+(`rpc::kGpuCallDeadline`); [rpc.md](rpc.md), "Call deadlines", has the table.
+
 ### Measuring it
 
 The picker's calibration section takes a carrier whose true frequency is known

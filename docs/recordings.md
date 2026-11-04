@@ -184,7 +184,7 @@ it builds is the interesting part.
 
 64 channels of a 96 kS/s stream with a 2048-point second stage is 65536 bins at
 **1.465 Hz**, against 36.6 Hz on the shipped VHF geometry. Nothing was
-reconfigured to get that: the default grid divided into a slow band gives HF
+reconfigured to get that: the 64-channel grid divided into a slow band gives HF
 resolution for free.
 
 **What it found**, 55 seconds of 40 m at 1359 UT, default thresholds:
@@ -327,7 +327,8 @@ station.
 ## Whole files, read natively
 
 All six, every sample, through `revenant-cli --detect` with default thresholds,
-the default 64-channel grid (1.465 Hz per bin) and `center=` as above, on the
+64 channels (1.465 Hz per bin; pass `--channels 64`, since the CLI's default is
+now the engine's choice below 30 MHz) and `center=` as above, on the
 RTX 4090 on 2026-09-22. Each file is 357,739,520 samples, 5458 frames and 5457
 decisions, and each took 298 to 366 seconds of wall clock, 10.2 to 12.5 times
 realtime.

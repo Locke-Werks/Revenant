@@ -247,7 +247,11 @@ claims the engine as "phone <address> via webgate" when it connects.
 The phone shows and controls every receiver the engine has, whoever opened it:
 the desktop before a takeover, an engine plugin, the trunk follower. Changing
 the centre frequency moves the one radio, and a receiver that falls outside the
-new span is removed with the reason shown.
+new span is removed. A receiver the engine removes (a span change, a trunk
+follower whose call ended, Auto DV housekeeping) raises no toast: its chip
+leaving the list is the notice. A receiver lost in an engine restart still
+gets one, with the reason. Captions already on the waterfall stay after their
+receiver goes and scroll off with their rows.
 
 ### Display follows the desktop
 
@@ -801,8 +805,7 @@ Waterfall and tuning
 9. Change mode to AM and the bandwidth: audio has at most a brief gap and the
    chip shows the new mode. Move squelch.
 10. Remove the receiver: the chip goes, audio stops, no toast. Retune the
-    centre so a receiver falls outside: a toast names the frequency and the
-    reason.
+    centre so a receiver falls outside: its chip goes, with no toast.
 11. Find radios and open one (allow up to 30 seconds); gain sliders and Auto
     appear for its stages.
 12. Landscape: waterfall full width, top bar and chips in the right rail,
@@ -851,7 +854,8 @@ Speech
     and Off. The choice survives a mode change.
 27. Key up on a tuned voice channel: a caption appears at the receiver's
     frequency on the rows of the transmission, scrolls down with them and
-    fades, and is gone when the rows leave the bottom.
+    fades, and is gone when the rows leave the bottom. Remove the receiver:
+    the caption stays and scrolls off with its rows.
 28. Pan and zoom: captions follow their frequency and clip at the edges.
     More than 20 transmissions: the oldest go first.
 29. The feed ("Decoded and spoken") lists the active receiver's lines newest

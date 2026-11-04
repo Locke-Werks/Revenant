@@ -20,8 +20,8 @@ stay on their author's machines owes nothing to anyone; the duty to offer
 corresponding source begins when a binary is handed to someone else. Binaries
 have been handed out since v0.1.0 on 2026-09-27, and every release page
 carries the corresponding source beside the installer:
-`Revenant-<version>-corresponding-source.zip` for Revenant, libusb and
-librtlsdr, and the Qt and FFmpeg source archives the client is built from,
+`Revenant-<version>-corresponding-source.zip` for Revenant and every GPL or LGPL
+library in the engine (libusb, librtlsdr and, since 2026-11-02, libcodec2), and the Qt and FFmpeg source archives the client is built from,
 listed in `SOURCES-client.txt`. The release obligations are in
 [docs/clean-room.md](clean-room.md).
 

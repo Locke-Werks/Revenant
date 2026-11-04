@@ -2160,7 +2160,10 @@ shipped 2.4 MS/s grid is 1.6 ms of GPU a second.
 
 On the host, `characterise()` runs on the pool's own worker thread: 12 to 17 ms
 an extract at 12000 S/s, 31 ms at 24000, 58 to 85 ms at 48000 and 6.7 ms on the
-3000 S/s HF grid. Across the bus a probe is eight bytes a sample, 96 KB/s at the
+3000 S/s HF grid. Those were measured on the single worker this pool had
+until 252a00d4; it now finishes probes on two threads (`ProbePoolConfig::threads`)
+under a 1.75 core budget, which "Which detection tier two looks at first"
+has. Across the bus a probe is eight bytes a sample, 96 KB/s at the
 floor bucket; `core/engine/engine.h` carries the amendment to its promise.
 
 **A probe counts stream samples and is placed on the wall clock.** The worker
@@ -2245,6 +2248,14 @@ SSB and BPSK, and 10.5 s for QPSK and OFDM. The spread is the queue: sixteen to
 twenty tracks are born within a decision of each other, the oldest-first order
 breaks the tie by id, ids run up in frequency, and a pool of four takes five
 rounds of two seconds to reach the top of the span.
+
+**These latencies were measured before the schedule changed.** The times above
+and the first-family columns below were taken with the oldest-first order and a
+pool of four on one thread, before 1c6ec2de (viewed, strong and new first, with
+a starvation bound), 87dc3209 (identification dwells ranked with the looks) and
+252a00d4 (two finishing threads, 1.75 cores). The queue arithmetic in the
+paragraph above no longer holds as written. "Which detection tier two looks at
+first" has first-label times after, on the labelled scene rather than this one.
 
 #### Real HF, through the 24-bit path
 
@@ -2376,6 +2387,12 @@ which rule refused each call, and whether the refused ones were real PSK is not
 known, because nothing in this corpus has ground truth. The first-family times
 moved by up to 2.1 s, and a probe is placed on the wall clock, so that column
 varies run to run as well as rule to rule.
+
+The first-family column here, and the lost-with-the-track counts quoted below,
+were measured before 1c6ec2de, 87dc3209 and 252a00d4 changed the order, the
+dwell ranking and the finishing threads. Both depend on when a probe is placed
+and how long it takes to finish, so they are likely to differ now and have not
+been re-run.
 
 With `--channels 64` the six runs reproduce the old 64-channel rows to within a
 run's variation, lost answers included: 9, 4, 6, 1, 19 and 17 came back after
@@ -2521,6 +2538,15 @@ whole rule, in this order:
 WHAT RULE 2 USED TO SAY about AM: "or AM when its sidebands mirror about
 it". "Voice" below has why that changed.
 
+**The refinement goes before all of that.** `label_track` takes the deepest
+confirmed node of `core/detect/refine.h` when it has one and falls back to the
+four rules above while nothing there is confirmed. Every probe is one more
+observation and each level of the tree keeps its own tally, so a wrong deeper
+guess falls back to its parent rather than sticking, and a hover can read
+"NFM > 4FSK > P25 > control?". `Detection.label` carries the levels as `path`,
+a list of `LabelStep` (name, confidence, confirmed). The rules above are what
+names a track on the first probe.
+
 **USB and LSB come from the side, not from a family.** No family the
 characteriser names is single sideband. It reads a talker on a suppressed
 carrier and which side of it the talker sits, from the probe's extract, and
@@ -2617,6 +2643,9 @@ channels, with identification running:
 | 20 m 1359 | 10 | 5 | 1 | none | 4.10 s |
 | 20 m 1501 | 33 | 35 | 1 | CW 2 | 7.55 s |
 | 20 m 1603 | 59 | 72 | 6 | CW 10, PSK31 2 | 4.91 s |
+
+The "first family" and "lost with the track" columns are as measured before
+1c6ec2de, 87dc3209 and 252a00d4 (the schedule and the finishing threads).
 
 **None of these is known to be right.** The recordings carry no ground truth,
 and if the centre is where `docs/recordings.md` assumes, 20 m here is 14127 to
@@ -2797,6 +2826,11 @@ pool of four was spent on the voice fragments.
 | lsb | 10 dB | none / none | 1, 1 / 1, 1 | 1 / 1 | never / never | never / never |
 | cw | 10 dB | CW 0.90 / CW 0.95 | 1, 1 / 1, 1 | 1 / 1 | 6.0 s / 6.0 s | never / never |
 | bpsk | 10 dB | BPSK 0.96 / BPSK 0.97 | 1, 1 / 1, 1 | 1 / 1 | 6.1 s / 6.1 s | never / never |
+
+The first-label times in this table, and in the two re-runs after it, were
+measured on a pool of four with the oldest-first order, before 1c6ec2de, 87dc3209
+and 252a00d4, and have not been re-run. The times may differ now; the wrong
+and right labels were not shown to depend on the order.
 
 **No wrong label on any of the 56 emitter runs.** AM reads AM on every track
 it puts up, from 3.5 to 5.2 s, at every level. NFM at both deviations reads

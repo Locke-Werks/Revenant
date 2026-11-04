@@ -139,9 +139,8 @@ They are separate CMake projects, not one project with an option.
 `REVENANT_BUILD_UI` exists in the root `CMakeLists.txt` and fails the configure
 outright; it is not the switch for building `ui/` out of the main tree, because
 the main tree's cache holds the static triplet and the wrong runtime library.
-The refusal is still right and its wording is now stale: it says there is no UI
-yet, and there is. `ui/` configures and builds from its own presets, which is
-what the message should point at.
+The refusal says so and points at `cmake --preset vs` from inside `ui/` and at
+`docs/building.md`.
 
 `core/rpc/CMakeLists.txt` splits the wire into two static libraries for the
 same reason:
@@ -843,7 +842,8 @@ through it by the end of 2026-09-23, each one adapter and one registry row in
 WHAT THE SENTENCE BEFORE THAT USED TO SAY: "Thirteen decoders report through
 it as of 2026-09-22"; `dmr` is the fourteenth. And after that: "Fourteen
 decoders report through it as of 2026-09-23"; `ais` and `dsc` are the
-fifteenth and sixteenth, the same day.
+fifteenth and sixteenth, the same day. The registry has grown well past that
+since, and the tables below are its current contents.
 
 | Name | What comes out | What it needs from its receiver |
 | --- | --- | --- |
@@ -1023,7 +1023,8 @@ per decoder, so two subscribers see the same numbers.
 
 **`ended()` says why a stream stopped**, on `AudioReceiver::ended`'s argument
 that a stream which simply stops looks like a quiet channel: the receiver was
-removed, by anybody or by its session ending; the decoder refused what the
+removed, by anybody or by the lease ending (a receiver went with its session
+before 2026-11-03); the decoder refused what the
 receiver delivered, which is terminal for that decoder on that receiver; or a
 `message()` call failed.
 
@@ -1949,7 +1950,8 @@ hears is the voice stream running dry, four to six times in 30 s for 82 to
 - Every thread has a class, `core/thread_role.h`. Listening, above normal: the
   source's delivery threads, the pool workers that copy its blocks, the
   completion thread and the decode lanes. Display, normal: this loop. Signal
-  identification, below normal: the sigid lane and the probe worker.
+  identification, below normal: the sigid lane and the probe pool's finishing
+  threads.
 - The decoders, the P25 voice stream and RDS run on two decode lanes,
   `core/rpc/decode_lane.h`, fed by sinks that copy the chunk and return. A
   receiver's own audio, a copy into a queue, stays on the completion thread.
@@ -2280,11 +2282,14 @@ Client says `still queued after N s behind another call the engine has not
 answered`.
 
 The desktop uses the same Client and so the same deadlines; nothing under
-`ui/` opens a scope.
+`ui/` opens a scope. The gateway's `tools/webgate/phone_hub.cpp` does, and
+`tools/webgate/dispatch.h` lists the phone commands whose engine calls may take
+up to `rpc::kSlowCallDeadline`, which run off the gateway's event loop.
 
 TimedOut is not Disconnected. The connection may be fine and the engine busy,
 so a poll skips a turn, and a supervisor decides how many in a row mean gone
-(the webgate's liveness probe takes three). The category is raised by the
+(the liveness probe takes three, `kProbeTimeoutsDown`, in both
+`tools/webgate/engine_link.h` and `ui/models/engine_link.cpp`). The category is raised by the
 client alone and never crosses the wire.
 
 Tested by `tests/rpc/test_rpc_deadline.cpp` and
@@ -2342,8 +2347,9 @@ its own and not only as the total `framesDropped` rolls up.
 ## Logging in
 
 A connection holds an `Authenticator` and nothing else until it has passed the
-engine's token. `Authenticator` has one method, `login(token :Data) ->
-(session :Session)`, and no radio on it at all, so there is no `Session` in an
+engine's token. `Authenticator` has one method, `login(token :Data, holder
+:Text, mode :LoginMode) -> (session :Session)` (the last two are the lease's,
+below), and no radio on it at all, so there is no `Session` in an
 unauthenticated caller's capability table to refuse. That is the difference
 between "a Session that says no" and "no Session", and it is why this is a
 bootstrap interface rather than a check at the top of every method: a check has
@@ -2404,7 +2410,10 @@ account, needs none of them.
 
 In C++, `core/rpc/token.h` is both halves of the file format in one translation
 unit, compiled into `revenant_rpc_client` so the Qt process gets it too.
-`Client::connect(address, port, token)` takes exactly 32 bytes.
+`Client::connect(address, port, token, mode, holder)` takes exactly 32 bytes
+of token; the last two default to claim and empty. `rpc::write_private_file`
+in the same header applies the token file's owner-and-SYSTEM ACL at creation to
+any other secret, which is how the gateway's TLS private keys are written.
 `ServerOptions::token` takes the same, and **empty is a `create()` failure
 rather than "no authentication"**: an off switch is the thing that ends up on
 by accident, so there is not one.
@@ -2523,7 +2532,9 @@ and `mode :LoginMode`:
   of the old holder is sent `VrxEventReceiver.leaseLost(newHolder)`, then the
   old holder's connections are closed, after the notices are answered or two
   seconds, whichever is first. In between, its sessions are refused every
-  call. The receivers stay: the new holder inherits the radio as it is.
+  call except `leaseStatus`, with "the engine was taken over by <holder>, and
+  this session no longer holds it". The receivers stay: the new holder inherits
+  the radio as it is. On the client, `Client::on_lease_lost` delivers the notice.
 - `observe` takes nothing. The session may call `info`, `listSources` and
   `leaseStatus`; every other call is refused with "observing only". For
   probes and an idle gateway.
@@ -2911,8 +2922,9 @@ window, crash included, and then reopens the radio opened last or, on a first
 run or a refused reopen, shows the radio panel. An engine somebody started
 themselves is never touched: nothing is started while anything answers on the
 port, and no radio is reopened on an engine the window did not start.
-`ui/models/engine_start.h` has the rules and `ui/models/engine_launcher.cpp`
-the process. `ServerOptions::port` in the
+`core/launch/engine_start.h` has the rules and `core/launch/engine_launcher.cpp`
+the process; they live in `core/launch` so the phone gateway shares them, and
+`ui/models/engine_start.h` and `ui/models/engine_launcher.h` forward to them. `ServerOptions::port` in the
 library stays at zero, which is what the suite needs.
 
 The bind is exclusive, and kj's own `listen()` is not. kj sets `SO_REUSEADDR`,

@@ -121,7 +121,7 @@ window's occupancy over that band, dimmer where nothing was captured. A
 double click replays a hit, and "back to the radio" opens the radio picker. A
 replay is not itself recorded. The session calls behind it,
 `captureCatalog`, `captureSearch` and `captureOccupancy`, are in
-[rpc.md](rpc.md).
+[rpc.md](rpc.md), and each has a 60 s call deadline (`rpc::kSlowCallDeadline`).
 
 ## Limits
 

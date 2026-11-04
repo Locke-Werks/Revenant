@@ -98,6 +98,11 @@ EXTRA_NOTICES = {
     "pthreads": ("3.0.0", "licenses/notices/pthreads4w-3.0.0-NOTICE.txt"),
 }
 
+# Third-party files vendored into web/ (web/vendor/README.md records each).
+WEB_VENDOR_NOTICES = [
+    "licenses/notices/opus-decoder-0.7.12-NOTICE.txt",
+]
+
 # The source archives of the Qt modules and the FFmpeg release the client
 # payload conveys, with the payload files each one covers. The Qt modules whose
 # attributions the notices carry are read from it rather than listed twice, so
@@ -353,6 +358,12 @@ def render_engine(vcpkg: Path, version: str) -> str:
 
     parts.append(heading("Components and their licences"))
     parts.extend(render_port(p) for p in ports)
+
+    # Not a vcpkg port, so no copyright file reaches it: the phone app's files
+    # ship in web/ beside the gateway and carry their notice from here.
+    parts.append(heading("Files the phone app serves (web/, served by revenant-webgate.exe)"))
+    for relative in WEB_VENDOR_NOTICES:
+        parts.append(f"{THIN}\n{(REPO / relative).read_text(encoding='utf-8').strip(chr(10))}")
 
     parts.append(heading("Not in this program"))
     lines = [

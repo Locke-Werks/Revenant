@@ -64,7 +64,7 @@ where it is the only practical path to a capability. Not permitted as the
 quicker of two routes that both work. Every instance gets a row in the table
 below naming the library, its licence, what it is used for, and why the
 clean-room path was rejected, with a pointer to the evidence for that rejection.
-One row today.
+Two rows today.
 
 **Do not launder.** Reading a GPL library and then reimplementing it in a file
 presented as original is now legally unnecessary and it is still forbidden here.
@@ -91,7 +91,11 @@ that patch is libcodec2's expression, modified, and stays under its licence,
 in the same position as the librtlsdr patch below. Revenant uses only the
 public `codec2.h` interface and queries frame sizes at run time; no libcodec2
 source was read for the wrapper. A release owes the licence notice beside
-librtlsdr's.
+librtlsdr's. It is also a static LGPL link, so it takes libusb's route:
+`scripts/corresponding_source.py` selects every installed port whose declared
+licence is GPL or LGPL, and the port declares `LGPL-2.1-only`, so its source
+and the overlay's patch travel in the corresponding-source archive without a
+change to the script.
 
 The short form of that finding, so this table can be read without opening the
 other document. The Realtek RTL2832U datasheet, Rev 1.4, specifies the transport
@@ -140,10 +144,13 @@ than they should. State why the clean-room path fails, in a document under
 not a permission slip written after the fact.
 
 **A GPL-2.0-only library still cannot be linked.** Moving to GPL-3.0 did not
-open the copyleft ecosystem generally. libhackrf is recorded below as GPL-2.0
-from its `COPYING` file, and if a HackRF backend is ever wanted the per-file
-grant has to be read first: 2.0-only against a GPL-3.0 work is incompatible in
-both directions, and no amount of care in the wrapper fixes it.
+open the copyleft ecosystem generally. libhackrf was recorded below as GPL-2.0
+from its `COPYING` file, and the per-file grant had to be read before a HackRF
+backend could be written: 2.0-only against a GPL-3.0 work is incompatible in
+both directions, and no amount of care in the wrapper fixes it. Reading it
+found that the two files the backend compiles are BSD-3-Clause, so the HackRF
+backend links a permissive library and is not a row in the table above;
+`docs/hackrf-provenance.md` has the reading.
 
 ## What this does not license
 
@@ -692,6 +699,36 @@ backend builds against the same LunarG SDK and imports the same
 `vulkan-1.dll` as the engine, so no Vulkan loader arrives from vcpkg. The
 model file is not a port and not in the binary; "Speech to text, and the
 first model file" above has its position.
+
+**Added on 2026-11-02, for the phone gateway.** Read from the installed
+`vcpkg.spdx.json` of the `ci` build tree. Only `revenant-webgate.exe` links
+them, through `tools/webgate/CMakeLists.txt`; the engine does not.
+
+| Port | Version | Licence, as the port declares it | In the binary | What it asks of a binary release |
+| --- | --- | --- | --- | --- |
+| opus (libopus) | 1.5.2 | BSD-3-Clause | yes, static, in the gateway | the copyright notice, the conditions and the disclaimer |
+| openssl | 3.6.1 | Apache-2.0 | yes, static, in the gateway, pulled in by the `openssl` feature of capnproto that `vcpkg.json` now requests for `kj-tls` | section 4: the licence, the notices, and upstream's `NOTICE` file if it has one |
+
+OpenSSL 3 is Apache-2.0, which the section above has already found compatible
+with GPL-3.0 and not with GPL-2.0-only, so it adds no case that the pthreads4w
+finding did not. `scripts/generate_notices.py` reads every installed port, so
+both reach `THIRD-PARTY-NOTICES-engine.txt` with no change to it. It has no
+`EXTRA_NOTICES` entry for openssl: whether upstream ships a `NOTICE` file that
+vcpkg's `copyright` does not carry was not checked. capnproto and zlib are
+unchanged. codec2 (above) is the other port added since v0.3.14.
+
+**Not ports, and not from vcpkg.** `web/static/vendor/opus-decoder.min.js` is
+`opus-decoder` 0.7.12, MIT, with libopus (BSD-3-Clause) and puff (Zlib)
+compiled into its WebAssembly. It is a file copied unmodified from the npm
+tarball and not a dependency: `web/vendor/README.md` has the URL and both
+SHA-256 hashes, and `licenses/notices/opus-decoder-0.7.12-NOTICE.txt` has the
+notice. Nothing in `scripts/` references that notice file yet, so it does not
+reach a notices file the way pthreads4w's does. It sits under `web/`, which the
+CI guard on copyright lines does not scan (that guard covers `core/`, `tools/`
+and `ui/`), so the vendored file's own copyright is not caught by it. `web/package.json` lists `esbuild`
+and `typescript` as `devDependencies`: they bundle and type-check the web app
+on the build machine, MIT and Apache-2.0, and no npm package reaches the
+shipped page.
 
 **Qt, which the engine does not link and the UI does.** `ui/` is a separate
 CMake project against the dynamic triplet, requiring Qt6 6.8 or newer, and it
