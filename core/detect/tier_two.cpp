@@ -27,7 +27,7 @@ struct Rank {
     int starved = 1;  // 0 when starved, so it sorts first
     int refine = 0;
     int unviewed = 0;
-    int probed = 0;
+    int probed = 0;  // 0 never probed, 1 a first identification dwell, 2 a re-look
     double weakness = 0.0;  // minus the SNR, so the strongest sorts first
     dsp::SampleIndex key = 0;
     std::uint64_t id = 0;
@@ -253,7 +253,7 @@ namespace {
             continue;
         }
         eligible.push_back(
-            ranked(0, 1, track, tried->second, tried->second + reprobe_samples));
+            ranked(0, 2, track, tried->second, tried->second + reprobe_samples));
     }
     return eligible;
 }
@@ -600,6 +600,7 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
         Rank rank;
         std::uint64_t tag = 0;
         const LineGroup* group = nullptr;
+        bool identify = false;
     };
     std::vector<Unit> units;
     for (const Rank& rank : rank_tracks(alone, attempts_, in_flight_, now, config_.source_rate,
@@ -635,30 +636,30 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
             const bool fresh = tried == group_attempts_.end();
             const dsp::SampleIndex key = fresh ? group.formed : tried->second;
             units.push_back(Unit{
-                .rank = rank_of(0, fresh ? 0 : 1, in_view(viewed_, group.low_edge, group.high_edge),
+                .rank = rank_of(0, fresh ? 0 : 2, in_view(viewed_, group.low_edge, group.high_edge),
                                 anchor->snr_2500_db, key, fresh ? key : key + reprobe_samples, now,
                                 starve_samples, group.anchor),
                 .tag = group.anchor,
                 .group = &group});
         }
     }
-    std::sort(units.begin(), units.end(),
-              [](const Unit& a, const Unit& b) { return a.rank < b.rank; });
-    if (units.size() > free) {
-        units.resize(free);
-    }
-
-    // What the pool has left after the classification schedule goes to the
-    // identification one: a narrow track's long dwells, up to
-    // kIdentifyDwells. See pick_identify.
+    // THE IDENTIFICATION DWELLS, ranked with everything above rather than
+    // given what it leaves. A narrow track that has been characterised and
+    // not yet verified is owed a long dwell, and its first one ranks behind
+    // the never-probed tracks and emitters and ahead of every re-look; a
+    // retry ranks with the re-looks. Not level with the never-probed: an AM
+    // talker's carrier line, strong and narrow, then took its dwell before its
+    // emitter's first probe, verified the syllables as Morse, and read CW on
+    // seed 2 of the labelled scene. WHAT THIS USED TO
+    // DO: run only on the pool left over after the classification schedule.
+    // Once that schedule put strong tracks first, its re-looks of strong
+    // tracks kept a pool of four full and RTTY on seed 2 of the labelled
+    // scene never had its framing verified in 30 s (2026-11-03).
     std::erase_if(identify_dwells_, gone);
     std::vector<std::uint64_t> identifying;
     std::vector<const LineGroup*> identifying_groups;
-    if (units.size() < free) {
-        std::vector<std::uint64_t> chosen;
-        for (const Unit& unit : units) {
-            chosen.push_back(unit.tag);
-        }
+    {
+        const std::vector<std::uint64_t> chosen;
         // Not a line an emitter's answer reached, and not one called AM: the
         // long dwell is for the narrow data modes, and a talker's syllables
         // key a carrier the way Morse does. In the voice survey a sideband
@@ -671,8 +672,7 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
                 narrow.push_back(track);
             }
         }
-        identifying =
-            pick_identify(narrow, identify_dwells_, in_flight_, chosen, free - units.size());
+        identifying = pick_identify(narrow, identify_dwells_, in_flight_, chosen, narrow.size());
 
         // A narrow emitter gets the same long dwells once its first emitter
         // probe has answered and named no protocol: RTTY's two tones read as
@@ -708,15 +708,72 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
                 owed.emplace_back(count, &group);
             }
         }
-        std::stable_sort(owed.begin(), owed.end(),
-                         [](const auto& a, const auto& b) { return a.first < b.first; });
         for (const auto& entry : owed) {
-            if (units.size() + identifying.size() + identifying_groups.size() >= free) {
-                break;
-            }
             identifying_groups.push_back(entry.second);
         }
     }
+
+    // One ranked list. A dwell replaces the same track's or emitter's
+    // classification re-look, since the long dwell characterises as well.
+    {
+        const auto snr_of = [&](std::uint64_t id) {
+            const auto found = std::find_if(tracks.begin(), tracks.end(),
+                                            [id](const Track& t) { return t.id == id; });
+            return found == tracks.end() ? 0.0 : found->snr_2500_db;
+        };
+        const auto born_of = [&](std::uint64_t id) {
+            const auto found = std::find_if(tracks.begin(), tracks.end(),
+                                            [id](const Track& t) { return t.id == id; });
+            return found == tracks.end() ? now : found->first_seen;
+        };
+        for (const std::uint64_t id : identifying) {
+            std::erase_if(units, [id](const Unit& unit) { return unit.tag == id; });
+            const auto given = identify_dwells_.find(id);
+            const bool retry = given != identify_dwells_.end() && given->second > 0;
+            const auto found = std::find_if(tracks.begin(), tracks.end(),
+                                            [id](const Track& t) { return t.id == id; });
+            const dsp::Hertz half = found == tracks.end() ? 0 : found->bandwidth / 2;
+            const dsp::Hertz center = found == tracks.end() ? 0 : found->center;
+            // A dwell never starves: it is owed only a bounded number of times.
+            units.push_back(Unit{.rank = rank_of(0, retry ? 2 : 1,
+                                                 in_view(viewed_, center - half, center + half),
+                                                 snr_of(id), born_of(id), now, now,
+                                                 starve_samples, id),
+                                 .tag = id,
+                                 .identify = true});
+        }
+        for (const LineGroup* group : identifying_groups) {
+            std::erase_if(units, [&](const Unit& unit) { return unit.tag == group->anchor; });
+            const auto given = group_identify_dwells_.find(group->id);
+            const bool retry = given != group_identify_dwells_.end() && given->second > 0;
+            units.push_back(
+                Unit{.rank = rank_of(0, retry ? 2 : 1,
+                                     in_view(viewed_, group->low_edge, group->high_edge),
+                                     snr_of(group->anchor), group->formed, now, now,
+                                     starve_samples, group->anchor),
+                     .tag = group->anchor,
+                     .group = group,
+                     .identify = true});
+        }
+    }
+    std::sort(units.begin(), units.end(),
+              [](const Unit& a, const Unit& b) { return a.rank < b.rank; });
+    if (units.size() > free) {
+        units.resize(free);
+    }
+    identifying.clear();
+    identifying_groups.clear();
+    std::erase_if(units, [&](const Unit& unit) {
+        if (!unit.identify) {
+            return false;
+        }
+        if (unit.group != nullptr) {
+            identifying_groups.push_back(unit.group);
+        } else {
+            identifying.push_back(unit.tag);
+        }
+        return true;
+    });
     if (units.empty() && identifying.empty() && identifying_groups.empty()) {
         return {};
     }
