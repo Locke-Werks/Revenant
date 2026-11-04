@@ -4,6 +4,7 @@ import {
   CaptionLayer,
   captionFromEvent,
   CaptionStore,
+  DETACHED,
   MAX_CAPTIONS,
   MAX_CAPTION_CHARS,
   placeCaption,
@@ -208,13 +209,16 @@ test("the store remaps receiver ids in one step, so a swap holds", () => {
   assert.deepEqual(store.list().map((c) => c.vrx), [2, 9]);
 });
 
-test("the store drops a receiver captions", () => {
+test("a removed receiver's captions stay, detached from its id", () => {
   const store = new CaptionStore();
   add(store, 1, 0);
   add(store, 2, 1);
   add(store, 1, 2);
-  store.dropReceiver(1);
-  assert.deepEqual(store.list().map((c) => c.vrx), [2]);
+  store.detachReceiver(1);
+  assert.deepEqual(store.list().map((c) => c.vrx), [DETACHED, 2, DETACHED]);
+  // A restart remapping the old id 1 does not carry them to a new receiver.
+  store.remap([{ old: 1, new: 5 }]);
+  assert.deepEqual(store.list().map((c) => c.vrx), [DETACHED, 2, DETACHED]);
 });
 
 test("the store can drop one caption or all of them", () => {

@@ -295,6 +295,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     toast,
     audioNote: (text) => notes.set("audio", text),
     tuneRanges: () => radio.tuneRanges(),
+    quietRemovals: () => dvState.follow !== null,
   });
 
   sheet = new Sheet({
@@ -483,7 +484,7 @@ export function mountApp(root: HTMLElement): AppHandle {
     for (const p of pairs) rds.drop(p.old);
   });
   receivers.onGone((vrx) => {
-    captionStore.dropReceiver(vrx);
+    captionStore.detachReceiver(vrx);
     feedModel.dropReceiver(vrx);
     rds.drop(vrx);
   });

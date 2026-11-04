@@ -93,6 +93,9 @@ export interface Caption {
 
 export type NewCaption = Omit<Caption, "id">;
 
+// The vrx of a caption whose receiver is gone.
+export const DETACHED = -1;
+
 // The transcript event as a caption, or null when it lacks what pinning needs.
 export function captionFromEvent(e: GatewayEvent): NewCaption | null {
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -129,8 +132,13 @@ export class CaptionStore {
     this.items = [];
   }
 
-  dropReceiver(vrx: number): void {
-    this.items = this.items.filter((c) => c.vrx !== vrx);
+  // A caption is pinned to where and when the speech was heard, not to its
+  // receiver, so it outlives the receiver and scrolls off with its rows. A
+  // trunk follower is removed the moment its call ends, which is exactly when
+  // its last caption arrives. The id is cleared so a later receiver reusing
+  // it, or a remap, cannot claim the caption.
+  detachReceiver(vrx: number): void {
+    this.items = this.items.map((c) => (c.vrx === vrx ? { ...c, vrx: DETACHED } : c));
   }
 
   // Old ids to new, as one step, the way ReceiverList.remap does it.
