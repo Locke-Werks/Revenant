@@ -827,8 +827,16 @@ void PhoneHub::rebuilt(const std::string& token, Expected<std::unique_ptr<rpc::C
         return;
     }
     resident->rebuilding = false;
+    // A rebuilt session is connected, whatever the gateway's own link says:
+    // the claim can land on the new engine before the link probe sees it, and
+    // the phone only reads recreated and lost on an Up.
     JsonObject fields;
-    fields.add_string("state", state_name(link_state_)).add_string("detail", link_detail_);
+    if (client && link_state_ != LinkState::Up) {
+        fields.add_string("state", state_name(LinkState::Up))
+            .add_string("detail", "connected to the engine");
+    } else {
+        fields.add_string("state", state_name(link_state_)).add_string("detail", link_detail_);
+    }
     const bool owed = std::exchange(resident->link_owed, false);
     if (rebuild_on(*resident, fields, std::move(client))) {
         resident->last_probe = now();
