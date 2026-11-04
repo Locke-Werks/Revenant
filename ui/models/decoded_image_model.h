@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <set>
 
 #include <QAbstractListModel>
 #include <QByteArray>
@@ -28,6 +29,7 @@
 #include <QObject>
 #include <QQuickImageProvider>
 #include <QString>
+#include <QTimer>
 #include <QUrl>
 #include <QVariant>
 #include <QVariantMap>
@@ -108,6 +110,17 @@ signals:
 
 private:
     void shelve(const DecodedImage& image);
+
+    // Shelves every image a row has touched since the last flush and tells
+    // the views. Rows are coalesced because shelving copies the whole
+    // picture and each view reloads it, so doing it per row made the cost of
+    // a line grow with the image's height and stalled the GUI thread.
+    void flush();
+
+    // Indices into store_ with rows not yet shelved. Flushed before any
+    // change that moves indices.
+    std::set<std::size_t> dirty_;
+    QTimer flush_timer_;
 
     DecodedImageStore store_;
     qulonglong revision_ = 0;

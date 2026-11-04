@@ -97,6 +97,8 @@
 #include <memory>
 #include <vector>
 
+#include <utility>
+
 #include <QAudioDevice>
 #include <QAudioFormat>
 #include <QAudioSink>
@@ -106,6 +108,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QThread>
 #include <QTimer>
 #include <QtQmlIntegration>
 
@@ -116,9 +119,15 @@
 
 namespace revenant::ui {
 
-// The QIODevice QAudioSink pulls through. Lives on the Qt thread and is
-// READ on the sink's own thread, which is the whole of why it touches
-// nothing but the rings, its own mix and a handful of atomics.
+// The QIODevice QAudioSink pulls through. Lives on AudioPlayer's pull
+// thread with the sink, and touches nothing but the rings, its own mix and a
+// handful of atomics, because the Qt thread reads its counters.
+//
+// WHY A THREAD OF ITS OWN. In Qt 6.11 a pull-mode sink calls readData on the
+// thread that owns the sink, not on the WASAPI worker, which only drains
+// Qt's own small buffer. With the sink on the Qt thread, any stall there
+// longer than the sink buffer starved the card: the images pane repainting
+// a tall picture on every row did exactly that.
 //
 // THE MIX. Every slot in EngineLink::mixMask holds a subscription on a
 // heard receiver, each in its own ring. A pull hands every one of those
@@ -395,7 +404,7 @@ private:
     // same device across the change where it can.
     void refresh_devices();
 
-    void handle_sink_state(QAudio::State state);
+    void handle_sink_state(QAudio::State state, QtAudio::Error why, std::uint64_t generation);
 
     // The linear gain the sink is given, from volume_ and muted_.
     [[nodiscard]] qreal sink_gain() const;
@@ -403,8 +412,26 @@ private:
     EngineLink& link_;
     QMediaDevices* devices_ = nullptr;
 
+    // Both made, driven and destroyed on pull_thread_, through pull_host_.
+    // The pointers are only compared and handed over on this thread.
+    QThread pull_thread_;
+    std::unique_ptr<QObject> pull_host_;
     std::unique_ptr<QAudioSink> sink_;
     std::unique_ptr<RingSource> pull_;
+
+    // Counts sinks opened, so a state report from a sink already closed is
+    // not taken for the current one's.
+    std::uint64_t sink_generation_ = 0;
+
+    // Runs f on pull_thread_ and waits for it.
+    template <typename F>
+    void on_pull_thread(F&& f)
+    {
+        QMetaObject::invokeMethod(pull_host_.get(), std::forward<F>(f),
+                                  Qt::BlockingQueuedConnection);
+    }
+
+    void apply_sink_volume();
 
     // The format the open sink runs at, the device's. Zero when closed.
     //

@@ -8,7 +8,40 @@
 
 namespace revenant::ui {
 
-DecodedImageModel::DecodedImageModel(QObject* parent) : QAbstractListModel(parent) {}
+namespace {
+
+// How often a growing image is repainted. Four a second paints a fax or an
+// APT pass smoothly and bounds the copy and texture upload whatever the
+// line rate or the number of decoders sending.
+constexpr int kFlushMs = 250;
+
+}  // namespace
+
+DecodedImageModel::DecodedImageModel(QObject* parent) : QAbstractListModel(parent)
+{
+    flush_timer_.setSingleShot(true);
+    flush_timer_.setInterval(kFlushMs);
+    connect(&flush_timer_, &QTimer::timeout, this, [this] { flush(); });
+}
+
+void DecodedImageModel::flush()
+{
+    flush_timer_.stop();
+    if (dirty_.empty()) {
+        return;
+    }
+    for (const std::size_t i : dirty_) {
+        if (i >= store_.size()) {
+            continue;
+        }
+        shelve(store_.at(i));
+        const QModelIndex at = index(static_cast<int>(i));
+        emit dataChanged(at, at);
+    }
+    dirty_.clear();
+    ++revision_;
+    emit changed();
+}
 
 int DecodedImageModel::rowCount(const QModelIndex& parent) const
 {
@@ -86,6 +119,7 @@ void DecodedImageModel::apply(const rpc::DecodedImageEvent& event, std::int64_t 
     const bool will_add = event.kind == rpc::DecodedImageEvent::Kind::Open &&
                           !store_.holds(event.vrx, event.decoder, event.image_id);
     if (will_add) {
+        flush();
         if (store_.size() >= kDecodedImageCapacity) {
             beginRemoveRows(QModelIndex(), 0, 0);
             {
@@ -109,15 +143,15 @@ void DecodedImageModel::apply(const rpc::DecodedImageEvent& event, std::int64_t 
     if (change.kind != DecodedImageChange::Kind::Updated) {
         return;
     }
-    shelve(store_.at(change.index));
-    const QModelIndex at = index(static_cast<int>(change.index));
-    emit dataChanged(at, at);
-    ++revision_;
-    emit changed();
+    dirty_.insert(change.index);
+    if (!flush_timer_.isActive()) {
+        flush_timer_.start();
+    }
 }
 
 void DecodedImageModel::abort_open(std::uint64_t vrx, const std::string& decoder)
 {
+    flush();
     for (const std::size_t i : store_.abort_open(vrx, decoder)) {
         const QModelIndex at = index(static_cast<int>(i));
         emit dataChanged(at, at);
@@ -128,6 +162,8 @@ void DecodedImageModel::abort_open(std::uint64_t vrx, const std::string& decoder
 
 void DecodedImageModel::clear()
 {
+    dirty_.clear();
+    flush_timer_.stop();
     beginResetModel();
     store_.clear();
     {

@@ -164,6 +164,11 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
 
 AudioPlayer::AudioPlayer(EngineLink& link, QObject* parent) : QObject(parent), link_(link)
 {
+    pull_thread_.setObjectName(QStringLiteral("revenant audio pull"));
+    pull_thread_.start(QThread::TimeCriticalPriority);
+    pull_host_ = std::make_unique<QObject>();
+    pull_host_->moveToThread(&pull_thread_);
+
     // WHAT THE OPERATOR CHOSE LAST TIME, READ BEFORE THE DEVICE LIST IS
     // BUILT. refresh_devices matches wanted_device_id_ against the
     // enumeration and sets device_index_ from it, so the id has to be in
@@ -202,6 +207,8 @@ AudioPlayer::~AudioPlayer()
     // destroyed after this object in main(). Stopping the sink is what
     // joins its pull thread, so nothing is reading the ring afterwards.
     close_sink();
+    pull_thread_.quit();
+    pull_thread_.wait();
 }
 
 void AudioPlayer::start()
@@ -345,9 +352,7 @@ void AudioPlayer::setVolume(qreal value)
         return;
     }
     volume_ = clamped;
-    if (sink_ != nullptr) {
-        sink_->setVolume(sink_gain());
-    }
+    apply_sink_volume();
 
     // WRITTEN ON EVERY MOVE AND NOT ON EXIT. A window that saves at
     // shutdown loses everything when it is killed, and the setting an
@@ -377,9 +382,7 @@ void AudioPlayer::setMuted(bool value)
     // The sink keeps running and the ring keeps draining. Stopping it
     // instead would leave the buffered audio in place, and unmuting would
     // then play whatever was live at the moment of the mute, seconds late.
-    if (sink_ != nullptr) {
-        sink_->setVolume(sink_gain());
-    }
+    apply_sink_volume();
     QSettings().setValue(settings::kAudioMuted, muted_);
     emit volumeChanged();
 }
@@ -400,6 +403,20 @@ void AudioPlayer::setVoiceGainDb(double db)
     }
     QSettings().setValue(settings::kAudioVoiceGainDb, voice_gain_db_);
     emit voiceGainChanged();
+}
+
+void AudioPlayer::apply_sink_volume()
+{
+    if (sink_ == nullptr) {
+        return;
+    }
+    // Queued, not blocking: a slider drag should not wait on the pull
+    // thread. The sink cannot go before this runs, because close_sink
+    // destroys it through the same queue.
+    QAudioSink* const sink = sink_.get();
+    const qreal gain = sink_gain();
+    QMetaObject::invokeMethod(pull_host_.get(), [sink, gain] { sink->setVolume(gain); },
+                              Qt::QueuedConnection);
 }
 
 qreal AudioPlayer::sink_gain() const
@@ -482,8 +499,6 @@ void AudioPlayer::open_sink()
     const int out_channels = wanted.channelCount();
     const auto out_rate = static_cast<std::uint32_t>(wanted.sampleRate());
 
-    sink_ = std::make_unique<QAudioSink>(out, wanted);
-
     // The sink's depth, derived from the grant. See THE THREE BUFFER DEPTHS
     // at the top of audio/audio_player.h for why it is a quarter and why it
     // comes off the grant rather than off the request.
@@ -491,18 +506,39 @@ void AudioPlayer::open_sink()
     sink_millis_ = std::max(kMinSinkMillis, granted / kSinkDepthDivisor);
     const auto sink_frames = static_cast<qsizetype>(
         (static_cast<std::uint64_t>(sink_millis_) * out_rate) / 1000U);
-    sink_->setBufferSize(sink_frames * out_channels * wanted.bytesPerSample());
-    sink_->setVolume(sink_gain());
+    const qsizetype buffer_bytes = sink_frames * out_channels * wanted.bytesPerSample();
+    const qreal gain = sink_gain();
+    const float voice = voice_gain_amplitude(voice_gain_db_);
+    const std::uint64_t generation = ++sink_generation_;
 
-    connect(sink_.get(), &QAudioSink::stateChanged, this,
-            [this](QAudio::State state) { handle_sink_state(state); });
+    // Made on the pull thread so that is the thread Qt pulls on. See WHY A
+    // THREAD OF ITS OWN above RingSource.
+    on_pull_thread([&] {
+        sink_ = std::make_unique<QAudioSink>(out, wanted);
+        sink_->setBufferSize(buffer_bytes);
+        sink_->setVolume(gain);
 
-    pull_ = std::make_unique<RingSource>(link_, out_rate, out_channels, wanted.sampleFormat());
-    // Before the sink starts pulling, so the first frame of a reopened stream
-    // already carries the voice level rather than one pull at unity.
-    pull_->set_voice_gain(voice_gain_amplitude(voice_gain_db_));
-    pull_->open(QIODevice::ReadOnly);
-    sink_->start(pull_.get());
+        // The error is read here, on the sink's thread, and carried over.
+        QAudioSink* const sink = sink_.get();
+        connect(sink, &QAudioSink::stateChanged, sink,
+                [this, sink, generation](QAudio::State state) {
+                    const QtAudio::Error why = sink->error();
+                    QMetaObject::invokeMethod(
+                        this,
+                        [this, state, why, generation] {
+                            handle_sink_state(state, why, generation);
+                        },
+                        Qt::QueuedConnection);
+                });
+
+        pull_ = std::make_unique<RingSource>(link_, out_rate, out_channels,
+                                             wanted.sampleFormat());
+        // Before the sink starts pulling, so the first frame of a reopened
+        // stream already carries the voice level rather than one pull at unity.
+        pull_->set_voice_gain(voice);
+        pull_->open(QIODevice::ReadOnly);
+        sink_->start(pull_.get());
+    });
 
     sink_rate_ = out_rate;
     sink_channels_ = out_channels;
@@ -534,13 +570,17 @@ QString AudioPlayer::fault() const
 
 void AudioPlayer::close_sink()
 {
-    if (sink_ != nullptr) {
-        // stop() before the QIODevice goes, because the sink's own thread
-        // is reading through it and stop() is what joins that thread.
-        sink_->stop();
-        sink_.reset();
+    if (sink_ != nullptr || pull_ != nullptr) {
+        // stop() before the QIODevice goes, because the sink reads through
+        // it, and both go on the thread they were made on.
+        on_pull_thread([this] {
+            if (sink_ != nullptr) {
+                sink_->stop();
+            }
+            sink_.reset();
+            pull_.reset();
+        });
     }
-    pull_.reset();
     sink_rate_ = 0;
     sink_channels_ = 0;
     active_device_.clear();
@@ -553,8 +593,12 @@ void AudioPlayer::close_sink()
     note_.clear();
 }
 
-void AudioPlayer::handle_sink_state(QAudio::State state)
+void AudioPlayer::handle_sink_state(QAudio::State state, QtAudio::Error why,
+                                    std::uint64_t generation)
 {
+    if (generation != sink_generation_ || sink_ == nullptr) {
+        return;
+    }
     // No default label, so a new QtAudio::State raises C4062 here. See
     // cmake/CompilerFlags.cmake.
     switch (state) {
@@ -576,7 +620,6 @@ void AudioPlayer::handle_sink_state(QAudio::State state)
             // pull.
             break;
         case QAudio::StoppedState: {
-            const QtAudio::Error why = sink_ == nullptr ? QtAudio::NoError : sink_->error();
             if (why == QtAudio::NoError) {
                 break;
             }
@@ -590,10 +633,9 @@ void AudioPlayer::handle_sink_state(QAudio::State state)
                               "plug it back in and pick it again.")
                               .arg(static_cast<int>(why));
 
-            // NOT close_sink() HERE. This runs from the QAudioSink's own
-            // stateChanged, so the sink whose signal is on the stack would
-            // be destroyed under it. tick() does the close on the next
-            // pass with nothing of the sink's live.
+            // NOT close_sink() HERE. This is the sink's own stateChanged,
+            // relayed from the pull thread, and tick() does the close on the
+            // next pass where nothing of the sink's can be mid-signal.
             //
             // Recording the fault and leaving the sink in place was the
             // whole bug: playing() reads sink_ != nullptr, so the window

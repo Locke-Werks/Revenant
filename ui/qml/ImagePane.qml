@@ -152,6 +152,8 @@ ColumnLayout {
                         sourceSize.width: 80
                         fillMode: Image.PreserveAspectFit
                         cache: false
+                        asynchronous: true
+                        retainWhileLoading: true
                         smooth: true
                     }
 
@@ -200,6 +202,8 @@ ColumnLayout {
                 source: big.entry ? big.entry.source : ""
                 fillMode: Image.PreserveAspectFit
                 cache: false
+                asynchronous: true
+                retainWhileLoading: true
                 smooth: false
                 verticalAlignment: Image.AlignTop
             }
