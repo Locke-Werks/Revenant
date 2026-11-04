@@ -2002,6 +2002,12 @@ private:
     void pump_audio(const std::shared_ptr<AudioNode>& node);
 
     void drain_decoded();
+
+    // Runs drain_decoded again after kDecodedRetryDelay, once however often
+    // it is asked, for the routes a pass skipped because a lane held them.
+    void retry_drain_decoded();
+    bool decoded_retry_pending_ = false;  // loop thread only
+    static constexpr kj::Duration kDecodedRetryDelay = 20 * kj::MILLISECONDS;
     void pump_decoded(const std::shared_ptr<DecodedNode>& node);
     void send_decoded_backlog(const std::shared_ptr<DecodedNode>& node);
     void send_decoded_ended(const std::shared_ptr<DecodedNode>& node, kj::StringPtr reason);
@@ -7249,11 +7255,24 @@ void ServerImpl::drain_decoded() {
     // Faults first. A decoder that refused a chunk has stopped for good, and
     // every subscriber to it is told why rather than left watching a stream
     // that went quiet.
+    //
+    // A ROUTE ITS LANE IS DECODING IS SKIPPED, NOT WAITED FOR. The lane holds
+    // route.lock for the whole of a consume, and one consume can run for most
+    // of a second: an MFSK or FSQ decoder's acquisition search is one block
+    // of work. Waiting here held the whole loop for it, and every receiver's
+    // audio with it, which was the chop an operator heard on picking Auto.
+    // A skipped route is looked at again shortly, so what it queued before
+    // this pass is not stranded until some other route rings.
     std::vector<std::pair<std::shared_ptr<DecodeRoute>, std::string>> faulted;
     std::vector<std::shared_ptr<DecodedNode>> ready;
+    bool skipped = false;
     for (const auto& entry : decode_routes_) {
         const auto& route = entry.second;
-        const std::scoped_lock held(route->lock);
+        const std::unique_lock held(route->lock, std::try_to_lock);
+        if (!held.owns_lock()) {
+            skipped = true;
+            continue;
+        }
         if (!route->fault.empty() && !route->fault_reported) {
             route->fault_reported = true;
             faulted.emplace_back(route, route->fault);
@@ -7280,6 +7299,20 @@ void ServerImpl::drain_decoded() {
     for (const auto& node : gone) {
         end_decoded(node);
     }
+    if (skipped) {
+        retry_drain_decoded();
+    }
+}
+
+void ServerImpl::retry_drain_decoded() {
+    if (decoded_retry_pending_ || sends_ == nullptr || timer_ == nullptr) {
+        return;
+    }
+    decoded_retry_pending_ = true;
+    sends_->add(timer_->afterDelay(kDecodedRetryDelay).then([this]() {
+        decoded_retry_pending_ = false;
+        drain_decoded();
+    }));
 }
 
 void ServerImpl::pump_images(const std::shared_ptr<DecodedNode>& node) {
