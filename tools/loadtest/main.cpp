@@ -46,6 +46,7 @@
 // what it cannot deliver, rather than as a file, which waits.
 
 #include <algorithm>
+#include <ranges>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -109,6 +110,8 @@ struct Options {
     std::vector<std::int64_t> nfm;
     bool nfm_auto = false;
     std::string nfm_only;  // with --nfm-auto, attach only this decoder
+    std::string demod = "nfm";          // what the --nfm receivers demodulate
+    std::vector<std::string> nfm_skip;  // with --nfm-auto, decoders left out
     bool detect = true;
     std::uint32_t every_nth = 1;
     std::uint32_t audio_ms = 200;
@@ -287,6 +290,23 @@ void print_usage()
                 if (!got) { return std::unexpected(got.error()); }
                 options.nfm.push_back(*got);
                 rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+            }
+        } else if (token == "--demod") {
+            auto text = value();
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            options.demod = std::string(*text);
+            if (options.demod != "nfm" && options.demod != "usb" && options.demod != "lsb") {
+                return fail(std::format("--demod takes nfm, usb or lsb, not {}", options.demod));
+            }
+        } else if (token == "--skip") {
+            auto text = value();
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            for (const auto part : std::views::split(*text, ',')) {
+                options.nfm_skip.emplace_back(part.begin(), part.end());
             }
         } else if (token == "--nfm-auto") {
             options.nfm_auto = true;
@@ -792,7 +812,9 @@ struct WhisperCall {
     for (const std::int64_t offset : options.nfm) {
         rpc::VrxParams params;
         params.center = offset;
-        params.demod = rpc::Demod::Nfm;
+        params.demod = options.demod == "usb"   ? rpc::Demod::Usb
+                       : options.demod == "lsb" ? rpc::Demod::Lsb
+                                                : rpc::Demod::Nfm;
         auto vrx = client->add_vrx(params);
         if (!vrx) {
             return std::unexpected(with_context(vrx.error(), "adding an nfm receiver"));
@@ -1082,8 +1104,9 @@ struct WhisperCall {
         std::size_t attached = 0;
         for (const std::uint64_t vrx : nfm_vrxs) {
             for (const rpc::DecoderInfo& offer : *offered) {
-                if (std::ranges::find(offer.modes, "nfm") == offer.modes.end() ||
-                    (!options.nfm_only.empty() && offer.name != options.nfm_only)) {
+                if (std::ranges::find(offer.modes, options.demod) == offer.modes.end() ||
+                    (!options.nfm_only.empty() && offer.name != options.nfm_only) ||
+                    std::ranges::find(options.nfm_skip, offer.name) != options.nfm_skip.end()) {
                     continue;
                 }
                 auto decoding = client->subscribe_decoded(
@@ -1091,7 +1114,10 @@ struct WhisperCall {
                     [auto_messages](const rpc::DecodedMessage&) {
                         auto_messages->fetch_add(1, std::memory_order_relaxed);
                     },
-                    [](const std::string&) {});
+                    [](const std::string&) {},
+                    [auto_messages](const rpc::DecodedImageEvent&) {
+                        auto_messages->fetch_add(1, std::memory_order_relaxed);
+                    });
                 if (!decoding) {
                     return std::unexpected(
                         with_context(decoding.error(), std::format("subscribing {}", offer.name)));
