@@ -306,6 +306,8 @@ struct ProbePool::Impl {
     std::condition_variable finish_wake;
     std::deque<std::uint32_t> finish_jobs;
     bool finishers_stopping = false;
+    std::atomic<std::uint32_t> finishing{0};
+    std::atomic<std::uint32_t> most_finishing{0};
 
     // The outcome ring has one producer, so the control thread and every
     // finisher take this to write it; and the budget is shared by the
@@ -632,7 +634,18 @@ struct ProbePool::Impl {
                 index = finish_jobs.front();
                 finish_jobs.pop_front();
             }
+            const std::uint32_t now_finishing =
+                finishing.fetch_add(1, std::memory_order_relaxed) + 1;
+            std::uint32_t most = most_finishing.load(std::memory_order_relaxed);
+            while (now_finishing > most &&
+                   !most_finishing.compare_exchange_weak(most, now_finishing,
+                                                         std::memory_order_relaxed)) {
+            }
+            if (config.before_finish) {
+                config.before_finish(slots[index].request.tag);
+            }
             finish(slots[index], index);
+            finishing.fetch_sub(1, std::memory_order_relaxed);
             {
                 const std::scoped_lock held(finish_lock);
                 slots[index].phase = 2;
@@ -910,6 +923,8 @@ ProbeStats ProbePool::stats() const {
     out.receivers = impl.receivers.load(std::memory_order_relaxed);
     out.busy = impl.busy.load(std::memory_order_relaxed);
     out.size = impl.config.size;
+    out.finishing = impl.finishing.load(std::memory_order_relaxed);
+    out.most_finishing = impl.most_finishing.load(std::memory_order_relaxed);
     out.characterise_ms_total =
         static_cast<double>(impl.characterise_us.load(std::memory_order_relaxed)) / 1000.0;
     out.worker_ms_total =

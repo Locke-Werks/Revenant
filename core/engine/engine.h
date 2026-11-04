@@ -328,6 +328,9 @@ struct EngineConfig {
     double probe_cpu_budget = ProbePoolConfig{}.cpu_budget;
     std::uint32_t probe_threads = ProbePoolConfig{}.threads;
 
+    // ProbePoolConfig::before_finish, for tests only.
+    std::function<void(std::uint64_t tag)> probe_before_finish;
+
     // Where each device's calibration is kept between sessions, keyed by its
     // serial. EMPTY KEEPS NOTHING: a calibration set on this engine applies
     // for the life of the open source and is not restored next time, which is

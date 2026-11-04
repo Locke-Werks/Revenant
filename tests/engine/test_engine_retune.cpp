@@ -22,7 +22,10 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <functional>
+#include <mutex>
 #include <cstdint>
 #include <format>
 #include <memory>
@@ -88,7 +91,183 @@ Expected<std::unique_ptr<engine::Engine>> open_movable(std::uint32_t probes) {
     return std::move(*created);
 }
 
+// The movable scene, running: four seconds of stream paced at realtime, so a
+// probe's two second dwell fills while the test watches. `tweak` sets the
+// pool's threads and its before_finish hook.
+Expected<std::unique_ptr<engine::Engine>> open_running(
+    std::uint32_t probes, const std::function<void(engine::EngineConfig&)>& tweak) {
+    engine::EngineConfig config = hf_config(probes);
+    config.pace = 1.0;
+    tweak(config);
+    auto created = engine::Engine::create(config);
+    if (!created) {
+        return std::unexpected(created.error());
+    }
+    auto scene = source::open_source(std::format(
+        "synthetic:wideband?rate={}&center={}&emitters=0&samples={}&seed=20260923", kRate,
+        kOpenedAt, 4 * kRate));
+    if (!scene) {
+        return std::unexpected(scene.error());
+    }
+    auto opened = engine::open_built_source(
+        **created, std::make_unique<MovableCentre>(std::move(*scene)));
+    if (!opened) {
+        return std::unexpected(opened.error());
+    }
+    return std::move(*created);
+}
+
+// A gate a finishing thread waits at until it is opened or `limit` passes, so
+// a test can hold a slot in the finishing state. Counts who is inside.
+struct FinishGate {
+    std::mutex lock;
+    std::condition_variable changed;
+    bool open = false;
+    std::uint32_t inside = 0;
+    std::uint32_t most_inside = 0;
+    std::uint32_t entered = 0;
+
+    void wait(std::chrono::milliseconds limit) {
+        std::unique_lock held(lock);
+        ++inside;
+        ++entered;
+        most_inside = std::max(most_inside, inside);
+        changed.notify_all();
+        changed.wait_for(held, limit, [this] { return open; });
+        --inside;
+    }
+    void release() {
+        const std::scoped_lock held(lock);
+        open = true;
+        changed.notify_all();
+    }
+    bool wait_for_entered(std::uint32_t count, std::chrono::seconds limit) {
+        std::unique_lock held(lock);
+        return changed.wait_for(held, limit, [&] { return entered >= count; });
+    }
+};
+
+std::vector<engine::ProbeRequest> four_requests() {
+    std::vector<engine::ProbeRequest> out;
+    for (std::uint64_t tag = 1; tag <= 4; ++tag) {
+        out.push_back(engine::ProbeRequest{.tag = tag,
+                                           .center = static_cast<dsp::Hertz>(tag) * 15'625,
+                                           .occupied_hz = 3'000});
+    }
+    return out;
+}
+
 }  // namespace
+
+// REJECTS: a pool that finishes probes one at a time whatever its thread
+// count, which is the one-thread worker it replaced (2026-11-03).
+TEST_CASE("the probe pool finishes on more than one thread at once",
+          "[gpu][engine][probe-pool]") {
+    REVENANT_NEEDS_GPU();
+    FinishGate gate;
+    auto opened = open_running(4, [&](engine::EngineConfig& config) {
+        config.probe_threads = 2;
+        config.probe_cpu_budget = 2.0;
+        // Each finisher waits until both are inside, or two seconds.
+        config.probe_before_finish = [&](std::uint64_t) {
+            {
+                const std::scoped_lock held(gate.lock);
+                if (gate.inside + 1 >= 2) {
+                    gate.open = true;
+                }
+            }
+            gate.wait(std::chrono::milliseconds(2'000));
+        };
+    });
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+    engine::Engine& eng = **opened;
+    for (const engine::ProbeRequest& request : four_requests()) {
+        REQUIRE(eng.submit_probe(request).has_value());
+    }
+    Status ran;
+    std::thread runner([&] { ran = eng.run(); });
+    const bool entered = gate.wait_for_entered(4, std::chrono::seconds(10));
+    runner.join();
+    REQUIRE(ran.has_value());
+    CHECK(entered);
+    CHECK(gate.most_inside == 2);
+    CHECK(eng.probe_stats().most_finishing == 2);
+}
+
+// REJECTS: an answer from an extract taken before a retune, handed back as if
+// it were current because the retune landed while a finishing thread held it.
+TEST_CASE("a retune while a probe is being finished comes back cancelled",
+          "[gpu][engine][retune][probe-pool]") {
+    REVENANT_NEEDS_GPU();
+    FinishGate gate;
+    auto opened = open_running(1, [&](engine::EngineConfig& config) {
+        config.probe_threads = 1;
+        config.probe_before_finish = [&](std::uint64_t) {
+            gate.wait(std::chrono::milliseconds(10'000));
+        };
+    });
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+    engine::Engine& eng = **opened;
+    REQUIRE(eng.submit_probe(four_requests().front()).has_value());
+    Status ran;
+    std::thread runner([&] { ran = eng.run(); });
+    REQUIRE(gate.wait_for_entered(1, std::chrono::seconds(10)));
+    CHECK(eng.probe_stats().finishing == 1);
+    const auto landed = eng.set_source_center(kOpenedAt + 3'500);
+    gate.release();
+    runner.join();
+    INFO(test::message_of(landed));
+    REQUIRE(landed.has_value());
+    REQUIRE(ran.has_value());
+
+    std::array<engine::ProbeOutcome, 4> outcomes{};
+    std::size_t got = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (got == 0 && std::chrono::steady_clock::now() < deadline) {
+        got = eng.take_probe_outcomes(outcomes);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(got == 1);
+    CHECK(outcomes[0].status == engine::ProbeStatus::Cancelled);
+}
+
+// REJECTS: a pool whose destructor hangs, or frees slots a finishing thread is
+// still using, when jobs are queued behind a finishing thread that is slow.
+TEST_CASE("an engine closes while probes are queued for a finishing thread",
+          "[gpu][engine][probe-pool]") {
+    REVENANT_NEEDS_GPU();
+    FinishGate gate;
+    auto opened = open_running(4, [&](engine::EngineConfig& config) {
+        config.probe_threads = 1;
+        config.probe_before_finish = [&](std::uint64_t) {
+            gate.wait(std::chrono::milliseconds(1'500));
+        };
+    });
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+    std::unique_ptr<engine::Engine> eng = std::move(*opened);
+    for (const engine::ProbeRequest& request : four_requests()) {
+        REQUIRE(eng->submit_probe(request).has_value());
+    }
+    Status ran;
+    std::thread runner([&] { ran = eng->run(); });
+    REQUIRE(gate.wait_for_entered(1, std::chrono::seconds(10)));
+    const engine::ProbeStats held = eng->probe_stats();
+    CHECK(held.finishing == 1);
+    CHECK(held.busy >= 2);
+    REQUIRE(eng->stop().has_value());
+    runner.join();
+
+    const auto began = std::chrono::steady_clock::now();
+    eng.reset();
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+    INFO("closed in " << seconds << " s");
+    CHECK(seconds < 10.0);
+    CHECK(gate.entered >= 1);
+}
 
 TEST_CASE("after a retune every receiver is on its own frequency or reported removed",
           "[gpu][engine][retune]") {

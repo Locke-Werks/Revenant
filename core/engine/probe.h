@@ -80,6 +80,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 
@@ -346,6 +347,11 @@ struct ProbeStats {
     std::uint32_t busy = 0;
     std::uint32_t size = 0;
 
+    // Of busy, how many a finishing thread holds right now, and the most
+    // that ever have at once.
+    std::uint32_t finishing = 0;
+    std::uint32_t most_finishing = 0;
+
     double characterise_ms_total = 0.0;
 
     // The worker's time finishing probes, characterise() and identify()
@@ -390,6 +396,12 @@ struct ProbePoolConfig {
     // sixteen probes on a 300-emitter scene and 19 percent with four, is
     // still under "Threading" in docs/rpc.md.
     double cpu_budget = 1.75;
+
+    // FOR TESTS. Called on a finishing thread after it has taken a slot and
+    // before it finishes it, with the probe's tag, so a test can hold a slot
+    // in the finishing state while it cancels, destroys or counts. Empty in
+    // every real configuration.
+    std::function<void(std::uint64_t tag)> before_finish;
 };
 
 // Owned by the engine, created with the graph and destroyed before it.

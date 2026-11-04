@@ -582,8 +582,13 @@ public:
             probe_config.source_rate = rate;
             probe_config.channel_rate = graph_->geometry().channel_rate;
             probe_config.first_id = kFirstProbeId;
-            probe_config.cpu_budget = config_.probe_cpu_budget;
             probe_config.threads = config_.probe_threads;
+            // Held to the threads there are, so a caller that asks for fewer
+            // threads and leaves the budget at its default gets all of them
+            // rather than a refusal.
+            probe_config.cpu_budget = std::min(config_.probe_cpu_budget,
+                                               static_cast<double>(config_.probe_threads));
+            probe_config.before_finish = config_.probe_before_finish;
             auto pool = ProbePool::create(*graph_, probe_config);
             if (!pool) {
                 graph_.reset();
