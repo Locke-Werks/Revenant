@@ -221,6 +221,11 @@ public:
     using LeaseLostCallback = std::function<void(const std::string& new_holder)>;
     virtual void on_lease_lost(LeaseLostCallback callback) = 0;
 
+    // True once the connection to the engine is known to have dropped. Any
+    // thread, and asks the engine nothing, so it never waits. False does not
+    // prove the engine is there: a drop can go unseen until a call fails.
+    [[nodiscard]] virtual bool disconnected() const = 0;
+
     virtual ~Client() = default;
 
     Client(const Client&) = delete;

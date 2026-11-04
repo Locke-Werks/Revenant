@@ -50,6 +50,10 @@ constexpr auto kProbeInterval = std::chrono::seconds(1);
 // the connection works.
 [[nodiscard]] bool connection_dead(rpc::Client& client)
 {
+    // Runs on the event loop: a known drop answers without a call.
+    if (client.disconnected()) {
+        return true;
+    }
     const auto info = client.info();
     return !info && info.error().category == ErrorCategory::Disconnected;
 }

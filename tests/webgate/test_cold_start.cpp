@@ -546,7 +546,7 @@ struct FakeGateway {
 
 }  // namespace
 
-TEST_CASE("--stop terminates a gateway that does not answer its event", "[webgate][coldstart]")
+TEST_CASE("a gateway that does not answer its stop event is terminated by --stop", "[webgate][coldstart]")
 {
     // Beside this executable, which stands for the installation --stop runs
     // from, so it is terminated whether or not the case runs elevated.

@@ -1633,6 +1633,14 @@ private:
     // subscribe_wideband_decoded's local keys. Any thread.
     std::atomic<std::uint64_t> next_wideband_key_{0};
 
+    // Set on the loop thread when the connection drops; read from any.
+    std::atomic<bool> disconnected_{false};
+
+ public:
+    [[nodiscard]] bool disconnected() const override { return disconnected_.load(); }
+
+ private:
+
     // Loop thread only.
     [[nodiscard]] kj::Promise<void> end_subscription(LoopState& state);
     [[nodiscard]] kj::Promise<void> end_passband(LoopState& state, std::uint64_t vrx);
@@ -2037,6 +2045,14 @@ void ClientImpl::run(const std::string& address, std::uint16_t port,
         pending.wait(io.waitScope);
 
         phase = Phase::Serving;
+
+        // Recorded as it happens, so a caller can learn the engine is gone
+        // without a call: the first call on a dead connection only fails once
+        // its write does, which costs Windows over a hundred milliseconds.
+        auto watch = rpc.onDisconnect()
+                         .then([this]() { disconnected_.store(true); })
+                         .eagerlyEvaluate([this](kj::Exception&&) { disconnected_.store(true); });
+
         announce(Status{});
 
         // Runs until the destructor fulfills this from inside an executeSync.
