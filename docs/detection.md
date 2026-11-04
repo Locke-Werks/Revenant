@@ -2116,12 +2116,17 @@ collecting rather than carrying it across the retune.
   12000 S/s is the lowest bucket that holds that many in two seconds. On a grid
   whose channels run slower, the 3000 S/s of a 96 kS/s source over 64 channels,
   the probe runs at the channel rate and the dwell stretches to 5.46 s.
-- Schedule: oldest unclassified first, and not round robin, which would spend
-  the pool on tracks already answered. A Live track never probed goes first,
-  oldest birth first; one whose answer could not drive anything waits ten
-  seconds and then queues behind every new one; one with a family is not
-  probed again. Held and Merged tracks are skipped: one has no transmission and
-  the other is inside another track's band.
+- Schedule: viewed, strong and new first, and not round robin, which would
+  spend the pool on tracks already answered. A track eligible for 15 s without
+  a look goes ahead of everything; then a track inside a span a client is
+  viewing; then one never probed before a re-look; then the higher SNR in
+  2500 Hz; then the older. One whose answer could not drive anything waits ten
+  seconds before it is eligible again; one with a family is probed again only
+  to refine its label. Held and Merged tracks are skipped: one has no
+  transmission and the other is inside another track's band. "Which detection
+  tier two looks at first" below has the decision. WHAT THIS BULLET USED TO
+  SAY: "oldest unclassified first ... A Live track never probed goes first,
+  oldest birth first".
 
 **What the track carries.** `Track::classification` is the family of the most
 recent probe `characterise::may_drive_detection` accepted, with its
@@ -2388,6 +2393,77 @@ than being given the nearest label. It is still clickable, it still has a
 bandwidth, and the operator can listen and decide, which is what they were
 going to do. This is the same rule AFT follows in `docs/ui-spectrum.md`: an
 unidentified signal means hold still, not guess.
+
+### Which detection tier two looks at first
+
+Decided 2026-11-03, after the phone gateway began starting one engine per
+phone session, so every phone session met a cold engine. Measured on the
+owner's band: detections at about 3.7 s and the first label at 26.7 s, and
+after 90 s two or three of about twenty detections labelled. Tier two took the
+oldest unlabelled track first, four probes at a time, each look a 2 s dwell
+and a narrow track's identification dwells 5 s each. At a display's -0.5 dB
+threshold most of the twenty were noise born in the same decision as the
+stations, and oldest-first spent the first cycles on them.
+
+The owner chose "smarter labeller", and then gave detection two cores:
+
+- **The order**, `core/detect/tier_two.h`: a track eligible for
+  `TierTwoConfig::starve_seconds` (15 s) without a look goes first, longest
+  wait first; then refinement probes go last; then a track inside a span a
+  client is viewing; then never probed before a re-look; then the higher
+  `snr_2500_db`; then the older. A strong track is the one a probe can answer
+  and the one an operator is looking at. The bound keeps a weak one from
+  waiting for ever.
+- **Identification dwells are ranked with the looks**, `TierTwo::merge_schedule`:
+  a narrow track characterised and not yet verified is owed a 5 s dwell, and
+  its first one ranks behind every never-probed track and emitter and ahead of
+  every re-look; a retry ranks with the re-looks; an owed dwell starves on the
+  same 15 s bound, counted from when it became owed. Before, dwells had only
+  what the looks left, and once strong tracks went first their re-looks kept
+  a pool of four full: RTTY on seed 2 of the labelled scene was never
+  verified in 30 s. Level with the never-probed was tried and lost an AM
+  talker on the same seed: its carrier line, strong and narrow, took its dwell
+  before its emitter's first probe and verified the syllables as Morse.
+- **The view is not fed yet.** No call carries a client's view:
+  `subscribeSpectrum` sends the whole span and both clients zoom on their own
+  side. `TierTwo::set_viewed` takes spans and the order honours them, so a
+  call that carries a view needs only to pass it through. Today the order is
+  strength and novelty.
+- **The pool**, `core/engine/probe.h`: characterise() and identify() run on
+  two finishing threads (`ProbePoolConfig::threads`) below normal priority,
+  under a budget of 1.75 cores between them; with the detector lane's 0.25
+  that is the two cores. `revenant-engine` builds sixteen probes, the pool's
+  ceiling, where it built four. No warm-up special case: the measurement
+  below showed none was needed.
+- The dwell is unchanged. Every characteriser figure in this document was
+  taken at 2 s, and a shorter first look would change the answers.
+
+**Measured**, `tests/detect/test_labelled_scene.cpp` "label latency", hidden,
+the labelled scene on 16 channels at twice realtime, three seeds, at the
+default 6 dB threshold and at -0.5 dB. First label on any track, in stream
+seconds, and emitters (of 12) labelled at 15 s and at 30 s:
+
+| | first label | emitters at 15 s | emitters at 30 s | tracks labelled at 30 s |
+| --- | --- | --- | --- | --- |
+| before: oldest first, 4 probes, 1 thread, 0.5 core | 6.3 to 7.9 s | 4 to 5 | 7 to 8 | 7 to 10 of 17 to 23 |
+| order only, 4 probes, 1 thread, 0.5 core | 3.9 to 4.1 s | 4 to 6 | 7 to 10 | 8 to 12 of 17 to 23 |
+| order, 16 probes, 2 threads, 1.75 cores | 3.9 to 4.1 s | 7 to 10 | 12 | 17 to 23 of 17 to 23, every one |
+
+The "before" row ran while a scene render shared the machine, which may have
+added to its first-label time; the emitter counts are of a piece with the
+other rows. The finishing threads took 19 to 26 s of CPU over the 15 s of wall
+time with sixteen probes, against 7 to 12 s with four, so on this scene the
+budget, not the dwell, is what holds the count of probes in flight.
+
+What the engine kept, `revenant-loadtest` as docs/rpc.md "Threading" runs it,
+machine idle, 4 probes on one thread at 0.5 core against 16 on two at 1.75:
+realtime 1.000 against 1.000, display rows 32.9 a second both, no samples lost
+and no voice underruns in either, voice arrival jitter p99 7.6 against 8.6 ms
+on the labelled scene and 2.9 against 3.0 ms on 300 emitters, and the
+completion thread's GPU wait 16.3 against 23.1 ms a second, the twelve extra
+receivers' standing cost. On the 300-emitter scene each probe cost about a
+second of CPU to characterise and identify, so both shapes were budget bound
+there: 3 probes characterised against 7 in 30 s.
 
 ## The label on the wire
 

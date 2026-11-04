@@ -80,6 +80,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 
@@ -153,6 +154,9 @@ inline constexpr std::uint32_t kProbeSettleSamples = 256;
 
 // Receivers a pool may hold, whatever EngineConfig asks for.
 inline constexpr std::uint32_t kMaxProbeReceivers = 16;
+
+// Finishing threads a pool may run, ProbePoolConfig::threads.
+inline constexpr std::uint32_t kMaxProbeThreads = 8;
 
 static_assert(kProbeFloorRate * kProbeDwellSeconds >=
                   static_cast<double>(characterise::kMinCharacteriseSamples),
@@ -343,6 +347,11 @@ struct ProbeStats {
     std::uint32_t busy = 0;
     std::uint32_t size = 0;
 
+    // Of busy, how many a finishing thread holds right now, and the most
+    // that ever have at once.
+    std::uint32_t finishing = 0;
+    std::uint32_t most_finishing = 0;
+
     double characterise_ms_total = 0.0;
 
     // The worker's time finishing probes, characterise() and identify()
@@ -370,13 +379,29 @@ struct ProbePoolConfig {
     // identify::IdentifyConfig::dmr, the one flag the DMR row sits behind.
     bool identify_dmr = true;
 
-    // The most of one core the worker averages on finishing probes, which is
-    // characterise() and identify(). Past it the next probe waits, so a busy
-    // band gets fewer probes a second rather than a whole core. Half a core
-    // by default: measured under "Threading" in docs/rpc.md, the worker took
-    // 52 to 59 percent of one core with sixteen probes on a 300-emitter
-    // scene, and 19 percent with four.
-    double cpu_budget = 0.5;
+    // Threads that finish probes, characterise() and identify(), each below
+    // normal priority. Two by default: the owner's decision of 2026-11-03
+    // gives detection two cores, and docs/rpc.md, "Threading", says why.
+    std::uint32_t threads = 2;
+
+    // The cores the finishing threads average between them. Past it the next
+    // probe waits, so a busy band gets fewer probes a second rather than more
+    // cores. At most `threads`.
+    //
+    // 1.75 by default, which with the detector lane's 0.25
+    // (rpc::ServerOptions::detector_cpu_budget) is the two cores the owner
+    // gave detection on 2026-11-03. WHAT THIS USED TO BE: half of one core on
+    // one thread, sized when the worker shared a busy machine with no other
+    // protection; the measurement behind it, 52 to 59 percent of one core with
+    // sixteen probes on a 300-emitter scene and 19 percent with four, is
+    // still under "Threading" in docs/rpc.md.
+    double cpu_budget = 1.75;
+
+    // FOR TESTS. Called on a finishing thread after it has taken a slot and
+    // before it finishes it, with the probe's tag, so a test can hold a slot
+    // in the finishing state while it cancels, destroys or counts. Empty in
+    // every real configuration.
+    std::function<void(std::uint64_t tag)> before_finish;
 };
 
 // Owned by the engine, created with the graph and destroyed before it.

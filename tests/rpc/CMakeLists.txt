@@ -319,16 +319,16 @@ if(TARGET revenant-engine)
 
     set(engined_uri "synthetic:wideband?rate=2400032&emitters=4&seed=4242&samples=4800064")
     revenant_engined_refuses(a_detector_budget_over_one
-        "--detector-cpu 1\\.5 is not above 0 and at most 1\\. It is a share of one core"
+        "--detector-cpu 1\\.5 is not above 0 and at most 1\\. It is cores"
         "${engined_uri}" --detector-cpu 1.5)
     revenant_engined_refuses(a_zero_detector_budget
         "--detector-cpu 0 is not above 0 and at most 1"
         "${engined_uri}" --detector-cpu 0)
     revenant_engined_refuses(a_negative_probe_budget
-        "--probe-cpu -0\\.5 is not above 0 and at most 1.*--probes 0 is how to run without probes"
+        "--probe-cpu -0\\.5 is not above 0 and at most 2.*--probes 0 is how to run without probes"
         "${engined_uri}" --probe-cpu=-0.5)
     revenant_engined_refuses(a_nan_probe_budget
-        "--probe-cpu nan is not above 0 and at most 1"
+        "--probe-cpu nan is not above 0 and at most 2"
         "${engined_uri}" --probe-cpu nan)
     revenant_engined_refuses(an_infinite_detector_budget
         "--detector-cpu inf is not above 0 and at most 1"
@@ -401,7 +401,7 @@ if(TARGET revenant-engine)
     set_tests_properties(engined_takes_the_budgets_it_is_given PROPERTIES
         LABELS "rpc"
         TIMEOUT 300
-        PASS_REGULAR_EXPRESSION "budgets +detector 0\\.10 of a core, probes 0\\.20 of a core, 3 decode lanes"
+        PASS_REGULAR_EXPRESSION "budgets +detection 0\\.30 cores: detector 0\\.10, 16 probes on 2 threads 0\\.20; 3 decode lanes"
         FAIL_REGULAR_EXPRESSION "revenant-engine: |listening on 127\\.0\\.0\\.1:17690"
     )
 else()

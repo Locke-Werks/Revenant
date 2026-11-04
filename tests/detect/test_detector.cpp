@@ -2405,6 +2405,140 @@ TEST_CASE("tier two probes the oldest unclassified live track first", "[detect][
     }
 }
 
+// REJECTS: a schedule that hands the pool to the oldest track while a
+// stronger or viewed one waits, that re-looks before a first look, or that
+// lets a weak track wait past the starvation bound. The 2026-11-03 change,
+// docs/detection.md "Which detection tier two looks at first".
+TEST_CASE("tier two looks at viewed, strong and new tracks first, and starves none",
+          "[detect][tier-two]") {
+    constexpr dsp::SampleRate kPickRate = 1'000'000;
+    const auto track = [](std::uint64_t id, dsp::SampleIndex born, double snr,
+                          dsp::Hertz center) {
+        detect::Track out;
+        out.id = id;
+        out.state = detect::TrackState::Live;
+        out.first_seen = born;
+        out.snr_2500_db = snr;
+        out.center = center;
+        out.bandwidth = 2'000;
+        return out;
+    };
+
+    SECTION("strong before weak, whatever their age") {
+        const std::vector<detect::Track> tracks = {
+            track(1, 1'000'000, 3.0, 100'000), track(2, 2'000'000, 30.0, 200'000),
+            track(3, 3'000'000, 12.0, 300'000)};
+        CHECK(detect::TierTwo::pick(tracks, {}, {}, 8, 5'000'000, kPickRate, 10.0) ==
+              std::vector<std::uint64_t>{2, 3, 1});
+    }
+    SECTION("viewed before unviewed, even when weaker") {
+        const std::vector<detect::Track> tracks = {
+            track(1, 1'000'000, 30.0, 100'000), track(2, 2'000'000, 5.0, 500'000)};
+        const detect::ViewedSpan view[] = {{450'000, 550'000}};
+        CHECK(detect::TierTwo::pick(tracks, {}, {}, 8, 5'000'000, kPickRate, 10.0, 15.0, view) ==
+              std::vector<std::uint64_t>{2, 1});
+    }
+    SECTION("a never-probed track before a stronger re-look") {
+        const std::vector<detect::Track> tracks = {
+            track(1, 1'000'000, 30.0, 100'000), track(2, 2'000'000, 5.0, 200'000)};
+        const std::unordered_map<std::uint64_t, dsp::SampleIndex> attempts = {{1, 1'000'000}};
+        CHECK(detect::TierTwo::pick(tracks, attempts, {}, 8, 12'000'000, kPickRate, 10.0) ==
+              std::vector<std::uint64_t>{2, 1});
+    }
+    SECTION("a track eligible past the bound goes ahead of stronger and viewed ones") {
+        const std::vector<detect::Track> tracks = {
+            track(1, 1'000'000, 3.0, 100'000), track(2, 15'000'000, 30.0, 500'000)};
+        const detect::ViewedSpan view[] = {{450'000, 550'000}};
+        // At 15.9 s the weak track has waited 14.9 s, inside the bound.
+        CHECK(detect::TierTwo::pick(tracks, {}, {}, 8, 15'900'000, kPickRate, 10.0, 15.0, view) ==
+              std::vector<std::uint64_t>{2, 1});
+        // At 16 s it has waited 15 s and goes first.
+        CHECK(detect::TierTwo::pick(tracks, {}, {}, 1, 16'000'000, kPickRate, 10.0, 15.0, view) ==
+              std::vector<std::uint64_t>{1});
+    }
+    SECTION("a re-look starves from when it fell due, not from its last look") {
+        const std::vector<detect::Track> tracks = {
+            track(1, 0, 3.0, 100'000), track(2, 20'000'000, 30.0, 200'000)};
+        // 1 was looked at 2 s in and fell due at 12 s. At 26 s it has waited
+        // 14 s and the new strong track goes first; at 27 s it is starved.
+        const std::unordered_map<std::uint64_t, dsp::SampleIndex> attempts = {{1, 2'000'000}};
+        CHECK(detect::TierTwo::pick(tracks, attempts, {}, 1, 26'000'000, kPickRate, 10.0) ==
+              std::vector<std::uint64_t>{2});
+        CHECK(detect::TierTwo::pick(tracks, attempts, {}, 1, 27'000'000, kPickRate, 10.0) ==
+              std::vector<std::uint64_t>{1});
+    }
+}
+
+// REJECTS: a merged schedule that puts a re-look ahead of an owed dwell or a
+// dwell ahead of a first look, that lets a dwell wait past the starvation
+// bound, that drops a starved look's wait when its dwell replaces it, or that
+// loses which entries are dwells when it cuts the list to the pool.
+TEST_CASE("tier two ranks identification dwells with the classification looks",
+          "[detect][tier-two]") {
+    constexpr dsp::SampleIndex kSecond = 1'000'000;
+    constexpr dsp::SampleIndex kStarve = 15 * kSecond;
+    const auto entry = [](std::uint64_t tag, int tier, double snr, dsp::SampleIndex since) {
+        return detect::ScheduleEntry{
+            .tag = tag, .tier = tier, .snr_db = snr, .key = since, .waiting_since = since};
+    };
+    const auto tags = [](const std::vector<detect::ScheduleEntry>& list) {
+        std::vector<std::uint64_t> out;
+        for (const detect::ScheduleEntry& one : list) {
+            out.push_back(one.tag);
+        }
+        return out;
+    };
+    const dsp::SampleIndex now = 20 * kSecond;
+
+    SECTION("never probed, then a first dwell, then a re-look, whatever their SNR") {
+        const std::vector<detect::ScheduleEntry> looks = {entry(1, 2, 40.0, 18 * kSecond),
+                                                          entry(2, 0, 3.0, 18 * kSecond)};
+        const detect::ScheduleEntry dwells[] = {entry(3, 1, 10.0, 18 * kSecond)};
+        const auto chosen = detect::TierTwo::merge_schedule(looks, dwells, 8, now, kStarve);
+        CHECK(tags(chosen) == std::vector<std::uint64_t>{2, 3, 1});
+        CHECK_FALSE(chosen[0].identify);
+        CHECK(chosen[1].identify);
+        CHECK_FALSE(chosen[2].identify);
+    }
+    SECTION("a dwell replaces its own track's look") {
+        const std::vector<detect::ScheduleEntry> looks = {entry(1, 2, 20.0, 18 * kSecond),
+                                                          entry(2, 2, 10.0, 18 * kSecond)};
+        const detect::ScheduleEntry dwells[] = {entry(1, 1, 20.0, 19 * kSecond)};
+        const auto chosen = detect::TierTwo::merge_schedule(looks, dwells, 8, now, kStarve);
+        REQUIRE(tags(chosen) == std::vector<std::uint64_t>{1, 2});
+        CHECK(chosen[0].identify);
+    }
+    SECTION("a dwell owed past the bound goes ahead of a never-probed track") {
+        const std::vector<detect::ScheduleEntry> looks = {entry(1, 0, 40.0, 19 * kSecond)};
+        const detect::ScheduleEntry fresh[] = {entry(2, 1, 3.0, 6 * kSecond)};
+        CHECK(tags(detect::TierTwo::merge_schedule(looks, fresh, 8, now, kStarve)) ==
+              std::vector<std::uint64_t>{1, 2});
+        const detect::ScheduleEntry starved[] = {entry(2, 1, 3.0, 5 * kSecond)};
+        CHECK(tags(detect::TierTwo::merge_schedule(looks, starved, 1, now, kStarve)) ==
+              std::vector<std::uint64_t>{2});
+    }
+    SECTION("a dwell replacing a starved look keeps the look's wait") {
+        const std::vector<detect::ScheduleEntry> looks = {entry(1, 2, 3.0, 2 * kSecond),
+                                                          entry(2, 0, 40.0, 19 * kSecond)};
+        const detect::ScheduleEntry dwells[] = {entry(1, 1, 3.0, now)};
+        const auto chosen = detect::TierTwo::merge_schedule(looks, dwells, 1, now, kStarve);
+        REQUIRE(tags(chosen) == std::vector<std::uint64_t>{1});
+        CHECK(chosen[0].identify);
+    }
+    SECTION("cut to the pool, each entry still says whether it is a dwell") {
+        const std::vector<detect::ScheduleEntry> looks = {
+            entry(1, 0, 30.0, 18 * kSecond), entry(2, 0, 20.0, 18 * kSecond),
+            entry(3, 2, 30.0, 18 * kSecond)};
+        const detect::ScheduleEntry dwells[] = {entry(4, 1, 5.0, 18 * kSecond),
+                                                entry(5, 2, 5.0, 18 * kSecond)};
+        const auto chosen = detect::TierTwo::merge_schedule(looks, dwells, 3, now, kStarve);
+        REQUIRE(tags(chosen) == std::vector<std::uint64_t>{1, 2, 4});
+        CHECK_FALSE(chosen[0].identify);
+        CHECK_FALSE(chosen[1].identify);
+        CHECK(chosen[2].identify);
+    }
+}
+
 // REJECTS: an identification schedule that spends the long dwell on a wide
 // track, on one never probed, on one already identified, or on one that has
 // had detect::kIdentifyDwells. WHAT THIS USED TO SAY at its end: "or twice on

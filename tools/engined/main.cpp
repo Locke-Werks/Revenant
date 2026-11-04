@@ -205,27 +205,30 @@ using source::parse_frequency;
     return *value;
 }
 
-// A share of one core, for the two signal identification budgets.
+// Cores, for the two signal identification budgets.
 //
-// Above zero and at most one, the range core/engine/cpu_budget.h's bucket
-// means anything in: each budget holds one thread, and one thread cannot take
-// more than one core, so 1.5 would read as a promise the bucket cannot keep.
+// Above zero and at most the threads the budget holds: one for the detector,
+// the probe pool's finishing threads for the probes. A thread cannot take more
+// than one core, so more than that would read as a promise the bucket cannot
+// keep.
 // Zero is refused rather than taken as "off", because a bucket that never
 // refills starts nothing and the thing it holds would sit there looking idle.
 // Each flag's own message says what off is spelled as. from_chars reads "nan"
 // and "inf" as numbers, and the comparison below is written so both fail it.
 [[nodiscard]] Expected<double> parse_core_share(std::string_view text, std::string_view what,
-                                                std::string_view off_hint)
+                                                std::string_view off_hint,
+                                                std::uint32_t threads = 1)
 {
     auto value = parse_real(text, what);
     if (!value) {
         return value;
     }
-    if (!(*value > 0.0 && *value <= 1.0)) {
-        return fail(std::format("{} {} is not above 0 and at most 1. It is a share of one core, "
-                                "such as 0.25 for a quarter, and the budget holds one thread, "
-                                "which cannot use more than one core. {}",
-                                what, text, off_hint));
+    if (!(*value > 0.0 && *value <= static_cast<double>(threads))) {
+        return fail(std::format("{} {} is not above 0 and at most {}. It is cores, such as 0.25 "
+                                "for a quarter of one, and the budget holds {} thread{}, which "
+                                "cannot use more than that many cores. {}",
+                                what, text, threads, threads, threads == 1 ? "" : "s",
+                                off_hint));
     }
     return *value;
 }
@@ -333,13 +336,19 @@ struct Options {
     // subscribes, because the stage is per receiver and opt in.
     std::uint32_t passband_points = 512;
 
-    // Probe receivers, EngineConfig::probe_receivers. Four by default, which
-    // is what revenant-cli runs and what docs/detection.md measured: they are
-    // what labels a detection for a client's span, and a display is what
+    // Probe receivers, EngineConfig::probe_receivers. Sixteen by default; they
+    // are what labels a detection for a client's span, and a display is what
     // connects to this. Zero builds no pool, and every detection then crosses
     // the wire unlabelled. docs/detection.md has the standing GPU cost: four
     // at the floor bucket on a 2.4 MS/s grid is 1.6 ms of GPU a second.
-    std::uint32_t probes = 4;
+    //
+    // WHAT THIS USED TO BE: four, until the owner gave detection two cores on
+    // 2026-11-03. Four probes at a 2 s dwell labelled two or three of twenty
+    // detections in the first 90 s of a cold engine. Sixteen is the pool's
+    // ceiling, kMaxProbeReceivers, and the worker measured 52 to 59 percent of
+    // one core at sixteen, inside the two finishing threads' budget;
+    // docs/detection.md has the measurement of this change.
+    std::uint32_t probes = 16;
 
     // EngineConfig::spectrum_rows_per_second. Thirty, the rate ui/main.cpp
     // gives for a waterfall that reads as live; it changes nothing on a
@@ -464,7 +473,7 @@ void print_usage()
         "                      smaller ones, so a 96 kS/s recording draws 30 rows a\n"
         "                      second rather than 1.5. 0 is one row per block.\n"
         "  --probes <n>        Probe receivers the engine places on detections to\n"
-        "                      label them, default 4, at most 16. 0 builds none and\n"
+        "                      label them, default 16, at most 16. 0 builds none and\n"
         "                      every detection is sent unlabelled.\n"
         "  --spectrum-floor <dbfs>\n"
         "  --spectrum-ceiling <dbfs>\n"
@@ -477,9 +486,9 @@ void print_usage()
         "                      average, default {}. A share above 0 and at most 1. Past\n"
         "                      it the detector's lane sheds spectrum frames rather than\n"
         "                      fall behind. Needs the spectrum stage.\n"
-        "  --probe-cpu <x>     The most of one core the probe worker averages\n"
+        "  --probe-cpu <x>     The cores the probe pool's two finishing threads average\n"
         "                      characterising and identifying what the probes collect,\n"
-        "                      default {}. A share above 0 and at most 1. Past it the\n"
+        "                      default {}. Above 0 and at most 2. Past it the\n"
         "                      next probe starts later. Needs probes; --probes 0 is how\n"
         "                      to run without them.\n"
         "  --decode-lanes <n>  Threads that run every decoder, every P25 voice stream\n"
@@ -799,7 +808,8 @@ void print_usage()
             if (!text) {
                 return std::unexpected(text.error());
             }
-            auto share = parse_core_share(*text, arg, "--probes 0 is how to run without probes.");
+            auto share = parse_core_share(*text, arg, "--probes 0 is how to run without probes.",
+                                          engine::EngineConfig{}.probe_threads);
             if (!share) {
                 return std::unexpected(share.error());
             }
@@ -1369,10 +1379,11 @@ void print_engine_block(const engine::Engine& eng)
     // a run was held to without anyone reconstructing it from the command
     // line and the library's defaults.
     if (config.probe_receivers > 0) {
-        std::println("budgets         detector {:.2f} of a core, probes {:.2f} of a core, {} "
-                     "decode lanes",
-                     server_options.detector_cpu_budget, config.probe_cpu_budget,
-                     server_options.decode_lanes);
+        std::println("budgets         detection {:.2f} cores: detector {:.2f}, {} probes on {} "
+                     "threads {:.2f}; {} decode lanes",
+                     server_options.detector_cpu_budget + config.probe_cpu_budget,
+                     server_options.detector_cpu_budget, config.probe_receivers,
+                     config.probe_threads, config.probe_cpu_budget, server_options.decode_lanes);
     } else {
         std::println("budgets         detector {:.2f} of a core, no probes, {} decode lanes",
                      server_options.detector_cpu_budget, server_options.decode_lanes);

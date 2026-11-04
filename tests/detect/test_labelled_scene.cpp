@@ -252,6 +252,148 @@ struct Record {
 
 }  // namespace
 
+// LABEL LATENCY ON A COLD ENGINE, the number docs/detection.md's "Which
+// detection tier two looks at first" records. Hidden, so ctest never runs it:
+// it asserts nothing and exists to be run by hand before and after a change
+// to the schedule or the pool's budget.
+//
+// The scene on sixteen channels, once at the detector's default threshold
+// and once at the -0.5 dB a display sends, which is what floods the pool with
+// noise tracks on a real band (the label-latency investigation of
+// 2026-11-03). Printed per run: stream seconds to the first label on any
+// track, to the first label on an emitter, and how many emitters and tracks
+// carry a label at 15 s and at the end, 30 s.
+TEST_CASE("label latency on the labelled scene from a cold engine",
+          "[.][gpu][detect][label-latency]") {
+    REVENANT_NEEDS_GPU();
+
+    const std::uint64_t seeds[] = {1, 2, 3};
+    const double thresholds[] = {6.0, -0.5};
+    for (const std::uint64_t seed : seeds) {
+        Capture capture;
+        capture.path = test::unique_temp_path("revenant_label_latency", ".cf32");
+        siggen_labelled::LabelledSceneSpec spec;
+        spec.out_path = capture.path.string();
+        spec.seconds = kSceneSeconds;
+        spec.seed = seed;
+        const auto rendered = siggen_labelled::render_labelled_scene(spec);
+        INFO(message_of(rendered));
+        REQUIRE(rendered.has_value());
+
+        // The pool as it was before 2026-11-03, and as revenant-engine now
+        // builds it.
+        struct PoolShape {
+            std::uint32_t probes;
+            std::uint32_t threads;
+            double cpu;
+        };
+        const PoolShape pools[] = {{4, 1, 0.5}, {16, 2, 1.75}};
+        for (const PoolShape& pool : pools)
+        for (const double threshold : thresholds) {
+            engine::EngineConfig config;
+            config.gpu_index = -1;
+            config.channels = 16;
+            config.probe_receivers = pool.probes;
+            config.probe_threads = pool.threads;
+            config.probe_cpu_budget = pool.cpu;
+            config.spectrum_transform = dsp::kDefaultSpectrumTransform;
+            config.pace = 2.0;
+            auto created = engine::Engine::create(config);
+            REQUIRE(created.has_value());
+            auto& eng = **created;
+            REQUIRE(eng.open_source(capture.uri()).has_value());
+
+            detect::DetectorConfig detect_config;
+            detect_config.source_rate = eng.info().source_rate;
+            detect_config.source_center = eng.info().source_center;
+            detect_config.grid_channels = eng.info().grid.channels;
+            detect_config.detection_threshold_db = threshold;
+            auto detector = detect::Detector::create(detect_config, eng.info().spectrum);
+            REQUIRE(detector.has_value());
+            auto tier_two = detect::TierTwo::create(
+                detect::TierTwoConfig{.source_rate = eng.info().source_rate});
+            REQUIRE(tier_two.has_value());
+            auto det = std::make_unique<detect::Detector>(std::move(*detector));
+            auto two = std::make_unique<detect::TierTwo>(std::move(*tier_two));
+
+            const double rate = static_cast<double>(eng.info().source_rate);
+            dsp::SampleIndex last = 0;
+            double first_any = -1.0;
+            double first_emitter = -1.0;
+            std::size_t emitters_mid = 0;
+            std::size_t tracks_mid = 0;
+            std::size_t live_mid = 0;
+            bool mid_taken = false;
+            const auto count = [&](std::size_t* emitters, std::size_t* tracks,
+                                   std::size_t* live) {
+                std::vector<bool> seen(std::size(kEmitters), false);
+                *emitters = 0;
+                *tracks = 0;
+                *live = 0;
+                for (const detect::Track& track : det->tracks()) {
+                    if (track.state != detect::TrackState::Live &&
+                        track.state != detect::TrackState::Held) {
+                        continue;
+                    }
+                    ++*live;
+                    if (detect::label_track(track).kind == detect::LabelKind::Unknown) {
+                        continue;
+                    }
+                    ++*tracks;
+                    const std::size_t which = emitter_of(track);
+                    if (which < seen.size() && !seen[which]) {
+                        seen[which] = true;
+                        ++*emitters;
+                    }
+                }
+            };
+            const auto sink = [&](const engine::SpectrumFrame& frame) -> Status {
+                if (auto fed = det->consume(frame); !fed) {
+                    return fed;
+                }
+                if (det->last_decision() == last) {
+                    return {};
+                }
+                last = det->last_decision();
+                auto stepped = two->step(*det, eng);
+                const double now = static_cast<double>(last) / rate;
+                for (const detect::Track& track : det->tracks()) {
+                    if (detect::label_track(track).kind == detect::LabelKind::Unknown) {
+                        continue;
+                    }
+                    if (first_any < 0.0) {
+                        first_any = now;
+                    }
+                    if (first_emitter < 0.0 && emitter_of(track) < std::size(kEmitters)) {
+                        first_emitter = now;
+                    }
+                }
+                if (!mid_taken && now >= kSceneSeconds / 2.0) {
+                    mid_taken = true;
+                    count(&emitters_mid, &tracks_mid, &live_mid);
+                }
+                return stepped;
+            };
+            REQUIRE(eng.set_spectrum_sink(sink).has_value());
+            REQUIRE(eng.run().has_value());
+
+            std::size_t emitters_end = 0;
+            std::size_t tracks_end = 0;
+            std::size_t live_end = 0;
+            count(&emitters_end, &tracks_end, &live_end);
+            const engine::ProbeStats probes = eng.probe_stats();
+            std::println("label latency, seed {}, {} probes on {} threads, threshold {:.1f} dB: "
+                         "first label {:.1f} s, first emitter label {:.1f} s, at 15 s {}/{} "
+                         "emitters and {}/{} tracks, at 30 s {}/{} emitters and {}/{} tracks, "
+                         "{} probes characterised, worker CPU {:.0f} ms",
+                         seed, pool.probes, pool.threads, threshold, first_any, first_emitter,
+                         emitters_mid, std::size(kEmitters), tracks_mid, live_mid, emitters_end,
+                         std::size(kEmitters), tracks_end, live_end, probes.characterised,
+                         probes.worker_cpu_ms_total);
+        }
+    }
+}
+
 // REJECTS: a change to the characteriser, the identifier or tier two that
 // moves any emitter of the labelled scene off its label, which is what the
 // keyed carrier's did unnoticed.
