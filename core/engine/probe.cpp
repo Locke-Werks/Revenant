@@ -338,7 +338,9 @@ struct ProbePool::Impl {
     // to pay for that. With half a second of burst the same scene labelled
     // 66 tracks in 30 s against 98 with no budget, the credit an idle dwell
     // earned being thrown away at the cap.
-    CpuBudget budget{0.5, kProbeBudgetBurstNs};
+    // Replaced in create() with ProbePoolConfig::cpu_budget; this default is
+    // never charged.
+    CpuBudget budget{ProbePoolConfig{}.cpu_budget, kProbeBudgetBurstNs};
     std::atomic<std::uint64_t> worker_us{0};
     std::atomic<std::uint64_t> worker_cpu_us{0};
     std::atomic<std::uint64_t> budget_waits{0};
@@ -425,10 +427,12 @@ struct ProbePool::Impl {
         // THE BUDGET, core/engine/cpu_budget.h. Every finish is charged the
         // CPU it took, characterise() and identify() together, and a waiting
         // probe starts only while the bucket has credit, so however busy the
-        // band is the worker averages no more than cpu_budget of one core.
-        // What that costs is probes, not correctness: tier two keeps at most
-        // the pool's size outstanding, so a slower worker means fewer probes
-        // a second and longer between answers.
+        // band is the finishing threads average no more than cpu_budget
+        // cores between them. The bucket gates starts, not running work, so
+        // probes started together can take every finishing thread at once
+        // for a while. What it costs is probes, not correctness: tier two
+        // keeps at most the pool's size outstanding, so slower finishing
+        // means fewer probes a second and longer between answers.
         bool may_start = true;
         if (!pending.empty()) {
             const std::scoped_lock held(budget_lock);

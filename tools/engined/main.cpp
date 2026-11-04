@@ -205,11 +205,12 @@ using source::parse_frequency;
     return *value;
 }
 
-// A share of one core, for the two signal identification budgets.
+// Cores, for the two signal identification budgets.
 //
-// Above zero and at most one, the range core/engine/cpu_budget.h's bucket
-// means anything in: each budget holds one thread, and one thread cannot take
-// more than one core, so 1.5 would read as a promise the bucket cannot keep.
+// Above zero and at most the threads the budget holds: one for the detector,
+// the probe pool's finishing threads for the probes. A thread cannot take more
+// than one core, so more than that would read as a promise the bucket cannot
+// keep.
 // Zero is refused rather than taken as "off", because a bucket that never
 // refills starts nothing and the thing it holds would sit there looking idle.
 // Each flag's own message says what off is spelled as. from_chars reads "nan"
@@ -335,9 +336,8 @@ struct Options {
     // subscribes, because the stage is per receiver and opt in.
     std::uint32_t passband_points = 512;
 
-    // Probe receivers, EngineConfig::probe_receivers. Four by default, which
-    // is what revenant-cli runs and what docs/detection.md measured: they are
-    // what labels a detection for a client's span, and a display is what
+    // Probe receivers, EngineConfig::probe_receivers. Sixteen by default; they
+    // are what labels a detection for a client's span, and a display is what
     // connects to this. Zero builds no pool, and every detection then crosses
     // the wire unlabelled. docs/detection.md has the standing GPU cost: four
     // at the floor bucket on a 2.4 MS/s grid is 1.6 ms of GPU a second.
