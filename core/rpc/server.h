@@ -300,6 +300,16 @@ struct ServerLoad {
     std::uint64_t lane_busy_ns = 0;
     std::uint64_t lane_latency_ns = 0;
     std::uint64_t lane_latency_max_ns = 0;
+
+    // The same five for the event lanes, which run the decoders on
+    // subscribeDecoded and subscribeWidebandDecoded below the voice lanes'
+    // priority. The lane_ fields above are the voice, RDS and transcription
+    // lanes alone.
+    std::uint64_t event_lane_posted = 0;
+    std::uint64_t event_lane_dropped = 0;
+    std::uint64_t event_lane_busy_ns = 0;
+    std::uint64_t event_lane_latency_ns = 0;
+    std::uint64_t event_lane_latency_max_ns = 0;
 };
 
 class Server {

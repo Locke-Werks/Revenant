@@ -89,7 +89,8 @@ public:
     static constexpr std::size_t kDefaultJobs = 512;
 
     [[nodiscard]] static Expected<std::unique_ptr<DecodeLane>> create(
-        std::wstring name, std::size_t jobs = kDefaultJobs)
+        std::wstring name, ThreadClass role = ThreadClass::Listening,
+        std::size_t jobs = kDefaultJobs)
     {
         std::unique_ptr<DecodeLane> lane(new (std::nothrow) DecodeLane());
         if (lane == nullptr) {
@@ -112,8 +113,8 @@ public:
             static_cast<void>(lane->free_->write(std::span<Job* const>(&job, 1)));
         }
         try {
-            lane->thread_ = std::thread([raw = lane.get(), name = std::move(name)] {
-                describe_this_thread(name, ThreadClass::Listening);
+            lane->thread_ = std::thread([raw = lane.get(), name = std::move(name), role] {
+                describe_this_thread(name, role);
                 raw->run();
             });
         } catch (const std::system_error& error) {

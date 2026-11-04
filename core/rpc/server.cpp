@@ -1520,6 +1520,15 @@ public:
             out.lane_latency_ns += lane_stats.latency_ns;
             out.lane_latency_max_ns = std::max(out.lane_latency_max_ns, lane_stats.latency_max_ns);
         }
+        for (const auto& lane : event_lanes_) {
+            const DecodeLaneStats lane_stats = lane->stats();
+            out.event_lane_posted += lane_stats.posted;
+            out.event_lane_dropped += lane_stats.dropped;
+            out.event_lane_busy_ns += lane_stats.busy_ns;
+            out.event_lane_latency_ns += lane_stats.latency_ns;
+            out.event_lane_latency_max_ns =
+                std::max(out.event_lane_latency_max_ns, lane_stats.latency_max_ns);
+        }
         return out;
     }
 
@@ -2331,12 +2340,36 @@ private:
     std::vector<std::shared_ptr<DecodeLane>> lanes_;
     std::uint32_t next_lane_ = 0;  // loop thread only
 
+    // THE EVENT LANES, as many as lanes_, at ThreadClass::Display. Every
+    // event decoder on subscribeDecoded and subscribeWidebandDecoded runs on
+    // one of these; P25 voice, RDS and the transcription tap stay on lanes_.
+    //
+    // Split on 2026-11-04 after the receiver window's auto, which attaches
+    // every decoder that reads the mode at once (eight on nfm), chopped the
+    // audio for a few seconds. The decoders build on their first chunk, the
+    // queue fills behind them, and the lanes then caught up flat out at
+    // above normal priority, ahead of the RPC loop that sends every client
+    // its audio. A text decoder that falls behind costs a late line; the
+    // audio it held up cost a hole the listener hears. At normal priority an
+    // event lane shares the processor with the loop rather than preempting
+    // it, and the voice lanes no longer queue behind text decoding.
+    std::vector<std::shared_ptr<DecodeLane>> event_lanes_;
+    std::uint32_t next_event_lane_ = 0;  // loop thread only
+
     // The lane a new route is pinned to. Loop thread.
     [[nodiscard]] std::shared_ptr<DecodeLane> pick_lane() {
         if (lanes_.empty()) {
             return nullptr;
         }
         return lanes_[next_lane_++ % lanes_.size()];
+    }
+
+    // The event lane a new decoder route is pinned to. Loop thread.
+    [[nodiscard]] std::shared_ptr<DecodeLane> pick_event_lane() {
+        if (event_lanes_.empty()) {
+            return pick_lane();
+        }
+        return event_lanes_[next_event_lane_++ % event_lanes_.size()];
     }
 
     std::atomic<std::uint16_t> port_{0};
@@ -5678,6 +5711,13 @@ Status ServerImpl::start_lanes(const ServerOptions& options) {
         }
         lanes_.push_back(std::shared_ptr<DecodeLane>(std::move(*lane)));
     }
+    for (std::uint32_t i = 0; i < options.decode_lanes; ++i) {
+        auto lane = DecodeLane::create(std::format(L"revenant events {}", i), ThreadClass::Display);
+        if (!lane) {
+            return std::unexpected(with_context(lane.error(), "starting the event lanes"));
+        }
+        event_lanes_.push_back(std::shared_ptr<DecodeLane>(std::move(*lane)));
+    }
     return {};
 }
 
@@ -6882,7 +6922,7 @@ Status ServerImpl::add_decoded(std::shared_ptr<DecodedNode> node,
         // chunk stamped with an older tuning.
         route->epoch_target = status.tuning_epoch;
 
-        route->lane = pick_lane();
+        route->lane = pick_event_lane();
         std::tie(route->freq_lower_hz, route->freq_upper_hz) =
             decoded_passband(engine_.info(), status);
         auto attached = engine_.attach_audio_sink(
@@ -6944,7 +6984,7 @@ Expected<dsp::SampleRate> ServerImpl::add_wideband_decoded(std::shared_ptr<Decod
 
     auto route = std::make_shared<DecodeRoute>(node->vrx, spec, engine::Demod::Raw);
     route->owner = this;
-    route->lane = pick_lane();
+    route->lane = pick_event_lane();
 
     // The route's own LaneWork, as add_decoded's, so the decode, the fault
     // path and the queues are exactly the receiver path's.
@@ -9817,6 +9857,9 @@ void ServerImpl::stop() {
     // shared with its sink callables and outlives this server in them when
     // it has to; stopped here, it holds no thread.
     for (const auto& lane : lanes_) {
+        lane->stop();
+    }
+    for (const auto& lane : event_lanes_) {
         lane->stop();
     }
 

@@ -40,7 +40,7 @@ namespace {
 }  // namespace
 
 TEST_CASE("a decode lane runs every chunk once, in order, on its own copy", "[rpc][lane]") {
-    auto made = rpc::DecodeLane::create(L"test lane", 64);
+    auto made = rpc::DecodeLane::create(L"test lane", ThreadClass::Listening, 64);
     REQUIRE(made.has_value());
     rpc::DecodeLane& lane = **made;
 
@@ -82,7 +82,7 @@ TEST_CASE("a decode lane runs every chunk once, in order, on its own copy", "[rp
 
 TEST_CASE("a full lane drops for a source on a clock and waits for an unthrottled one",
           "[rpc][lane]") {
-    auto made = rpc::DecodeLane::create(L"test lane", 4);
+    auto made = rpc::DecodeLane::create(L"test lane", ThreadClass::Listening, 4);
     REQUIRE(made.has_value());
     rpc::DecodeLane& lane = **made;
 
@@ -127,7 +127,7 @@ TEST_CASE("a full lane drops for a source on a clock and waits for an unthrottle
 }
 
 TEST_CASE("a stopped lane refuses what it is given and runs nothing more", "[rpc][lane]") {
-    auto made = rpc::DecodeLane::create(L"test lane", 8);
+    auto made = rpc::DecodeLane::create(L"test lane", ThreadClass::Listening, 8);
     REQUIRE(made.has_value());
     rpc::DecodeLane& lane = **made;
 

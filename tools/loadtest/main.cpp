@@ -107,6 +107,8 @@ struct Options {
 
     std::optional<std::int64_t> p25;
     std::vector<std::int64_t> nfm;
+    bool nfm_auto = false;
+    std::string nfm_only;  // with --nfm-auto, attach only this decoder
     bool detect = true;
     std::uint32_t every_nth = 1;
     std::uint32_t audio_ms = 200;
@@ -164,6 +166,9 @@ void print_usage()
         "  --p25 HZ              a p25p1 receiver this far from baseband DC, with its voice\n"
         "                        and its p25p1 decoder subscribed\n"
         "  --nfm HZ[,HZ...]      nfm receivers with audio subscribed, for extra load\n"
+        "  --nfm-auto            when the window opens, attach every decoder that reads nfm\n"
+        "                        to each --nfm receiver, as the receiver window's auto does\n"
+        "  --nfm-decoder NAME    as --nfm-auto, with that one decoder only\n"
         "  --no-detect           do not poll detections, so no detector runs\n"
         "  --every-nth N         spectrum subscription stride (1)\n"
         "  --warmup S            seconds before the window opens (5)\n"
@@ -283,6 +288,13 @@ void print_usage()
                 options.nfm.push_back(*got);
                 rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
             }
+        } else if (token == "--nfm-auto") {
+            options.nfm_auto = true;
+        } else if (token == "--nfm-decoder") {
+            auto text = value();
+            if (!text) { return std::unexpected(text.error()); }
+            options.nfm_auto = true;
+            options.nfm_only = std::string(*text);
         } else if (token == "--no-detect") {
             options.detect = false;
         } else if (token == "--every-nth") {
@@ -469,6 +481,10 @@ struct Observed {
     std::vector<Clock::time_point> rows;
     std::vector<std::uint64_t> row_sequences;
     std::vector<VoiceArrival> voice;
+    // The first --nfm receiver's analog audio, scored as the voice is, at
+    // the rate its chunks carry.
+    std::vector<VoiceArrival> nfm_audio;
+    std::uint32_t nfm_rate = 0;
     std::map<std::string, std::uint64_t> decoded_kinds;
     std::vector<std::pair<Clock::time_point, std::string>> decoded;
     std::string voice_ended;
@@ -500,9 +516,9 @@ struct VoiceScore {
 // resumes at the next arrival, which is what ui/audio's drift trim does on a
 // starve. Arrival jitter is each chunk's arrival less the time its first
 // sample was due, with the earliest taken as zero.
-[[nodiscard]] VoiceScore score_voice(const std::vector<VoiceArrival>& arrivals)
+[[nodiscard]] VoiceScore score_voice(const std::vector<VoiceArrival>& arrivals,
+                                     double kRate = 8000.0)
 {
-    constexpr double kRate = 8000.0;
     constexpr double kLeadMs = 50.0;
     VoiceScore score;
     if (arrivals.empty()) {
@@ -772,6 +788,7 @@ struct WhisperCall {
         }
     }
 
+    std::vector<std::uint64_t> nfm_vrxs;
     for (const std::int64_t offset : options.nfm) {
         rpc::VrxParams params;
         params.center = offset;
@@ -780,11 +797,25 @@ struct WhisperCall {
         if (!vrx) {
             return std::unexpected(with_context(vrx.error(), "adding an nfm receiver"));
         }
+        const bool scored = nfm_vrxs.empty();
         auto granted = client->subscribe_audio(
-            *vrx, options.audio_ms, [](const rpc::AudioChunk&) {}, [](const std::string&) {});
+            *vrx, options.audio_ms,
+            [observed, scored](const rpc::AudioChunk& chunk) {
+                if (!scored) {
+                    return;
+                }
+                const std::scoped_lock held(observed->lock);
+                observed->nfm_rate = chunk.sample_rate;
+                observed->nfm_audio.push_back(VoiceArrival{
+                    Clock::now(), chunk.sample_index,
+                    chunk.channel_count == 0 ? 0 : chunk.samples.size() / chunk.channel_count,
+                    chunk.frames_dropped_before, chunk.squelch_open});
+            },
+            [](const std::string&) {});
         if (!granted) {
             return std::unexpected(with_context(granted.error(), "subscribing nfm audio"));
         }
+        nfm_vrxs.push_back(*vrx);
     }
 
     // The engine runs on a thread of its own, as revenant-engine's main does,
@@ -1040,6 +1071,38 @@ struct WhisperCall {
     const source::SourceStats source0 = eng.source_stats();
     const auto receivers0 = receiver_losses();
 
+    // After the baselines, so the attach and whatever it costs fall inside
+    // the window rather than in the warm-up.
+    auto auto_messages = std::make_shared<std::atomic<std::uint64_t>>(0);
+    if (options.nfm_auto && !nfm_vrxs.empty()) {
+        auto offered = client->decoders();
+        if (!offered) {
+            return std::unexpected(with_context(offered.error(), "listing the decoders"));
+        }
+        std::size_t attached = 0;
+        for (const std::uint64_t vrx : nfm_vrxs) {
+            for (const rpc::DecoderInfo& offer : *offered) {
+                if (std::ranges::find(offer.modes, "nfm") == offer.modes.end() ||
+                    (!options.nfm_only.empty() && offer.name != options.nfm_only)) {
+                    continue;
+                }
+                auto decoding = client->subscribe_decoded(
+                    vrx, offer.name,
+                    [auto_messages](const rpc::DecodedMessage&) {
+                        auto_messages->fetch_add(1, std::memory_order_relaxed);
+                    },
+                    [](const std::string&) {});
+                if (!decoding) {
+                    return std::unexpected(
+                        with_context(decoding.error(), std::format("subscribing {}", offer.name)));
+                }
+                ++attached;
+            }
+        }
+        std::println("{} nfm auto: {} decoders attached across {} receivers", options.label,
+                     attached, nfm_vrxs.size());
+    }
+
     std::this_thread::sleep_for(std::chrono::duration<double>(options.seconds));
 
     window_open.store(false);
@@ -1070,6 +1133,8 @@ struct WhisperCall {
     std::uint64_t rows = 0;
     std::uint64_t ldus = 0;
     std::vector<VoiceArrival> voice;
+    std::vector<VoiceArrival> nfm_audio;
+    std::uint32_t nfm_rate = 0;
     std::string voice_ended;
     {
         const std::scoped_lock held(observed->lock);
@@ -1086,6 +1151,12 @@ struct WhisperCall {
                 voice.push_back(arrival);
             }
         }
+        for (const VoiceArrival& arrival : observed->nfm_audio) {
+            if (arrival.at >= t0 && arrival.at < t1) {
+                nfm_audio.push_back(arrival);
+            }
+        }
+        nfm_rate = observed->nfm_rate;
         voice_ended = observed->voice_ended;
     }
     const VoiceScore scored = score_voice(voice);
@@ -1107,6 +1178,14 @@ struct WhisperCall {
                      scored.gap_frames, scored.underruns, scored.starved_ms, scored.jitter_p50_ms,
                      scored.jitter_p99_ms, scored.jitter_max_ms,
                      voice_ended.empty() ? std::string{} : " ended: " + voice_ended);
+    }
+    if (!nfm_audio.empty() && nfm_rate != 0) {
+        const VoiceScore analog = score_voice(nfm_audio, static_cast<double>(nfm_rate));
+        std::println("{} nfm audio at {} S/s: chunks {} gaps {} gap_frames {} underruns {} "
+                     "starved_ms {:.1f} jitter p50 {:.1f} p99 {:.1f} max {:.1f} ms",
+                     tag, nfm_rate, analog.chunks, analog.gap_events, analog.gap_frames,
+                     analog.underruns, analog.starved_ms, analog.jitter_p50_ms,
+                     analog.jitter_p99_ms, analog.jitter_max_ms);
     }
     std::println("{} source lost {} samples in {} overruns", tag,
                  source1.samples_lost - source0.samples_lost,
@@ -1178,6 +1257,17 @@ struct WhisperCall {
                                  : ms(serve1.lane_latency_ns - serve0.lane_latency_ns) /
                                        static_cast<double>(posted),
                      ms(serve1.lane_latency_max_ns));
+    }
+    {
+        const std::uint64_t posted = serve1.event_lane_posted - serve0.event_lane_posted;
+        std::println("{} event lanes: {} chunks, {} dropped, busy {:.1f} ms/s, queued mean {:.3f} "
+                     "ms max {:.2f} ms, {} messages from nfm auto",
+                     tag, posted, serve1.event_lane_dropped - serve0.event_lane_dropped,
+                     per_second(serve1.event_lane_busy_ns - serve0.event_lane_busy_ns),
+                     posted == 0 ? 0.0
+                                 : ms(serve1.event_lane_latency_ns - serve0.event_lane_latency_ns) /
+                                       static_cast<double>(posted),
+                     ms(serve1.event_lane_latency_max_ns), auto_messages->load());
     }
     if (!polls.empty()) {
         std::ranges::sort(polls);
