@@ -173,6 +173,30 @@ struct ViewedSpan {
     dsp::Hertz high = 0;
 };
 
+// One unit the schedule may hand a probe: a line on its own or an emitter,
+// for a classification look or a long identification dwell. See
+// TierTwo::merge_schedule.
+struct ScheduleEntry {
+    // The track id the probe is tagged with: the line's, or the emitter's
+    // anchor.
+    std::uint64_t tag = 0;
+    bool identify = false;
+
+    // 0 never probed, 1 a first identification dwell, 2 a re-look or a dwell
+    // retry. A first dwell ranks behind the never-probed: see step().
+    int tier = 0;
+    bool refine = false;
+    bool viewed = false;
+    double snr_db = 0.0;
+
+    // Birth, or the last look for a re-look: the age tie-break.
+    dsp::SampleIndex key = 0;
+
+    // When the unit became eligible, which is what TierTwoConfig::starve_seconds
+    // counts from.
+    dsp::SampleIndex waiting_since = 0;
+};
+
 // One emitter tier two is following: a LineGrouper group, by its id, its
 // strongest line, its extent and its lines. For a caller that publishes one
 // detection per emitter rather than one per line.
@@ -309,6 +333,15 @@ public:
         dsp::SampleRate source_rate, double reprobe_seconds, double starve_seconds = 15.0,
         std::span<const ViewedSpan> viewed = {});
 
+    // THE ONE LIST step() submits from: the classification looks and the
+    // identification dwells ranked together by the header's order, at most
+    // `free` of them, first first. A dwell replaces the same tag's
+    // classification look and inherits its wait, so a unit already starved
+    // stays starved; every dwell returned has identify set.
+    [[nodiscard]] static std::vector<ScheduleEntry> merge_schedule(
+        std::vector<ScheduleEntry> classification, std::span<const ScheduleEntry> dwells,
+        std::size_t free, dsp::SampleIndex now, dsp::SampleIndex starve_samples);
+
     // The spans clients are looking at, absolute hertz, replacing the last
     // set. Empty, the default, ranks on strength and novelty alone.
     //
@@ -382,6 +415,12 @@ private:
     std::unordered_map<std::uint64_t, dsp::SampleIndex> attempts_;
     std::unordered_map<std::uint64_t, engine::ProbeStatus> statuses_;
     std::unordered_map<std::uint64_t, std::uint32_t> identify_dwells_;
+
+    // When each track's, and each emitter's, owed dwell became owed, so a
+    // dwell starves on the same bound as every other unit. Cleared when the
+    // dwell is submitted.
+    std::unordered_map<std::uint64_t, dsp::SampleIndex> dwell_owed_since_;
+    std::unordered_map<std::uint64_t, dsp::SampleIndex> group_dwell_owed_since_;
     std::vector<engine::ProbeOutcome> outcomes_;
 
     // The emitters. A probe of a group is tagged with its anchor's id and

@@ -199,27 +199,28 @@ Expected<TierTwo> TierTwo::create(const TierTwoConfig& config) {
 
 namespace {
 
-// Every eligible track with its rank, unsorted. pick() and step() share it so
-// a line on its own and an emitter are ordered by one rule.
-[[nodiscard]] std::vector<Rank> rank_tracks(
+// Every eligible track as a schedule entry, unsorted. pick() and step() share
+// it so a line on its own and an emitter are ordered by one rule.
+[[nodiscard]] std::vector<ScheduleEntry> rank_tracks(
     std::span<const Track> tracks,
     const std::unordered_map<std::uint64_t, dsp::SampleIndex>& attempts,
     std::span<const std::uint64_t> in_flight, dsp::SampleIndex now,
-    dsp::SampleRate source_rate, double reprobe_seconds, double starve_seconds,
-    std::span<const ViewedSpan> viewed) {
+    dsp::SampleRate source_rate, double reprobe_seconds, std::span<const ViewedSpan> viewed) {
     const auto reprobe_samples =
         static_cast<dsp::SampleIndex>(reprobe_seconds * static_cast<double>(source_rate));
-    const auto starve_samples =
-        static_cast<dsp::SampleIndex>(starve_seconds * static_cast<double>(source_rate));
-    const auto ranked = [&](int refine, int probed, const Track& track, dsp::SampleIndex key,
+    const auto ranked = [&](bool refine, int tier, const Track& track, dsp::SampleIndex key,
                             dsp::SampleIndex waiting_since) {
         const dsp::Hertz half = track.bandwidth / 2;
-        return rank_of(refine, probed,
-                       in_view(viewed, track.center - half, track.center + half),
-                       track.snr_2500_db, key, waiting_since, now, starve_samples, track.id);
+        return ScheduleEntry{.tag = track.id,
+                             .tier = tier,
+                             .refine = refine,
+                             .viewed = in_view(viewed, track.center - half, track.center + half),
+                             .snr_db = track.snr_2500_db,
+                             .key = key,
+                             .waiting_since = waiting_since};
     };
 
-    std::vector<Rank> eligible;
+    std::vector<ScheduleEntry> eligible;
     for (const Track& track : tracks) {
         if (track.state != TrackState::Live) {
             continue;
@@ -242,23 +243,62 @@ namespace {
             if (now < since + kRefineReprobeFactor * reprobe_samples) {
                 continue;
             }
-            eligible.push_back(ranked(1, 0, track, since, since));
+            eligible.push_back(ranked(true, 0, track, since, since));
             continue;
         }
         if (tried == attempts.end()) {
-            eligible.push_back(ranked(0, 0, track, track.first_seen, track.first_seen));
+            eligible.push_back(ranked(false, 0, track, track.first_seen, track.first_seen));
             continue;
         }
         if (now < tried->second + reprobe_samples) {
             continue;
         }
         eligible.push_back(
-            ranked(0, 2, track, tried->second, tried->second + reprobe_samples));
+            ranked(false, 2, track, tried->second, tried->second + reprobe_samples));
     }
     return eligible;
 }
 
 }  // namespace
+
+std::vector<ScheduleEntry> TierTwo::merge_schedule(std::vector<ScheduleEntry> classification,
+                                                   std::span<const ScheduleEntry> dwells,
+                                                   std::size_t free, dsp::SampleIndex now,
+                                                   dsp::SampleIndex starve_samples) {
+    std::vector<ScheduleEntry> all = std::move(classification);
+    for (ScheduleEntry dwell : dwells) {
+        dwell.identify = true;
+        // The dwell takes the place of the same unit's classification look,
+        // and keeps how long that look had been waiting, so a unit that was
+        // already starved stays starved when its dwell replaces it.
+        for (const ScheduleEntry& replaced : all) {
+            if (replaced.tag == dwell.tag && !replaced.refine) {
+                dwell.waiting_since = std::min(dwell.waiting_since, replaced.waiting_since);
+            }
+        }
+        std::erase_if(all, [&](const ScheduleEntry& entry) { return entry.tag == dwell.tag; });
+        all.push_back(dwell);
+    }
+    std::vector<std::pair<Rank, std::size_t>> ranked;
+    ranked.reserve(all.size());
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        const ScheduleEntry& entry = all[i];
+        ranked.emplace_back(rank_of(entry.refine ? 1 : 0, entry.tier, entry.viewed, entry.snr_db,
+                                    entry.key, entry.waiting_since, now, starve_samples,
+                                    entry.tag),
+                            i);
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<ScheduleEntry> out;
+    for (const auto& [rank, at] : ranked) {
+        if (out.size() >= free) {
+            break;
+        }
+        out.push_back(all[at]);
+    }
+    return out;
+}
 
 std::vector<std::uint64_t> TierTwo::pick(
     std::span<const Track> tracks,
@@ -266,15 +306,14 @@ std::vector<std::uint64_t> TierTwo::pick(
     std::span<const std::uint64_t> in_flight, std::size_t free, dsp::SampleIndex now,
     dsp::SampleRate source_rate, double reprobe_seconds, double starve_seconds,
     std::span<const ViewedSpan> viewed) {
-    std::vector<Rank> eligible = rank_tracks(tracks, attempts, in_flight, now, source_rate,
-                                             reprobe_seconds, starve_seconds, viewed);
-    std::sort(eligible.begin(), eligible.end());
+    const auto starve_samples =
+        static_cast<dsp::SampleIndex>(starve_seconds * static_cast<double>(source_rate));
+    const std::vector<ScheduleEntry> chosen = merge_schedule(
+        rank_tracks(tracks, attempts, in_flight, now, source_rate, reprobe_seconds, viewed),
+        {}, free, now, starve_samples);
     std::vector<std::uint64_t> out;
-    for (const Rank& entry : eligible) {
-        if (out.size() >= free) {
-            break;
-        }
-        out.push_back(entry.id);
+    for (const ScheduleEntry& entry : chosen) {
+        out.push_back(entry.tag);
     }
     return out;
 }
@@ -596,25 +635,21 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
     // the rule the header states. An emitter is ranked on its anchor's SNR,
     // its whole extent against the view, and the decision its group formed as
     // its birth.
-    struct Unit {
-        Rank rank;
-        std::uint64_t tag = 0;
-        const LineGroup* group = nullptr;
-        bool identify = false;
-    };
-    std::vector<Unit> units;
-    for (const Rank& rank : rank_tracks(alone, attempts_, in_flight_, now, config_.source_rate,
-                                        config_.reprobe_seconds, config_.starve_seconds,
-                                        viewed_)) {
-        units.push_back(Unit{.rank = rank, .tag = rank.id});
-    }
     const auto reprobe_samples = static_cast<dsp::SampleIndex>(
         config_.reprobe_seconds * static_cast<double>(config_.source_rate));
     const auto starve_samples = static_cast<dsp::SampleIndex>(
         config_.starve_seconds * static_cast<double>(config_.source_rate));
+    std::vector<ScheduleEntry> looks = rank_tracks(alone, attempts_, in_flight_, now,
+                                                   config_.source_rate, config_.reprobe_seconds,
+                                                   viewed_);
+    std::unordered_map<std::uint64_t, const LineGroup*> group_of;
     if (grouper_.has_value()) {
         for (const LineGroup& group : grouper_->groups()) {
-            if (!is_emitter(group) || group_findings_.contains(group.id)) {
+            if (!is_emitter(group)) {
+                continue;
+            }
+            group_of[group.anchor] = &group;
+            if (group_findings_.contains(group.id)) {
                 continue;
             }
             const auto anchor = std::find_if(tracks.begin(), tracks.end(), [&](const Track& t) {
@@ -635,31 +670,35 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
             }
             const bool fresh = tried == group_attempts_.end();
             const dsp::SampleIndex key = fresh ? group.formed : tried->second;
-            units.push_back(Unit{
-                .rank = rank_of(0, fresh ? 0 : 2, in_view(viewed_, group.low_edge, group.high_edge),
-                                anchor->snr_2500_db, key, fresh ? key : key + reprobe_samples, now,
-                                starve_samples, group.anchor),
+            looks.push_back(ScheduleEntry{
                 .tag = group.anchor,
-                .group = &group});
+                .tier = fresh ? 0 : 2,
+                .viewed = in_view(viewed_, group.low_edge, group.high_edge),
+                .snr_db = anchor->snr_2500_db,
+                .key = key,
+                .waiting_since = fresh ? key : key + reprobe_samples});
         }
     }
-    // THE IDENTIFICATION DWELLS, ranked with everything above rather than
-    // given what it leaves. A narrow track that has been characterised and
-    // not yet verified is owed a long dwell, and its first one ranks behind
-    // the never-probed tracks and emitters and ahead of every re-look; a
-    // retry ranks with the re-looks. Not level with the never-probed: an AM
-    // talker's carrier line, strong and narrow, then took its dwell before its
-    // emitter's first probe, verified the syllables as Morse, and read CW on
-    // seed 2 of the labelled scene. WHAT THIS USED TO
-    // DO: run only on the pool left over after the classification schedule.
-    // Once that schedule put strong tracks first, its re-looks of strong
-    // tracks kept a pool of four full and RTTY on seed 2 of the labelled
+
+    // THE IDENTIFICATION DWELLS, ranked with the looks above rather than given
+    // what they leave. A narrow track that has been characterised and not yet
+    // verified is owed a long dwell. Its first one ranks behind the
+    // never-probed tracks and emitters and ahead of every re-look; a retry
+    // ranks with the re-looks; and either starves on TierTwoConfig::
+    // starve_seconds counted from when it became owed.
+    //
+    // Not level with the never-probed: an AM talker's carrier line, strong and
+    // narrow, then took its dwell before its emitter's first probe, verified
+    // the syllables as Morse, and read CW on seed 2 of the labelled scene.
+    // WHAT THIS USED TO DO: run only on the pool left over after the
+    // classification looks. Once those put strong tracks first, their
+    // re-looks kept a pool of four full and RTTY on seed 2 of the labelled
     // scene never had its framing verified in 30 s (2026-11-03).
     std::erase_if(identify_dwells_, gone);
-    std::vector<std::uint64_t> identifying;
-    std::vector<const LineGroup*> identifying_groups;
+    std::erase_if(dwell_owed_since_, gone);
+    std::erase_if(group_dwell_owed_since_, group_gone);
+    std::vector<ScheduleEntry> dwells;
     {
-        const std::vector<std::uint64_t> chosen;
         // Not a line an emitter's answer reached, and not one called AM: the
         // long dwell is for the narrow data modes, and a talker's syllables
         // key a carrier the way Morse does. In the voice survey a sideband
@@ -672,13 +711,25 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
                 narrow.push_back(track);
             }
         }
-        identifying = pick_identify(narrow, identify_dwells_, in_flight_, chosen, narrow.size());
+        for (const std::uint64_t id :
+             pick_identify(narrow, identify_dwells_, in_flight_, {}, narrow.size())) {
+            const auto found = std::find_if(narrow.begin(), narrow.end(),
+                                            [id](const Track& t) { return t.id == id; });
+            const auto given = identify_dwells_.find(id);
+            const bool retry = given != identify_dwells_.end() && given->second > 0;
+            const dsp::Hertz half = found->bandwidth / 2;
+            dwells.push_back(ScheduleEntry{
+                .tag = id,
+                .tier = retry ? 2 : 1,
+                .viewed = in_view(viewed_, found->center - half, found->center + half),
+                .snr_db = found->snr_2500_db,
+                .key = found->first_seen,
+                .waiting_since = dwell_owed_since_.try_emplace(id, now).first->second});
+        }
 
         // A narrow emitter gets the same long dwells once its first emitter
         // probe has answered and named no protocol: RTTY's two tones read as
-        // two lines are one such emitter. First dwells before retries here as
-        // well, and otherwise in the grouper's order.
-        std::vector<std::pair<std::uint32_t, const LineGroup*>> owed;
+        // two lines are one such emitter.
         if (grouper_.has_value()) {
             for (const LineGroup& group : grouper_->groups()) {
                 if (!is_emitter(group) ||
@@ -689,7 +740,7 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
                 const std::uint32_t count =
                     given == group_identify_dwells_.end() ? 0 : given->second;
                 if (group.high_edge - group.low_edge > engine::kProbeIdentifyNarrowHz ||
-                    count >= kIdentifyDwells || listed(chosen, group.anchor)) {
+                    count >= kIdentifyDwells) {
                     continue;
                 }
                 const auto anchor = std::find_if(tracks.begin(), tracks.end(), [&](const Track& t) {
@@ -705,75 +756,43 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
                     })) {
                     continue;
                 }
-                owed.emplace_back(count, &group);
+                dwells.push_back(ScheduleEntry{
+                    .tag = group.anchor,
+                    .tier = count > 0 ? 2 : 1,
+                    .viewed = in_view(viewed_, group.low_edge, group.high_edge),
+                    .snr_db = anchor->snr_2500_db,
+                    .key = group.formed,
+                    .waiting_since =
+                        group_dwell_owed_since_.try_emplace(group.id, now).first->second});
             }
-        }
-        for (const auto& entry : owed) {
-            identifying_groups.push_back(entry.second);
         }
     }
 
-    // One ranked list. A dwell replaces the same track's or emitter's
-    // classification re-look, since the long dwell characterises as well.
-    {
-        const auto snr_of = [&](std::uint64_t id) {
-            const auto found = std::find_if(tracks.begin(), tracks.end(),
-                                            [id](const Track& t) { return t.id == id; });
-            return found == tracks.end() ? 0.0 : found->snr_2500_db;
-        };
-        const auto born_of = [&](std::uint64_t id) {
-            const auto found = std::find_if(tracks.begin(), tracks.end(),
-                                            [id](const Track& t) { return t.id == id; });
-            return found == tracks.end() ? now : found->first_seen;
-        };
-        for (const std::uint64_t id : identifying) {
-            std::erase_if(units, [id](const Unit& unit) { return unit.tag == id; });
-            const auto given = identify_dwells_.find(id);
-            const bool retry = given != identify_dwells_.end() && given->second > 0;
-            const auto found = std::find_if(tracks.begin(), tracks.end(),
-                                            [id](const Track& t) { return t.id == id; });
-            const dsp::Hertz half = found == tracks.end() ? 0 : found->bandwidth / 2;
-            const dsp::Hertz center = found == tracks.end() ? 0 : found->center;
-            // A dwell never starves: it is owed only a bounded number of times.
-            units.push_back(Unit{.rank = rank_of(0, retry ? 2 : 1,
-                                                 in_view(viewed_, center - half, center + half),
-                                                 snr_of(id), born_of(id), now, now,
-                                                 starve_samples, id),
-                                 .tag = id,
-                                 .identify = true});
-        }
-        for (const LineGroup* group : identifying_groups) {
-            std::erase_if(units, [&](const Unit& unit) { return unit.tag == group->anchor; });
-            const auto given = group_identify_dwells_.find(group->id);
-            const bool retry = given != group_identify_dwells_.end() && given->second > 0;
-            units.push_back(
-                Unit{.rank = rank_of(0, retry ? 2 : 1,
-                                     in_view(viewed_, group->low_edge, group->high_edge),
-                                     snr_of(group->anchor), group->formed, now, now,
-                                     starve_samples, group->anchor),
-                     .tag = group->anchor,
-                     .group = group,
-                     .identify = true});
-        }
-    }
-    std::sort(units.begin(), units.end(),
-              [](const Unit& a, const Unit& b) { return a.rank < b.rank; });
-    if (units.size() > free) {
-        units.resize(free);
-    }
-    identifying.clear();
-    identifying_groups.clear();
-    std::erase_if(units, [&](const Unit& unit) {
-        if (!unit.identify) {
-            return false;
-        }
-        if (unit.group != nullptr) {
-            identifying_groups.push_back(unit.group);
+    // Back from the one list into what to submit, and how.
+    struct Unit {
+        std::uint64_t tag = 0;
+        const LineGroup* group = nullptr;
+    };
+    std::vector<Unit> units;
+    std::vector<std::uint64_t> identifying;
+    std::vector<const LineGroup*> identifying_groups;
+    for (const ScheduleEntry& entry :
+         merge_schedule(std::move(looks), dwells, free, now, starve_samples)) {
+        // A tag names an emitter when it is an emitter's anchor and that
+        // anchor is not also a line on its own, which it never is: grouped
+        // lines are left out of `alone`.
+        const auto grouped_at = group_of.find(entry.tag);
+        const LineGroup* group = grouped_at == group_of.end() ? nullptr : grouped_at->second;
+        if (!entry.identify) {
+            units.push_back(Unit{.tag = entry.tag, .group = group});
+        } else if (group != nullptr) {
+            identifying_groups.push_back(group);
+            group_dwell_owed_since_.erase(group->id);
         } else {
-            identifying.push_back(unit.tag);
+            identifying.push_back(entry.tag);
+            dwell_owed_since_.erase(entry.tag);
         }
-        return true;
-    });
+    }
     if (units.empty() && identifying.empty() && identifying_groups.empty()) {
         return {};
     }

@@ -2469,6 +2469,76 @@ TEST_CASE("tier two looks at viewed, strong and new tracks first, and starves no
     }
 }
 
+// REJECTS: a merged schedule that puts a re-look ahead of an owed dwell or a
+// dwell ahead of a first look, that lets a dwell wait past the starvation
+// bound, that drops a starved look's wait when its dwell replaces it, or that
+// loses which entries are dwells when it cuts the list to the pool.
+TEST_CASE("tier two ranks identification dwells with the classification looks",
+          "[detect][tier-two]") {
+    constexpr dsp::SampleIndex kSecond = 1'000'000;
+    constexpr dsp::SampleIndex kStarve = 15 * kSecond;
+    const auto entry = [](std::uint64_t tag, int tier, double snr, dsp::SampleIndex since) {
+        return detect::ScheduleEntry{
+            .tag = tag, .tier = tier, .snr_db = snr, .key = since, .waiting_since = since};
+    };
+    const auto tags = [](const std::vector<detect::ScheduleEntry>& list) {
+        std::vector<std::uint64_t> out;
+        for (const detect::ScheduleEntry& one : list) {
+            out.push_back(one.tag);
+        }
+        return out;
+    };
+    const dsp::SampleIndex now = 20 * kSecond;
+
+    SECTION("never probed, then a first dwell, then a re-look, whatever their SNR") {
+        const std::vector<detect::ScheduleEntry> looks = {entry(1, 2, 40.0, 18 * kSecond),
+                                                          entry(2, 0, 3.0, 18 * kSecond)};
+        const detect::ScheduleEntry dwells[] = {entry(3, 1, 10.0, 18 * kSecond)};
+        const auto chosen = detect::TierTwo::merge_schedule(looks, dwells, 8, now, kStarve);
+        CHECK(tags(chosen) == std::vector<std::uint64_t>{2, 3, 1});
+        CHECK_FALSE(chosen[0].identify);
+        CHECK(chosen[1].identify);
+        CHECK_FALSE(chosen[2].identify);
+    }
+    SECTION("a dwell replaces its own track's look") {
+        const std::vector<detect::ScheduleEntry> looks = {entry(1, 2, 20.0, 18 * kSecond),
+                                                          entry(2, 2, 10.0, 18 * kSecond)};
+        const detect::ScheduleEntry dwells[] = {entry(1, 1, 20.0, 19 * kSecond)};
+        const auto chosen = detect::TierTwo::merge_schedule(looks, dwells, 8, now, kStarve);
+        REQUIRE(tags(chosen) == std::vector<std::uint64_t>{1, 2});
+        CHECK(chosen[0].identify);
+    }
+    SECTION("a dwell owed past the bound goes ahead of a never-probed track") {
+        const std::vector<detect::ScheduleEntry> looks = {entry(1, 0, 40.0, 19 * kSecond)};
+        const detect::ScheduleEntry fresh[] = {entry(2, 1, 3.0, 6 * kSecond)};
+        CHECK(tags(detect::TierTwo::merge_schedule(looks, fresh, 8, now, kStarve)) ==
+              std::vector<std::uint64_t>{1, 2});
+        const detect::ScheduleEntry starved[] = {entry(2, 1, 3.0, 5 * kSecond)};
+        CHECK(tags(detect::TierTwo::merge_schedule(looks, starved, 1, now, kStarve)) ==
+              std::vector<std::uint64_t>{2});
+    }
+    SECTION("a dwell replacing a starved look keeps the look's wait") {
+        const std::vector<detect::ScheduleEntry> looks = {entry(1, 2, 3.0, 2 * kSecond),
+                                                          entry(2, 0, 40.0, 19 * kSecond)};
+        const detect::ScheduleEntry dwells[] = {entry(1, 1, 3.0, now)};
+        const auto chosen = detect::TierTwo::merge_schedule(looks, dwells, 1, now, kStarve);
+        REQUIRE(tags(chosen) == std::vector<std::uint64_t>{1});
+        CHECK(chosen[0].identify);
+    }
+    SECTION("cut to the pool, each entry still says whether it is a dwell") {
+        const std::vector<detect::ScheduleEntry> looks = {
+            entry(1, 0, 30.0, 18 * kSecond), entry(2, 0, 20.0, 18 * kSecond),
+            entry(3, 2, 30.0, 18 * kSecond)};
+        const detect::ScheduleEntry dwells[] = {entry(4, 1, 5.0, 18 * kSecond),
+                                                entry(5, 2, 5.0, 18 * kSecond)};
+        const auto chosen = detect::TierTwo::merge_schedule(looks, dwells, 3, now, kStarve);
+        REQUIRE(tags(chosen) == std::vector<std::uint64_t>{1, 2, 4});
+        CHECK_FALSE(chosen[0].identify);
+        CHECK_FALSE(chosen[1].identify);
+        CHECK(chosen[2].identify);
+    }
+}
+
 // REJECTS: an identification schedule that spends the long dwell on a wide
 // track, on one never probed, on one already identified, or on one that has
 // had detect::kIdentifyDwells. WHAT THIS USED TO SAY at its end: "or twice on
