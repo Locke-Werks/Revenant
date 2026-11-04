@@ -2414,6 +2414,16 @@ The owner chose "smarter labeller", and then gave detection two cores:
   `snr_2500_db`; then the older. A strong track is the one a probe can answer
   and the one an operator is looking at. The bound keeps a weak one from
   waiting for ever.
+- **Identification dwells are ranked with the looks**, `TierTwo::merge_schedule`:
+  a narrow track characterised and not yet verified is owed a 5 s dwell, and
+  its first one ranks behind every never-probed track and emitter and ahead of
+  every re-look; a retry ranks with the re-looks; an owed dwell starves on the
+  same 15 s bound, counted from when it became owed. Before, dwells had only
+  what the looks left, and once strong tracks went first their re-looks kept
+  a pool of four full: RTTY on seed 2 of the labelled scene was never
+  verified in 30 s. Level with the never-probed was tried and lost an AM
+  talker on the same seed: its carrier line, strong and narrow, took its dwell
+  before its emitter's first probe and verified the syllables as Morse.
 - **The view is not fed yet.** No call carries a client's view:
   `subscribeSpectrum` sends the whole span and both clients zoom on their own
   side. `TierTwo::set_viewed` takes spans and the order honours them, so a
