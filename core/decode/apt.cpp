@@ -23,6 +23,11 @@ constexpr double kEnvelopeTransitionHz = 500.0;
 constexpr float kAcquireScore = 0.5F;
 constexpr float kTrackScore = 0.3F;
 
+// Acquisition's coarse pass steps this many words, and refines any coarse
+// score within kCoarseMargin of kAcquireScore. See try_line.
+constexpr double kCoarseStepWords = 0.5;
+constexpr float kCoarseMargin = 0.15F;
+
 // Search either side of the expected line start while tracked, in words.
 constexpr double kTrackWindowWords = 6.0;
 
@@ -233,19 +238,47 @@ bool AptDecoder::try_line() {
         if (available < s + 2.0 * nominal_period_ + 4.0) {
             return false;
         }
-        double best_p = s;
-        float best = -2.0F;
-        float best_a = 0.0F;
-        float best_b = 0.0F;
-        for (double p = s; p < s + nominal_period_; p += 1.0) {
+        // Coarse then fine. A whole line searched a sample at a time is two
+        // ~450-tap correlations at every one of 24000 offsets at 48 kHz, and
+        // with no satellite in view, which on an nfm receiver is always, that
+        // ran forever: 48 ms of CPU a second per receiver, the heaviest
+        // decoder the receiver window's auto attached, and enough to make the
+        // receiver's audio arrive late (2026-11-04). The sync's correlation
+        // peak is about two words wide, so a half-word step cannot step over
+        // it and lands within a quarter word of it, where the score is still
+        // most of the peak's. The fine pass then searches a sample at a time
+        // either side of the best coarse offset, which finds the same peak
+        // the exhaustive search did.
+        const double step = std::max(1.0, std::floor(kCoarseStepWords * config_.sample_rate /
+                                                     kAptWordRate));
+        double coarse_p = s;
+        float coarse = -2.0F;
+        for (double p = s; p < s + nominal_period_; p += step) {
             float a = 0.0F;
             float b = 0.0F;
             const float sc = score_at(p, a, b);
-            if (sc > best) {
-                best = sc;
-                best_p = p;
-                best_a = a;
-                best_b = b;
+            if (sc > coarse) {
+                coarse = sc;
+                coarse_p = p;
+            }
+        }
+        double best_p = coarse_p;
+        float best = -2.0F;
+        float best_a = 0.0F;
+        float best_b = 0.0F;
+        if (coarse >= kAcquireScore - kCoarseMargin) {
+            const double lo = std::max(s, coarse_p - step);
+            const double hi = std::min(s + nominal_period_ - 1.0, coarse_p + step);
+            for (double p = lo; p <= hi; p += 1.0) {
+                float a = 0.0F;
+                float b = 0.0F;
+                const float sc = score_at(p, a, b);
+                if (sc > best) {
+                    best = sc;
+                    best_p = p;
+                    best_a = a;
+                    best_b = b;
+                }
             }
         }
         if (best < kAcquireScore) {
