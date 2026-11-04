@@ -270,9 +270,6 @@ export interface ControllerDeps {
   // A sentence about live audio that stays until it no longer holds; null
   // clears it.
   audioNote(text: string | null): void;
-  // True while trunk following is on: the engine then adds and removes
-  // followers per call, and a toast for each is noise.
-  quietRemovals?(): boolean;
 }
 
 export const NOT_STARTED = "The phone has not started sound yet. Tap the waterfall or a receiver to allow it.";
@@ -846,10 +843,9 @@ export class ReceiverController {
       this.list.remove(vrx);
       return;
     }
-    const was = this.list.remove(vrx);
-    if (!was || this.deps.quietRemovals?.()) return;
-    const reason = typeof e.reason === "string" && e.reason !== "" ? e.reason : "removed by the engine";
-    this.deps.toast(`Receiver at ${formatMHz(was.hz)} MHz removed: ${reason}`);
+    // No toast: trunk following and Auto DV add and remove receivers on their
+    // own all the time, and the chip leaving the list says enough.
+    this.list.remove(vrx);
   }
 
   private onLink(e: LinkEvent): void {

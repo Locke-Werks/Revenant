@@ -295,7 +295,6 @@ export function mountApp(root: HTMLElement): AppHandle {
     toast,
     audioNote: (text) => notes.set("audio", text),
     tuneRanges: () => radio.tuneRanges(),
-    quietRemovals: () => dvState.follow !== null,
   });
 
   sheet = new Sheet({

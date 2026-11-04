@@ -184,7 +184,7 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-function rig(ranges: { lowHz: number; highHz: number }[] | null = null, quiet = () => false) {
+function rig(ranges: { lowHz: number; highHz: number }[] | null = null) {
   const link = new FakeLink();
   const gate = new ReplaceGate(link);
   const audio = new FakeAudio(gate);
@@ -198,7 +198,6 @@ function rig(ranges: { lowHz: number; highHz: number }[] | null = null, quiet = 
     toast: (t) => toasts.push(t),
     tuneRanges: () => ranges,
     audioNote: (t) => notes.push(t),
-    quietRemovals: quiet,
   });
   return { link, gate, audio, keep, ctl, toasts, notes, chips: () => ctl.list.list().map((r) => `${r.vrx}:${r.hz}:${r.mode}`) };
 }
@@ -314,7 +313,7 @@ test("chips follow add, status and remove events", async () => {
   r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 4, reason: "the source was retuned away from it" });
   assert.deepEqual(r.chips(), []);
   assert.equal(r.ctl.list.active, null);
-  assert.equal(r.toasts[1], "Receiver at 100.0000 MHz removed: the source was retuned away from it");
+  assert.equal(r.toasts.length, 1);
 });
 
 test("a refused command shows the engine's sentence and changes nothing", async () => {
@@ -396,7 +395,7 @@ test("a refused replace lets a held removal through", async () => {
   await flush();
   assert.equal(r.audio.vrx, null);
   assert.deepEqual(r.chips(), []);
-  assert.deepEqual(r.toasts, ["set_vrx_params: remote exception: no", "Receiver at 146.5200 MHz removed: the source closed"]);
+  assert.deepEqual(r.toasts, ["set_vrx_params: remote exception: no"]);
 });
 
 test("the same mode again is a plain update", async () => {
@@ -587,11 +586,11 @@ test("a removal's id is forgotten once the reply lands, so a reused id's removal
   r.link.reply(status(1, 162_550_000));
   await flush();
   r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 1, reason: "retuned away" });
-  assert.deepEqual(r.toasts, ["Receiver at 162.5500 MHz removed: retuned away"]);
+  assert.deepEqual(r.chips(), []);
 });
 
-test("while trunk following is on, an engine removal is silent but still removes", async () => {
-  const r = rig(null, () => true);
+test("an engine removal is silent but still removes", async () => {
+  const r = rig();
   await listening(r, 1);
   const gone: number[] = [];
   r.ctl.onGone((v) => gone.push(v));
@@ -612,7 +611,7 @@ test("a restart forgets removals in flight", async () => {
   r.link.reply(status(1, 100_000_000));
   await flush();
   r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 1, reason: "gone" });
-  assert.equal(r.toasts[r.toasts.length - 1], "Receiver at 100.0000 MHz removed: gone");
+  assert.deepEqual(r.chips(), []);
 });
 
 test("a removal event before the reply is not news, and a restart in between clears it", async () => {
@@ -621,7 +620,7 @@ test("a removal event before the reply is not news, and a restart in between cle
   r.ctl.remove(1);
   r.link.emit("link", { event: "link", state: "up", detail: "", recreated: [{ old: 1, new: 1 }], lost: [] });
   r.link.emit("vrxRemoved", { event: "vrxRemoved", vrx: 1, reason: "x" });
-  assert.deepEqual(r.toasts, ["Receiver at 146.5200 MHz removed: x"]);
+  assert.deepEqual(r.chips(), []);
 });
 
 test("taps are ignored while the active receiver is being replaced", async () => {
