@@ -4299,6 +4299,13 @@ private:
     // these, never a receiver the operator placed.
     std::vector<std::uint64_t> auto_dv_spawned_keys_;
 
+    // The centres of the receivers autoDv handed back from a control channel,
+    // kept until the switch next moves. Without them a detection whose label
+    // wavered between "P25" and "P25 control" was opened and handed back again
+    // on every few passes: 86 opens and 62 hand-backs in 70 s on the live
+    // system at 852.5 MHz, with the rack holding steady near thirty.
+    std::vector<double> auto_dv_retired_hz_;
+
     [[nodiscard]] HeldView* held_view(std::uint64_t key);
     [[nodiscard]] const HeldView* held_view(std::uint64_t key) const;
 

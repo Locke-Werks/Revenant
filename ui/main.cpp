@@ -12,7 +12,7 @@
 // USAGE
 //
 //   revenant-ui [address] [port] [--every-nth N] [--smoke-seconds N]
-//               [--receiver FREQ:MODE ...] [--decode NAME] [--rds]
+//               [--receiver FREQ:MODE ...] [--decode NAME] [--rds] [--auto-dv]
 //               [--grab-receivers FILE] [--palette QUERY] [--keymap]
 //               [--grab-main FILE] [--frame-stats FILE] [--maximise]
 //               [--on-top] [--memories FILE] [--panel NAME]
@@ -45,8 +45,9 @@
 // rack is photographed. --decode names a decoder to attach to the first,
 // or auto, and switches decoding on. --rds switches the RDS section on for
 // the first, which on a wfm one raises it to the composite rate as the switch
-// in the window does. --grab-receivers pops the receivers out of the main
-// window, where a smoke run otherwise leaves them docked, and writes the
+// in the window does. --auto-dv turns the rack's auto DV switch on, so a
+// measured run carries the receivers it opens. --grab-receivers pops the
+// receivers out of the main window, where a smoke run otherwise leaves them docked, and writes the
 // receiver window to FILE as a PNG when the run ends; --grab-main with them
 // docked photographs them in the main window. Together they drive and photograph the rack and
 // the decode and RDS sections with nobody at the mouse, which is what they are
@@ -192,7 +193,7 @@ namespace {
 // USAGE at the top of this file, for --help and an unknown option.
 constexpr const char* kUsage =
     "usage: revenant-ui [address] [port] [--every-nth N] [--smoke-seconds N]\n"
-    "                   [--receiver FREQ:MODE ...] [--decode NAME] [--rds]\n"
+    "                   [--receiver FREQ:MODE ...] [--decode NAME] [--rds] [--auto-dv]\n"
     "                   [--grab-receivers FILE] [--grab-main FILE] [--grab-size WxH]\n"
     "                   [--palette QUERY] [--keymap] [--frame-stats FILE] [--maximise]\n"
     "                   [--on-top] [--memories FILE] [--panel NAME]\n"
@@ -489,6 +490,7 @@ int main(int argc, char* argv[])
     QStringList startup_receivers;
     QString startup_decoder;
     bool startup_rds = false;
+    bool startup_auto_dv = false;
     QString grab_receivers;
     QString grab_main;
     QSize grab_size;
@@ -533,6 +535,10 @@ int main(int argc, char* argv[])
         }
         if (args[i] == QStringLiteral("--rds")) {
             startup_rds = true;
+            continue;
+        }
+        if (args[i] == QStringLiteral("--auto-dv")) {
+            startup_auto_dv = true;
             continue;
         }
         if (args[i] == QStringLiteral("--grab-receivers") && i + 1 < args.size()) {
@@ -834,6 +840,9 @@ int main(int argc, char* argv[])
     // own switch would take too.
     if (startup_rds) {
         link.setRdsWanted(true);
+    }
+    if (startup_auto_dv) {
+        link.setAutoDv(true);
     }
 
     // DECLARED AFTER THE LINK ON PURPOSE, so it is destroyed BEFORE it.

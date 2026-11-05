@@ -159,15 +159,21 @@ ColumnLayout {
             width: parent.width
             spacing: 6
 
-            // By count and not by the list, so a strip is not rebuilt each
-            // time a level arrives, which is several times a second and would
-            // drop a gain slider out from under the pointer mid-drag.
+            // A fixed 64, the rack's limit, with the strips past rackCount
+            // hidden. Not the list, so a strip is not rebuilt each time a level
+            // arrives, which is several times a second and would drop a gain
+            // slider out from under the pointer mid-drag. Not rackCount either:
+            // a Repeater whose integer model changes destroys and recreates
+            // every delegate, and auto DV opening or handing back one receiver
+            // then rebuilt all of them on the GUI thread, 40 to 120 ms with
+            // thirty in the rack, which stalled the span displays.
             Repeater {
-                model: engineLink.rackCount
+                model: 64
 
                 ReceiverStrip {
                     required property int index
                     Layout.fillWidth: true
+                    visible: index < engineLink.rackCount
 
                     // The blank covers the one turn of the event loop between
                     // a strip going and the Repeater dropping its delegate.

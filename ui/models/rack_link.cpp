@@ -718,6 +718,7 @@ void EngineLink::apply_auto_dv(bool on, bool plugins_follow)
     auto_dv_ = on;
     auto_dv_dismissed_hz_.clear();
     auto_dv_noted_hz_.clear();
+    auto_dv_retired_hz_.clear();
     emit autoDvChanged();
 
     // Either auto DV or the trunk tracker, never both on one channel: on, the
@@ -761,6 +762,11 @@ void EngineLink::spawn_dv_receivers()
     }
     const std::vector<std::uint64_t> retire = plan_dv_retirements(shown_.detections, spawned);
     for (const std::uint64_t key : retire) {
+        for (const DvSpawned& one : spawned) {
+            if (one.key == key) {
+                auto_dv_retired_hz_.push_back(one.centre_hz);
+            }
+        }
         std::erase(auto_dv_spawned_keys_, key);
         removeRackReceiver(key);
     }
@@ -770,6 +776,7 @@ void EngineLink::spawn_dv_receivers()
     // So a receiver spawned last pass and not yet answered by the engine still
     // covers its frequency, and a pass cannot open it twice.
     std::vector<double> covered = auto_dv_dismissed_hz_;
+    covered.insert(covered.end(), auto_dv_retired_hz_.begin(), auto_dv_retired_hz_.end());
     for (const RackEntry& entry : rack_.entries()) {
         if (entry.key == pane_key_) {
             if (receiver_absolute_hz_ != 0) {

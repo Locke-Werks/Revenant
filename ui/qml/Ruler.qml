@@ -79,7 +79,10 @@ Item {
     // each in its rack colour. The focused one is the stronger mark and the
     // held ones fainter, the same split the span displays draw.
     Repeater {
-        model: ruler.live ? engineLink.rackCount : 0
+        // The rack's limit rather than rackCount, for the reason the rack's
+        // own Repeater gives: a changed count rebuilds every delegate. A
+        // slot past the rack draws nothing, its band having no width.
+        model: ruler.live ? 64 : 0
 
         Item {
             id: band
