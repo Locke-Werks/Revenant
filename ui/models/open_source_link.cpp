@@ -158,6 +158,7 @@ void EngineLink::note_comb_status(const rpc::SourceStats& stats)
                                 'f', 0);
                 break;
             case 3: text = QStringLiteral("comb lost"); break;
+            case 4: text = QStringLiteral("comb recovering"); break;
             default: text = QStringLiteral("comb"); break;
         }
     }

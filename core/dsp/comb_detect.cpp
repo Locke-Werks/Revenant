@@ -126,6 +126,7 @@ struct Peak {
 struct Fit {
     double c = 0.0;  // bins, line k = 0
     double d = 0.0;  // bins
+    double e = 0.0;  // bins, line k at c + k d + k^2 e; set only on a held comb
     std::int64_t k_lo = 0;
     std::int64_t k_hi = -1;
     std::uint32_t found = 0;
@@ -716,6 +717,7 @@ void take_grid(const std::vector<Peak>& peaks, const Fit& grid, std::vector<bool
     Fit grid;
     grid.c = static_cast<double>(n / 2) + held.offset_hz / hz_per_bin;
     grid.d = std::max(held.spacing_hz, 0.0) / hz_per_bin;
+    grid.e = held.curvature_hz / hz_per_bin;
     grid.k_lo = held.k_lo;
     grid.k_hi = grid.d > 0.0 ? held.k_hi : held.k_lo;
     out.push_back(grid);
@@ -751,13 +753,29 @@ void take_grid(const std::vector<Peak>& peaks, const Fit& grid, std::vector<bool
     return out;
 }
 
+// The k of g's line nearest x, curvature included: round against the
+// straight grid, then correct once for the curvature at that k.
+[[nodiscard]] double nearest_line(double x, const Fit& g)
+{
+    if (!(g.d > 0.0)) {
+        return 0.0;
+    }
+    const double k0 = std::round((x - g.c) / g.d);
+    return std::round((x - g.c - g.e * k0 * k0) / g.d);
+}
+
+[[nodiscard]] double line_at(const Fit& g, double k)
+{
+    return g.c + k * g.d + k * k * g.e;
+}
+
 // Whether a peak at x sits within tolerance_bins of a line of any grid.
 [[nodiscard]] bool on_any_line(double x, const std::vector<Fit>& grids, double tolerance_bins)
 {
     return std::ranges::any_of(grids, [&](const Fit& g) {
-        const double k = g.d > 0.0 ? std::round((x - g.c) / g.d) : 0.0;
+        const double k = nearest_line(x, g);
         return k >= static_cast<double>(g.k_lo) && k <= static_cast<double>(g.k_hi) &&
-               std::abs(x - g.c - k * g.d) < tolerance_bins;
+               std::abs(x - line_at(g, k)) < tolerance_bins;
     });
 }
 
@@ -771,10 +789,10 @@ void take_grid(const std::vector<Peak>& peaks, const Fit& grid, std::vector<bool
     }
     std::int64_t on = 0;
     for (std::int64_t k = grid.k_lo; k <= grid.k_hi; ++k) {
-        const double x = grid.c + static_cast<double>(k) * grid.d;
-        const double j = held.d > 0.0 ? std::round((x - held.c) / held.d) : 0.0;
+        const double x = line_at(grid, static_cast<double>(k));
+        const double j = nearest_line(x, held);
         if (j >= static_cast<double>(held.k_lo) && j <= static_cast<double>(held.k_hi) &&
-            std::abs(x - held.c - j * held.d) < tolerance_bins) {
+            std::abs(x - line_at(held, j)) < tolerance_bins) {
             ++on;
         }
     }

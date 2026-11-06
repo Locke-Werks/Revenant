@@ -242,6 +242,21 @@ revenant-cli. Spur cancelling (`EngineConfig::spur_cancel`, `setSpurCancel`) run
 the same trackers on single unkeyed carriers the wideband detector names, never on
 a frequency an open receiver is tuned to. The header has the model and the figures.
 
+A pass that stops fitting after it has locked, through a burst of noise or the comb
+going quiet, reports `recovering` (combLock 4): it cancels nothing meanwhile but
+keeps its model and pulls back in from it, and is only given up as `lost` after 8 s.
+A detection of the same comb re-centres a recovering pass: at once if the comb has
+moved off the pass's lines, otherwise after the pass has had a second to pull in
+alone. A healthy locked pass takes free slots a few lines a block until it covers
+the whole comb, and gives back what it took past an even share when a new comb
+needs the room.
+A line that does not move with the rest of the comb, such as one shared with a
+station, is set aside on its own rather than counting against the pass.
+
+Each pass models its comb either as straight, evenly spaced harmonics, or as curved,
+with the period growing away from the centre, and switches between the two as the
+lines call for it.
+
 ## Measured
 
 `tests/engine/test_engine_noise.cpp`, through the real engine on the RTX 4090:

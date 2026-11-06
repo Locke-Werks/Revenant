@@ -180,6 +180,12 @@ struct CombEstimate {
     double ripple_hz = 0.0;
     std::int32_t sideband_orders = 0;
 
+    // Line k sits at offset_hz + k spacing_hz + k^2 curvature_hz. Zero is the
+    // straight comb of exact harmonics, which is most of them; some combs'
+    // period grows away from the centre, and the tracker fits this term when
+    // the lines show it and holds it at zero when they do not.
+    double curvature_hz = 0.0;
+
     // A single unkeyed carrier rather than a comb: one line at offset_hz,
     // k_lo == k_hi == 0, spacing_hz zero, exempt from kCombMinLines. The
     // wideband detector names these (detect::Track::spur) and the bank holds
@@ -301,7 +307,11 @@ enum class CombLock : std::uint8_t {
     kIdle,       // nothing detected, nothing cancelled
     kAcquiring,  // detected, loops pulling in, nothing cancelled yet
     kLocked,     // cancelling
-    kLost,       // was locked, the model stopped fitting; cancellation off
+    kLost,       // gave up: never locked, or could not recover; cancellation off
+    // Was locked and stopped fitting: cancellation off, the model kept, and
+    // the loops pulling back in from it. Last so the wire values of the
+    // others do not move.
+    kRecovering,
 };
 
 // What the stage reports, for the RPC and the UI indicator.
@@ -316,6 +326,20 @@ struct CombStatus {
 
     // The loops' current estimate of how fast the spacing is moving, Hz/s.
     float spacing_drift_hz_per_s = 0.0F;
+};
+
+// The lock test as one phase-stage observation saw it: what the tests and a
+// replay read to learn why a tracker held or let go.
+struct CombVerdict {
+    std::uint32_t fitted = 0;      // lines in the phase fit
+    std::uint32_t strong = 0;      // carriers standing out
+    std::uint32_t benched = 0;     // carriers set aside as not moving with the comb
+    double residual_rad = 0.0;     // weighted RMS phase residual
+    double innovation_cycles = 0.0;
+    double freq_error_cycles = 0.0;  // per block
+    bool curved = false;             // the curved model in use
+    bool good = false;
+    bool bad = false;
 };
 
 // One block's projections, as read back from the project pass of block
@@ -372,7 +396,8 @@ public:
     // Acquiring or locked: holding a comb.
     [[nodiscard]] bool active() const
     {
-        return lock_ == CombLock::kAcquiring || lock_ == CombLock::kLocked;
+        return lock_ == CombLock::kAcquiring || lock_ == CombLock::kLocked ||
+               lock_ == CombLock::kRecovering;
     }
 
     // The estimate describes the comb this tracker holds.
@@ -382,6 +407,33 @@ public:
     // tracker's lines: a detection of lines already owned, at another
     // spacing, would subtract them twice.
     [[nodiscard]] double overlap(const CombEstimate& estimate, double tolerance_hz) const;
+
+    // A detection of the comb this pass holds, over more of it than the pass
+    // was started on: the range the pass grows into is widened to cover it.
+    void extend_range(const CombEstimate& estimate);
+
+    // Slots a healthy locked pass would take to reach the untried edges of
+    // its range, zero when it is not healthy or has nowhere left to grow.
+    [[nodiscard]] std::uint32_t wants_lines() const;
+
+    // Takes up to `slots` more slots for carriers at the edges of the lines
+    // it holds, each with its sidebands. Returns the slots taken.
+    std::uint32_t grow(std::uint32_t slots);
+
+    // Gives back slots down to `slots`, outermost carriers first, so a new
+    // comb can have its share of what growth took. Returns the slots freed.
+    std::uint32_t shrink_to(std::uint32_t slots);
+
+    // A detection of the comb a recovering pass holds: the model's
+    // frequencies are taken from it, the pass's own k numbering kept. `moved`
+    // is a detection on the pass's spacing that overlaps none of its lines,
+    // the comb shifted while the pass could not see it, and is taken at once;
+    // an overlapping one only after the loops have had a second alone.
+    // Returns whether the model was taken.
+    bool recentre(const CombEstimate& estimate, bool moved);
+
+    // The estimate's spacing is this pass's across the estimate's span.
+    [[nodiscard]] bool same_spacing(const CombEstimate& estimate) const;
 
     [[nodiscard]] std::uint32_t lines() const { return static_cast<std::uint32_t>(lines_.size()); }
 
@@ -410,6 +462,9 @@ public:
     // bank can find a tracker's rows in an observation by who planned them.
     void set_id(std::uint64_t id) { id_ = id; }
     [[nodiscard]] std::uint64_t id() const { return id_; }
+
+    // The lock test of the latest phase-stage observation.
+    [[nodiscard]] const CombVerdict& verdict() const { return verdict_; }
 
 private:
     // Value members only; the tracker is copyable so a test can fork it.
@@ -440,6 +495,12 @@ private:
         double block_power = 0.0;    // average |block amplitude|^2, for a sideband's coherence
         std::uint32_t weak_blocks = 0;
         bool in_band = true;
+        // A carrier whose phase leaves the comb's fit, as one sharing its bin
+        // with a station does, is benched: out of the fits and not
+        // subtracted, until it has moved with the comb again for a while.
+        bool benched = false;
+        std::uint32_t outlier_blocks = 0;
+        std::uint32_t inlier_blocks = 0;
     };
 
     // What was handed out for one block, kept until its observation arrives.
@@ -466,10 +527,18 @@ private:
 
     void start_acquisition(const CombEstimate& estimate);
     void advance_to(SampleIndex index);
-    void correct(SampleIndex at, double dc_phase, double dc_freq, double dc_rate,
-                 double dd_phase, double dd_freq, double dd_rate);
+    // Errors in c, d and e at `at`, each as phase, frequency and rate.
+    struct Correction {
+        double phase = 0.0;
+        double freq = 0.0;
+        double rate = 0.0;
+    };
+    void correct(SampleIndex at, Correction dc, Correction dd, Correction de);
+    void choose_model(const std::vector<double>& ks, const std::vector<double>& ys,
+                      const std::vector<double>& ws, double block_samples);
     void correct_ripple(SampleIndex at, double dp, double df, double dr);
     void replace_weak_lines();
+    void begin_recovery(SampleIndex at);
     [[nodiscard]] double line_snr(const Line& line, std::uint32_t count) const;
     [[nodiscard]] bool stands_out(std::size_t slot, std::uint32_t count) const;
 
@@ -488,9 +557,14 @@ private:
     SampleIndex anchor_ = 0;  // the index the axes are evaluated at
     Axis c_{};
     Axis d_{};
-    Axis r_{};  // the sideband ripple, line (k, m) at c + k d + m r
+    Axis r_{};  // the sideband ripple, line (k, m) at c + k d + k^2 e + m r
+    Axis e_{};  // curvature; exactly zero while the straight model is in use
+    bool curved_ = false;
+    std::uint32_t curve_votes_ = 0;     // consecutive blocks the curved model fit decisively better
+    std::uint32_t straight_votes_ = 0;  // consecutive blocks the tracked curvature was negligible
     double initial_offset_hz_ = 0.0;
     double initial_spacing_hz_ = 0.0;
+    double initial_curvature_hz_ = 0.0;
     double initial_ripple_hz_ = 0.0;
     std::int32_t orders_ = 0;
 
@@ -509,6 +583,9 @@ private:
     bool wide_ = true;                 // short sub-blocks, for the widest pull-in
     std::uint32_t bad_blocks_ = 0;     // consecutive blocks failing the lock test
     bool seed_pending_ = false;
+    SampleIndex recovering_since_ = 0;  // block middle at which kRecovering began
+    bool recentred_ = false;            // a detection has re-centred this recovery
+    CombVerdict verdict_{};
 };
 
 // Up to kCombMaxCombs trackers behind one tracker's interface, so the graph

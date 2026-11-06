@@ -112,10 +112,39 @@ void CombBank::detected(std::span<const CombEstimate> estimates)
         }
         return false;
     };
+    // A detection of a held comb is not dropped outright: it widens the
+    // range that comb's pass grows into, so a pass started on part of a comb
+    // reaches the rest of it as its weak lines are swapped outward.
+    for (const CombEstimate& estimate : estimates) {
+        if (estimate.spur) {
+            continue;
+        }
+        for (CombTracker& tracker : trackers_) {
+            if (!tracker.spur() && tracker.active() &&
+                tracker.overlap(estimate, kSameLineHz) > kOverlapFraction) {
+                tracker.extend_range(estimate);
+                tracker.recentre(estimate, false);
+                break;
+            }
+        }
+    }
+    // A comb on a recovering pass's spacing that overlaps none of its lines
+    // is that comb, moved while the pass could not see it: the pass takes it
+    // rather than a second pass starting beside a dying one.
+    auto moved = [this](const CombEstimate& estimate) {
+        for (CombTracker& tracker : trackers_) {
+            if (!tracker.spur() && tracker.status().lock == CombLock::kRecovering &&
+                tracker.same_spacing(estimate) && tracker.recentre(estimate, true)) {
+                tracker.extend_range(estimate);
+                return true;
+            }
+        }
+        return false;
+    };
     std::vector<const CombEstimate*> fresh;
     for (const CombEstimate& estimate : estimates) {
         if (!estimate.spur && estimate.line_count() >= kCombMinLines &&
-            estimate.spacing_hz > 0.0 && !held(estimate)) {
+            estimate.spacing_hz > 0.0 && !held(estimate) && !moved(estimate)) {
             fresh.push_back(&estimate);
         }
     }
@@ -126,6 +155,30 @@ void CombBank::detected(std::span<const CombEstimate> estimates)
     // A comb tracker that is not running gives its slots back.
     std::erase_if(trackers_,
                   [](const CombTracker& tracker) { return !tracker.spur() && !tracker.active(); });
+
+    // Passes that grew past an even share give the excess back when new
+    // combs want slots that are not free: growth only borrows what nobody
+    // else was asking for.
+    {
+        std::uint32_t held_slots = 0;
+        for (const CombTracker& tracker : trackers_) {
+            held_slots += tracker.spur() ? 0 : tracker.lines();
+        }
+        const auto running = static_cast<std::uint32_t>(std::ranges::count_if(
+            trackers_, [](const CombTracker& tracker) { return !tracker.spur(); }));
+        const auto incoming = static_cast<std::uint32_t>(
+            std::min<std::size_t>(fresh.size(), kCombMaxCombs > running ? kCombMaxCombs - running : 0));
+        if (incoming > 0) {
+            const std::uint32_t fair = kCombMaxLines / (running + incoming);
+            if (kCombMaxLines - held_slots < fair * incoming) {
+                for (CombTracker& tracker : trackers_) {
+                    if (!tracker.spur() && tracker.lines() > fair) {
+                        tracker.shrink_to(fair);
+                    }
+                }
+            }
+        }
+    }
 
     // Combs have first claim: the slots spurs hold count as free here, and a
     // comb that starts takes them back below.
@@ -201,21 +254,28 @@ CombBlockPlan CombBank::plan(SampleIndex start, std::uint32_t count)
     // A spur that lost its line goes, and is held off.
     erase_spurs_if([](const CombTracker& tracker) { return !tracker.active(); });
 
-    // Two trackers that have come to hold the same lines: the later one goes.
-    // Overlap is checked at start too, but a tracker started beside a much
-    // stronger comb can be pulled onto it during acquisition, whose pull-in
-    // is a few hundred hertz, and then cancels lines another already does.
+    // Two trackers that have come to hold the same lines: one goes. Overlap is
+    // checked at start too, but a tracker started beside a much stronger comb
+    // can be pulled onto it during acquisition, whose pull-in is a few hundred
+    // hertz, and then cancels lines another already does. The one cancelling
+    // more lines stays, the earlier on a tie: age says nothing about which
+    // has the comb, and dropping a working pass for a younger one throws the
+    // working model away.
     for (std::size_t j = trackers_.size(); j-- > 1;) {
-        if (trackers_[j].spur()) {
+        if (trackers_[j].spur() || !trackers_[j].active()) {
             continue;
         }
         const CombStatus later = trackers_[j].status();
         for (std::size_t i = 0; i < j; ++i) {
-            if (!trackers_[i].spur() && trackers_[i].active() && trackers_[j].active() &&
-                trackers_[i].overlap(later.comb, kSameLineHz) > kOverlapFraction) {
-                trackers_.erase(trackers_.begin() + static_cast<std::ptrdiff_t>(j));
-                break;
+            if (trackers_[i].spur() || !trackers_[i].active() ||
+                trackers_[i].overlap(later.comb, kSameLineHz) <= kOverlapFraction) {
+                continue;
             }
+            const std::size_t drop =
+                later.lines_cancelled > trackers_[i].status().lines_cancelled ? i : j;
+            trackers_.erase(trackers_.begin() + static_cast<std::ptrdiff_t>(drop));
+            j = std::min(j, trackers_.size());
+            break;
         }
     }
     // A spur on a line some comb has come to hold, its sidebands included,
@@ -226,6 +286,24 @@ CombBlockPlan CombBank::plan(SampleIndex start, std::uint32_t count)
             return !tracker.spur() && tracker.holds_frequency(at, kSameLineHz);
         });
     });
+
+    // Slots nobody holds go to healthy locked passes that have more of their
+    // comb to reach, a few carriers each per block, so a pass started on the
+    // share it got at detection grows to cover the comb. Spurs keep theirs: a
+    // comb that starts takes them back in detected().
+    std::uint32_t held_slots = 0;
+    for (const CombTracker& tracker : trackers_) {
+        held_slots += tracker.lines();
+    }
+    for (CombTracker& tracker : trackers_) {
+        if (held_slots >= kCombMaxLines) {
+            break;
+        }
+        const std::uint32_t want = std::min(tracker.wants_lines(), kCombMaxLines - held_slots);
+        if (want > 0) {
+            held_slots += tracker.grow(want);
+        }
+    }
 
     std::vector<CombBlockPlan> plans;
     plans.reserve(trackers_.size());
@@ -392,6 +470,8 @@ CombStatus CombBank::status() const
         auto rank = [](CombLock lock) {
             switch (lock) {
                 case CombLock::kLocked:
+                    return 4;
+                case CombLock::kRecovering:
                     return 3;
                 case CombLock::kAcquiring:
                     return 2;

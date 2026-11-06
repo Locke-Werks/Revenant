@@ -1054,3 +1054,484 @@ TEST_CASE("comb bank: a spur on a comb's sideband line is not started", "[comb][
     bank.spurs(std::span<const CombEstimate>(&spur, 1));
     CHECK(bank.trackers().size() == 2);
 }
+
+// Diagnostics for the lock-then-lost behaviour seen live: a pass that cancels
+// part of a wide comb and then lets go. Hidden; run with "[diag]".
+namespace {
+
+const char* lock_name(CombLock lock)
+{
+    switch (lock) {
+        case CombLock::kIdle:
+            return "idle";
+        case CombLock::kAcquiring:
+            return "acquiring";
+        case CombLock::kLocked:
+            return "locked";
+        case CombLock::kLost:
+            return "lost";
+        case CombLock::kRecovering:
+            return "recovering";
+    }
+    return "?";
+}
+
+void report(const char* tag, int b, const CombTracker& t)
+{
+    const auto st = t.status();
+    const auto& v = t.verdict();
+    std::printf("  %s blk %4d %-9s k [%d,%d] cancel %4u sup %5.1f | fit %4u strong %4u rms %.3f "
+                "innov %.4f ferr %.4f bench %u good %d bad %d\n",
+                tag, b, lock_name(st.lock), st.comb.k_lo, st.comb.k_hi, st.lines_cancelled,
+                st.suppression_db, v.fitted, v.strong, v.residual_rad, v.innovation_cycles,
+                v.freq_error_cycles, v.benched, v.good ? 1 : 0, v.bad ? 1 : 0);
+}
+
+void wide_comb(Sim& sim, bool harmonic)
+{
+    constexpr double kF0 = 1301.7;
+    if (harmonic) {
+        // Line k is harmonic 700 + k of a fundamental wandering 0.01 Hz.
+        auto f0 = [](double t) { return kF0 + 0.01 * std::sin(kTwoPi * t / 11.0); };
+        sim.truth.spacing = f0;
+        sim.truth.offset = [f0](double t) { return 700.0 * f0(t) - 700.0 * kF0 + 1234.0; };
+    } else {
+        sim.truth.spacing = [](double t) { return kF0 + 0.05 * std::sin(kTwoPi * t / 13.0); };
+        sim.truth.offset = [](double t) { return 1234.0 + 1.0 * std::sin(kTwoPi * t / 17.0); };
+    }
+    populate(sim, -380, 380, 6.0, 25.0, 4);
+}
+
+}  // namespace
+
+TEST_CASE("comb diag: a pass holding a quarter of a wide comb", "[.][diag]")
+{
+    for (bool harmonic : {false, true}) {
+        Sim sim;
+        sim.rng.seed(0xD1A6ULL + (harmonic ? 1 : 0));
+        sim.frames_in_flight = 3;
+        wide_comb(sim, harmonic);
+        CombTracker tracker(kRate, 190);
+        tracker.detected(estimate_of(sim.truth, -380, 380, 40.0, 0.05));
+        std::printf("wide comb, harmonic %d\n", harmonic ? 1 : 0);
+        CombLock was = CombLock::kIdle;
+        for (int b = 0; b < 1500; ++b) {
+            step(sim, tracker);
+            const CombLock now = tracker.status().lock;
+            if (now != was || b % 100 == 0) {
+                report(now != was ? "*" : " ", b, tracker);
+            }
+            was = now;
+        }
+    }
+}
+
+TEST_CASE("comb diag: bank re-fed full-span detections", "[.][diag]")
+{
+    Sim a;
+    Sim none;
+    a.rng.seed(0xBA4CULL);
+    none.rng.seed(1);
+    none.noise_power = 1.0e-12;
+    none.truth.spacing = [](double) { return 1.0; };
+    none.truth.offset = [](double) { return 0.0; };
+    wide_comb(a, false);
+    dsp::CombBank bank(kRate);
+    const CombEstimate full = estimate_of(a.truth, -380, 380, 10.0, 0.01);
+    // Start one pass on a quarter, as if the slots were mostly taken.
+    CombEstimate quarter = estimate_of(a.truth, -95, 95, 10.0, 0.01);
+    bank.detected(std::span<const CombEstimate>(&quarter, 1));
+    std::deque<std::pair<CombBlockPlan, std::vector<dsp::Complex32>>> in_flight;
+    std::size_t was = 0;
+    for (int b = 0; b < 1200; ++b) {
+        bank_step(a, none, bank, in_flight);
+        if (b % 36 == 0) {
+            bank.detected(std::span<const CombEstimate>(&full, 1));
+        }
+        if (bank.trackers().size() != was || b % 100 == 0) {
+            std::printf(" blk %4d trackers %zu\n", b, bank.trackers().size());
+            for (const auto& t : bank.trackers()) {
+                report("   ", b, t);
+            }
+        }
+        was = bank.trackers().size();
+    }
+}
+
+// Field conditions the clean scenarios leave out. Hidden; run with "[diag]".
+TEST_CASE("comb diag: field conditions", "[.][diag]")
+{
+    enum class Kind { kContaminated, kNoiseBurst, kBlank, kWeak };
+    const std::pair<Kind, const char*> cases[] = {
+        {Kind::kContaminated, "15% of lines carry another signal"},
+        {Kind::kNoiseBurst, "floor up 15 dB for 1.5 s"},
+        {Kind::kBlank, "comb gone for 1 s"},
+        {Kind::kWeak, "lines 3 to 12 dB"},
+    };
+    for (const auto& [kind, name] : cases) {
+        Sim sim;
+        sim.rng.seed(0xF1E1DULL + static_cast<std::uint64_t>(kind));
+        sim.frames_in_flight = 3;
+        wide_comb(sim, true);
+        if (kind == Kind::kWeak) {
+            sim.truth.amplitude.clear();
+            populate(sim, -380, 380, 3.0, 12.0, 4);
+        }
+        if (kind == Kind::kContaminated) {
+            // Every seventh line shares its bin with a signal wandering on
+            // its own: an SSB or AM station sitting on a comb line.
+            auto params = std::make_shared<std::map<std::int32_t, std::pair<double, double>>>();
+            std::uniform_real_distribution<double> uni(0.0, 1.0);
+            for (std::int32_t k = -380; k <= 380; k += 7) {
+                (*params)[k] = {1.0 + 3.0 * uni(sim.rng), kTwoPi * uni(sim.rng)};
+            }
+            sim.truth.extra = [params](std::int32_t k, double t) {
+                auto it = params->find(k);
+                if (it == params->end()) {
+                    return 0.0;
+                }
+                return 4.0 * std::sin(kTwoPi * t / it->second.first + it->second.second);
+            };
+        }
+        CombTracker tracker(kRate, 190);
+        tracker.detected(estimate_of(sim.truth, -380, 380, 40.0, 0.05));
+        std::printf("field: %s\n", name);
+        CombLock was = CombLock::kIdle;
+        const auto saved = sim.truth.amplitude;
+        for (int b = 0; b < 900; ++b) {
+            if (b == 300) {
+                if (kind == Kind::kNoiseBurst) {
+                    sim.noise_power = 31.6;
+                } else if (kind == Kind::kBlank) {
+                    sim.truth.amplitude.clear();
+                }
+            }
+            if (b == 300 + (kind == Kind::kNoiseBurst ? 55 : 37)) {
+                sim.noise_power = 1.0;
+                sim.truth.amplitude = saved;
+            }
+            step(sim, tracker);
+            const CombLock now = tracker.status().lock;
+            if (now != was || b % 100 == 0 || (b >= 295 && b <= 420 && b % 10 == 0)) {
+                report(now != was ? "*" : " ", b, tracker);
+            }
+            was = now;
+        }
+    }
+}
+
+// Lines sharing their bins with other signals are benched; the pass locks and
+// cancels the rest instead of failing on its worst lines.
+TEST_CASE("comb tracker: lines that leave the comb are benched, not fatal", "[comb][tracker]")
+{
+    const std::uint64_t seed = 0xBE4C11ULL;
+    std::printf("comb tracker benching: seed %llu\n", static_cast<unsigned long long>(seed));
+    INFO("seed " << seed);
+    Sim sim;
+    sim.rng.seed(seed);
+    wide_comb(sim, true);
+    auto params = std::make_shared<std::map<std::int32_t, std::pair<double, double>>>();
+    std::uniform_real_distribution<double> uni(0.0, 1.0);
+    for (std::int32_t k = -380; k <= 380; k += 7) {
+        (*params)[k] = {1.0 + 3.0 * uni(sim.rng), kTwoPi * uni(sim.rng)};
+    }
+    sim.truth.extra = [params](std::int32_t k, double t) {
+        auto it = params->find(k);
+        return it == params->end()
+                   ? 0.0
+                   : 4.0 * std::sin(kTwoPi * t / it->second.first + it->second.second);
+    };
+    CombTracker tracker(kRate, 190);
+    tracker.detected(estimate_of(sim.truth, -380, 380, 40.0, 0.05));
+    const int locked_at = run_to_lock(sim, tracker, 100);
+    INFO("locked at block " << locked_at);
+    REQUIRE(locked_at > 0);
+    for (int b = 0; b < 60; ++b) {
+        step(sim, tracker);
+    }
+    for (int b = 0; b < 400; ++b) {
+        step(sim, tracker);
+        REQUIRE(tracker.status().lock == CombLock::kLocked);
+    }
+    const auto st = tracker.status();
+    std::printf("  locked at %d, %u lines cancelled, %u benched, %.1f dB\n", locked_at,
+                st.lines_cancelled, tracker.verdict().benched, st.suppression_db);
+    CHECK(tracker.verdict().benched >= 8);
+    CHECK(st.lines_cancelled >= 120);
+    CHECK(st.suppression_db > 15.0F);
+}
+
+// A burst of noise, or the comb going quiet, used to end a pass for good. It
+// now recovers from its own model; only a comb gone for longer than the
+// recovery allows is let go.
+TEST_CASE("comb tracker: recovers from a noise burst and a gap", "[comb][tracker]")
+{
+    enum class Kind { kNoise, kBlank, kGone };
+    for (Kind kind : {Kind::kNoise, Kind::kBlank, Kind::kGone}) {
+        const std::uint64_t seed = 0x2EC0ULL + static_cast<std::uint64_t>(kind);
+        INFO("seed " << seed << ", case " << static_cast<int>(kind));
+        Sim sim;
+        sim.rng.seed(seed);
+        wide_comb(sim, true);
+        CombTracker tracker(kRate, 190);
+        tracker.detected(estimate_of(sim.truth, -380, 380, 40.0, 0.05));
+        REQUIRE(run_to_lock(sim, tracker, 80) > 0);
+        for (int b = 0; b < 100; ++b) {
+            step(sim, tracker);
+        }
+        REQUIRE(tracker.status().lock == CombLock::kLocked);
+
+        const auto saved = sim.truth.amplitude;
+        // 1.5 s, 1 s, and 10 s: past the recovery's 8 s.
+        const int length = kind == Kind::kNoise ? 55 : (kind == Kind::kBlank ? 37 : 370);
+        if (kind == Kind::kNoise) {
+            sim.noise_power = 31.6;
+        } else {
+            sim.truth.amplitude.clear();
+        }
+        bool recovered_state = false;
+        bool lost_during = false;
+        for (int b = 0; b < length; ++b) {
+            step(sim, tracker);
+            recovered_state = recovered_state || tracker.status().lock == CombLock::kRecovering;
+            lost_during = lost_during || tracker.status().lock == CombLock::kLost;
+        }
+        sim.noise_power = 1.0;
+        sim.truth.amplitude = saved;
+        if (kind == Kind::kGone) {
+            CHECK(lost_during);
+            CHECK(tracker.status().lock == CombLock::kLost);
+            continue;
+        }
+        CHECK(recovered_state);
+        CHECK_FALSE(lost_during);
+        int relocked = -1;
+        for (int b = 0; b < 120 && relocked < 0; ++b) {
+            step(sim, tracker);
+            if (tracker.status().lock == CombLock::kLocked) {
+                relocked = b + 1;
+            }
+        }
+        std::printf("comb tracker recovery: case %d relocked %d blocks after\n",
+                    static_cast<int>(kind), relocked);
+        CHECK(relocked > 0);
+        CHECK(relocked <= 60);
+    }
+}
+
+// A pass holding a quarter of a wide comb holds the comb: full-span
+// detections of it start no second pass on the same grid.
+TEST_CASE("comb bank: a pass on part of a comb holds all of it", "[comb][tracker]")
+{
+    Sim a;
+    Sim none;
+    a.rng.seed(0xBA4CULL);
+    none.rng.seed(1);
+    none.noise_power = 1.0e-12;
+    none.truth.spacing = [](double) { return 1.0; };
+    none.truth.offset = [](double) { return 0.0; };
+    wide_comb(a, false);
+    dsp::CombBank bank(kRate);
+    // Under kCombOverlapFraction of the full span's lines.
+    const CombEstimate part = estimate_of(a.truth, -80, 80, 10.0, 0.01);
+    bank.detected(std::span<const CombEstimate>(&part, 1));
+    REQUIRE(bank.trackers().size() == 1);
+    const std::uint32_t started = bank.trackers()[0].lines();
+    const CombEstimate full = estimate_of(a.truth, -380, 380, 10.0, 0.01);
+    std::deque<std::pair<CombBlockPlan, std::vector<dsp::Complex32>>> in_flight;
+    for (int b = 0; b < 200; ++b) {
+        bank_step(a, none, bank, in_flight);
+        if (b % 36 == 0) {
+            bank.detected(std::span<const CombEstimate>(&full, 1));
+        }
+        REQUIRE(bank.trackers().size() == 1);
+    }
+    CHECK(bank.trackers()[0].status().lock == CombLock::kLocked);
+    // And the pass now grows into the whole of it.
+    const CombEstimate held = bank.trackers()[0].estimate();
+    CHECK(held.k_lo <= -379);
+    CHECK(held.k_hi >= 379);
+
+    // It takes the free slots to get there: it started on 161 lines.
+    for (int b = 0; b < 600; ++b) {
+        bank_step(a, none, bank, in_flight);
+        if (b % 36 == 0) {
+            bank.detected(std::span<const CombEstimate>(&full, 1));
+        }
+    }
+    const auto grown =bank.trackers()[0].status();
+    std::printf("comb bank growth: %u slots at start, %u after, %u cancelled, %.1f dB\n", started,
+                bank.trackers()[0].lines(), grown.lines_cancelled, grown.suppression_db);
+    CHECK(grown.lock == CombLock::kLocked);
+    CHECK(bank.trackers()[0].lines() >= 700);
+    CHECK(grown.lines_cancelled >= 500);
+
+    // A second comb gets its share back from the grown pass.
+    CombEstimate other;
+    other.offset_hz = 333.0;
+    other.spacing_hz = 977.3;
+    other.k_lo = -40;
+    other.k_hi = 40;
+    bank.detected(std::span<const CombEstimate>(&other, 1));
+    REQUIRE(bank.trackers().size() == 2);
+    CHECK(bank.trackers()[1].lines() >= 81);
+    std::uint32_t total = 0;
+    for (const CombTracker& t : bank.trackers()) {
+        total += t.lines();
+    }
+    CHECK(total <= dsp::kCombMaxLines);
+    for (int b = 0; b < 40; ++b) {
+        bank_step(a, none, bank, in_flight);
+    }
+    CHECK(bank.trackers()[0].status().lock == CombLock::kLocked);
+}
+
+// A comb that moves while a pass cannot see it, further than recovery's
+// narrow pull-in reaches: an agreeing detection re-centres the pass and it
+// relocks as the same pass.
+TEST_CASE("comb bank: a detection re-centres a recovering pass", "[comb][tracker]")
+{
+    Sim a;
+    Sim none;
+    a.rng.seed(0x2EC3ULL);
+    none.rng.seed(1);
+    none.noise_power = 1.0e-12;
+    none.truth.spacing = [](double) { return 1.0; };
+    none.truth.offset = [](double) { return 0.0; };
+    wide_comb(a, false);
+    double shift = 0.0;
+    const auto base = a.truth.offset;
+    a.truth.offset = [base, &shift](double t) { return base(t) + shift; };
+    dsp::CombBank bank(kRate);
+    const CombEstimate first = estimate_of(a.truth, -380, 380, 10.0, 0.01);
+    bank.detected(std::span<const CombEstimate>(&first, 1));
+    REQUIRE(bank.trackers().size() == 1);
+    std::deque<std::pair<CombBlockPlan, std::vector<dsp::Complex32>>> in_flight;
+    for (int b = 0; b < 200; ++b) {
+        bank_step(a, none, bank, in_flight);
+    }
+    REQUIRE(bank.trackers()[0].status().lock == CombLock::kLocked);
+    const std::uint64_t id = bank.trackers()[0].id();
+
+    // 1.5 s dark, and the comb comes back 300 Hz up.
+    const auto saved = a.truth.amplitude;
+    a.truth.amplitude.clear();
+    for (int b = 0; b < 55; ++b) {
+        bank_step(a, none, bank, in_flight);
+    }
+    a.truth.amplitude = saved;
+    shift = 300.0;
+    REQUIRE(bank.trackers().size() == 1);
+    REQUIRE(bank.trackers()[0].status().lock == CombLock::kRecovering);
+
+    int relocked = -1;
+    for (int b = 0; b < 250 && relocked < 0; ++b) {
+        bank_step(a, none, bank, in_flight);
+        if (b % 36 == 0) {
+            const CombEstimate now = estimate_of(a.truth, -380, 380, 10.0, 0.01);
+            bank.detected(std::span<const CombEstimate>(&now, 1));
+        }
+        REQUIRE(!bank.trackers().empty());
+        if (bank.trackers()[0].status().lock == CombLock::kLocked) {
+            relocked = b + 1;
+        }
+    }
+    std::printf("comb bank re-centre: relocked %d blocks after the comb returned\n", relocked);
+    CHECK(relocked > 0);
+    REQUIRE(bank.trackers().size() == 1);
+    CHECK(bank.trackers()[0].id() == id);
+}
+
+// A comb whose period grows away from its centre: line k at c + k d + k^2 e,
+// the outermost of 761 lines 60 Hz off the straight grid. The pass must take
+// up the curved model, track e, hold the outer lines without benching them,
+// and keep it through a recovery. A straight comb must never take it up.
+TEST_CASE("comb tracker: curved and straight combs each get their own model", "[comb][tracker]")
+{
+    constexpr double kCurve = 60.0 / (380.0 * 380.0);
+    const std::uint64_t seed = 0xC0BE5ULL;
+    std::printf("comb tracker curvature: seed %llu\n", static_cast<unsigned long long>(seed));
+    INFO("seed " << seed);
+    {
+        Sim sim;
+        sim.rng.seed(seed);
+        wide_comb(sim, true);
+        sim.truth.extra = [](std::int32_t k, double) {
+            return kCurve * static_cast<double>(k) * static_cast<double>(k);
+        };
+        dsp::CombBank bank(kRate);
+        // A detection fits a straight grid to what it sees: the centre.
+        const CombEstimate part = estimate_of(sim.truth, -120, 120, 20.0, 0.02);
+        bank.detected(std::span<const CombEstimate>(&part, 1));
+        REQUIRE(bank.trackers().size() == 1);
+        Sim none;
+        none.rng.seed(1);
+        none.noise_power = 1.0e-12;
+        none.truth.spacing = [](double) { return 1.0; };
+        none.truth.offset = [](double) { return 0.0; };
+        std::deque<std::pair<CombBlockPlan, std::vector<dsp::Complex32>>> in_flight;
+        // As detections arrive on the live engine, about once a second: the
+        // detector sees the whole comb, curved.
+        CombEstimate full = estimate_of(sim.truth, -380, 380, 0.0, 0.0);
+        full.curvature_hz = kCurve;
+        int curved_at = -1;
+        for (int b = 0; b < 1500; ++b) {
+            bank_step(sim, none, bank, in_flight);
+            if (b % 36 == 35) {
+                bank.detected(std::span<const CombEstimate>(&full, 1));
+            }
+            REQUIRE(bank.trackers().size() == 1);
+            if (curved_at < 0 && bank.trackers()[0].verdict().curved) {
+                curved_at = b;
+            }
+        }
+        const CombTracker& t = bank.trackers()[0];
+        const auto st = t.status();
+        std::printf("  curved at block %d, curvature %.6f Hz against %.6f, k [%d, %d], %u lines "
+                    "cancelled, %u benched, %.1f dB\n",
+                    curved_at, st.comb.curvature_hz, kCurve, st.comb.k_lo, st.comb.k_hi,
+                    st.lines_cancelled, t.verdict().benched, st.suppression_db);
+        CHECK(curved_at >= 0);
+        CHECK(t.verdict().curved);
+        CHECK(st.lock == CombLock::kLocked);
+        CHECK(std::abs(st.comb.curvature_hz - kCurve) < 0.1 * kCurve);
+        CHECK(st.comb.k_hi - st.comb.k_lo > 240);
+        CHECK(st.lines_cancelled >= 150);
+        CHECK(t.verdict().benched <= 6);
+        CHECK(st.suppression_db > 15.0F);
+
+        // A burst: recovery keeps the model, curvature and all.
+        sim.noise_power = 31.6;
+        for (int b = 0; b < 55; ++b) {
+            bank_step(sim, none, bank, in_flight);
+        }
+        sim.noise_power = 1.0;
+        int relocked = -1;
+        for (int b = 0; b < 120 && relocked < 0; ++b) {
+            bank_step(sim, none, bank, in_flight);
+            if (bank.trackers()[0].status().lock == CombLock::kLocked) {
+                relocked = b + 1;
+            }
+        }
+        std::printf("  relocked %d blocks after a burst, still curved %d\n", relocked,
+                    bank.trackers()[0].verdict().curved ? 1 : 0);
+        CHECK(relocked > 0);
+        CHECK(bank.trackers()[0].verdict().curved);
+    }
+    {
+        // Exact harmonics of a wandering fundamental: straight throughout.
+        Sim sim;
+        sim.rng.seed(seed + 1);
+        wide_comb(sim, true);
+        CombTracker tracker(kRate, 190);
+        tracker.detected(estimate_of(sim.truth, -380, 380, 40.0, 0.05));
+        bool ever_curved = false;
+        for (int b = 0; b < 900; ++b) {
+            step(sim, tracker);
+            ever_curved = ever_curved || tracker.verdict().curved;
+        }
+        CHECK(tracker.status().lock == CombLock::kLocked);
+        CHECK_FALSE(ever_curved);
+        CHECK(tracker.status().comb.curvature_hz == 0.0);
+    }
+}

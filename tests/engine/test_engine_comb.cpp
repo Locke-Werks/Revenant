@@ -189,6 +189,7 @@ struct Run {
         case dsp::CombLock::kAcquiring: return "acquiring";
         case dsp::CombLock::kLocked: return "locked";
         case dsp::CombLock::kLost: return "lost";
+        case dsp::CombLock::kRecovering: return "recovering";
     }
     return "unknown";
 }

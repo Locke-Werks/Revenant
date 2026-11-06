@@ -945,7 +945,9 @@ struct SourceStats {
     # The span-wide comb cancellation, core/dsp/comb_cancel.h: whether it is
     # on, and what its tracker last reported. combLock is 0 idle (no comb
     # found), 1 acquiring (found, not yet cancelling), 2 locked (cancelling)
-    # and 3 lost (was cancelling, stopped fitting, cancelling nothing).
+    # 3 lost (gave up: never locked, or could not recover; cancelling
+    # nothing) and 4 recovering (was cancelling, stopped fitting, model kept
+    # while it pulls back in; cancelling nothing meanwhile).
     # combLines is the lines cancelled now and combSuppressionDb the mean depth
     # over them; the rest describe the comb as tracked, frequencies in hertz at
     # baseband.

@@ -103,17 +103,44 @@
 // its noise in one block's resolution, a gap in the grid, is given zero
 // amplitude: subtracting it would put its estimate's noise in for nothing.
 //
+// TWO MODELS. Most combs are exact harmonics and their lines lie on a straight
+// line in k. Some combs' period grows away from the centre, and their lines
+// lie on c + k d + k^2 e. The model always carries e, as an exact axis like c
+// and d, and uses it only while the lines call for it: choose_model takes up
+// the curved fit when it explains the frequency innovations decisively better
+// over a wide enough span, and drops back, setting e to exactly zero, when the
+// tracked curvature has stayed negligible. Under the straight model e is never
+// corrected and stays zero. Recovery keeps whichever model was in use.
+//
+// THE FITS ARE ROBUST. Both are reweighted twice (Huber, past 2.5 times the
+// median residual), so a carrier sharing its bin with a station neither steers
+// the comb nor reads as the comb failing. Each carrier is then judged against
+// the phase fit on its own: out by more than 0.8 rad for four blocks running
+// and it is BENCHED, out of the fits and not subtracted, its sidebands with
+// it; in step for eight and it comes back. A pass is judged by the carriers
+// moving together, not by its worst ones: the residual below is over the
+// carriers not benched, and more than half benched is no comb.
+//
 // LOCK.
 //   Acquiring -> Locked   eight consecutive phase-stage blocks with the
 //                         weighted RMS phase residual under 0.25 rad (12 dB of
 //                         cancellation at worst from phase alone), the fitted
 //                         phase innovation under 0.03 cycles across the lines
-//                         (the loop has pulled in, not merely fits) and at
-//                         least kCombMinLines lines standing out. About 37
-//                         blocks from a detection 90 Hz off, 1 s.
-//   Locked -> Lost        six consecutive blocks with that residual over
-//                         0.6 rad, or too few lines standing out, or the
-//                         frequency innovation over 0.25 cycles per block.
+//                         (the loop has pulled in, not merely fits), at least
+//                         kCombMinLines lines standing out and no more than
+//                         half benched. About 37 blocks from a detection 90 Hz
+//                         off, 1 s.
+//   Locked -> Recovering  six consecutive blocks with that residual over
+//                         0.6 rad, too few lines standing out, most benched,
+//                         or the frequency innovation over 0.25 cycles per
+//                         block. Cancellation stops but the model is kept:
+//                         frequencies held, rates dropped, phase references
+//                         retaken, and the loops pull back in from the
+//                         frequency stage on long sub-blocks. A burst of noise
+//                         or the comb going quiet for a second used to end the
+//                         pass outright and wait for a fresh detection.
+//   Recovering -> Locked  the acquisition test again.
+//   Recovering -> Lost    not locked again within 8 s.
 //   Acquiring -> Lost     no lock within 200 blocks, 5.5 s at 65536 samples.
 // Lost and Idle plan nothing. A detection that disagrees with the model, or
 // any detection while Lost or Idle, restarts acquisition. While acquiring, a
@@ -193,6 +220,31 @@ constexpr std::uint32_t kLockBlocks = 8;
 constexpr double kLostRad = 0.6;
 constexpr std::uint32_t kLostBlocks = 6;
 constexpr std::uint32_t kAcquireLimit = 200;
+// A carrier whose phase residual against the fit is over this, about three
+// times the scatter of a line at the fit threshold, is out of step this block.
+constexpr double kLineOutlierRad = 0.8;
+constexpr std::uint32_t kBenchBlocks = 4;
+constexpr std::uint32_t kUnbenchBlocks = 8;
+// Fewer of the fitted carriers than this share moving together is not a comb.
+constexpr double kHealthyShare = 0.5;
+// How long a pass that was locked keeps its model while pulling back in. A
+// burst of noise or the comb going quiet for a second or two is recovered
+// from; a comb gone for longer is let go and its slots released.
+constexpr double kRecoverSeconds = 8.0;
+// A recovery still short of lock this long takes a detection's model.
+constexpr double kRecentreSeconds = 1.0;
+// Carriers a healthy pass is given per block when it grows.
+constexpr std::uint32_t kGrowCarriers = 16;
+// Huber: residuals past this many times the median residual are weighted down.
+constexpr double kHuber = 2.5;
+// Model choice, CombTracker::choose_model.
+constexpr std::size_t kCurveMinLines = 24;
+constexpr double kCurveMinSpan = 16.0;
+constexpr double kCurveGain = 0.5;
+constexpr double kCurveOnCycles = 0.05;
+constexpr double kCurveOffCycles = 0.02;
+constexpr std::uint32_t kCurveVotes = 4;
+constexpr std::uint32_t kStraightVotes = 64;
 constexpr std::uint32_t kSwapBlocks = 64;
 constexpr double kAgreeHz = 150.0;
 // Lines further than 0.45 of the rate from centre, 90% of the way to the band
@@ -259,14 +311,105 @@ std::uint64_t times_k(std::uint64_t value, std::int32_t k)
     return value * static_cast<std::uint64_t>(static_cast<std::int64_t>(k));
 }
 
+std::uint64_t times_k2(std::uint64_t value, std::int32_t k)
+{
+    const auto kk = static_cast<std::int64_t>(k) * static_cast<std::int64_t>(k);
+    return value * static_cast<std::uint64_t>(kk);
+}
+
+// y(k) = at_zero + slope k + curve k^2; curve is zero for the straight model.
 struct Fit {
     double at_zero = 0.0;  // e_c
     double slope = 0.0;    // e_d
+    double curve = 0.0;    // e_e
     double centroid_value = 0.0;
-    double half_span_value = 0.0;  // |slope| * half the weighted k spread
+    double half_span_value = 0.0;  // the fit's largest departure across the lines from its centroid value
     double rms = 0.0;              // weighted RMS residual
     std::uint32_t used = 0;
 };
+
+double eval(const Fit& fit, double k)
+{
+    return fit.at_zero + fit.slope * k + fit.curve * k * k;
+}
+
+// The k of the grid line c + k d + k^2 e nearest f. Rounding against the
+// straight grid first and correcting once for the curvature at that k is
+// exact while the curvature moves a line by less than half a spacing between
+// neighbours, which any comb the detector can see as a comb satisfies.
+double nearest_k(double f, double c, double d, double e)
+{
+    const double k0 = std::round((f - c) / d);
+    return std::round((f - c - e * k0 * k0) / d);
+}
+
+Fit fit_affine(const std::vector<double>& k, const std::vector<double>& y,
+               const std::vector<double>& w);
+
+// Weighted least squares for the curved model, in k about its weighted mean
+// so the normal equations stay well conditioned at k in the hundreds. Too few
+// lines, or a span the curvature cannot be told from, falls back to straight.
+Fit fit_quadratic(const std::vector<double>& k, const std::vector<double>& y,
+                  const std::vector<double>& w)
+{
+    if (k.size() < 4) {
+        return fit_affine(k, y, w);
+    }
+    double sw = 0.0;
+    double sk = 0.0;
+    for (std::size_t i = 0; i < k.size(); ++i) {
+        sw += w[i];
+        sk += w[i] * k[i];
+    }
+    if (sw <= 0.0) {
+        return Fit{};
+    }
+    const double kbar = sk / sw;
+    double s2 = 0.0;
+    double s3 = 0.0;
+    double s4 = 0.0;
+    double t0 = 0.0;
+    double t1 = 0.0;
+    double t2 = 0.0;
+    double kmin = k[0];
+    double kmax = k[0];
+    for (std::size_t i = 0; i < k.size(); ++i) {
+        const double u = k[i] - kbar;
+        const double u2 = u * u;
+        s2 += w[i] * u2;
+        s3 += w[i] * u2 * u;
+        s4 += w[i] * u2 * u2;
+        t0 += w[i] * y[i];
+        t1 += w[i] * u * y[i];
+        t2 += w[i] * u2 * y[i];
+        kmin = std::min(kmin, k[i]);
+        kmax = std::max(kmax, k[i]);
+    }
+    // [sw 0 s2; 0 s2 s3; s2 s3 s4] [a b q] = [t0 t1 t2], by Cramer's rule.
+    const double det = sw * (s2 * s4 - s3 * s3) - s2 * (s2 * s2);
+    if (!(std::abs(det) > 1e-12 * sw * s2 * s4)) {
+        return fit_affine(k, y, w);
+    }
+    const double a = (t0 * (s2 * s4 - s3 * s3) + s2 * (t1 * s3 - s2 * t2)) / det;
+    const double b = (sw * (t1 * s4 - s3 * t2) + s2 * (t0 * s3 - s2 * t1)) / det;
+    const double q = (sw * (s2 * t2 - s3 * t1) - t0 * s2 * s2) / det;
+    Fit fit;
+    fit.curve = q;
+    fit.slope = b - 2.0 * q * kbar;
+    fit.at_zero = a - b * kbar + q * kbar * kbar;
+    fit.centroid_value = a;
+    const double lo = kmin - kbar;
+    const double hi = kmax - kbar;
+    fit.half_span_value = std::max(std::abs(b * lo + q * lo * lo), std::abs(b * hi + q * hi * hi));
+    double sr = 0.0;
+    for (std::size_t i = 0; i < k.size(); ++i) {
+        const double r = y[i] - eval(fit, k[i]);
+        sr += w[i] * r * r;
+    }
+    fit.rms = std::sqrt(sr / sw);
+    fit.used = static_cast<std::uint32_t>(k.size());
+    return fit;
+}
 
 Fit fit_affine(const std::vector<double>& k, const std::vector<double>& y,
                const std::vector<double>& w)
@@ -317,6 +460,38 @@ Fit fit_affine(const std::vector<double>& k, const std::vector<double>& y,
     fit.half_span_value = std::abs(slope) * 0.5 * (kmax - kmin);
     fit.rms = std::sqrt(sr / sw);
     fit.used = static_cast<std::uint32_t>(k.size());
+    return fit;
+}
+
+// The affine fit with lines that disagree weighted down, twice reweighted
+// (Huber). One line on a station, or a handful, then neither steers the comb
+// nor reads as the comb failing to fit. `floor` keeps a clean fit, whose
+// median residual is tiny, from treating ordinary scatter as outliers.
+Fit fit_robust(const std::vector<double>& k, const std::vector<double>& y,
+               const std::vector<double>& w, double floor, bool curved)
+{
+    auto fit_of = [curved](const std::vector<double>& kk, const std::vector<double>& yy,
+                           const std::vector<double>& ww) {
+        return curved ? fit_quadratic(kk, yy, ww) : fit_affine(kk, yy, ww);
+    };
+    Fit fit = fit_of(k, y, w);
+    if (k.size() < 3) {
+        return fit;
+    }
+    std::vector<double> r(k.size());
+    std::vector<double> rw(w);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (std::size_t i = 0; i < k.size(); ++i) {
+            r[i] = std::abs(y[i] - eval(fit, k[i]));
+        }
+        std::vector<double> sorted(r);
+        std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+        const double c = std::max(kHuber * sorted[sorted.size() / 2], floor);
+        for (std::size_t i = 0; i < k.size(); ++i) {
+            rw[i] = r[i] > c ? w[i] * c / r[i] : w[i];
+        }
+        fit = fit_of(k, y, rw);
+    }
     return fit;
 }
 
@@ -422,6 +597,7 @@ CombEstimate CombTracker::estimate() const
     const double rate = static_cast<double>(rate_);
     out.offset_hz = anchored_ ? signed_of(c_.freq) * rate : initial_offset_hz_;
     out.spacing_hz = anchored_ ? signed_of(d_.freq) * rate : initial_spacing_hz_;
+    out.curvature_hz = anchored_ ? signed_of(e_.freq) * rate : initial_curvature_hz_;
     out.k_lo = range_lo_;
     out.k_hi = range_hi_;
     for (const Line& line : lines_) {
@@ -433,6 +609,7 @@ CombEstimate CombTracker::estimate() const
     out.spur = spur_;
     if (spur_) {
         out.spacing_hz = 0.0;
+        out.curvature_hz = 0.0;
         out.k_lo = 0;
         out.k_hi = 0;
     }
@@ -447,9 +624,11 @@ bool CombTracker::holds_frequency(double frequency_hz, double tolerance_hz) cons
     const double rate = static_cast<double>(rate_);
     const double c = anchored_ ? signed_of(c_.freq) * rate : initial_offset_hz_;
     const double d = spur_ ? 0.0 : (anchored_ ? signed_of(d_.freq) * rate : initial_spacing_hz_);
+    const double e = spur_ ? 0.0 : (anchored_ ? signed_of(e_.freq) * rate : initial_curvature_hz_);
     const double r = ripple_hz();
     return std::ranges::any_of(lines_, [&](const Line& line) {
-        const double f = c + static_cast<double>(line.k) * d + static_cast<double>(line.m) * r;
+        const double k = static_cast<double>(line.k);
+        const double f = c + k * d + k * k * e + static_cast<double>(line.m) * r;
         return std::abs(f - frequency_hz) < tolerance_hz;
     });
 }
@@ -509,21 +688,191 @@ double CombTracker::overlap(const CombEstimate& estimate, double tolerance_hz) c
     if (!(d > 0.0)) {
         return 0.0;
     }
-    std::int32_t lo = lines_.front().k;
-    std::int32_t hi = lines_.front().k;
+    // The whole detected range, not only the lines holding slots: a pass on
+    // a quarter of a comb still holds the comb, and a detection of the rest
+    // must not start a second pass on the same grid. detect_combs judges held
+    // combs over the same range (CombTracker::estimate).
+    std::int32_t lo = range_lo_;
+    std::int32_t hi = range_hi_;
     for (const Line& line : lines_) {
         lo = std::min(lo, line.k);
         hi = std::max(hi, line.k);
     }
+    // Judged over the estimate's lines that fall inside this pass's range:
+    // a detection of the whole comb is the same comb as a pass on part of it,
+    // whatever share of the whole that part is. Interleaved grids and
+    // sideband grids land inside the range off every line and still score
+    // nothing. Too few inside to judge by, and it is the share of the whole.
+    const double e = anchored_ ? signed_of(e_.freq) * rate : initial_curvature_hz_;
     std::uint32_t on = 0;
+    std::uint32_t inside = 0;
     for (std::int32_t k = estimate.k_lo; k <= estimate.k_hi; ++k) {
-        const double f = estimate.offset_hz + k * estimate.spacing_hz;
-        const double j = std::round((f - c) / d);
-        if (j >= lo && j <= hi && std::abs(f - (c + j * d)) < tolerance_hz) {
-            ++on;
+        const double kk = static_cast<double>(k);
+        const double f =
+            estimate.offset_hz + kk * estimate.spacing_hz + kk * kk * estimate.curvature_hz;
+        const double j = nearest_k(f, c, d, e);
+        if (j >= lo && j <= hi) {
+            ++inside;
+            if (std::abs(f - (c + j * d + j * j * e)) < tolerance_hz) {
+                ++on;
+            }
         }
     }
-    return static_cast<double>(on) / static_cast<double>(estimate.line_count());
+    const std::uint32_t over = inside >= kCombMinLines ? inside : estimate.line_count();
+    return static_cast<double>(on) / static_cast<double>(over);
+}
+
+void CombTracker::extend_range(const CombEstimate& estimate)
+{
+    if (spur_ || estimate.spur || !active() || estimate.line_count() == 0) {
+        return;
+    }
+    const double rate = static_cast<double>(rate_);
+    const double c = anchored_ ? signed_of(c_.freq) * rate : initial_offset_hz_;
+    const double d = anchored_ ? signed_of(d_.freq) * rate : initial_spacing_hz_;
+    if (!(d > 0.0)) {
+        return;
+    }
+    const double e = anchored_ ? signed_of(e_.freq) * rate : initial_curvature_hz_;
+    auto to_k = [&](std::int32_t k) {
+        const double kk = static_cast<double>(k);
+        const double f =
+            estimate.offset_hz + kk * estimate.spacing_hz + kk * kk * estimate.curvature_hz;
+        return static_cast<std::int32_t>(nearest_k(f, c, d, e));
+    };
+    const std::int32_t a = to_k(estimate.k_lo);
+    const std::int32_t b = to_k(estimate.k_hi);
+    range_lo_ = std::min({range_lo_, a, b});
+    range_hi_ = std::max({range_hi_, a, b});
+}
+
+// Growth is a few carriers a block, so each batch of new lines is checked by
+// the fit and the bench before the next arrives; a whole edge of unseeded
+// lines at once would let a bad extrapolation into the fit wholesale.
+std::uint32_t CombTracker::wants_lines() const
+{
+    if (spur_ || lock_ != CombLock::kLocked || !verdict_.good ||
+        4 * verdict_.benched > verdict_.fitted) {
+        return 0;
+    }
+    const auto per_line = static_cast<std::uint32_t>(2 * orders_ + 1);
+    const auto left = static_cast<std::uint32_t>(std::max(0, range_hi_ - next_hi_ + 1) +
+                                                 std::max(0, next_lo_ - range_lo_ + 1));
+    return std::min(left, kGrowCarriers) * per_line;
+}
+
+std::uint32_t CombTracker::grow(std::uint32_t slots)
+{
+    const auto per_line = static_cast<std::uint32_t>(2 * orders_ + 1);
+    std::uint32_t taken = 0;
+    while (taken + per_line <= slots) {
+        const bool hi_left = next_hi_ <= range_hi_;
+        const bool lo_left = next_lo_ >= range_lo_;
+        if (!hi_left && !lo_left) {
+            break;
+        }
+        const bool take_hi = hi_left && (next_take_hi_ || !lo_left);
+        const std::int32_t k = take_hi ? next_hi_++ : next_lo_--;
+        next_take_hi_ = !take_hi;
+        for (std::int32_t m = -orders_; m <= orders_; ++m) {
+            Line line;
+            line.k = k;
+            line.m = m;
+            lines_.push_back(line);
+        }
+        taken += per_line;
+    }
+    max_lines_ += taken;
+    return taken;
+}
+
+std::uint32_t CombTracker::shrink_to(std::uint32_t slots)
+{
+    const auto per_line = static_cast<std::size_t>(2 * orders_ + 1);
+    const std::size_t floor = std::max<std::size_t>(slots, kCombMinLines * per_line);
+    if (spur_ || lines_.size() <= floor) {
+        return 0;
+    }
+    const std::size_t before = lines_.size();
+    std::vector<std::int32_t> ks;
+    for (std::size_t base = 0; base < lines_.size(); base += per_line) {
+        ks.push_back(lines_[base].k);
+    }
+    std::ranges::sort(ks);
+    const std::size_t keep = floor / per_line;
+    // The central `keep` carriers stay.
+    const std::size_t first = (ks.size() - keep) / 2;
+    const std::int32_t lo = ks[first];
+    const std::int32_t hi = ks[first + keep - 1];
+    std::erase_if(lines_, [&](const Line& line) { return line.k < lo || line.k > hi; });
+    next_lo_ = lo - 1;
+    next_hi_ = hi + 1;
+    max_lines_ = static_cast<std::uint32_t>(lines_.size());
+    // Slots moved: plans already handed out no longer name the right lines.
+    ++generation_;
+    records_.clear();
+    return static_cast<std::uint32_t>(before - lines_.size());
+}
+
+// Recovery pulls in from the model it held, on the long sub-blocks, which is
+// right after a burst and too narrow after the comb has moved while the pass
+// could not see it. A detection names where the comb is now; mapped onto the
+// pass's own k it gives c, d and e, and the frequency stage takes it from
+// there on the wide pull-in. Once per recovery, after the first second, so a
+// recovery the loops would finish alone is left to them: a detection is
+// coarser than a locked model.
+bool CombTracker::same_spacing(const CombEstimate& estimate) const
+{
+    if (spur_ || estimate.spur || !anchored_ || estimate.line_count() == 0) {
+        return false;
+    }
+    const double d = signed_of(d_.freq) * static_cast<double>(rate_);
+    const double half_span = 0.5 * static_cast<double>(estimate.line_count());
+    // A quarter spacing at the ends of the span: a recovering model drifts in
+    // spacing while it cannot see the comb, by more than kAgreeHz allows
+    // across hundreds of lines, and a comb a quarter spacing off at its ends
+    // is the same grid, not another one.
+    return d > 0.0 && std::abs(estimate.spacing_hz - d) * half_span < 0.25 * d;
+}
+
+bool CombTracker::recentre(const CombEstimate& estimate, bool moved)
+{
+    if (spur_ || estimate.spur || lock_ != CombLock::kRecovering || !anchored_ ||
+        estimate.line_count() == 0 || !(estimate.spacing_hz > 0.0)) {
+        return false;
+    }
+    const double rate = static_cast<double>(rate_);
+    if (!moved && (recentred_ || static_cast<double>(static_cast<std::int64_t>(
+                                     anchor_ - recovering_since_)) < kRecentreSeconds * rate)) {
+        return false;
+    }
+    const double c = signed_of(c_.freq) * rate;
+    const double d = signed_of(d_.freq) * rate;
+    const double e = signed_of(e_.freq) * rate;
+    // The pass's k at the estimate's k = 0: estimate line k sits at pass k + j0.
+    const double j0 = std::round(nearest_k(estimate.offset_hz, c, d, e));
+    const double ce = estimate.curvature_hz;
+    const double nc = estimate.offset_hz - j0 * estimate.spacing_hz + j0 * j0 * ce;
+    const double nd = estimate.spacing_hz - 2.0 * j0 * ce;
+    c_ = Axis{c_.phase, to_fixed(nc / rate), 0};
+    d_ = Axis{d_.phase, to_fixed(nd / rate), 0};
+    if (ce != 0.0) {
+        e_ = Axis{e_.phase, to_fixed(ce / rate), 0};
+        curved_ = true;
+    }
+    r_.rate = 0;
+    recentred_ = true;
+    stage_ = Stage::kFrequency;
+    wide_ = true;
+    settle_blocks_ = 0;
+    bad_blocks_ = 0;
+    // Plans already handed out were made against the old model.
+    ++generation_;
+    records_.clear();
+    for (Line& line : lines_) {
+        line.seeded = false;
+    }
+    return true;
 }
 
 void CombTracker::start_acquisition(const CombEstimate& estimate)
@@ -540,6 +889,8 @@ void CombTracker::start_acquisition(const CombEstimate& estimate)
     wide_ = true;
     initial_offset_hz_ = estimate.offset_hz;
     initial_spacing_hz_ = estimate.spacing_hz;
+    initial_curvature_hz_ = estimate.spur ? 0.0 : estimate.curvature_hz;
+    curved_ = initial_curvature_hz_ != 0.0;
     range_lo_ = estimate.k_lo;
     range_hi_ = estimate.k_hi;
     spur_ = estimate.spur;
@@ -601,9 +952,11 @@ void CombTracker::advance_to(SampleIndex index)
     const Axes c = advanced(c_, n);
     const Axes d = advanced(d_, n);
     const Axes r = advanced(r_, n);
+    const Axes e = advanced(e_, n);
     c_ = Axis{c.phase, c.freq, c.rate};
     d_ = Axis{d.phase, d.freq, d.rate};
     r_ = Axis{r.phase, r.freq, r.rate};
+    e_ = Axis{e.phase, e.freq, e.rate};
     anchor_ = index;
 }
 
@@ -617,17 +970,76 @@ void CombTracker::correct_ripple(SampleIndex at, double dp, double df, double dr
 
 // Corrections are errors at index `at`, applied to the model as a change of
 // its whole trajectory and carried forward to the anchor.
-void CombTracker::correct(SampleIndex at, double dc_phase, double dc_freq, double dc_rate,
-                          double dd_phase, double dd_freq, double dd_rate)
+// The curvature is only moved while the curved model is in use, so under the
+// straight model it stays exactly zero.
+void CombTracker::correct(SampleIndex at, Correction dc, Correction dd, Correction de)
 {
     const double dt = static_cast<double>(static_cast<std::int64_t>(anchor_ - at));
-    auto apply = [dt](Axis& axis, double dp, double df, double dr) {
-        axis.phase += to_fixed(dp + df * dt + 0.5 * dr * dt * dt);
-        axis.freq += to_fixed(df + dr * dt);
-        axis.rate += to_fixed_small(dr);
+    auto apply = [dt](Axis& axis, const Correction& x) {
+        axis.phase += to_fixed(x.phase + x.freq * dt + 0.5 * x.rate * dt * dt);
+        axis.freq += to_fixed(x.freq + x.rate * dt);
+        axis.rate += to_fixed_small(x.rate);
     };
-    apply(c_, dc_phase, dc_freq, dc_rate);
-    apply(d_, dd_phase, dd_freq, dd_rate);
+    apply(c_, dc);
+    apply(d_, dd);
+    if (curved_) {
+        apply(e_, de);
+    }
+}
+
+// Which model the pass uses, from this block's frequency innovations over
+// every carrier fitted, benched ones included: a curved comb under the
+// straight model puts its outer lines off the line and on the bench, which is
+// exactly where the evidence for the curvature is.
+//
+// To curved: four blocks running in which the curved fit leaves under half
+// the straight fit's residual power and its curvature moves the outermost
+// lines by more than 0.05 cycles per block (1.8 Hz at 65536 samples and
+// 2.4 MS/s), over at least 24 lines spanning 16. To straight: the tracked
+// curvature moving the outermost lines by under 0.02 cycles per block for 64
+// blocks, 1.7 s, at which point it is set to exactly zero. Innovations are
+// taken against the model, so once the curvature is tracked the evidence for
+// it goes quiet; the way back is judged on the model's own curvature, not on
+// the innovations, or the pass would flip back and forth.
+void CombTracker::choose_model(const std::vector<double>& ks, const std::vector<double>& ys,
+                               const std::vector<double>& ws, double block_samples)
+{
+    if (spur_ || ks.size() < kCurveMinLines) {
+        curve_votes_ = 0;
+        return;
+    }
+    const auto [lo, hi] = std::ranges::minmax(ks);
+    if (hi - lo < kCurveMinSpan) {
+        curve_votes_ = 0;
+        return;
+    }
+    const double half = 0.5 * (hi - lo);
+    if (!curved_) {
+        const Fit straight = fit_robust(ks, ys, ws, 0.01 / block_samples, false);
+        const Fit curved = fit_robust(ks, ys, ws, 0.01 / block_samples, true);
+        const double bend = std::abs(curved.curve) * half * half * block_samples;
+        const bool better = curved.rms * curved.rms < kCurveGain * straight.rms * straight.rms &&
+                            bend > kCurveOnCycles;
+        curve_votes_ = better ? curve_votes_ + 1 : 0;
+        if (curve_votes_ >= kCurveVotes) {
+            curved_ = true;
+            curve_votes_ = 0;
+            straight_votes_ = 0;
+        }
+        return;
+    }
+    // The curvature's bend across the lines, relative to the straight line
+    // through the ends, as the model holds it now.
+    const double e = signed_of(e_.freq);
+    const double bend = std::abs(e) * half * half * block_samples;
+    straight_votes_ = bend < kCurveOffCycles ? straight_votes_ + 1 : 0;
+    if (straight_votes_ >= kStraightVotes) {
+        // Fold what curvature is left into nothing: it is under the off
+        // threshold, a fraction of a cycle per block at the outermost line.
+        e_ = Axis{};
+        curved_ = false;
+        straight_votes_ = 0;
+    }
 }
 
 CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
@@ -636,8 +1048,7 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
     out.start = start;
     out.count = count;
     out.sub_blocks = 1;
-    if (rate_ <= 0 || count == 0 || lines_.empty() ||
-        (lock_ != CombLock::kAcquiring && lock_ != CombLock::kLocked)) {
+    if (rate_ <= 0 || count == 0 || lines_.empty() || !active()) {
         return out;
     }
     const std::uint32_t half = count / 2;
@@ -650,6 +1061,7 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
         c_ = Axis{0, to_fixed(initial_offset_hz_ / rate), 0};
         d_ = Axis{0, to_fixed(initial_spacing_hz_ / rate), 0};
         r_ = Axis{0, to_fixed(initial_ripple_hz_ / rate), 0};
+        e_ = Axis{0, to_fixed(initial_curvature_hz_ / rate), 0};
     } else {
         const auto gap = static_cast<std::int64_t>(mid - anchor_);
         if (gap > static_cast<std::int64_t>(kGapSeconds * rate) || gap < 0) {
@@ -659,7 +1071,14 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
             c_.rate = 0;
             d_.rate = 0;
             r_.rate = 0;
-            lock_ = CombLock::kAcquiring;
+            e_.rate = 0;
+            if (lock_ == CombLock::kLocked) {
+                lock_ = CombLock::kRecovering;
+                recovering_since_ = mid;
+                recentred_ = false;
+            } else if (lock_ != CombLock::kRecovering) {
+                lock_ = CombLock::kAcquiring;
+            }
             stage_ = Stage::kFrequency;
             wide_ = true;
             settle_blocks_ = 0;
@@ -689,9 +1108,10 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
 
     for (std::uint32_t slot = 0; slot < lines_.size(); ++slot) {
         Line& line = lines_[slot];
-        const std::uint64_t phase =
-            c_.phase + times_k(d_.phase, line.k) + times_k(r_.phase, line.m);
-        const std::uint64_t freq = c_.freq + times_k(d_.freq, line.k) + times_k(r_.freq, line.m);
+        const std::uint64_t phase = c_.phase + times_k(d_.phase, line.k) +
+                                    times_k2(e_.phase, line.k) + times_k(r_.phase, line.m);
+        const std::uint64_t freq = c_.freq + times_k(d_.freq, line.k) +
+                                   times_k2(e_.freq, line.k) + times_k(r_.freq, line.m);
         const auto step = static_cast<std::uint32_t>((freq + (1ULL << 31)) >> 32);
         const auto phase_mid = static_cast<std::uint32_t>((phase + (1ULL << 31)) >> 32);
         const std::uint32_t phase0 = phase_mid - step * half;
@@ -699,7 +1119,11 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
         line.in_band = std::abs(signed_of(freq)) < kBandEdge;
 
         Complex32 amp{};
-        if (out.subtract && line.seeded && line.in_band && stands_out(slot, count)) {
+        // A sideband follows its carrier onto the bench.
+        const std::size_t carrier_slot =
+            slot - static_cast<std::size_t>(static_cast<std::ptrdiff_t>(line.m));
+        const bool benched = carrier_slot < lines_.size() && lines_[carrier_slot].benched;
+        if (out.subtract && line.seeded && line.in_band && !benched && stands_out(slot, count)) {
             amp = Complex32{static_cast<float>(line.amp.real()),
                             static_cast<float>(line.amp.imag())};
         }
@@ -717,6 +1141,30 @@ CombBlockPlan CombTracker::plan(SampleIndex start, std::uint32_t count)
         records_.erase(records_.begin());
     }
     return out;
+}
+
+// A locked pass stopped fitting. Its model was right moments ago, so it is
+// kept: frequencies held, rates dropped (they would carry the model away over
+// a gap), cancellation off, and the loops pull back in from the frequency
+// stage on the long sub-blocks. Every line's phase reference is retaken,
+// since after a gap or a burst the old ones are stale.
+void CombTracker::begin_recovery(SampleIndex at)
+{
+    lock_ = CombLock::kRecovering;
+    recovering_since_ = at;
+    recentred_ = false;
+    stage_ = Stage::kFrequency;
+    wide_ = false;
+    seed_pending_ = false;
+    settle_blocks_ = 0;
+    bad_blocks_ = 0;
+    c_.rate = 0;
+    d_.rate = 0;
+    r_.rate = 0;
+    e_.rate = 0;
+    for (Line& line : lines_) {
+        line.seeded = false;
+    }
 }
 
 void CombTracker::replace_weak_lines()
@@ -748,7 +1196,7 @@ void CombTracker::replace_weak_lines()
 
 void CombTracker::observe(const CombObservation& observation)
 {
-    if (lock_ != CombLock::kAcquiring && lock_ != CombLock::kLocked) {
+    if (!active()) {
         return;
     }
     auto it = std::find_if(records_.begin(), records_.end(), [&](const PlanRecord& r) {
@@ -794,6 +1242,7 @@ void CombTracker::observe(const CombObservation& observation)
     const Axes cb = advanced(c_, back);
     const Axes db = advanced(d_, back);
     const Axes rb = advanced(r_, back);
+    const Axes eb = advanced(e_, back);
 
     struct Measured {
         std::uint32_t slot = 0;
@@ -903,10 +1352,12 @@ void CombTracker::observe(const CombObservation& observation)
         const double plan_freq =
             static_cast<double>(static_cast<std::int32_t>(planned.step)) / kTwo32;
         const std::uint64_t model_phase_fixed =
-            cb.phase + times_k(db.phase, planned.k) + times_k(rb.phase, planned.m);
+            cb.phase + times_k(db.phase, planned.k) + times_k2(eb.phase, planned.k) +
+            times_k(rb.phase, planned.m);
         const double model_phase = static_cast<double>(model_phase_fixed) / kTwo64;
-        const double model_freq =
-            signed_of(cb.freq + times_k(db.freq, planned.k) + times_k(rb.freq, planned.m));
+        const double model_freq = signed_of(cb.freq + times_k(db.freq, planned.k) +
+                                            times_k2(eb.freq, planned.k) +
+                                            times_k(rb.freq, planned.m));
         const double df_plan = S >= 2 ? std::arg(D) / (kTwoPi * L) : 0.0;
 
         Measured m;
@@ -962,7 +1413,18 @@ void CombTracker::observe(const CombObservation& observation)
             ws.push_back(m.snr);
         }
     }
-    const Fit ffit = fit_affine(ks, ys, ws);
+    choose_model(ks, ys, ws, T);
+    ks.clear();
+    ys.clear();
+    ws.clear();
+    for (const Measured& m : measured) {
+        if (m.fit && !lines_[m.slot].benched) {
+            ks.push_back(m.k);
+            ys.push_back(m.freq_innovation);
+            ws.push_back(m.snr);
+        }
+    }
+    const Fit ffit = fit_robust(ks, ys, ws, 0.01 / T, curved_);
     const bool enough = ffit.used >= min_lines_;
     const double freq_error_per_block =
         (std::abs(ffit.centroid_value) + ffit.half_span_value) * T;
@@ -971,8 +1433,10 @@ void CombTracker::observe(const CombObservation& observation)
         if (enough) {
             const double ec = ffit.at_zero;
             const double ed = ffit.slope;
-            correct(record.mid, 0.0, kFllGain * ec, kFllRateGain * ec / T, 0.0, kFllGain * ed,
-                    kFllRateGain * ed / T);
+            const double ee = ffit.curve;
+            correct(record.mid, {0.0, kFllGain * ec, kFllRateGain * ec / T},
+                    {0.0, kFllGain * ed, kFllRateGain * ed / T},
+                    {0.0, kFllGain * ee, kFllRateGain * ee / T});
             if (wide_ && freq_error_per_block < kNarrowCyclesPerBlock) {
                 wide_ = false;
             }
@@ -1001,22 +1465,54 @@ void CombTracker::observe(const CombObservation& observation)
         ws.clear();
         for (const Measured& m : measured) {
             const Line& line = lines_[m.slot];
-            if (m.fit && line.seeded && std::abs(line.amp) > 0.0) {
+            if (m.fit && !line.benched && line.seeded && std::abs(line.amp) > 0.0) {
                 ks.push_back(m.k);
                 ys.push_back(std::arg(m.a_meas * std::conj(line.amp)) / kTwoPi);
                 ws.push_back(m.snr);
             }
         }
-        const Fit pfit = fit_affine(ks, ys, ws);
+        const Fit pfit = fit_robust(ks, ys, ws, 0.02, curved_);
+
+        // Each carrier judged against the comb's fit, benched ones included,
+        // so a line that rejoins the comb comes off the bench. A carrier the
+        // fit cannot judge this block (too weak, or the fit too thin) keeps
+        // its standing.
+        std::uint32_t candidates = 0;
+        std::uint32_t benched = 0;
+        if (pfit.used >= min_lines_) {
+            for (const Measured& m : measured) {
+                Line& line = lines_[m.slot];
+                if (!m.fit || !line.seeded || std::abs(line.amp) <= 0.0) {
+                    continue;
+                }
+                ++candidates;
+                const double r = wrap_cycles(std::arg(m.a_meas * std::conj(line.amp)) / kTwoPi -
+                                             eval(pfit, m.k));
+                if (std::abs(r) * kTwoPi > kLineOutlierRad) {
+                    ++line.outlier_blocks;
+                    line.inlier_blocks = 0;
+                    if (line.outlier_blocks >= kBenchBlocks) {
+                        line.benched = true;
+                    }
+                } else {
+                    ++line.inlier_blocks;
+                    line.outlier_blocks = 0;
+                    if (line.inlier_blocks >= kUnbenchBlocks) {
+                        line.benched = false;
+                    }
+                }
+                benched += line.benched ? 1U : 0U;
+            }
+        }
         const double rho = std::exp(-T / (kLoopSeconds * rate));
         const double alpha = 1.0 - rho * rho * rho;
         const double beta = 1.5 * (1.0 - rho) * (1.0 - rho) * (1.0 + rho);
         const double gamma = (1.0 - rho) * (1.0 - rho) * (1.0 - rho);
         if (pfit.used >= min_lines_) {
-            const double ec = pfit.at_zero;
-            const double ed = pfit.slope;
-            correct(record.mid, alpha * ec, beta * ec / T, gamma * ec / (T * T), alpha * ed,
-                    beta * ed / T, gamma * ed / (T * T));
+            auto loop = [&](double x) {
+                return Correction{alpha * x, beta * x / T, gamma * x / (T * T)};
+            };
+            correct(record.mid, loop(pfit.at_zero), loop(pfit.slope), loop(pfit.curve));
         }
         // The ripple: each sideband's phase error past what the carriers'
         // fit gives its k is m times the ripple's, so the weighted least
@@ -1035,7 +1531,7 @@ void CombTracker::observe(const CombObservation& observation)
                     continue;
                 }
                 const double y = wrap_cycles(std::arg(m.a_meas * std::conj(line.amp)) / kTwoPi -
-                                             (pfit.at_zero + pfit.slope * m.k));
+                                             eval(pfit, m.k));
                 const double mm = static_cast<double>(m.m);
                 swy += m.snr * y * mm;
                 sww += m.snr * mm * mm;
@@ -1047,11 +1543,11 @@ void CombTracker::observe(const CombObservation& observation)
                                gamma * ripple_error / (T * T));
             }
         }
-        // Amplitudes learn what the affine fit does not explain.
+        // Amplitudes learn what the comb's fit does not explain.
         for (const Measured& m : measured) {
             Line& line = lines_[m.slot];
             const double fitted =
-                (pfit.used >= min_lines_ ? pfit.at_zero + pfit.slope * m.k : 0.0) +
+                (pfit.used >= min_lines_ ? eval(pfit, m.k) : 0.0) +
                 static_cast<double>(m.m) * ripple_error;
             const Cd target = m.a_meas * std::polar(1.0, -kTwoPi * fitted);
             if (!line.seeded) {
@@ -1067,19 +1563,30 @@ void CombTracker::observe(const CombObservation& observation)
         const double residual_rad = pfit.rms * kTwoPi;
         const bool fits = pfit.used >= min_lines_;
         const double innovation_cycles = std::abs(pfit.centroid_value) + pfit.half_span_value;
-        const bool good = fits && residual_rad < kLockRad && strong >= min_lines_ &&
+        // The pass is judged by the carriers moving together, not by the
+        // worst of them: benched lines are out of the residual, and the pass
+        // only fails when too few remain or most have left the fit.
+        const bool cohesive =
+            candidates == 0 ||
+            static_cast<double>(candidates - benched) >= kHealthyShare * candidates;
+        const bool good = fits && cohesive && residual_rad < kLockRad && strong >= min_lines_ &&
                           innovation_cycles < kLockInnovationCycles &&
                           freq_error_per_block < kPhaseFallbackCyclesPerBlock;
-        const bool bad = !fits || residual_rad > kLostRad || strong < min_lines_ ||
+        const bool bad = !fits || !cohesive || residual_rad > kLostRad || strong < min_lines_ ||
                          freq_error_per_block > kPhaseFallbackCyclesPerBlock;
-        if (lock_ == CombLock::kAcquiring) {
+        verdict_ = CombVerdict{pfit.used, strong,  benched, residual_rad, innovation_cycles,
+                               freq_error_per_block, curved_, good,    bad};
+        if (lock_ == CombLock::kAcquiring || lock_ == CombLock::kRecovering) {
             settle_blocks_ = good ? settle_blocks_ + 1 : 0;
             if (settle_blocks_ >= kLockBlocks) {
                 lock_ = CombLock::kLocked;
                 bad_blocks_ = 0;
             } else if (enough && freq_error_per_block > kPhaseFallbackCyclesPerBlock) {
+                // Recovering starts from a model that was right moments ago,
+                // so it keeps the long sub-blocks; acquisition needs the
+                // wide pull-in.
                 stage_ = Stage::kFrequency;
-                wide_ = true;
+                wide_ = lock_ == CombLock::kAcquiring;
                 settle_blocks_ = 0;
                 for (Line& line : lines_) {
                     line.seeded = false;
@@ -1088,14 +1595,19 @@ void CombTracker::observe(const CombObservation& observation)
         } else {
             bad_blocks_ = bad ? bad_blocks_ + 1 : 0;
             if (bad_blocks_ >= kLostBlocks) {
-                lock_ = CombLock::kLost;
-                records_.clear();
-                return;
+                begin_recovery(record.mid);
             }
         }
     }
 
     if (lock_ == CombLock::kAcquiring && observed_ > kAcquireLimit) {
+        lock_ = CombLock::kLost;
+        records_.clear();
+        return;
+    }
+    if (lock_ == CombLock::kRecovering &&
+        static_cast<double>(static_cast<std::int64_t>(record.mid - recovering_since_)) >
+            kRecoverSeconds * rate) {
         lock_ = CombLock::kLost;
         records_.clear();
         return;
@@ -1115,6 +1627,7 @@ CombStatus CombTracker::status() const
     const double rate = static_cast<double>(rate_);
     out.comb.offset_hz = anchored_ ? signed_of(c_.freq) * rate : initial_offset_hz_;
     out.comb.spacing_hz = anchored_ ? signed_of(d_.freq) * rate : initial_spacing_hz_;
+    out.comb.curvature_hz = anchored_ ? signed_of(e_.freq) * rate : initial_curvature_hz_;
     if (!lines_.empty()) {
         std::int32_t lo = lines_.front().k;
         std::int32_t hi = lines_.front().k;
@@ -1135,7 +1648,10 @@ CombStatus CombTracker::status() const
         if (line.m != 0) {
             // Counted, but kept out of the heights and the suppression
             // figure, whose noise estimates a nearby carrier spoils.
-            if (lock_ == CombLock::kLocked && line.seeded && line.in_band &&
+            const std::size_t carrier =
+                slot - static_cast<std::size_t>(static_cast<std::ptrdiff_t>(line.m));
+            const bool benched = carrier < lines_.size() && lines_[carrier].benched;
+            if (lock_ == CombLock::kLocked && line.seeded && line.in_band && !benched &&
                 stands_out(slot, last_count_)) {
                 ++cancelled;
             }
@@ -1146,7 +1662,7 @@ CombStatus CombTracker::status() const
             continue;
         }
         heights.push_back(10.0 * std::log10(snr));
-        if (lock_ == CombLock::kLocked && line.seeded) {
+        if (lock_ == CombLock::kLocked && line.seeded && !line.benched) {
             ++cancelled;
             ++carriers;
             const double floor = line.noise / n;
