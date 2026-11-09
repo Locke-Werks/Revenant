@@ -82,8 +82,25 @@ ColumnLayout {
     readonly property string liveRt: rtWhole ? engineLink.rdsRadioText : ""
     onLivePsChanged: if (livePs.length > 0) heldPs = livePs
     onLiveRtChanged: if (liveRt.length > 0) heldRt = liveRt
-    readonly property string station: engineLink.rdsIdentity + "|" + engineLink.receiverId
-    onStationChanged: { heldPs = ""; heldRt = "" }
+    // Losing sync blanks the PI for a while, which is not a new station:
+    // only a different PI, or another receiver, lets go of the held text.
+    property string heldPi: ""
+    readonly property string livePi: engineLink.rdsIdentity
+    onLivePiChanged: {
+        if (livePi.length === 0 || livePi === heldPi) {
+            return
+        }
+        if (heldPi.length > 0) {
+            heldPs = ""
+            heldRt = ""
+        }
+        heldPi = livePi
+    }
+    readonly property int receiver: engineLink.receiverId
+    onReceiverChanged: { heldPs = ""; heldRt = ""; heldPi = "" }
+    // Turning RDS off lets go as well; the text is not kept past the switch.
+    readonly property bool wanted: engineLink.rdsWanted
+    onWantedChanged: if (!wanted) { heldPs = ""; heldRt = ""; heldPi = "" }
     readonly property string psText: heldPs.length > 0 ? heldPs : engineLink.rdsPs
     readonly property string rtText: heldRt.length > 0 ? heldRt : engineLink.rdsRadioText
 
@@ -173,16 +190,15 @@ ColumnLayout {
         // The station, which is the whole point and is only shown
         // once groups are actually arriving.
         Label {
-            visible: engineLink.rdsDecoding
-                     && engineLink.rdsIdentity.length > 0
-            text: engineLink.rdsIdentity
+            visible: rds.heldPi.length > 0
+            text: rds.heldPi
             color: Theme.ink
             font.pixelSize: Theme.sizeTitle
             font.bold: true
         }
 
         Label {
-            visible: engineLink.rdsDecoding && rds.psText.length > 0
+            visible: rds.psText.length > 0
             text: "“" + rds.psText + "”"
                   + (rds.heldPs.length === 0
                      && engineLink.rdsPsSegments < engineLink.rdsPsSegmentsTotal
@@ -255,8 +271,7 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
-        visible: engineLink.rdsDecoding
-                 && (engineLink.rdsProgrammeType.length > 0 || engineLink.rdsPtynShown
+        visible: (engineLink.rdsProgrammeType.length > 0 || engineLink.rdsPtynShown
                      || rds.rtText.length > 0)
         spacing: 8
 
