@@ -128,19 +128,9 @@ ApplicationWindow {
         }
     }
 
-    function placeReceiverPanel() {
-        if (receiverPlacement.poppedOut)
-            receiverPanel.parent = receiverWindow.contentItem
-    }
-
-    Component.onCompleted: placeReceiverPanel()
-
     Connections {
         target: receiverPlacement
-        function onPoppedOutChanged() {
-            window.placeReceiverPanel()
-            window.placeReceiverWindow()
-        }
+        function onPoppedOutChanged() { window.placeReceiverWindow() }
         function onShownChanged() { window.placeReceiverWindow() }
         function onReadyChanged() { window.placeReceiverWindow() }
     }
@@ -154,19 +144,14 @@ ApplicationWindow {
         id: receiverWindow
         commands: keyCommands
         onDockRequested: receiverPlacement.poppedOut = false
-        // Never smaller than the receivers' panes at their minimums.
-        minimumWidth: Math.max(360, receiverPanel.minimumWidth)
-        minimumHeight: Math.max(320, receiverPanel.minimumHeight)
+        paneContents: receiverPanel.contents
     }
 
     // The receivers themselves, in the dock or in the receiver window.
-    //
-    // Docked, its frame in the main window's tiled layout takes it; popped
-    // out, it is put in the receiver window here.
+    // ReceiverPanel.qml makes their panes; the main window's layout or the
+    // receiver window's draws them.
     ReceiverPanel {
         id: receiverPanel
-        anchors.fill: parent
-        visible: receiverPlacement.shown
         poppedOut: receiverPlacement.poppedOut
         onPopToggled: window.popReceivers()
     }
@@ -237,50 +222,39 @@ ApplicationWindow {
             Layout.fillWidth: true
         }
 
-        // The span and the docked receivers, tiled; models/pane_layout.h.
-        // The operator drags the border between them and drags either one's
-        // title strip onto an edge of the other to put it there. Hidden or
-        // popped-out receivers leave the span the whole of it.
+        // Every pane, tiled; models/pane_layout.h. Any pane goes against any
+        // edge of any other by dragging its title strip there.
         PaneHost {
             id: mainHost
 
             Layout.fillWidth: true
             Layout.fillHeight: true
             store: mainLayout
-            contents: ({ "span": spanPane, "receivers": receiverPanel })
-            titles: ({ "span": "Spectrum and waterfall", "receivers": "Receiver dock" })
-            stripless: ["receivers"]
+            contents: {
+                const out = Object.assign({}, receiverPanel.contents)
+                out["spectrum"] = spanView.spectrumPane
+                out["waterfall"] = spanView.waterfallPane
+                return out
+            }
         }
     }
 
-    // Kept in step with whether the receivers are in this window at all.
+    // The receiver panes, which are in this window, in the receiver window,
+    // or hidden, and the sections with nothing to show, which step aside.
+    readonly property var receiverPanes: Object.keys(receiverPanel.contents)
+    readonly property bool receiversHere: receiverPlacement.shown && !receiverPlacement.poppedOut
+    readonly property bool receiversThere: receiverPlacement.shown && receiverPlacement.poppedOut
+
     Binding {
         target: mainLayout
         property: "hidden"
-        value: receiverPlacement.shown && !receiverPlacement.poppedOut ? [] : ["receivers"]
+        value: window.receiversHere ? receiverPanel.empty : window.receiverPanes
     }
 
-    // What the two panes need, which the store holds as their floors and
-    // adds up into the window's own minimum below.
-    component PaneMinimum: QtObject {
-        required property string pane
-        property real needWidth: 0
-        property real needHeight: 0
-        readonly property real strip: mainHost ? mainHost.stripFor(pane) : 0
-        function report() {
-            mainLayout.setMinimum(pane, needWidth, needHeight + strip)
-        }
-        onNeedWidthChanged: report()
-        onNeedHeightChanged: report()
-        onStripChanged: report()
-        Component.onCompleted: report()
-    }
-
-    PaneMinimum { pane: "span"; needWidth: 320 + 12; needHeight: spanView.minimumHeight + 12 }
-    PaneMinimum {
-        pane: "receivers"
-        needWidth: receiverPanel.minimumWidth
-        needHeight: receiverPanel.minimumHeight
+    Binding {
+        target: receiverLayout
+        property: "hidden"
+        value: window.receiversThere ? receiverPanel.empty : window.receiverPanes
     }
 
     // The window never gets smaller than every pane at its minimum plus the
@@ -289,57 +263,10 @@ ApplicationWindow {
     minimumHeight: mainLayout.minimumHeight + topBar.height + recordingStrip.height
                    + controlRow.height
 
-    // Where the span waits until its frame takes it.
-    Item {
-        visible: false
-
-        Item {
-            id: spanPane
-            anchors.fill: parent
-
-            SpanView {
-                id: spanView
-                anchors.fill: parent
-                anchors.margins: 6
-                selection: tuneSelection
-            }
-
-            // What the last click resolved to, over the bottom of the
-            // waterfall where the eye already is after clicking there.
-            Rectangle {
-                anchors.left: parent.left
-                anchors.bottom: parent.bottom
-                anchors.margins: 16
-                width: Math.min(parent.width - 32, readout.implicitWidth + close.width + 24)
-                height: readout.implicitHeight + 16
-                visible: tuneSelection.tuned
-                radius: Theme.radius + 2
-                color: Theme.panel
-                border.width: 1
-                border.color: Theme.border
-
-                ClickReadout {
-                    id: readout
-                    anchors.left: parent.left
-                    anchors.right: close.left
-                    anchors.top: parent.top
-                    anchors.margins: 8
-                    selection: tuneSelection
-                }
-
-                RButton {
-                    id: close
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    anchors.margins: 4
-                    flat: true
-                    text: "dismiss"
-                    iconName: "x"
-                    ink: Theme.inkDim
-                    onClicked: tuneSelection.dismiss()
-                }
-            }
-        }
+    // The spectrum and the waterfall, which the layout above draws.
+    SpanView {
+        id: spanView
+        selection: tuneSelection
     }
 
     // The single-user lease. Opaque and on top, and it takes every click and

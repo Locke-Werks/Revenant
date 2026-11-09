@@ -28,7 +28,19 @@ Rectangle {
     // note.
     property color ink: Theme.inkWarn
 
-    implicitWidth: text.implicitWidth + 16
+    // The longest thing this chip will say, when its words change while it is
+    // on screen: the chip keeps that width, so nothing beside it moves as it
+    // changes. Empty for a chip that says one thing.
+    property string widest: ""
+
+    TextMetrics {
+        id: widestMetrics
+        text: chip.widest
+        font.family: Theme.uiFont
+        font.pixelSize: Theme.sizeSmall
+    }
+
+    implicitWidth: Math.max(text.implicitWidth, widestMetrics.advanceWidth) + 16
     implicitHeight: 20
     radius: 10
     color: Qt.rgba(chip.ink.r, chip.ink.g, chip.ink.b, 0.12)

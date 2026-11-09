@@ -8,6 +8,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <numeric>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -73,46 +74,44 @@ TEST_CASE("min_size sums along the axis and takes the largest across it", "[pane
 // target.
 TEST_CASE("move_pane keeps every pane exactly once", "[pane_layout]")
 {
-    PaneNode tree = default_receiver_tree();
-    REQUIRE(move_pane(tree, "sections", "detail", PaneEdge::Bottom));
-    REQUIRE(holds_exactly(tree, receiver_tree_panes()));
-    REQUIRE(tree.horizontal);
-    REQUIRE(tree.children.size() == 2);
-    const PaneNode& column = tree.children[1];
-    REQUIRE_FALSE(column.horizontal);
-    REQUIRE(column.children[0].pane == "detail");
-    REQUIRE(column.children[1].pane == "sections");
+    PaneNode tree = default_main_tree();
+    REQUIRE(move_pane(tree, "audio", "detail", PaneEdge::Bottom));
+    REQUIRE(holds_exactly(tree, main_tree_panes()));
+    REQUIRE(move_pane(tree, "rack", "spectrum", PaneEdge::Left));
+    REQUIRE(holds_exactly(tree, main_tree_panes()));
 }
 
 // Rejects: a split nested inside another split running the same way, which
 // draws a border with nothing to divide on one side.
 TEST_CASE("move_pane folds a same-direction split into its parent", "[pane_layout]")
 {
-    PaneNode tree = default_receiver_tree();
-    REQUIRE(move_pane(tree, "rack", "sections", PaneEdge::Right));
+    PaneNode tree = pane_split(true, {pane_leaf("a"), pane_leaf("b"), pane_leaf("c")},
+                               {1.0, 1.0, 1.0});
+    REQUIRE(move_pane(tree, "a", "c", PaneEdge::Right));
     REQUIRE(tree.horizontal);
     REQUIRE(tree.children.size() == 3);
-    REQUIRE(tree.children[0].pane == "detail");
-    REQUIRE(tree.children[1].pane == "sections");
-    REQUIRE(tree.children[2].pane == "rack");
+    REQUIRE(tree.children[0].pane == "b");
+    REQUIRE(tree.children[1].pane == "c");
+    REQUIRE(tree.children[2].pane == "a");
 }
 
-// Rejects: the main tree turned sideways by dropping the receivers on the
-// span's right, which is what replaced the automatic dock-beside rule.
-TEST_CASE("move_pane can put the dock beside the span", "[pane_layout]")
+// Rejects: receiver panes held inside a block of their own, which was the
+// first version: the rack could not go beside the spectrum.
+TEST_CASE("move_pane puts a receiver pane beside the spectrum", "[pane_layout]")
 {
     PaneNode tree = default_main_tree();
-    REQUIRE(move_pane(tree, "receivers", "span", PaneEdge::Right));
-    REQUIRE(tree.horizontal);
-    REQUIRE(tree.children[0].pane == "span");
-    REQUIRE(tree.children[1].pane == "receivers");
+    REQUIRE(move_pane(tree, "rack", "spectrum", PaneEdge::Right));
+    const PaneNode& top = tree.children[0];
+    REQUIRE(top.horizontal);
+    REQUIRE(top.children[0].pane == "spectrum");
+    REQUIRE(top.children[1].pane == "rack");
 }
 
 // Rejects: a move onto itself or onto a pane that is not there that still
 // changes the tree.
 TEST_CASE("move_pane refuses a pane onto itself or a missing one", "[pane_layout]")
 {
-    PaneNode tree = default_receiver_tree();
+    PaneNode tree = default_main_tree();
     const std::string before = write_pane_tree(tree);
     REQUIRE_FALSE(move_pane(tree, "rack", "rack", PaneEdge::Left));
     REQUIRE_FALSE(move_pane(tree, "rack", "nowhere", PaneEdge::Left));
@@ -122,7 +121,7 @@ TEST_CASE("move_pane refuses a pane onto itself or a missing one", "[pane_layout
 // Rejects: a settings form that does not read back to the same tree.
 TEST_CASE("the settings form round-trips", "[pane_layout]")
 {
-    PaneNode tree = default_receiver_tree();
+    PaneNode tree = default_main_tree();
     REQUIRE(move_pane(tree, "rack", "detail", PaneEdge::Top));
     const std::string text = write_pane_tree(tree);
     const auto read = read_pane_tree(text);
@@ -141,4 +140,57 @@ TEST_CASE("a damaged or stale settings form is refused", "[pane_layout]")
     const auto old = read_pane_tree("h(1 rack 1 detail)");
     REQUIRE(old.has_value());
     REQUIRE_FALSE(holds_exactly(*old, receiver_tree_panes()));
+}
+
+// Rejects: a hidden pane leaving a hole, or a split of one drawn as a split.
+TEST_CASE("build_view drops hidden panes and collapses what they leave", "[pane_layout]")
+{
+    const PaneNode tree = default_main_tree();
+    std::set<std::string, std::less<>> hidden;
+    for (const std::string& pane : receiver_tree_panes()) {
+        hidden.insert(pane);
+    }
+    const auto view = build_view(tree, hidden);
+    REQUIRE(view.has_value());
+    REQUIRE(view->children.size() == 2);
+    REQUIRE(view->children[0].pane == "spectrum");
+    REQUIRE(view->kept == std::vector<std::size_t>{0, 1});
+
+    hidden.insert("spectrum");
+    hidden.insert("waterfall");
+    REQUIRE_FALSE(build_view(tree, hidden).has_value());
+}
+
+// Rejects: a drag on a view with hidden panes writing its sizes to the wrong
+// stored children, or spending the hidden ones' share.
+TEST_CASE("store_view_sizes keeps hidden children's weights", "[pane_layout]")
+{
+    PaneNode tree = pane_split(false, {pane_leaf("a"), pane_leaf("b"), pane_leaf("c")},
+                               {0.2, 0.3, 0.5});
+    const auto view = build_view(tree, {"b"});
+    REQUIRE(view.has_value());
+    store_view_sizes(tree, *view, {300.0, 100.0});
+    REQUIRE_THAT(tree.weights[1], WithinAbs(0.3, 1e-12));
+    REQUIRE_THAT(tree.weights[0], WithinAbs(0.525, 1e-12));
+    REQUIRE_THAT(tree.weights[2], WithinAbs(0.175, 1e-12));
+}
+
+// Rejects: a collapsed pane given a share like any other, which leaves its
+// strip with a blank area under it.
+TEST_CASE("a collapsed pane keeps exactly its minimum", "[pane_layout]")
+{
+    const std::vector<double> sizes =
+        lay_out({1.0, 1.0, 1.0}, {20.0, 50.0, 50.0}, 610.0, {true, false, false});
+    REQUIRE(sizes[0] == 20.0);
+    REQUIRE_THAT(sizes[1], WithinAbs(290.0, 1e-9));
+}
+
+// Rejects: a border beside a collapsed pane that cannot be dragged.
+TEST_CASE("drag_border skips a collapsed neighbour", "[pane_layout]")
+{
+    const std::vector<double> after =
+        drag_border({200.0, 20.0, 200.0}, {50.0, 20.0, 50.0}, 0, 30.0, {false, true, false});
+    REQUIRE(after[0] == 230.0);
+    REQUIRE(after[1] == 20.0);
+    REQUIRE(after[2] == 170.0);
 }

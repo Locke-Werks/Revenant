@@ -342,22 +342,9 @@ Rectangle {
                 }
             }
 
-            // The receivers, docked under the span or in their own window.
-            // Checked while they are shown, wherever that is, and a click hides
-            // them or brings them back.
-            RButton {
-                flat: true
-                checkable: true
-                checked: receiverPlacement.shown
-                text: "receivers"
-                iconName: "receivers"
-                label: "receivers"
-                ink: Theme.inkDim
-                tint: Theme.receiverColour(engineLink.focusedSlot)
-                onClicked: receiverPlacement.shown = !receiverPlacement.shown
-                tip: (receiverPlacement.shown ? "hide the receivers  " : "show the receivers  ")
-                     + KeyMap.keysText("window.receivers")
-            }
+            // WHAT STOOD HERE: the receivers button, which hid or showed them.
+            // Taken out on 2026-11-09 at the owner's word once every pane could
+            // be collapsed to its strip; Ctrl+R still hides and shows them.
 
             // SPEECH TO TEXT: the engine's one switch, the owner's decision of
             // 2026-10-03, beside the receivers because it acts on every one of

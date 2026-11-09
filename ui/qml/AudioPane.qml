@@ -51,7 +51,11 @@ ColumnLayout {
     // a vocoder plugin, and silent with none loaded.
     // WHAT THIS USED TO SAY: "raw, P25, D-STAR and TETRA hand out
     // complex baseband", and later "raw, D-STAR, TETRA and DMR".
-    visible: engineLink.receiverId > 0
+    // Whether there is anything to show, which the pane holding this reads to
+    // step aside when there is not. Not visible, which is false while the pane
+    // is waiting to be placed.
+    readonly property bool shown: engineLink.receiverId > 0
+    visible: shown
              ? engineLink.audioOffered
              : (engineLink.audioWanted
                 || engineLink.audioEndedReason.length > 0

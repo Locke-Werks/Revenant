@@ -54,7 +54,11 @@ ColumnLayout {
                                                           engineLink.receiverGrantedLow,
                                                           engineLink.receiverGrantedHigh)
 
-    visible: offered || engineLink.rdsWanted
+    // Whether there is anything to show, which the pane holding this reads to
+    // step aside when there is not. Not visible, which is false while the pane
+    // is waiting to be placed.
+    readonly property bool shown: offered || engineLink.rdsWanted
+    visible: shown
 
     // Narrow enough that the physical layer's line goes under the station.
     readonly property bool compact: width < 700

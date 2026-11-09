@@ -29,7 +29,11 @@ ColumnLayout {
 
     Layout.fillWidth: true
     spacing: 4
-    visible: onControl || engineLink.trunkEnabled || engineLink.trunkCalls.length > 0
+    // Whether there is anything to show, which the pane holding this reads to
+    // step aside when there is not. Not visible, which is false while the pane
+    // is waiting to be placed.
+    readonly property bool shown: onControl || engineLink.trunkEnabled || engineLink.trunkCalls.length > 0
+    visible: shown
 
     RowLayout {
         Layout.fillWidth: true

@@ -67,7 +67,9 @@ ColumnLayout {
     spacing: 6
     visible: engineLink.receiverId > 0
 
-    RowLayout {
+    // Wraps rather than running past the pane's edge, so a narrow pane puts
+    // the switches under the dial instead of cutting them off.
+    Flow {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
         spacing: 12
@@ -115,6 +117,8 @@ ColumnLayout {
         StatusChip {
             id: aftChip
 
+            widest: "holding, signal jumped  -0000 Hz"
+
             visible: !engineLink.aftOffered || engineLink.aftEnabled
             ink: !engineLink.aftEnabled ? Theme.inkDim
                  : engineLink.aftState === "correcting" ? Theme.accent
@@ -157,6 +161,8 @@ ColumnLayout {
         // On the same terms as AFT's chip.
         StatusChip {
             id: filterChip
+
+            widest: "fitted wfm -000.00 to 000.00 kHz"
 
             visible: !engineLink.autoFilterOffered || engineLink.autoFilterEnabled
             ink: !engineLink.autoFilterEnabled ? Theme.inkDim
@@ -224,8 +230,6 @@ ColumnLayout {
             font.pixelSize: Theme.sizeSmall
         }
 
-        Item { Layout.fillWidth: true }
-
         RButton {
             flat: true
             text: "remove"
@@ -258,10 +262,11 @@ ColumnLayout {
             overflowChosen: UiRules.modeIsDigital(engineLink.receiverDemod)
             current: engineLink.receiverDemod
             tint: detail.tint
+            id: modeChoice
             onPicked: (mode) => engineLink.setReceiverDemod(mode)
         }
 
-        RowLayout {
+        Flow {
             Layout.fillWidth: true
             Layout.minimumWidth: 0
             spacing: 8
@@ -305,18 +310,14 @@ ColumnLayout {
                 onClicked: passband.resetPassband()
             }
 
-            Item { Layout.fillWidth: true }
-
             // What noise mitigation is on, while the panel that sets it is
             // closed. Nothing at all while none is, so a receiver nobody has
             // asked for noise mitigation on says nothing about it.
             Label {
-                Layout.minimumWidth: 0
                 visible: !detail.expanded && engineLink.noiseSummary.length > 0
                 text: engineLink.noiseSummary
                 color: Theme.inkDim
                 font.pixelSize: Theme.sizeSmall
-                elide: Text.ElideRight
             }
 
             RButton {

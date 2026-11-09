@@ -148,7 +148,6 @@ Item {
         "window.reset_layout": () => {
             mainLayout.reset()
             receiverLayout.reset()
-            spanLayout.reset()
         },
         "palette.open": () => commands.openPalette(""),
         "keymap.open": () => commands.openKeyMap()

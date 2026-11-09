@@ -29,7 +29,11 @@ ColumnLayout {
 
     Layout.fillWidth: true
     spacing: 4
-    visible: images.count > 0
+    // Whether there is anything to show, which the pane holding this reads to
+    // step aside when there is not. Not visible, which is false while the pane
+    // is waiting to be placed. Not "shown", which is the picked image.
+    readonly property bool hasImages: images.count > 0
+    visible: hasImages
 
     FileDialog {
         id: saveDialog

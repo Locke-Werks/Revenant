@@ -1,10 +1,22 @@
-// One pane: a title strip over the display the host hands in for it.
+// One pane: a title strip over the content the host hands in for it.
 //
-// The strip is what the operator drags to move the pane. Dropped on another
-// pane of the same host, it lands against whichever edge of that pane the
-// pointer is nearest, and the half it will take is shaded while the pointer
-// is there. The display itself never moves under the pointer and is never
-// drawn over: the shading is the only thing on top, and only mid-drag.
+// THE STRIP. Dragged, it moves the pane: dropped on another pane of the same
+// host it lands against whichever edge of that pane the pointer is nearest,
+// and the half it will take is shaded while the pointer is there. At its right
+// end the pane's own scale, minus, percentage and plus, and the button that
+// collapses the pane to the strip alone. Ctrl and the wheel over the strip
+// scale too; a double click on the title collapses or opens the pane.
+//
+// COLLAPSED, a pane is its strip when it is above or below its neighbours,
+// and a narrow bar with its title on its side when it is beside them.
+//
+// SCALED, the content is laid out at the pane's size divided by its scale and
+// drawn magnified or reduced to fit, so a pane at 80% holds a fifth more and
+// its minimum is a fifth smaller.
+//
+// Nothing here draws outside the frame: the content is clipped to it. The
+// minimums in models/pane_layout.h are what keep that from cutting anything,
+// so a clip that bites is a minimum that is wrong.
 
 import QtQuick
 import QtQuick.Controls
@@ -16,35 +28,81 @@ Item {
     property var host: null
     property string pane: ""
 
+    readonly property var store: host ? host.store : null
     readonly property Item content: host && host.contents ? (host.contents[pane] || null) : null
+
+    readonly property bool collapsed: store !== null && (store.revision, store.collapsed.indexOf(pane) >= 0)
+    readonly property real paneScale: store !== null && pane !== ""
+                                      ? (store.revision, store.scales[pane] || 1) : 1
+
+    // Collapsed beside its neighbours rather than above or below them.
+    readonly property bool bar: collapsed && width < height
+
+    readonly property real strip: store ? store.strip : 20
+
+    component StripButton: Label {
+        id: stripButton
+        signal clicked()
+        width: Math.max(16, implicitWidth + 8)
+        height: frame.strip
+        horizontalAlignment: Text.AlignHCenter
+        verticalAlignment: Text.AlignVCenter
+        color: buttonArea.containsMouse ? Theme.ink : Theme.inkDim
+        font.pixelSize: Theme.sizeSmall
+        MouseArea {
+            id: buttonArea
+            anchors.fill: parent
+            hoverEnabled: true
+            onClicked: stripButton.clicked()
+        }
+    }
 
     function attach() {
         if (!content)
             return
-        content.parent = holder
+        content.parent = scaler
         content.visible = true
+        report()
+    }
+
+    function report() {
+        if (content && store && pane !== "")
+            store.setMinimum(pane, content.needWidth, content.needHeight)
+    }
+
+    function stepScale(steps) {
+        store.setScale(pane, paneScale + 0.05 * steps)
     }
 
     onContentChanged: attach()
     Component.onCompleted: attach()
 
+    Connections {
+        target: frame.content
+        ignoreUnknownSignals: true
+        function onNeedWidthChanged() { frame.report() }
+        function onNeedHeightChanged() { frame.report() }
+    }
+
+    // ------------------------------------------------------------------
+    // The strip
+    // ------------------------------------------------------------------
     Rectangle {
-        id: strip
+        id: stripBox
 
         anchors.left: parent.left
-        anchors.right: parent.right
         anchors.top: parent.top
-        height: frame.host ? frame.host.stripFor(frame.pane) : 0
-        visible: height > 0
+        width: frame.bar ? parent.width : parent.width
+        height: frame.bar ? parent.height : frame.strip
+        visible: frame.pane !== ""
         color: grip.containsMouse || grip.drag.active ? Theme.border : Theme.panelSolid
 
         // Six dots, the usual mark for "this drags".
         Grid {
             id: dots
-            anchors.left: parent.left
-            anchors.leftMargin: 6
-            anchors.verticalCenter: parent.verticalCenter
-            columns: 3
+            x: frame.bar ? (parent.width - width) / 2 : 6
+            y: frame.bar ? 6 : (parent.height - height) / 2
+            columns: frame.bar ? 2 : 3
             spacing: 2
             Repeater {
                 model: 6
@@ -57,20 +115,24 @@ Item {
         }
 
         Label {
-            anchors.left: dots.right
-            anchors.leftMargin: 6
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            text: frame.host ? (frame.host.titles[frame.pane] || frame.pane) : frame.pane
+            id: title
+
+            text: frame.host ? frame.host.titleOf(frame.pane) : frame.pane
             color: Theme.inkDim
-            font.pixelSize: Theme.sizeBody - 1
-            elide: Text.ElideRight
+            font.pixelSize: Theme.sizeSmall
+            rotation: frame.bar ? 90 : 0
+            transformOrigin: Item.TopLeft
+            x: frame.bar ? (parent.width + height) / 2 : dots.x + dots.width + 6
+            y: frame.bar ? dots.y + dots.height + 8 : (parent.height - height) / 2
         }
 
         MouseArea {
             id: grip
 
-            anchors.fill: parent
+            anchors.left: parent.left
+            anchors.right: frame.bar ? parent.right : controls.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
             hoverEnabled: true
             cursorShape: drag.active ? Qt.ClosedHandCursor : Qt.OpenHandCursor
             drag.target: frame.host ? frame.host.marker : null
@@ -93,16 +155,70 @@ Item {
                 frame.host.dragging = ""
             }
             onCanceled: frame.host.dragging = ""
+            onDoubleClicked: frame.store.toggleCollapsed(frame.pane)
+            onWheel: wheelEvent => {
+                if (!(wheelEvent.modifiers & Qt.ControlModifier) || frame.bar) {
+                    wheelEvent.accepted = false
+                    return
+                }
+                frame.stepScale(wheelEvent.angleDelta.y > 0 ? 1 : -1)
+            }
+        }
+
+        Row {
+            id: controls
+
+            anchors.right: parent.right
+            anchors.rightMargin: 2
+            anchors.verticalCenter: frame.bar ? undefined : parent.verticalCenter
+            anchors.bottom: frame.bar ? parent.bottom : undefined
+            spacing: 0
+            visible: frame.pane !== ""
+
+            StripButton {
+                visible: !frame.collapsed
+                text: "−"
+                onClicked: frame.stepScale(-1)
+            }
+            StripButton {
+                visible: !frame.collapsed
+                text: Math.round(frame.paneScale * 100) + "%"
+                // The widest it gets, so the buttons beside it do not move.
+                width: 40
+                onClicked: frame.store.setScale(frame.pane, 1)
+            }
+            StripButton {
+                visible: !frame.collapsed
+                text: "+"
+                onClicked: frame.stepScale(1)
+            }
+            StripButton {
+                text: frame.collapsed ? (frame.bar ? "▸" : "▾") : "▴"
+                onClicked: frame.store.toggleCollapsed(frame.pane)
+            }
         }
     }
 
+    // ------------------------------------------------------------------
+    // The content
+    // ------------------------------------------------------------------
     Item {
         id: holder
 
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.top: strip.bottom
+        anchors.top: stripBox.bottom
         anchors.bottom: parent.bottom
+        visible: !frame.collapsed
+        clip: true
+
+        Item {
+            id: scaler
+            width: holder.width / frame.paneScale
+            height: holder.height / frame.paneScale
+            scale: frame.paneScale
+            transformOrigin: Item.TopLeft
+        }
     }
 
     DropArea {
@@ -112,7 +228,7 @@ Item {
 
         anchors.fill: parent
         keys: frame.host ? [frame.host.dragKey] : []
-        enabled: frame.host && frame.host.dragging !== "" && frame.host.dragging !== frame.pane
+        enabled: frame.host !== null && frame.host.dragging !== "" && frame.host.dragging !== frame.pane
 
         // Whichever edge the pointer is proportionally nearest.
         function nearest(x, y) {
@@ -126,10 +242,11 @@ Item {
         onEntered: dragEvent => edge = nearest(dragEvent.x, dragEvent.y)
         onPositionChanged: dragEvent => edge = nearest(dragEvent.x, dragEvent.y)
         onExited: edge = ""
+
         // Later rather than now: the move rebuilds the frames, this one and
         // the one whose strip is still handling the release among them.
         onDropped: dropEvent => {
-            const store = frame.host.store
+            const store = frame.store
             const moved = frame.host.dragging
             const target = frame.pane
             const side = edge

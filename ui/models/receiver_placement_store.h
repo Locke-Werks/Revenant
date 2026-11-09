@@ -36,6 +36,7 @@ class ReceiverPlacement : public QObject {
     Q_PROPERTY(double dockHeight READ dockHeight WRITE setDockHeight NOTIFY dockHeightChanged)
     Q_PROPERTY(double dockWidth READ dockWidth WRITE setDockWidth NOTIFY dockWidthChanged)
     Q_PROPERTY(bool ready READ ready NOTIFY readyChanged)
+    Q_PROPERTY(bool rackPills READ rackPills WRITE setRackPills NOTIFY rackPillsChanged)
 
 public:
     explicit ReceiverPlacement(bool persist, QObject* parent = nullptr)
@@ -46,9 +47,27 @@ public:
         }
         const QSettings store;
         popped_out_ = store.value(settings::kReceiversPoppedOut, false).toBool();
-        shown_ = store.value(settings::kReceiversShown, true).toBool();
+        // Not read: with the top bar's receivers button gone, receivers hidden
+        // in an earlier run would come back hidden with nothing on screen to
+        // say so. Every run starts with them shown; Ctrl+R hides them.
         dock_height_ = store.value(settings::kReceiversDockHeight, 0.0).toDouble();
         dock_width_ = store.value(settings::kReceiversDockWidth, 0.0).toDouble();
+        rack_pills_ = store.value(settings::kReceiversPills, false).toBool();
+    }
+
+    // The rack's receivers as pills rather than strips. ReceiverRack.qml.
+    [[nodiscard]] bool rackPills() const { return rack_pills_; }
+
+    void setRackPills(bool pills)
+    {
+        if (rack_pills_ == pills) {
+            return;
+        }
+        rack_pills_ = pills;
+        if (persist_) {
+            QSettings().setValue(settings::kReceiversPills, rack_pills_);
+        }
+        emit rackPillsChanged();
     }
 
     [[nodiscard]] bool poppedOut() const { return popped_out_; }
@@ -127,6 +146,7 @@ signals:
     void dockHeightChanged();
     void dockWidthChanged();
     void readyChanged();
+    void rackPillsChanged();
 
 private:
     bool persist_ = false;
@@ -135,6 +155,7 @@ private:
     double dock_height_ = 0.0;
     double dock_width_ = 0.0;
     bool ready_ = false;
+    bool rack_pills_ = false;
 };
 
 }  // namespace revenant::ui

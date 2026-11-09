@@ -1,10 +1,11 @@
 // One tiled layout: the tree in a PaneLayoutStore (models/pane_layout_store.h)
 // drawn as frames and the borders between them.
 //
-// The displays themselves are made once by whoever owns this host and handed
-// in through contents, keyed by pane name. A frame re-parents its display
-// into itself, so moving a pane moves the display rather than rebuilding it:
-// the waterfall keeps its history and the rack its scroll position.
+// The contents themselves are made once by whoever owns this host and handed
+// in through contents, a map from pane name to PaneContent. A frame
+// re-parents its content into itself, so moving a pane moves the display
+// rather than rebuilding it: the waterfall keeps its history and the rack its
+// scroll position.
 //
 // A pane is moved by dragging its title strip onto an edge of another pane in
 // the same host. The marker that follows the pointer while dragging is the
@@ -20,27 +21,8 @@ Item {
     // The PaneLayoutStore this host draws.
     property var store: null
 
-    // Pane name to the Item drawn in it.
+    // Pane name to its PaneContent.
     property var contents: ({})
-
-    // Pane name to the title on its strip.
-    property var titles: ({})
-
-    // Whether panes have a title strip and can be dragged to a new place.
-    property bool movable: true
-
-    // Panes drawn without a title strip, which then cannot be picked up but
-    // can still have another pane dropped against them. The receiver dock is
-    // one: its own three panes each have a strip, and a fourth over them said
-    // nothing they did not.
-    property var stripless: []
-
-    // The title strip's height, which callers add to a pane's minimum.
-    readonly property real stripHeight: movable ? 18 : 0
-
-    function stripFor(pane) {
-        return stripless.indexOf(pane) >= 0 ? 0 : stripHeight
-    }
 
     // Kept apart per host, so a pane dragged out of one host is not offered
     // to another's drop zones.
@@ -51,6 +33,11 @@ Item {
 
     readonly property alias marker: marker
 
+    function titleOf(pane) {
+        const content = contents[pane]
+        return content && content.title ? content.title : pane
+    }
+
     PaneNode {
         anchors.fill: parent
         host: host
@@ -60,9 +47,7 @@ Item {
     Rectangle {
         id: marker
 
-        property string pane: ""
-
-        width: Math.min(160, label.implicitWidth + 20)
+        width: Math.min(180, label.implicitWidth + 20)
         height: 24
         radius: Theme.radius
         visible: host.dragging !== ""
@@ -79,11 +64,9 @@ Item {
         Label {
             id: label
             anchors.centerIn: parent
-            text: host.titles[host.dragging] || host.dragging
+            text: host.titleOf(host.dragging)
             color: Theme.ink
             font.pixelSize: Theme.sizeBody
-            elide: Text.ElideRight
-            width: Math.min(implicitWidth, 140)
         }
     }
 }

@@ -41,6 +41,11 @@ ColumnLayout {
     // past the rack's edge; their names are in the hovers either way.
     readonly property bool roomy: width >= 380
 
+    // Each receiver as a pill, its number, mode and frequency, wrapped across
+    // the rack, rather than a strip with its meter and gain: for a rack kept
+    // small beside the span. Remembered across runs.
+    readonly property bool pills: receiverPlacement.rackPills
+
     RowLayout {
         Layout.fillWidth: true
         spacing: 6
@@ -112,6 +117,18 @@ ColumnLayout {
         // the main window. The window's close button docks them as well.
         RButton {
             flat: true
+            checkable: true
+            checked: rack.pills
+            text: rack.pills ? "show strips" : "show pills"
+            iconName: "list"
+            ink: Theme.inkDim
+            onClicked: receiverPlacement.rackPills = !receiverPlacement.rackPills
+            tip: rack.pills ? "show each receiver as a strip with its meter and gain"
+                            : "show each receiver as a pill, so the rack fits in a small pane"
+        }
+
+        RButton {
+            flat: true
             text: rack.poppedOut ? "dock" : "pop out"
             iconName: rack.poppedOut ? "dock" : "popout"
             ink: Theme.inkDim
@@ -149,6 +166,7 @@ ColumnLayout {
     Flickable {
         Layout.fillWidth: true
         Layout.fillHeight: true
+        visible: !rack.pills
         contentHeight: strips.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
@@ -185,6 +203,85 @@ ColumnLayout {
 
     // Which click does what, where the operator reads about receivers. The
     // short form; the full sentence is the ruler's tooltip.
+    // The pills. A click focuses the receiver, as a click on its strip does.
+    Flickable {
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        visible: rack.pills
+        contentHeight: pillFlow.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        ScrollBar.vertical: RScrollBar {}
+
+        Flow {
+            id: pillFlow
+            width: parent.width
+            spacing: 6
+
+            Repeater {
+                model: rack.pills ? engineLink.rackCount : 0
+
+                Rectangle {
+                    id: pill
+
+                    required property int index
+                    readonly property var entry: engineLink.rackEntries[index] || rack.blank
+                    readonly property color tint: entry.colour
+
+                    width: pillRow.implicitWidth + 16
+                    height: 26
+                    radius: 13
+                    color: entry.focused ? Qt.rgba(tint.r, tint.g, tint.b, 0.22) : Theme.panelSolid
+                    border.width: entry.focused ? 2 : 1
+                    border.color: Qt.rgba(tint.r, tint.g, tint.b, entry.muted ? 0.35 : 0.8)
+                    opacity: entry.muted ? 0.6 : 1
+
+                    Row {
+                        id: pillRow
+                        anchors.centerIn: parent
+                        spacing: 6
+
+                        Label {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: pill.entry.label
+                            color: pill.tint
+                            font.pixelSize: Theme.sizeSmall
+                            font.bold: true
+                        }
+                        Label {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: UiRules.modeLabel(pill.entry.mode).toUpperCase()
+                            color: Theme.inkDim
+                            font.pixelSize: Theme.sizeSmall
+                        }
+                        Readout {
+                            anchors.verticalCenter: parent.verticalCenter
+                            widest: "0000.000000"
+                            text: (pill.entry.frequencyHz / 1.0e6).toFixed(6)
+                            color: pill.entry.pending || pill.entry.refused ? Theme.inkDim : Theme.ink
+                        }
+                    }
+
+                    // The level, as a line along the pill's foot.
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.bottom: parent.bottom
+                        anchors.leftMargin: 10
+                        anchors.bottomMargin: 3
+                        height: 2
+                        width: (parent.width - 20) * UiRules.meterFraction(pill.entry.levelDbfs)
+                        color: pill.entry.heard ? pill.tint : Theme.inkOff
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: engineLink.focusReceiver(pill.entry.key)
+                    }
+                }
+            }
+        }
+    }
+
     Label {
         Layout.fillWidth: true
         visible: engineLink.rackCount > 0

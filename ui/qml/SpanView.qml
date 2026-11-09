@@ -14,7 +14,15 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Revenant
 
-ColumnLayout {
+//
+// TWO PANES, SINCE 2026-11-09. The spectrum, with the band bar over it and
+// the ruler under it, is one pane of the tiled layout and the waterfall, with
+// the time-shift bar under it, is another, so either can go anywhere
+// (models/pane_layout.h). They are made here, together, because they share
+// the selection and refer to each other, and Main.qml hands both to the
+// layout. This item itself is never drawn.
+
+Item {
     id: span
 
     // The click readout's state, which the two displays write and read
@@ -34,611 +42,621 @@ ColumnLayout {
     readonly property double drawFloorDb: spectrum.drawFloorDb
     readonly property double drawCeilingDb: spectrum.drawCeilingDb
 
-    // The height the spectrum and the waterfall share, which the operator
-    // divides by dragging the top of the ruler; spanLayout is a two-pane tree
-    // in models/pane_layout.h, so each keeps its minimum. The ruler stands in
-    // for the border, so its width is counted back into the length.
-    readonly property real shared: Math.max(0, height - bandBar.height - spanRuler.height
-                                            - timeShift.height)
-    readonly property var shares: (spanLayout.revision,
-                                   spanLayout.sizes("", shared + UiRules.paneHandle))
+    readonly property alias spectrumPane: spectrumPane
+    readonly property alias waterfallPane: waterfallPane
 
-    // The least the span can be drawn in without either display going under
-    // its minimum, which the main window's tiled layout holds it to.
-    readonly property real minimumHeight: bandBar.height + spanRuler.implicitHeight
-                                          + timeShift.height + spanLayout.minimumHeight
-                                          - UiRules.paneHandle
+    visible: false
 
-    Layout.fillWidth: true
-    Layout.fillHeight: true
+    PaneContent {
+        id: spectrumPane
 
-    // Flush, so the ruler touches both of the displays it labels.
-    spacing: 0
+        anchors.fill: parent
+        title: "Spectrum"
+        needWidth: 240
+        needHeight: bandBar.height + 60 + spanRuler.implicitHeight
 
-    // ------------------------------------------------------------------
-    // The band bar
-    // ------------------------------------------------------------------
-    // Its own row rather than a strip over the trace, so it covers neither the
-    // detection labels nor the receiver markers; render/spectrum_item.h has
-    // the argument. As tall as the lanes in use, and gone when hidden or when
-    // the span crosses no band.
-    BandBarItem {
-        id: bandBar
-        Layout.fillWidth: true
-        // Not toggled invisible at zero height: a layout stops sizing an
-        // invisible item, and a bar with no width lays out no bands, so it
-        // would never come back.
-        Layout.preferredHeight: barHeight
-        link: engineLink
-        // Live from the settings window; models/band_plan_settings.h.
-        showBar: BandPlanSettings.showBar
-        region: BandPlanSettings.region
-
-        ToolTip {
-            parent: bandBar
-            visible: bandBar.hoverText !== ""
-            text: bandBar.hoverText
-            x: Math.min(Math.max(0, bandBar.hoverX - width / 2), bandBar.width - width)
-            y: bandBar.height + 2
-            delay: 300
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // The instantaneous spectrum
-    // ------------------------------------------------------------------
-    Item {
-        Layout.fillWidth: true
-        // A third of the span until the operator drags it; see shared above.
-        Layout.preferredHeight: Math.round(span.shares[0] || span.shared * 0.34)
-
-        SpectrumItem {
-            id: spectrum
+        ColumnLayout {
             anchors.fill: parent
-            link: engineLink
-            engineNoiseDbfs: engineLink.detectorNoiseFloorDbfs
-            mapPins: ScaleSettings
-            scaleLabelHeight: scaleMetrics.height
-            selectedDetection: span.selection.selectedDetection
-            onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted, pointerHz) =>
-                             span.selection.takeTune(id, centerHz, bandwidthHz, candidates,
-                                                     rank, exhausted, pointerHz)
-            onAddRequested: (id, centerHz, bandwidthHz, pointerHz) =>
-                            span.selection.takeAdd(id, centerHz, bandwidthHz, pointerHz)
-        }
+            // Flush, so the ruler touches the display it labels.
+            spacing: 0
 
-        // The ends the trace was drawn against, which include the
-        // reduction correction. Not engineLink.floorDb: that is what the
-        // engine measured, and the item draws against something slightly
-        // above it.
-        //
-        // Each sits on a plate, because these labels are drawn over the
-        // trace and the trace goes white at the top of the map. Read
-        // against a saturated carrier they were illegible, which is
-        // exactly where somebody looks for the ceiling.
-        //
-        // The ceiling stays above the floor, because a map's two ends
-        // read by position as much as by the number. It is pushed clear
-        // of the top edge rather than moved away from it: the detection
-        // labels are painted in that strip, and a QML Rectangle drawn
-        // over the item would cover one.
-        //
-        // Each end carries its pin beside it, since 2026-09-22. A pin holds
-        // that end at the level drawn when it went in, on both displays,
-        // until it is taken out; see PinPlate.qml.
-        PinPlate {
-            id: ceilingPin
-            anchors.left: parent.left
-            anchors.top: parent.top
-            anchors.leftMargin: 4
-            anchors.topMargin: 28
-            visible: span.drawing
-            text: spectrum.drawCeilingDb.toFixed(1) + " dBFS ceiling"
-            pinned: ScaleSettings.ceilingPinned
-            onPinRequested: ScaleSettings.pinCeiling(spectrum.drawCeilingDb)
-            onUnpinRequested: ScaleSettings.unpinCeiling()
-            onNudged: (steps) => ScaleSettings.nudgeCeiling(steps)
-        }
+            // ------------------------------------------------------------------
+            // The band bar
+            // ------------------------------------------------------------------
+            // Its own row rather than a strip over the trace, so it covers neither the
+            // detection labels nor the receiver markers; render/spectrum_item.h has
+            // the argument. As tall as the lanes in use, and gone when hidden or when
+            // the span crosses no band.
+            BandBarItem {
+                id: bandBar
+                Layout.fillWidth: true
+                // Not toggled invisible at zero height: a layout stops sizing an
+                // invisible item, and a bar with no width lays out no bands, so it
+                // would never come back.
+                Layout.preferredHeight: barHeight
+                link: engineLink
+                // Live from the settings window; models/band_plan_settings.h.
+                showBar: BandPlanSettings.showBar
+                region: BandPlanSettings.region
 
-        // THE VIEW'S ZOOM, beside the ceiling plate so it covers neither the
-        // detection labels across the top nor the level scale at the right.
-        // The same three things as Ctrl+wheel, Ctrl+Alt+Up, Ctrl+Alt+Down and
-        // Ctrl+Home; models/span_view.h has the rules. "full" is the way out
-        // of a band the menu zoomed to, and is lit while the view is narrow.
-        Row {
-            id: zoomRow
-            anchors.left: ceilingPin.right
-            anchors.leftMargin: 6
-            anchors.verticalCenter: ceilingPin.verticalCenter
-            spacing: 2
-            visible: span.drawing
-
-            RButton {
-                flat: true
-                text: "zoom out"
-                iconName: "minus"
-                enabled: engineLink.viewZoomed
-                onClicked: engineLink.zoomView(1 / KeyMap.zoomStep, 0.5)
-                tip: "Zoom out (" + KeyMap.keysText("view.zoom_out") + ", or Ctrl+wheel)"
-            }
-            RButton {
-                flat: true
-                text: "zoom in"
-                iconName: "plus"
-                onClicked: engineLink.zoomView(KeyMap.zoomStep, 0.5)
-                tip: "Zoom in (" + KeyMap.keysText("view.zoom_in") + ", or Ctrl+wheel over the pointer). Shift+wheel moves a zoomed view."
-            }
-            RButton {
-                flat: true
-                implicitHeight: 20
-                text: "full"
-                iconName: "expand"
-                checked: engineLink.viewZoomed
-                enabled: engineLink.viewZoomed
-                onClicked: engineLink.fullSpan()
-                tip: (engineLink.viewHoldsBand
-                      ? "Showing the band picked from the menu. "
-                      : "") + "Show the full span (" + KeyMap.keysText("view.full") + ")"
-            }
-        }
-
-        // Band-plan overlay labels (feature 18): plan channels and named
-        // detections over the trace, and the toggle for them beside the zoom.
-        SpanLabels {
-            id: spanLabels
-            anchors.fill: parent
-            visible: span.drawing && shown
-        }
-        RButton {
-            anchors.left: zoomRow.right
-            anchors.leftMargin: 6
-            anchors.verticalCenter: ceilingPin.verticalCenter
-            visible: span.drawing
-            flat: true
-            implicitHeight: 20
-            text: "labels"
-            iconName: "tag"
-            checked: SpanLabelSettings.showLabels
-            onClicked: SpanLabelSettings.showLabels = !SpanLabelSettings.showLabels
-            tip: "Show band-plan and identified-signal labels on the span. Click a label to tune there."
-        }
-
-        PinPlate {
-            anchors.left: parent.left
-            anchors.bottom: parent.bottom
-            anchors.margins: 4
-            visible: span.drawing
-            text: spectrum.drawFloorDb.toFixed(1) + " dBFS floor"
-            pinned: ScaleSettings.floorPinned
-            onPinRequested: ScaleSettings.pinFloor(spectrum.drawFloorDb)
-            onUnpinRequested: ScaleSettings.unpinFloor()
-            onNudged: (steps) => ScaleSettings.nudgeFloor(steps)
-
-            // How far above the engine's floor this one is drawn, and why, on
-            // hover. It was a plate of its own in the corner opposite,
-            // "floor +16.8 dB for the column peak", always on screen and read
-            // by nobody who did not already know what it meant.
-            detail: spectrum.headroomDb > 0.05
-                    ? "Each column shows the loudest of the bins under it, and on an empty "
-                      + "band that sits " + spectrum.headroomDb.toFixed(1) + " dB above the "
-                      + "engine's floor, its fifth percentile. The map starts below that "
-                      + "level so the noise sits in the bottom eighth of the pane, and is "
-                      + "never narrower than 40 dB, so a band of noise reads as noise."
-                    : ""
-        }
-
-        // THE LEVEL SCALE, up the right edge, since 2026-09-23. The ticks and
-        // their spacing are models/level_scale.h, planned by the item from
-        // the ends it draws against, so the scale follows the auto-scale and
-        // the pins alike; the gridlines and edge marks are drawn by the item
-        // under the trace, and only the numbers are here. Outlined in the
-        // background colour rather than set on plates, so they read over the
-        // trace without hiding a strip of it.
-        FontMetrics {
-            id: scaleMetrics
-            font.family: Theme.monoFont
-            font.pixelSize: Theme.sizeSmall
-        }
-
-        // How far in from the right edge the scale's numbers reach, which the
-        // peak's plate keeps out of: four characters, "-120", and the ticks.
-        readonly property double scaleGutter: scaleMetrics.averageCharacterWidth * 4 + 12
-
-        Repeater {
-            model: span.drawing ? spectrum.scaleLabelCount : 0
-
-            Text {
-                required property int index
-                readonly property var entry: spectrum.scaleLabels[index] || ({})
-
-                // A number under the noise floor's plate would be read as
-                // part of it.
-                visible: !noisePlate.covers(y, height)
-                x: parent.width - 9 - implicitWidth
-                y: (entry.y || 0) - height / 2
-                height: scaleMetrics.height
-                verticalAlignment: Text.AlignVCenter
-                text: entry.text || ""
-                color: Theme.inkDim
-                font.family: Theme.monoFont
-                font.pixelSize: Theme.sizeSmall
-                style: Text.Outline
-                styleColor: Theme.background
-            }
-        }
-
-        // THE NOISE FLOOR: the detector's own, when the engine states it on
-        // the detections poll, and this window's estimate off the trace when
-        // it does not. The detector's is what every detection's SNR is
-        // measured against. models/span_markers.h has why the fallback is a
-        // low percentile of the trace and not the auto-scale floor on the
-        // plate at the left. The line is the item's, dashed under the trace;
-        // the plate goes under the noise so it covers the fill and not the
-        // trace.
-        Plate {
-            id: noisePlate
-
-            readonly property var at: spectrum.noisePlate(spectrum.noiseY, spectrum.noiseLowY,
-                                                          implicitWidth, implicitHeight,
-                                                          parent.width, parent.height)
-
-            function covers(top, tall) {
-                return visible && top < y + height && y < top + tall
+                ToolTip {
+                    parent: bandBar
+                    visible: bandBar.hoverText !== ""
+                    text: bandBar.hoverText
+                    x: Math.min(Math.max(0, bandBar.hoverX - width / 2), bandBar.width - width)
+                    y: bandBar.height + 2
+                    delay: 300
+                }
             }
 
-            // Under the bottom of the scale, which is where the auto-scale
-            // puts the noise on a flat band: its floor is lifted to where a
-            // noise-only column lands, so half the noise is drawn at the
-            // bottom edge. The line is not drawn there, and the arrow says
-            // which way the floor is.
-            readonly property bool below: spectrum.noiseY >= parent.height
+            // ------------------------------------------------------------------
+            // The instantaneous spectrum
+            // ------------------------------------------------------------------
+            Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
 
-            visible: span.drawing && spectrum.noiseValid
-            x: at.x
-            y: at.y
-            text: (below ? "▼ " : "") + "noise " + spectrum.noiseDb.toFixed(1)
-                  + (spectrum.noiseFromEngine ? " dBFS" : " dBFS est.")
+                SpectrumItem {
+                    id: spectrum
+                    anchors.fill: parent
+                    link: engineLink
+                    engineNoiseDbfs: engineLink.detectorNoiseFloorDbfs
+                    mapPins: ScaleSettings
+                    scaleLabelHeight: scaleMetrics.height
+                    selectedDetection: span.selection.selectedDetection
+                    onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted, pointerHz) =>
+                                     span.selection.takeTune(id, centerHz, bandwidthHz, candidates,
+                                                             rank, exhausted, pointerHz)
+                    onAddRequested: (id, centerHz, bandwidthHz, pointerHz) =>
+                                    span.selection.takeAdd(id, centerHz, bandwidthHz, pointerHz)
+                }
 
-            HoverHandler { id: noiseHover }
+                // The ends the trace was drawn against, which include the
+                // reduction correction. Not engineLink.floorDb: that is what the
+                // engine measured, and the item draws against something slightly
+                // above it.
+                //
+                // Each sits on a plate, because these labels are drawn over the
+                // trace and the trace goes white at the top of the map. Read
+                // against a saturated carrier they were illegible, which is
+                // exactly where somebody looks for the ceiling.
+                //
+                // The ceiling stays above the floor, because a map's two ends
+                // read by position as much as by the number. It is pushed clear
+                // of the top edge rather than moved away from it: the detection
+                // labels are painted in that strip, and a QML Rectangle drawn
+                // over the item would cover one.
+                //
+                // Each end carries its pin beside it, since 2026-09-22. A pin holds
+                // that end at the level drawn when it went in, on both displays,
+                // until it is taken out; see PinPlate.qml.
+                PinPlate {
+                    id: ceilingPin
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.leftMargin: 4
+                    anchors.topMargin: 28
+                    visible: span.drawing
+                    text: spectrum.drawCeilingDb.toFixed(1) + " dBFS ceiling"
+                    pinned: ScaleSettings.ceilingPinned
+                    onPinRequested: ScaleSettings.pinCeiling(spectrum.drawCeilingDb)
+                    onUnpinRequested: ScaleSettings.unpinCeiling()
+                    onNudged: (steps) => ScaleSettings.nudgeCeiling(steps)
+                }
 
-            Tip {
-                visible: noiseHover.hovered
-                text: spectrum.noiseFromEngine
-                      ? "The detector's noise floor across the span: the median over bins of "
-                        + "the floor it estimated under its latest decision, which is what "
-                        + "every detection's SNR is measured against. This is not the floor "
-                        + "plate at the left, which is where the colour map starts."
-                      : "The noise floor as this window estimates it from the trace: a "
-                        + "quarter of the trace's columns sit below the dashed line. The "
-                        + "engine has not stated its detector's floor yet, which an engine "
-                        + "that has not decided or one older than the field does not. This "
-                        + "is not the floor plate at the left, which is where the colour map "
-                        + "starts rather than where the noise is."
-            }
-        }
+                // THE VIEW'S ZOOM, beside the ceiling plate so it covers neither the
+                // detection labels across the top nor the level scale at the right.
+                // The same three things as Ctrl+wheel, Ctrl+Alt+Up, Ctrl+Alt+Down and
+                // Ctrl+Home; models/span_view.h has the rules. "full" is the way out
+                // of a band the menu zoomed to, and is lit while the view is narrow.
+                Row {
+                    id: zoomRow
+                    anchors.left: ceilingPin.right
+                    anchors.leftMargin: 6
+                    anchors.verticalCenter: ceilingPin.verticalCenter
+                    spacing: 2
+                    visible: span.drawing
 
-        // THE STRONGEST SIGNAL across the whole span the source delivers,
-        // held on one signal until another is 3 dB louder and eased over a
-        // quarter second, so it can be read; models/span_markers.h. A tick
-        // points down at it and the plate sits over the tick, where the pane
-        // is empty because nothing else is as tall. Above the top of the
-        // scale it cannot be pointed at, and the plate goes beside it,
-        // under the detection labels, with an arrow saying which way it is.
-        Item {
-            id: peakMarker
+                    RButton {
+                        flat: true
+                        text: "zoom out"
+                        iconName: "minus"
+                        enabled: engineLink.viewZoomed
+                        onClicked: engineLink.zoomView(1 / KeyMap.zoomStep, 0.5)
+                        tip: "Zoom out (" + KeyMap.keysText("view.zoom_out") + ", or Ctrl+wheel)"
+                    }
+                    RButton {
+                        flat: true
+                        text: "zoom in"
+                        iconName: "plus"
+                        onClicked: engineLink.zoomView(KeyMap.zoomStep, 0.5)
+                        tip: "Zoom in (" + KeyMap.keysText("view.zoom_in") + ", or Ctrl+wheel over the pointer). Shift+wheel moves a zoomed view."
+                    }
+                    RButton {
+                        flat: true
+                        implicitHeight: 20
+                        text: "full"
+                        iconName: "expand"
+                        checked: engineLink.viewZoomed
+                        enabled: engineLink.viewZoomed
+                        onClicked: engineLink.fullSpan()
+                        tip: (engineLink.viewHoldsBand
+                              ? "Showing the band picked from the menu. "
+                              : "") + "Show the full span (" + KeyMap.keysText("view.full") + ")"
+                    }
+                }
 
-            readonly property bool above: spectrum.peakY < 0
-            readonly property var at: spectrum.peakPlate(spectrum.peakX, spectrum.peakY,
-                                                         peakPlate.width, peakPlate.height,
-                                                         parent.scaleGutter, width, height,
-                                                         Qt.rect(ceilingPin.x, ceilingPin.y,
-                                                                 ceilingPin.width,
-                                                                 ceilingPin.height))
+                // Band-plan overlay labels (feature 18): plan channels and named
+                // detections over the trace, and the toggle for them beside the zoom.
+                SpanLabels {
+                    id: spanLabels
+                    anchors.fill: parent
+                    visible: span.drawing && shown
+                }
+                RButton {
+                    anchors.left: zoomRow.right
+                    anchors.leftMargin: 6
+                    anchors.verticalCenter: ceilingPin.verticalCenter
+                    visible: span.drawing
+                    flat: true
+                    implicitHeight: 20
+                    text: "labels"
+                    iconName: "tag"
+                    checked: SpanLabelSettings.showLabels
+                    onClicked: SpanLabelSettings.showLabels = !SpanLabelSettings.showLabels
+                    tip: "Show band-plan and identified-signal labels on the span. Click a label to tune there."
+                }
 
-            anchors.fill: parent
-            visible: span.drawing && spectrum.peakValid
+                PinPlate {
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 4
+                    visible: span.drawing
+                    text: spectrum.drawFloorDb.toFixed(1) + " dBFS floor"
+                    pinned: ScaleSettings.floorPinned
+                    onPinRequested: ScaleSettings.pinFloor(spectrum.drawFloorDb)
+                    onUnpinRequested: ScaleSettings.unpinFloor()
+                    onNudged: (steps) => ScaleSettings.nudgeFloor(steps)
 
-            Rectangle {
-                visible: peakMarker.at.tick
-                x: Math.round(peakMarker.at.tickX)
-                y: peakMarker.at.tickTop
-                width: 1
-                height: peakMarker.at.tickBottom - peakMarker.at.tickTop
-                color: Theme.ink
-            }
+                    // How far above the engine's floor this one is drawn, and why, on
+                    // hover. It was a plate of its own in the corner opposite,
+                    // "floor +16.8 dB for the column peak", always on screen and read
+                    // by nobody who did not already know what it meant.
+                    detail: spectrum.headroomDb > 0.05
+                            ? "Each column shows the loudest of the bins under it, and on an empty "
+                              + "band that sits " + spectrum.headroomDb.toFixed(1) + " dB above the "
+                              + "engine's floor, its fifth percentile. The map starts below that "
+                              + "level so the noise sits in the bottom eighth of the pane, and is "
+                              + "never narrower than 40 dB, so a band of noise reads as noise."
+                            : ""
+                }
 
-            Rectangle {
-                id: peakPlate
-
-                x: peakMarker.at.x
-                y: peakMarker.at.y
-                width: peakText.implicitWidth + 8
-                height: peakText.implicitHeight + 4
-                radius: 2
-                color: Theme.plate
-
-                Text {
-                    id: peakText
-                    anchors.centerIn: parent
-                    color: Theme.ink
+                // THE LEVEL SCALE, up the right edge, since 2026-09-23. The ticks and
+                // their spacing are models/level_scale.h, planned by the item from
+                // the ends it draws against, so the scale follows the auto-scale and
+                // the pins alike; the gridlines and edge marks are drawn by the item
+                // under the trace, and only the numbers are here. Outlined in the
+                // background colour rather than set on plates, so they read over the
+                // trace without hiding a strip of it.
+                FontMetrics {
+                    id: scaleMetrics
                     font.family: Theme.monoFont
                     font.pixelSize: Theme.sizeSmall
-                    text: (peakMarker.above ? "▲ " : "") + "peak "
-                          + spectrum.peakDb.toFixed(1) + " dBFS  "
-                          + (spectrum.peakHz / 1.0e6).toFixed(4) + " MHz"
                 }
 
-                HoverHandler { id: peakHover }
+                // How far in from the right edge the scale's numbers reach, which the
+                // peak's plate keeps out of: four characters, "-120", and the ticks.
+                readonly property double scaleGutter: scaleMetrics.averageCharacterWidth * 4 + 12
 
-                Tip {
-                    visible: peakHover.hovered
-                    text: "The strongest signal across the whole span the source delivers, "
-                          + "at its loudest bin. The marker stays on one signal until another "
-                          + "is 3 dB louder, and its figures are eased over a quarter second."
-                          + (peakMarker.above ? " It is above the top of the scale." : "")
+                Repeater {
+                    model: span.drawing ? spectrum.scaleLabelCount : 0
+
+                    Text {
+                        required property int index
+                        readonly property var entry: spectrum.scaleLabels[index] || ({})
+
+                        // A number under the noise floor's plate would be read as
+                        // part of it.
+                        visible: !noisePlate.covers(y, height)
+                        x: parent.width - 9 - implicitWidth
+                        y: (entry.y || 0) - height / 2
+                        height: scaleMetrics.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: entry.text || ""
+                        color: Theme.inkDim
+                        font.family: Theme.monoFont
+                        font.pixelSize: Theme.sizeSmall
+                        style: Text.Outline
+                        styleColor: Theme.background
+                    }
+                }
+
+                // THE NOISE FLOOR: the detector's own, when the engine states it on
+                // the detections poll, and this window's estimate off the trace when
+                // it does not. The detector's is what every detection's SNR is
+                // measured against. models/span_markers.h has why the fallback is a
+                // low percentile of the trace and not the auto-scale floor on the
+                // plate at the left. The line is the item's, dashed under the trace;
+                // the plate goes under the noise so it covers the fill and not the
+                // trace.
+                Plate {
+                    id: noisePlate
+
+                    readonly property var at: spectrum.noisePlate(spectrum.noiseY, spectrum.noiseLowY,
+                                                                  implicitWidth, implicitHeight,
+                                                                  parent.width, parent.height)
+
+                    function covers(top, tall) {
+                        return visible && top < y + height && y < top + tall
+                    }
+
+                    // Under the bottom of the scale, which is where the auto-scale
+                    // puts the noise on a flat band: its floor is lifted to where a
+                    // noise-only column lands, so half the noise is drawn at the
+                    // bottom edge. The line is not drawn there, and the arrow says
+                    // which way the floor is.
+                    readonly property bool below: spectrum.noiseY >= parent.height
+
+                    visible: span.drawing && spectrum.noiseValid
+                    x: at.x
+                    y: at.y
+                    text: (below ? "▼ " : "") + "noise " + spectrum.noiseDb.toFixed(1)
+                          + (spectrum.noiseFromEngine ? " dBFS" : " dBFS est.")
+
+                    HoverHandler { id: noiseHover }
+
+                    Tip {
+                        visible: noiseHover.hovered
+                        text: spectrum.noiseFromEngine
+                              ? "The detector's noise floor across the span: the median over bins of "
+                                + "the floor it estimated under its latest decision, which is what "
+                                + "every detection's SNR is measured against. This is not the floor "
+                                + "plate at the left, which is where the colour map starts."
+                              : "The noise floor as this window estimates it from the trace: a "
+                                + "quarter of the trace's columns sit below the dashed line. The "
+                                + "engine has not stated its detector's floor yet, which an engine "
+                                + "that has not decided or one older than the field does not. This "
+                                + "is not the floor plate at the left, which is where the colour map "
+                                + "starts rather than where the noise is."
+                    }
+                }
+
+                // THE STRONGEST SIGNAL across the whole span the source delivers,
+                // held on one signal until another is 3 dB louder and eased over a
+                // quarter second, so it can be read; models/span_markers.h. A tick
+                // points down at it and the plate sits over the tick, where the pane
+                // is empty because nothing else is as tall. Above the top of the
+                // scale it cannot be pointed at, and the plate goes beside it,
+                // under the detection labels, with an arrow saying which way it is.
+                Item {
+                    id: peakMarker
+
+                    readonly property bool above: spectrum.peakY < 0
+                    readonly property var at: spectrum.peakPlate(spectrum.peakX, spectrum.peakY,
+                                                                 peakPlate.width, peakPlate.height,
+                                                                 parent.scaleGutter, width, height,
+                                                                 Qt.rect(ceilingPin.x, ceilingPin.y,
+                                                                         ceilingPin.width,
+                                                                         ceilingPin.height))
+
+                    anchors.fill: parent
+                    visible: span.drawing && spectrum.peakValid
+
+                    Rectangle {
+                        visible: peakMarker.at.tick
+                        x: Math.round(peakMarker.at.tickX)
+                        y: peakMarker.at.tickTop
+                        width: 1
+                        height: peakMarker.at.tickBottom - peakMarker.at.tickTop
+                        color: Theme.ink
+                    }
+
+                    Rectangle {
+                        id: peakPlate
+
+                        x: peakMarker.at.x
+                        y: peakMarker.at.y
+                        width: peakText.implicitWidth + 8
+                        height: peakText.implicitHeight + 4
+                        radius: 2
+                        color: Theme.plate
+
+                        Text {
+                            id: peakText
+                            anchors.centerIn: parent
+                            color: Theme.ink
+                            font.family: Theme.monoFont
+                            font.pixelSize: Theme.sizeSmall
+                            text: (peakMarker.above ? "▲ " : "") + "peak "
+                                  + spectrum.peakDb.toFixed(1) + " dBFS  "
+                                  + (spectrum.peakHz / 1.0e6).toFixed(4) + " MHz"
+                        }
+
+                        HoverHandler { id: peakHover }
+
+                        Tip {
+                            visible: peakHover.hovered
+                            text: "The strongest signal across the whole span the source delivers, "
+                                  + "at its loudest bin. The marker stays on one signal until another "
+                                  + "is 3 dB louder, and its figures are eased over a quarter second."
+                                  + (peakMarker.above ? " It is above the top of the scale." : "")
+                        }
+                    }
+                }
+
+                // THE TRACK UNDER THE POINTER, in full, on either display.
+                //
+                // A span label says the frequency and the SNR and nothing else since
+                // 2026-09-22. The three numbers that used to crowd it, or were never
+                // on it, are here, each named for what it measures: how long the
+                // track has held (the stopwatch the detections bar filters on, which
+                // the label used to print bare as a confidence), how far it stood above
+                // the threshold, and how much of it is in three bins. Only while the
+                // pointer is on a box, so the card is never over a picture nobody asked
+                // about.
+                Rectangle {
+                    id: hoverCard
+
+                    readonly property var trackId: spectrum.hoveredDetection !== 0
+                                              ? spectrum.hoveredDetection
+                                              : waterfall.hoveredDetection
+                    readonly property double held: trackId !== 0 ? engineLink.detectionConfidence(trackId) : -1
+                    readonly property double margin: trackId !== 0 ? engineLink.detectionMargin(trackId) : -1
+                    readonly property double concentration:
+                        trackId !== 0 ? engineLink.detectionConcentration(trackId) : -1
+
+                    // What the engine says the signal is, in full: the bracket has
+                    // room for the name only. models/label_tune.h writes the line.
+                    readonly property string label: trackId !== 0 ? engineLink.detectionLabelText(trackId) : ""
+
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.rightMargin: 6
+                    anchors.topMargin: 28
+                    visible: trackId !== 0 && held >= 0
+                    width: hoverText.implicitWidth + 16
+                    height: hoverText.implicitHeight + 10
+                    radius: Theme.radius
+                    color: Theme.panel
+                    border.width: 1
+                    border.color: Theme.border
+
+                    Text {
+                        id: hoverText
+                        anchors.centerIn: parent
+                        color: Theme.ink
+                        font.family: Theme.monoFont
+                        font.pixelSize: Theme.sizeSmall
+                        text: (hoverCard.label !== "" ? hoverCard.label + "\n" : "")
+                              + "track " + hoverCard.trackId
+                              + "  ·  held for " + hoverCard.held.toFixed(2)
+                              + (hoverCard.margin >= 0 ? "  ·  margin " + hoverCard.margin.toFixed(2) : "")
+                              + (hoverCard.concentration >= 0
+                                 ? "  ·  " + hoverCard.concentration.toFixed(2) + " of it in 3 bins"
+                                 : "")
+                    }
                 }
             }
-        }
 
-        // THE TRACK UNDER THE POINTER, in full, on either display.
-        //
-        // A span label says the frequency and the SNR and nothing else since
-        // 2026-09-22. The three numbers that used to crowd it, or were never
-        // on it, are here, each named for what it measures: how long the
-        // track has held (the stopwatch the detections bar filters on, which
-        // the label used to print bare as a confidence), how far it stood above
-        // the threshold, and how much of it is in three bins. Only while the
-        // pointer is on a box, so the card is never over a picture nobody asked
-        // about.
-        Rectangle {
-            id: hoverCard
-
-            readonly property var trackId: spectrum.hoveredDetection !== 0
-                                      ? spectrum.hoveredDetection
-                                      : waterfall.hoveredDetection
-            readonly property double held: trackId !== 0 ? engineLink.detectionConfidence(trackId) : -1
-            readonly property double margin: trackId !== 0 ? engineLink.detectionMargin(trackId) : -1
-            readonly property double concentration:
-                trackId !== 0 ? engineLink.detectionConcentration(trackId) : -1
-
-            // What the engine says the signal is, in full: the bracket has
-            // room for the name only. models/label_tune.h writes the line.
-            readonly property string label: trackId !== 0 ? engineLink.detectionLabelText(trackId) : ""
-
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.rightMargin: 6
-            anchors.topMargin: 28
-            visible: trackId !== 0 && held >= 0
-            width: hoverText.implicitWidth + 16
-            height: hoverText.implicitHeight + 10
-            radius: Theme.radius
-            color: Theme.panel
-            border.width: 1
-            border.color: Theme.border
-
-            Text {
-                id: hoverText
-                anchors.centerIn: parent
-                color: Theme.ink
-                font.family: Theme.monoFont
-                font.pixelSize: Theme.sizeSmall
-                text: (hoverCard.label !== "" ? hoverCard.label + "\n" : "")
-                      + "track " + hoverCard.trackId
-                      + "  ·  held for " + hoverCard.held.toFixed(2)
-                      + (hoverCard.margin >= 0 ? "  ·  margin " + hoverCard.margin.toFixed(2) : "")
-                      + (hoverCard.concentration >= 0
-                         ? "  ·  " + hoverCard.concentration.toFixed(2) + " of it in 3 bins"
-                         : "")
+            // The ruler, between the two displays it labels. See Ruler.qml.
+            Ruler {
+                id: spanRuler
+                Layout.fillWidth: true
+                Layout.preferredHeight: implicitHeight
+                onPicked: (hz) => span.selection.takeTune(0, hz, 0.0, 0, 0, false, hz)
+                onAdded: (hz) => span.selection.takeAdd(0, hz, 0.0, hz)
             }
         }
     }
 
-    // The ruler, between the two displays it labels. See Ruler.qml.
-    Ruler {
-        id: spanRuler
-        Layout.fillWidth: true
-        Layout.preferredHeight: implicitHeight
-        onPicked: (hz) => span.selection.takeTune(0, hz, 0.0, 0, 0, false, hz)
-        onAdded: (hz) => span.selection.takeAdd(0, hz, 0.0, hz)
+    PaneContent {
+        id: waterfallPane
 
-        // The border between the spectrum and the waterfall: the ruler's top
-        // edge, dragged up or down. Drawn only while hovered or held.
-        MouseArea {
-            id: spanBorder
+        anchors.fill: parent
+        title: "Waterfall"
+        needWidth: 240
+        needHeight: 60 + timeShift.implicitHeight
 
-            property real last: 0
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 0
 
+            // ------------------------------------------------------------------
+            // The waterfall
+            // ------------------------------------------------------------------
+            WaterfallItem {
+                id: waterfall
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+
+                // WHERE THE HISTORY ENDS, while it is still filling. Rows arrive at
+                // the top and push the history down, so for the first minute after a
+                // start, a reconnect or a resize the bottom of the waterfall has never
+                // been written and is the background. Seen on 2026-09-22 as the
+                // waterfall stopping three quarters of the way down; it had not
+                // stopped, it had not got there yet. A line and a note at the edge
+                // say which.
+                Rectangle {
+                    visible: waterfall.historyFraction > 0 && waterfall.historyFraction < 1
+                    y: Math.round(waterfall.height * waterfall.historyFraction)
+                    width: parent.width
+                    height: 1
+                    color: Theme.border
+
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        y: 6
+                        text: "filling from the top"
+                        color: Theme.inkOff
+                        font.family: Theme.uiFont
+                        font.pixelSize: Theme.sizeSmall
+                    }
+                }
+                // THE CAPTION UNDER THE POINTER, in full. A caption on the waterfall
+                // carries three lines at most (render/caption_layout.h); this card
+                // carries the receiver, its mode and frequency, the call's talkgroup
+                // where the protocol said one, the whole text, and how sure and how
+                // late the recogniser was. Only while the pointer is on a plate, and in
+                // the waterfall's top right corner, where the detection card sits on
+                // the spectrum. While the caption is frozen the plate itself has grown to
+                // the whole text, so the card keeps only its first and last lines.
+                Rectangle {
+                    id: captionCard
+
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.rightMargin: 24
+                    anchors.topMargin: 6
+                    visible: waterfall.hoveredCaption !== 0 && captionText.text.length > 0
+                    width: Math.min(captionText.implicitWidth, 460) + 16
+                    height: captionText.implicitHeight + 10
+                    radius: Theme.radius
+                    color: Theme.panel
+                    border.width: 1
+                    border.color: Theme.border
+                    z: 2
+
+                    Text {
+                        id: captionText
+                        x: 8
+                        y: 5
+                        width: Math.min(implicitWidth, 460)
+                        text: waterfall.captionFrozen ? waterfall.hoveredCaptionDetail
+                                                      : waterfall.hoveredCaptionText
+                        wrapMode: Text.WordWrap
+                        color: Theme.ink
+                        font.family: Theme.monoFont
+                        font.pixelSize: Theme.sizeSmall
+                    }
+                }
+
+                // The contrast pivot, live, on the right edge. Above the caption
+                // card, which moves left to clear it.
+                PivotStrip {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    z: 3
+                }
+
+                // PERSISTENCE AND 3D, drawn over the waterfall rather than in place
+                // of it: the waterfall keeps taking frames underneath, and its drawn
+                // ends are the level axis both of these use, so a pin or the
+                // history's own scale moves all three alike. Each item does nothing
+                // while hidden. models/span_display_settings.h holds the choice.
+                PersistenceItem {
+                    id: persistence
+                    anchors.fill: parent
+                    z: 1
+                    visible: SpanDisplaySettings.view === "persistence"
+                    link: engineLink
+                    mapPins: ScaleSettings
+                    floorDb: waterfall.drawFloorDb
+                    ceilingDb: waterfall.drawCeilingDb
+                    decaySeconds: SpanDisplaySettings.persistenceDecaySeconds
+
+                    Text {
+                        x: 6
+                        y: 30
+                        text: persistence.ceilingDb.toFixed(0) + " dBFS"
+                        color: Theme.inkOff
+                        font.family: Theme.monoFont
+                        font.pixelSize: Theme.sizeSmall
+                    }
+                    Text {
+                        x: 6
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: 4
+                        text: persistence.floorDb.toFixed(0) + " dBFS"
+                        color: Theme.inkOff
+                        font.family: Theme.monoFont
+                        font.pixelSize: Theme.sizeSmall
+                    }
+                }
+                Surface3DItem {
+                    id: surface
+                    anchors.fill: parent
+                    z: 1
+                    visible: SpanDisplaySettings.view === "3D"
+                    link: engineLink
+                    mapPins: ScaleSettings
+                    floorDb: waterfall.drawFloorDb
+                    ceilingDb: waterfall.drawCeilingDb
+
+                    Text {
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        anchors.margins: 6
+                        anchors.rightMargin: 24
+                        text: "drag to orbit, double click to reset"
+                        color: Theme.inkOff
+                        font.family: Theme.uiFont
+                        font.pixelSize: Theme.sizeSmall
+                    }
+                }
+                RSegmented {
+                    x: 6
+                    y: 4
+                    z: 4
+                    options: ["waterfall", "persistence", "3D"]
+                    current: SpanDisplaySettings.view
+                    onPicked: (option) => SpanDisplaySettings.view = option
+                }
+
+                link: engineLink
+                mapPins: ScaleSettings
+                timeMarkerSeconds: ScaleSettings.timeMarkerSeconds
+                selectedDetection: span.selection.selectedDetection
+                onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted, pointerHz) =>
+                                 span.selection.takeTune(id, centerHz, bandwidthHz, candidates,
+                                                         rank, exhausted, pointerHz)
+                onAddRequested: (id, centerHz, bandwidthHz, pointerHz) =>
+                                span.selection.takeAdd(id, centerHz, bandwidthHz, pointerHz)
+            }
+
+            // Time-shift: the scrub bar, under the history it scrubs.
+            TimeShiftBar {
+                id: timeShift
+                previewTarget: waterfall
+                Layout.fillWidth: true
+                Layout.preferredHeight: visible ? implicitHeight : 0
+            }
+        }
+
+        // What the last click resolved to, over the bottom of the waterfall
+        // where the eye already is after clicking there.
+        Rectangle {
             anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.topMargin: -3
-            height: 7
-            z: 10
-            hoverEnabled: true
-            preventStealing: true
-            cursorShape: Qt.SplitVCursor
-
-            onPressed: mouseEvent => last = mapToItem(span, 0, mouseEvent.y).y
-            onPositionChanged: mouseEvent => {
-                if (!pressed)
-                    return
-                const now = mapToItem(span, 0, mouseEvent.y).y
-                spanLayout.drag("", 0, now - last, span.shared + UiRules.paneHandle)
-                last = now
-            }
-            onReleased: spanLayout.commit()
-            onDoubleClicked: spanLayout.reset()
-
-            Rectangle {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                height: 1
-                visible: spanBorder.containsMouse || spanBorder.pressed
-                color: spanBorder.pressed ? Theme.accent : Theme.border
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // The waterfall
-    // ------------------------------------------------------------------
-    WaterfallItem {
-        id: waterfall
-        Layout.fillWidth: true
-        Layout.fillHeight: true
-
-        // WHERE THE HISTORY ENDS, while it is still filling. Rows arrive at
-        // the top and push the history down, so for the first minute after a
-        // start, a reconnect or a resize the bottom of the waterfall has never
-        // been written and is the background. Seen on 2026-09-22 as the
-        // waterfall stopping three quarters of the way down; it had not
-        // stopped, it had not got there yet. A line and a note at the edge
-        // say which.
-        Rectangle {
-            visible: waterfall.historyFraction > 0 && waterfall.historyFraction < 1
-            y: Math.round(waterfall.height * waterfall.historyFraction)
-            width: parent.width
-            height: 1
-            color: Theme.border
-
-            Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                y: 6
-                text: "filling from the top"
-                color: Theme.inkOff
-                font.family: Theme.uiFont
-                font.pixelSize: Theme.sizeSmall
-            }
-        }
-        // THE CAPTION UNDER THE POINTER, in full. A caption on the waterfall
-        // carries three lines at most (render/caption_layout.h); this card
-        // carries the receiver, its mode and frequency, the call's talkgroup
-        // where the protocol said one, the whole text, and how sure and how
-        // late the recogniser was. Only while the pointer is on a plate, and in
-        // the waterfall's top right corner, where the detection card sits on
-        // the spectrum. While the caption is frozen the plate itself has grown to
-        // the whole text, so the card keeps only its first and last lines.
-        Rectangle {
-            id: captionCard
-
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.rightMargin: 24
-            anchors.topMargin: 6
-            visible: waterfall.hoveredCaption !== 0 && captionText.text.length > 0
-            width: Math.min(captionText.implicitWidth, 460) + 16
-            height: captionText.implicitHeight + 10
-            radius: Theme.radius
+            anchors.bottom: parent.bottom
+            anchors.margins: 16
+            width: Math.min(parent.width - 32, readout.implicitWidth + close.width + 24)
+            height: readout.implicitHeight + 16
+            visible: span.selection.tuned
+            radius: Theme.radius + 2
             color: Theme.panel
             border.width: 1
             border.color: Theme.border
-            z: 2
 
-            Text {
-                id: captionText
-                x: 8
-                y: 5
-                width: Math.min(implicitWidth, 460)
-                text: waterfall.captionFrozen ? waterfall.hoveredCaptionDetail
-                                              : waterfall.hoveredCaptionText
-                wrapMode: Text.WordWrap
-                color: Theme.ink
-                font.family: Theme.monoFont
-                font.pixelSize: Theme.sizeSmall
+            ClickReadout {
+                id: readout
+                anchors.left: parent.left
+                anchors.right: close.left
+                anchors.top: parent.top
+                anchors.margins: 8
+                selection: span.selection
             }
-        }
 
-        // The contrast pivot, live, on the right edge. Above the caption
-        // card, which moves left to clear it.
-        PivotStrip {
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            z: 3
-        }
-
-        // PERSISTENCE AND 3D, drawn over the waterfall rather than in place
-        // of it: the waterfall keeps taking frames underneath, and its drawn
-        // ends are the level axis both of these use, so a pin or the
-        // history's own scale moves all three alike. Each item does nothing
-        // while hidden. models/span_display_settings.h holds the choice.
-        PersistenceItem {
-            id: persistence
-            anchors.fill: parent
-            z: 1
-            visible: SpanDisplaySettings.view === "persistence"
-            link: engineLink
-            mapPins: ScaleSettings
-            floorDb: waterfall.drawFloorDb
-            ceilingDb: waterfall.drawCeilingDb
-            decaySeconds: SpanDisplaySettings.persistenceDecaySeconds
-
-            Text {
-                x: 6
-                y: 30
-                text: persistence.ceilingDb.toFixed(0) + " dBFS"
-                color: Theme.inkOff
-                font.family: Theme.monoFont
-                font.pixelSize: Theme.sizeSmall
-            }
-            Text {
-                x: 6
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: 4
-                text: persistence.floorDb.toFixed(0) + " dBFS"
-                color: Theme.inkOff
-                font.family: Theme.monoFont
-                font.pixelSize: Theme.sizeSmall
-            }
-        }
-        Surface3DItem {
-            id: surface
-            anchors.fill: parent
-            z: 1
-            visible: SpanDisplaySettings.view === "3D"
-            link: engineLink
-            mapPins: ScaleSettings
-            floorDb: waterfall.drawFloorDb
-            ceilingDb: waterfall.drawCeilingDb
-
-            Text {
+            RButton {
+                id: close
                 anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                anchors.margins: 6
-                anchors.rightMargin: 24
-                text: "drag to orbit, double click to reset"
-                color: Theme.inkOff
-                font.family: Theme.uiFont
-                font.pixelSize: Theme.sizeSmall
+                anchors.top: parent.top
+                anchors.margins: 4
+                flat: true
+                text: "dismiss"
+                iconName: "x"
+                ink: Theme.inkDim
+                onClicked: span.selection.dismiss()
             }
         }
-        RSegmented {
-            x: 6
-            y: 4
-            z: 4
-            options: ["waterfall", "persistence", "3D"]
-            current: SpanDisplaySettings.view
-            onPicked: (option) => SpanDisplaySettings.view = option
-        }
-
-        link: engineLink
-        mapPins: ScaleSettings
-        timeMarkerSeconds: ScaleSettings.timeMarkerSeconds
-        selectedDetection: span.selection.selectedDetection
-        onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted, pointerHz) =>
-                         span.selection.takeTune(id, centerHz, bandwidthHz, candidates,
-                                                 rank, exhausted, pointerHz)
-        onAddRequested: (id, centerHz, bandwidthHz, pointerHz) =>
-                        span.selection.takeAdd(id, centerHz, bandwidthHz, pointerHz)
-    }
-
-    // Time-shift: the scrub bar, under the history it scrubs.
-    TimeShiftBar {
-        id: timeShift
-        previewTarget: waterfall
-        Layout.fillWidth: true
-        Layout.preferredHeight: visible ? implicitHeight : 0
     }
 }

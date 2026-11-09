@@ -177,6 +177,7 @@
 #include "models/frequency_entry.h"
 #include "models/frequency_manager.h"
 #include "models/pane_layout_store.h"
+#include "models/ui_scale_settings.h"
 #include "models/receiver_placement_store.h"
 #include "models/recording_link.h"
 #include "models/settings.h"
@@ -412,6 +413,18 @@ int main(int argc, char* argv[])
     }
     if (smoke && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", "offscreen");
+    }
+
+    // The interface scale, which Qt only reads as the application is made.
+    // The names are spelled out because the application that sets them for
+    // every later QSettings does not exist yet. See models/ui_scale_settings.h.
+    if (!smoke && qEnvironmentVariableIsEmpty("QT_SCALE_FACTOR")) {
+        const QSettings early(QStringLiteral("Locke Werks"), QStringLiteral("Revenant"));
+        const int percent = revenant::ui::ui_scale_percent(
+            early.value(revenant::ui::settings::kUiScale, 1.0).toDouble());
+        if (percent != 100) {
+            qputenv("QT_SCALE_FACTOR", QByteArray::number(percent / 100.0));
+        }
     }
 
     QGuiApplication app(argc, argv);
@@ -917,14 +930,10 @@ int main(int argc, char* argv[])
     revenant::ui::PaneLayoutStore receiver_layout(
         QString(revenant::ui::settings::kLayoutReceivers), revenant::ui::default_receiver_tree(),
         revenant::ui::receiver_tree_panes(), !smoke);
-    revenant::ui::PaneLayoutStore span_layout(
-        QString(revenant::ui::settings::kLayoutSpan), revenant::ui::default_span_tree(),
-        revenant::ui::span_tree_panes(), !smoke);
     QObject::connect(&app, &QGuiApplication::aboutToQuit, &app,
-                     [&main_layout, &receiver_layout, &span_layout] {
+                     [&main_layout, &receiver_layout] {
                          main_layout.commit();
                          receiver_layout.commit();
-                         span_layout.commit();
                      });
 
     // Before the engine, so it outlives every binding that reads it.
@@ -934,7 +943,6 @@ int main(int argc, char* argv[])
     engine.rootContext()->setContextProperty(QStringLiteral("receiverPlacement"), &placement);
     engine.rootContext()->setContextProperty(QStringLiteral("mainLayout"), &main_layout);
     engine.rootContext()->setContextProperty(QStringLiteral("receiverLayout"), &receiver_layout);
-    engine.rootContext()->setContextProperty(QStringLiteral("spanLayout"), &span_layout);
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
     // The engine owns and deletes the provider; the shelf it reads is shared.
     engine.addImageProvider(QStringLiteral("decoded"),

@@ -32,14 +32,19 @@ Window {
     // skinny, ordinary and wide short windows. The default fits the screen.
     width: Math.min(1040, Screen.desktopAvailableWidth - 40)
     height: Math.min(680, Screen.desktopAvailableHeight - 60)
-    minimumWidth: 360
-    minimumHeight: 320
+    // Never smaller than its panes at their minimums.
+    minimumWidth: Math.max(360, receiverLayout.minimumWidth + 8)
+    minimumHeight: Math.max(320, receiverLayout.minimumHeight + 8)
     color: Theme.background
     transientParent: null
     visible: false
 
     // Commands.qml, which this window's palette runs its entries through.
     property var commands: null
+
+    // The receiver panes, ReceiverPanel.qml's contents, which this window's
+    // own tiled layout draws while they are popped out.
+    property var paneContents: ({})
 
     readonly property alias commandPalette: commandPalette
     readonly property alias keyMapView: keyMapView
@@ -64,6 +69,13 @@ Window {
             receivers.raise()
         if (plan.activate)
             receivers.requestActivate()
+    }
+
+    PaneHost {
+        anchors.fill: parent
+        anchors.margins: 4
+        store: receiverLayout
+        contents: receivers.paneContents
     }
 
     CommandPalette {

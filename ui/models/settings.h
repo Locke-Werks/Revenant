@@ -103,13 +103,18 @@ inline constexpr QLatin1StringView kReceiversPoppedOut{"receivers/poppedOut"};
 inline constexpr QLatin1StringView kReceiversShown{"receivers/shown"};
 inline constexpr QLatin1StringView kReceiversDockHeight{"receivers/dockHeight"};
 inline constexpr QLatin1StringView kReceiversDockWidth{"receivers/dockWidth"};
+inline constexpr QLatin1StringView kReceiversPills{"receivers/pills"};
 
-// The tiled layouts, in models/pane_layout.h's settings form: the main
-// window's span and receivers, the receivers' rack, receiver and sections, and
-// the span's spectrum over its waterfall.
+// The tiled layouts, in models/pane_layout.h's settings form: every pane in
+// the main window, and the receiver panes in the receiver window while they
+// are popped out. Each has a second key, the same name with "Panes" after it,
+// holding the panes' own scales and which are collapsed.
 inline constexpr QLatin1StringView kLayoutMain{"layout/main"};
+
+// The interface scale on top of Windows' display scaling, as a factor;
+// models/ui_scale_settings.h. Read before the application exists.
+inline constexpr QLatin1StringView kUiScale{"display/uiScale"};
 inline constexpr QLatin1StringView kLayoutReceivers{"layout/receivers"};
-inline constexpr QLatin1StringView kLayoutSpan{"layout/span"};
 
 // The pins on either end of the span displays' colour map, and the levels
 // they were pinned at. Remembered because the job a pin does, comparing

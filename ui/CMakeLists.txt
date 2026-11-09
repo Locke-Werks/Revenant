@@ -249,6 +249,7 @@ qt_add_executable(revenant_ui
     models/receiver_placement_store.h
     models/pane_layout.h
     models/pane_layout_store.h
+    models/ui_scale_settings.h
     models/receiver_rack.h
     models/open_source_link.cpp
     models/front_end_link.cpp
@@ -344,6 +345,7 @@ qt_add_qml_module(revenant_ui
     QML_FILES
         qml/Main.qml
         qml/dock/PaneHost.qml
+        qml/dock/PaneContent.qml
         qml/dock/PaneNode.qml
         qml/dock/PaneFrame.qml
         qml/dock/PaneSplitter.qml

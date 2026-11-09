@@ -578,6 +578,38 @@ ColumnLayout {
 
     Rule {}
 
+    SectionTitle { text: "interface" }
+
+    RowLayout {
+        spacing: 16
+
+        Label {
+            text: "scale"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeBody
+            Layout.minimumWidth: 70
+        }
+
+        RSegmented {
+            options: UiScaleSettings.choices
+            current: UiScaleSettings.current
+            onPicked: (choice) => UiScaleSettings.pick(choice)
+        }
+    }
+
+    // Qt reads its scale once, as the client starts; models/ui_scale_settings.h.
+    Label {
+        Layout.fillWidth: true
+        text: UiScaleSettings.pending
+              ? "Takes effect when Revenant next starts."
+              : "On top of Windows' display scaling. Each pane also has its own, on its title strip."
+        color: UiScaleSettings.pending ? Theme.inkWarn : Theme.inkDim
+        font.pixelSize: Theme.sizeSmall
+        wrapMode: Text.WordWrap
+    }
+
+    Rule {}
+
     SectionTitle { text: "band plan" }
 
     RCheckBox {

@@ -7,13 +7,18 @@
 // fine-tuning waterfall keeps its history and the rack its scroll position
 // across a pop; models/receiver_placement.h has the owner's call behind it.
 //
-// TILED, SINCE 2026-11-09. The rack, the receiver and its sections are three
-// panes of their own tree, models/pane_layout.h, which the operator resizes
-// and rearranges and which travels with the panel between the dock and the
-// receiver window. They replaced three fixed arrangements chosen from the
-// panel's shape (narrow, stacked, wide). Each pane reports what its content
-// needs as its minimum, so no pane is ever drawn smaller than its content and
-// nothing is clipped; the window holding them refuses to shrink below the sum.
+// TILED, SINCE 2026-11-09. Each part is a pane of its own in the tiled layout
+// (models/pane_layout.h): the rack, the receiver, and RDS, decoding, images,
+// calls, trunking and audio each, any of which can go anywhere in the window
+// holding them. This item draws nothing. It makes the contents once and hands
+// them to whichever window has the receivers, so a pop moves them rather
+// than rebuilding them. A section with nothing to show steps out of the
+// layout until it has.
+//
+// WHAT EACH NEEDS. A pane's width is measured while its content is in its
+// folded arrangement, the narrowest it reads at; measured wide, it would be a
+// minimum that kept the content from ever folding. The store keeps the
+// largest it has seen, so nothing moves as the words in it change.
 
 import QtQuick
 import QtQuick.Controls
@@ -34,133 +39,143 @@ Item {
     readonly property alias dial: detail.dial
     readonly property alias passband: detail.passband
 
-    // Inside the frames, the same breathing room the panel always had.
-    readonly property real inset: panel.poppedOut ? 12 : Theme.gap
+    // Pane name to its PaneContent, for a PaneHost.
+    readonly property var contents: ({
+        "rack": rackPane, "detail": detailPane, "rds": rdsPane, "decode": decodePane,
+        "image": imagePane, "calls": callsPane, "trunk": trunkPane, "audio": audioPane
+    })
 
-    // The smallest the panel can be, its margins included. Main.qml gives it
-    // to the main window's tree, and the receiver window takes it as its own.
-    readonly property real minimumWidth: receiverLayout.minimumWidth + 2 * host.anchors.margins
-    readonly property real minimumHeight: receiverLayout.minimumHeight + 2 * host.anchors.margins
-
-    // What each pane's content needs, which raises that pane's floor.
-    component PaneMinimum: QtObject {
-        required property string pane
-        property real needWidth: 0
-        property real needHeight: 0
-        readonly property real strip: host ? host.stripHeight : 0
-        function report() {
-            receiverLayout.setMinimum(pane, needWidth + 2 * panel.inset,
-                                      needHeight + strip + 2 * panel.inset)
+    // The panes with nothing to show right now.
+    readonly property var empty: {
+        const out = []
+        for (const name in contents) {
+            if (!contents[name].paneShown)
+                out.push(name)
         }
-        onNeedWidthChanged: report()
-        onNeedHeightChanged: report()
-        onStripChanged: report()
-        Component.onCompleted: report()
+        return out
     }
 
-    PaneMinimum { pane: "rack"; needWidth: 240; needHeight: 150 }
-    PaneMinimum { pane: "detail"; needWidth: 300; needHeight: detail.implicitHeight }
-    PaneMinimum { pane: "sections"; needWidth: panel.sectionsNeed; needHeight: sections.implicitHeight }
+    // Breathing room inside each pane.
+    readonly property real inset: Theme.gap
 
-    // The sections' width when their rows have folded onto two lines each,
-    // which is the narrowest they read at. AudioPane and RdsPane fold under
-    // 700, so their width is measured only while folded: measured wide, it
-    // would be a minimum that kept them from ever folding.
-    property real sectionsNeed: 340
-    function measureSections() {
-        if (sections.width > 0 && sections.width < 700)
-            sectionsNeed = Math.max(340, Math.ceil(sections.implicitWidth))
-    }
+    visible: false
 
-    PaneHost {
-        id: host
+    // A width taken while the content is folded. See WHAT EACH NEEDS above.
+    component Measured: PaneContent {
+        id: measured
+        default property alias body: inner.data
+        // True for content with no folded arrangement, whose width is always
+        // what it needs.
+        property bool folded: true
+        property real foldedWidth: 0
+        property Item measure: null
+        property real fallbackWidth: 240
+
+        function take() {
+            if (folded && measure)
+                foldedWidth = Math.max(foldedWidth, Math.ceil(measure.implicitWidth))
+        }
+
         anchors.fill: parent
-        anchors.margins: panel.poppedOut ? 4 : 0
-        store: receiverLayout
-        contents: ({ "rack": rackPane, "detail": detailPane, "sections": sectionsPane })
-        titles: ({ "rack": "Receivers", "detail": "Receiver", "sections": "RDS, decoding, audio" })
+        needWidth: Math.max(fallbackWidth, foldedWidth) + 2 * panel.inset
+        needHeight: (measure ? measure.implicitHeight : 0) + 2 * panel.inset
+        onFoldedChanged: take()
+
+        Connections {
+            target: measured.measure
+            function onImplicitWidthChanged() { measured.take() }
+        }
+
+        Item {
+            id: inner
+            anchors.fill: parent
+            anchors.margins: panel.inset
+        }
     }
 
-    // Where the three displays wait until a frame takes them.
-    Item {
-        id: stash
-        visible: false
+    PaneContent {
+        id: rackPane
+        anchors.fill: parent
+        title: "Receivers"
+        needWidth: 250 + 2 * panel.inset
+        needHeight: (rack.pills ? 80 : 150) + 2 * panel.inset
 
-        // The rack, scrolled inside, so it is usable at any height.
-        Item {
-            id: rackPane
+        // Scrolled inside, so it is usable at any height.
+        ReceiverRack {
+            id: rack
             anchors.fill: parent
-
-            ReceiverRack {
-                anchors.fill: parent
-                anchors.margins: panel.inset
-                poppedOut: panel.poppedOut
-                onPopToggled: panel.popToggled()
-            }
+            anchors.margins: panel.inset
+            poppedOut: panel.poppedOut
+            onPopToggled: panel.popToggled()
         }
+    }
 
-        Item {
-            id: detailPane
-            anchors.fill: parent
+    Measured {
+        id: detailPane
+        title: "Receiver"
+        paneShown: engineLink.receiverId > 0
+        measure: detail
+        folded: detail.narrow
+        fallbackWidth: 300
 
-            ReceiverDetail {
-                id: detail
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: panel.inset
-                height: Math.max(implicitHeight, parent.height - 2 * panel.inset)
-                narrow: width < 520
-            }
+        ReceiverDetail {
+            id: detail
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: Math.max(implicitHeight, parent.height)
+            narrow: width < 520
         }
+    }
 
-        Item {
-            id: sectionsPane
-            anchors.fill: parent
+    Measured {
+        id: rdsPane
+        title: "RDS"
+        paneShown: rds.shown
+        measure: rds
+        folded: rds.compact
+        RdsPane { id: rds; anchors.fill: parent }
+    }
 
-            // RDS, decoding and audio. The decode log takes what the column
-            // has spare, so audio stays at the foot of it.
-            ColumnLayout {
-                id: sections
+    Measured {
+        id: decodePane
+        title: "Decoding"
+        paneShown: decode.shown
+        measure: decode
+        folded: decode.compact
+        DecodePane { id: decode; anchors.fill: parent; fills: true }
+    }
 
-                onImplicitWidthChanged: panel.measureSections()
-                onWidthChanged: panel.measureSections()
-                anchors.fill: parent
-                anchors.margins: panel.inset
-                spacing: 10
+    Measured {
+        id: imagePane
+        title: "Images"
+        paneShown: image.hasImages
+        measure: image
+        ImagePane { id: image; anchors.fill: parent }
+    }
 
-                RdsPane {
-                    Layout.minimumWidth: 0
-                }
+    Measured {
+        id: callsPane
+        title: "Calls"
+        paneShown: calls.shown
+        measure: calls
+        CallsPane { id: calls; anchors.fill: parent }
+    }
 
-                DecodePane {
-                    id: decode
-                    Layout.minimumWidth: 0
-                    fills: true
-                }
+    Measured {
+        id: trunkPane
+        title: "Trunking"
+        paneShown: trunk.shown
+        measure: trunk
+        TrunkPanel { id: trunk; anchors.fill: parent }
+    }
 
-                ImagePane {
-                    Layout.minimumWidth: 0
-                }
-
-                CallsPane {
-                    Layout.minimumWidth: 0
-                }
-
-                // P25 trunk following.
-                TrunkPanel {
-                    Layout.minimumWidth: 0
-                }
-
-                Item {
-                    visible: !(decode.visible && decode.growing)
-                    Layout.fillHeight: true
-                }
-
-                AudioPane {
-                    Layout.minimumWidth: 0
-                }
-            }
-        }
+    Measured {
+        id: audioPane
+        title: "Audio"
+        paneShown: audio.shown
+        measure: audio
+        folded: audio.compact
+        AudioPane { id: audio; anchors.fill: parent }
     }
 }
