@@ -128,9 +128,19 @@ ApplicationWindow {
         }
     }
 
+    function placeReceiverPanel() {
+        if (receiverPlacement.poppedOut)
+            receiverPanel.parent = receiverWindow.contentItem
+    }
+
+    Component.onCompleted: placeReceiverPanel()
+
     Connections {
         target: receiverPlacement
-        function onPoppedOutChanged() { window.placeReceiverWindow() }
+        function onPoppedOutChanged() {
+            window.placeReceiverPanel()
+            window.placeReceiverWindow()
+        }
         function onShownChanged() { window.placeReceiverWindow() }
         function onReadyChanged() { window.placeReceiverWindow() }
     }
@@ -144,12 +154,17 @@ ApplicationWindow {
         id: receiverWindow
         commands: keyCommands
         onDockRequested: receiverPlacement.poppedOut = false
+        // Never smaller than the receivers' panes at their minimums.
+        minimumWidth: Math.max(360, receiverPanel.minimumWidth)
+        minimumHeight: Math.max(320, receiverPanel.minimumHeight)
     }
 
     // The receivers themselves, in the dock or in the receiver window.
+    //
+    // Docked, its frame in the main window's tiled layout takes it; popped
+    // out, it is put in the receiver window here.
     ReceiverPanel {
         id: receiverPanel
-        parent: receiverPlacement.poppedOut ? receiverWindow.contentItem : dock
         anchors.fill: parent
         visible: receiverPlacement.shown
         poppedOut: receiverPlacement.poppedOut
@@ -211,6 +226,7 @@ ApplicationWindow {
 
         // The open recording's name, position and pace, while there is one.
         RecordingStrip {
+            id: recordingStrip
             Layout.fillWidth: true
         }
 
@@ -221,108 +237,106 @@ ApplicationWindow {
             Layout.fillWidth: true
         }
 
-        // The span over the docked receivers, with a divider between them the
-        // operator can drag. SplitView leaves out an item that is not
-        // visible, so a hidden or popped-out dock gives the span everything.
-        // In a tall window the dock moves to the span's right instead; see
-        // dock_beside in models/receiver_placement.h.
-        SplitView {
-            id: split
-
-            readonly property bool beside: UiRules.dockBeside(width, height)
+        // The span and the docked receivers, tiled; models/pane_layout.h.
+        // The operator drags the border between them and drags either one's
+        // title strip onto an edge of the other to put it there. Hidden or
+        // popped-out receivers leave the span the whole of it.
+        PaneHost {
+            id: mainHost
 
             Layout.fillWidth: true
             Layout.fillHeight: true
-            orientation: beside ? Qt.Horizontal : Qt.Vertical
+            store: mainLayout
+            contents: ({ "span": spanPane, "receivers": receiverPanel })
+            titles: ({ "span": "Spectrum and waterfall", "receivers": "Receiver dock" })
+            stripless: ["receivers"]
+        }
+    }
 
-            handle: Rectangle {
-                implicitHeight: 5
-                implicitWidth: 5
-                color: SplitHandle.pressed ? Theme.accentDim
-                       : SplitHandle.hovered ? Theme.border
-                       : Theme.panelSolid
+    // Kept in step with whether the receivers are in this window at all.
+    Binding {
+        target: mainLayout
+        property: "hidden"
+        value: receiverPlacement.shown && !receiverPlacement.poppedOut ? [] : ["receivers"]
+    }
 
-                // A grip in the middle, so the divider reads as something
-                // that moves rather than as a gap between two displays.
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: split.beside ? 1 : 36
-                    height: split.beside ? 36 : 1
-                    color: SplitHandle.pressed ? Theme.accent : Theme.inkOff
-                }
+    // What the two panes need, which the store holds as their floors and
+    // adds up into the window's own minimum below.
+    component PaneMinimum: QtObject {
+        required property string pane
+        property real needWidth: 0
+        property real needHeight: 0
+        readonly property real strip: mainHost ? mainHost.stripFor(pane) : 0
+        function report() {
+            mainLayout.setMinimum(pane, needWidth, needHeight + strip)
+        }
+        onNeedWidthChanged: report()
+        onNeedHeightChanged: report()
+        onStripChanged: report()
+        Component.onCompleted: report()
+    }
+
+    PaneMinimum { pane: "span"; needWidth: 320 + 12; needHeight: spanView.minimumHeight + 12 }
+    PaneMinimum {
+        pane: "receivers"
+        needWidth: receiverPanel.minimumWidth
+        needHeight: receiverPanel.minimumHeight
+    }
+
+    // The window never gets smaller than every pane at its minimum plus the
+    // chrome above them, so no pane is ever cut off.
+    minimumWidth: Math.max(mainLayout.minimumWidth, 480)
+    minimumHeight: mainLayout.minimumHeight + topBar.height + recordingStrip.height
+                   + controlRow.height
+
+    // Where the span waits until its frame takes it.
+    Item {
+        visible: false
+
+        Item {
+            id: spanPane
+            anchors.fill: parent
+
+            SpanView {
+                id: spanView
+                anchors.fill: parent
+                anchors.margins: 6
+                selection: tuneSelection
             }
 
-            Item {
-                SplitView.fillHeight: true
-                SplitView.fillWidth: true
-                SplitView.minimumHeight: 160
-                SplitView.minimumWidth: 320
+            // What the last click resolved to, over the bottom of the
+            // waterfall where the eye already is after clicking there.
+            Rectangle {
+                anchors.left: parent.left
+                anchors.bottom: parent.bottom
+                anchors.margins: 16
+                width: Math.min(parent.width - 32, readout.implicitWidth + close.width + 24)
+                height: readout.implicitHeight + 16
+                visible: tuneSelection.tuned
+                radius: Theme.radius + 2
+                color: Theme.panel
+                border.width: 1
+                border.color: Theme.border
 
-                SpanView {
-                    id: spanView
-                    anchors.fill: parent
-                    anchors.margins: 6
+                ClickReadout {
+                    id: readout
+                    anchors.left: parent.left
+                    anchors.right: close.left
+                    anchors.top: parent.top
+                    anchors.margins: 8
                     selection: tuneSelection
                 }
 
-                // What the last click resolved to, over the bottom of the
-                // waterfall where the eye already is after clicking there.
-                Rectangle {
-                    anchors.left: parent.left
-                    anchors.bottom: parent.bottom
-                    anchors.margins: 16
-                    width: Math.min(parent.width - 32, readout.implicitWidth + close.width + 24)
-                    height: readout.implicitHeight + 16
-                    visible: tuneSelection.tuned
-                    radius: Theme.radius + 2
-                    color: Theme.panel
-                    border.width: 1
-                    border.color: Theme.border
-
-                    ClickReadout {
-                        id: readout
-                        anchors.left: parent.left
-                        anchors.right: close.left
-                        anchors.top: parent.top
-                        anchors.margins: 8
-                        selection: tuneSelection
-                    }
-
-                    RButton {
-                        id: close
-                        anchors.right: parent.right
-                        anchors.top: parent.top
-                        anchors.margins: 4
-                        flat: true
-                        text: "dismiss"
-                        iconName: "x"
-                        ink: Theme.inkDim
-                        onClicked: tuneSelection.dismiss()
-                    }
-                }
-            }
-
-            // The dock. ReceiverPanel is parented here while it is docked.
-            Rectangle {
-                id: dock
-
-                visible: receiverPlacement.shown && !receiverPlacement.poppedOut
-                color: Theme.background
-                SplitView.minimumHeight: split.beside ? 0 : 240
-                SplitView.minimumWidth: split.beside ? 340 : 0
-                SplitView.preferredHeight: UiRules.dockHeight(receiverPlacement.dockHeight, split.height)
-                SplitView.preferredWidth: UiRules.dockWidth(receiverPlacement.dockWidth, split.width)
-
-                // What the operator dragged it to, kept for the next run. Only
-                // while they are dragging, so a window resized or a banner coming
-                // and going does not overwrite what they chose.
-                onHeightChanged: {
-                    if (visible && split.resizing && !split.beside)
-                        receiverPlacement.dockHeight = height
-                }
-                onWidthChanged: {
-                    if (visible && split.resizing && split.beside)
-                        receiverPlacement.dockWidth = width
+                RButton {
+                    id: close
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 4
+                    flat: true
+                    text: "dismiss"
+                    iconName: "x"
+                    ink: Theme.inkDim
+                    onClicked: tuneSelection.dismiss()
                 }
             }
         }

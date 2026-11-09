@@ -176,6 +176,7 @@
 #include "models/engine_start.h"
 #include "models/frequency_entry.h"
 #include "models/frequency_manager.h"
+#include "models/pane_layout_store.h"
 #include "models/receiver_placement_store.h"
 #include "models/recording_link.h"
 #include "models/settings.h"
@@ -908,11 +909,32 @@ int main(int argc, char* argv[])
     QObject::connect(&app, &QGuiApplication::aboutToQuit, &placement,
                      [&placement] { placement.writeDockHeight(); });
 
+    // The tiled layouts; models/pane_layout.h. A smoke run reads and writes
+    // none of them, so it photographs the defaults.
+    revenant::ui::PaneLayoutStore main_layout(
+        QString(revenant::ui::settings::kLayoutMain), revenant::ui::default_main_tree(),
+        revenant::ui::main_tree_panes(), !smoke);
+    revenant::ui::PaneLayoutStore receiver_layout(
+        QString(revenant::ui::settings::kLayoutReceivers), revenant::ui::default_receiver_tree(),
+        revenant::ui::receiver_tree_panes(), !smoke);
+    revenant::ui::PaneLayoutStore span_layout(
+        QString(revenant::ui::settings::kLayoutSpan), revenant::ui::default_span_tree(),
+        revenant::ui::span_tree_panes(), !smoke);
+    QObject::connect(&app, &QGuiApplication::aboutToQuit, &app,
+                     [&main_layout, &receiver_layout, &span_layout] {
+                         main_layout.commit();
+                         receiver_layout.commit();
+                         span_layout.commit();
+                     });
+
     // Before the engine, so it outlives every binding that reads it.
     revenant::ui::HdrOutput hdr_output;
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("receiverPlacement"), &placement);
+    engine.rootContext()->setContextProperty(QStringLiteral("mainLayout"), &main_layout);
+    engine.rootContext()->setContextProperty(QStringLiteral("receiverLayout"), &receiver_layout);
+    engine.rootContext()->setContextProperty(QStringLiteral("spanLayout"), &span_layout);
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
     // The engine owns and deletes the provider; the shelf it reads is shared.
     engine.addImageProvider(QStringLiteral("decoded"),

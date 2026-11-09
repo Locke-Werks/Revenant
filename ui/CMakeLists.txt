@@ -247,6 +247,8 @@ qt_add_executable(revenant_ui
     models/receiver_palette.h
     models/receiver_placement.h
     models/receiver_placement_store.h
+    models/pane_layout.h
+    models/pane_layout_store.h
     models/receiver_rack.h
     models/open_source_link.cpp
     models/front_end_link.cpp
@@ -341,6 +343,10 @@ qt_add_qml_module(revenant_ui
     VERSION 1.0
     QML_FILES
         qml/Main.qml
+        qml/dock/PaneHost.qml
+        qml/dock/PaneNode.qml
+        qml/dock/PaneFrame.qml
+        qml/dock/PaneSplitter.qml
         qml/Theme.qml
         qml/Plate.qml
         qml/PinPlate.qml
@@ -806,6 +812,7 @@ if(REVENANT_UI_TESTS)
             tests/test_receiver_match.cpp
             tests/test_receiver_palette.cpp
             tests/test_receiver_placement.cpp
+            tests/test_pane_layout.cpp
             tests/test_radio_memory.cpp
             tests/test_receiver_rack.cpp
             tests/test_receiver_scroll.cpp

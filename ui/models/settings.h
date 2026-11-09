@@ -104,6 +104,13 @@ inline constexpr QLatin1StringView kReceiversShown{"receivers/shown"};
 inline constexpr QLatin1StringView kReceiversDockHeight{"receivers/dockHeight"};
 inline constexpr QLatin1StringView kReceiversDockWidth{"receivers/dockWidth"};
 
+// The tiled layouts, in models/pane_layout.h's settings form: the main
+// window's span and receivers, the receivers' rack, receiver and sections, and
+// the span's spectrum over its waterfall.
+inline constexpr QLatin1StringView kLayoutMain{"layout/main"};
+inline constexpr QLatin1StringView kLayoutReceivers{"layout/receivers"};
+inline constexpr QLatin1StringView kLayoutSpan{"layout/span"};
+
 // The pins on either end of the span displays' colour map, and the levels
 // they were pinned at. Remembered because the job a pin does, comparing
 // captures, spans sessions; see models/scale_settings.h.

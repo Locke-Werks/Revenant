@@ -301,6 +301,9 @@ inline constexpr std::array kKeyActions{
     KeyAction{"window.pop", "pop the receivers out or dock them", "panels",
               "vfo rack window undock float separate screen", {"Ctrl+Shift+W", ""},
               KeyContext::Window, kNeedsNothing, "window.pop", ""},
+    KeyAction{"window.reset_layout", "reset the pane layout", "panels",
+              "panes tiles split arrange default restore workspace", {"", ""},
+              KeyContext::Window, kNeedsNothing, "window.reset_layout", ""},
 
     // Finding the rest.
     KeyAction{"palette.open", "open the command palette", "help", "search commands find",

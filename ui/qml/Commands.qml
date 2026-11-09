@@ -145,6 +145,11 @@ Item {
         "memory.save": () => frequencyManager.addFromReceiver(""),
         "window.receivers": () => commands.mainWindow.toggleReceivers(),
         "window.pop": () => commands.mainWindow.popReceivers(),
+        "window.reset_layout": () => {
+            mainLayout.reset()
+            receiverLayout.reset()
+            spanLayout.reset()
+        },
         "palette.open": () => commands.openPalette(""),
         "keymap.open": () => commands.openKeyMap()
     })

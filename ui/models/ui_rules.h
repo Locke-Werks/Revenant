@@ -39,6 +39,7 @@
 #include "models/level_meter.h"
 #include "models/mode_choice.h"
 #include "models/receiver_palette.h"
+#include "models/pane_layout.h"
 #include "models/receiver_placement.h"
 #include "models/receiver_rack.h"
 #include "models/ruler.h"
@@ -54,6 +55,9 @@ class UiRules : public QObject {
     Q_OBJECT
     QML_ELEMENT
     QML_SINGLETON
+
+    // The border between two tiled panes; models/pane_layout.h.
+    Q_PROPERTY(double paneHandle READ paneHandle CONSTANT)
 
 public:
     explicit UiRules(QObject* parent = nullptr) : QObject(parent) {}
@@ -453,6 +457,8 @@ public:
     {
         return dock_beside(width, height);
     }
+
+    [[nodiscard]] double paneHandle() const { return kPaneHandle; }
 
     [[nodiscard]] Q_INVOKABLE double dockWidth(double remembered, double available) const
     {

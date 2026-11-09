@@ -34,6 +34,21 @@ ColumnLayout {
     readonly property double drawFloorDb: spectrum.drawFloorDb
     readonly property double drawCeilingDb: spectrum.drawCeilingDb
 
+    // The height the spectrum and the waterfall share, which the operator
+    // divides by dragging the top of the ruler; spanLayout is a two-pane tree
+    // in models/pane_layout.h, so each keeps its minimum. The ruler stands in
+    // for the border, so its width is counted back into the length.
+    readonly property real shared: Math.max(0, height - bandBar.height - spanRuler.height
+                                            - timeShift.height)
+    readonly property var shares: (spanLayout.revision,
+                                   spanLayout.sizes("", shared + UiRules.paneHandle))
+
+    // The least the span can be drawn in without either display going under
+    // its minimum, which the main window's tiled layout holds it to.
+    readonly property real minimumHeight: bandBar.height + spanRuler.implicitHeight
+                                          + timeShift.height + spanLayout.minimumHeight
+                                          - UiRules.paneHandle
+
     Layout.fillWidth: true
     Layout.fillHeight: true
 
@@ -74,9 +89,8 @@ ColumnLayout {
     // ------------------------------------------------------------------
     Item {
         Layout.fillWidth: true
-        // A third of the span, now that the span is the window rather than
-        // whatever a column of rows left of it.
-        Layout.preferredHeight: Math.round(span.height * 0.34)
+        // A third of the span until the operator drags it; see shared above.
+        Layout.preferredHeight: Math.round(span.shares[0] || span.shared * 0.34)
 
         SpectrumItem {
             id: spectrum
@@ -422,10 +436,49 @@ ColumnLayout {
 
     // The ruler, between the two displays it labels. See Ruler.qml.
     Ruler {
+        id: spanRuler
         Layout.fillWidth: true
         Layout.preferredHeight: implicitHeight
         onPicked: (hz) => span.selection.takeTune(0, hz, 0.0, 0, 0, false, hz)
         onAdded: (hz) => span.selection.takeAdd(0, hz, 0.0, hz)
+
+        // The border between the spectrum and the waterfall: the ruler's top
+        // edge, dragged up or down. Drawn only while hovered or held.
+        MouseArea {
+            id: spanBorder
+
+            property real last: 0
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.topMargin: -3
+            height: 7
+            z: 10
+            hoverEnabled: true
+            preventStealing: true
+            cursorShape: Qt.SplitVCursor
+
+            onPressed: mouseEvent => last = mapToItem(span, 0, mouseEvent.y).y
+            onPositionChanged: mouseEvent => {
+                if (!pressed)
+                    return
+                const now = mapToItem(span, 0, mouseEvent.y).y
+                spanLayout.drag("", 0, now - last, span.shared + UiRules.paneHandle)
+                last = now
+            }
+            onReleased: spanLayout.commit()
+            onDoubleClicked: spanLayout.reset()
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                height: 1
+                visible: spanBorder.containsMouse || spanBorder.pressed
+                color: spanBorder.pressed ? Theme.accent : Theme.border
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -583,6 +636,7 @@ ColumnLayout {
 
     // Time-shift: the scrub bar, under the history it scrubs.
     TimeShiftBar {
+        id: timeShift
         previewTarget: waterfall
         Layout.fillWidth: true
         Layout.preferredHeight: visible ? implicitHeight : 0
