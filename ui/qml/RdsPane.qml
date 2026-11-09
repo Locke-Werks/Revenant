@@ -80,23 +80,31 @@ ColumnLayout {
                                     && engineLink.rdsRtSegments >= engineLink.rdsRtSegmentsTotal
     readonly property string livePs: psWhole ? engineLink.rdsPs : ""
     readonly property string liveRt: rtWhole ? engineLink.rdsRadioText : ""
-    onLivePsChanged: if (livePs.length > 0) heldPs = livePs
-    onLiveRtChanged: if (liveRt.length > 0) heldRt = liveRt
-    // Losing sync blanks the PI for a while, which is not a new station:
-    // only a different PI, or another receiver, lets go of the held text.
+    // Losing sync blanks the decoder (a "no subcarrier" pass resets it), and
+    // a weak signal can throw up a PI that is not the station's, so neither a
+    // blank nor a changed PI lets go of what is held. A different station is
+    // believed only once its own PS has come in whole: then the PI and PS move
+    // together, and the old station's RadioText goes with them.
     property string heldPi: ""
     readonly property string livePi: engineLink.rdsIdentity
-    onLivePiChanged: {
-        if (livePi.length === 0 || livePi === heldPi) {
+    onLivePsChanged: {
+        if (livePs.length === 0) {
             return
         }
-        if (heldPi.length > 0) {
-            heldPs = ""
-            heldRt = ""
+        if (livePi.length > 0 && livePi !== heldPi) {
+            if (heldPi.length > 0) {
+                heldRt = ""
+            }
+            heldPi = livePi
         }
-        heldPi = livePi
+        heldPs = livePs
     }
-    readonly property int receiver: engineLink.receiverId
+    onLiveRtChanged: if (liveRt.length > 0 && (heldPi.length === 0 || livePi === heldPi)) heldRt = liveRt
+    onLivePiChanged: if (heldPi.length === 0 && livePi.length > 0) heldPi = livePi
+    // Another receiver slot starts over. The slot, not the receiver id: the
+    // id changes when the engine rebuilds the receiver for the multiplex
+    // rate, which is the same station on the same receiver.
+    readonly property int receiver: engineLink.focusedSlot
     onReceiverChanged: { heldPs = ""; heldRt = ""; heldPi = "" }
     // Turning RDS off lets go as well; the text is not kept past the switch.
     readonly property bool wanted: engineLink.rdsWanted

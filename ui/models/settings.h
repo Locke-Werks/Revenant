@@ -39,10 +39,9 @@
 // except to fill a list." True until the frequency manager, which also reads
 // it once to migrate it.
 //
-// The RDS switch is not remembered either, and for a sharper reason: the
-// first poll BUILDS a decoder on the engine, which is shared state on a
-// machine other clients may be using. A switch that turned itself on at
-// launch would stand a decoder up behind a receiver nobody asked about.
+// The RDS switch is not remembered either: it starts on every launch
+// (ui/main.cpp), since the engine serves one user at a time and RDS is what
+// broadcast FM is for.
 
 #pragma once
 

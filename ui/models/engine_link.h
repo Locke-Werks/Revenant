@@ -4968,7 +4968,7 @@ private:
 
     // Written by the Qt thread, read by the supervisor.
     std::atomic<bool> rds_wanted_{false};
-    std::atomic<bool> rds_region_rbds_{false};
+    std::atomic<bool> rds_region_rbds_{true};
 
     // Supervisor thread only: the receiver the decoder was asked for and
     // the region last written, so a repeated write is not made. A

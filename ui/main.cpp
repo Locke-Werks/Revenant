@@ -892,7 +892,12 @@ int main(int argc, char* argv[])
     // The switch is sticky and asks nothing until the pane holds a receiver,
     // so setting it before the receiver is placed is the order the window's
     // own switch would take too.
-    if (startup_rds) {
+    // On by default outside a smoke run: the engine serves one user at a
+    // time, so a decoder stood up behind the focused wfm receiver is that
+    // user's, and RDS is what they want on broadcast FM. It asks nothing until
+    // a receiver can carry it. A smoke run keeps it to --rds so its checks
+    // stay what they asked for.
+    if (startup_rds || !smoke) {
         link.setRdsWanted(true);
     }
     if (startup_auto_dv) {
