@@ -267,6 +267,13 @@ ApplicationWindow {
                             + controlRow.height,
                             Screen.desktopAvailableHeight - 48)
 
+    // Windows applies a minimum only to the next resize, so a minimum that
+    // rises under a window already smaller (a pane's content got wider) would
+    // leave the panes squeezed. Grow the window to it instead, unless it is
+    // maximised or full screen, where the screen is the limit anyway.
+    onMinimumWidthChanged: if (visibility === Window.Windowed && width < minimumWidth) width = minimumWidth
+    onMinimumHeightChanged: if (visibility === Window.Windowed && height < minimumHeight) height = minimumHeight
+
     // The spectrum and the waterfall, which the layout above draws.
     SpanView {
         id: spanView

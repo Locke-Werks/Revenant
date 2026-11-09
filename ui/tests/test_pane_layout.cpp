@@ -37,13 +37,18 @@ TEST_CASE("lay_out shares what the handles leave", "[pane_layout]")
     REQUIRE_THAT(sizes[0], WithinAbs(100.0, 1e-9));
 }
 
-// Rejects: a short split that shrinks every child proportionally, cutting
-// all of them, rather than holding each at its minimum.
-TEST_CASE("lay_out below the minimums holds every child at its minimum", "[pane_layout]")
+// Rejects: a split shorter than its minimums that runs past its own edge,
+// which put the last pane off the window when a minimum rose at run time.
+TEST_CASE("lay_out below the minimums squeezes to fit and keeps collapsed bars", "[pane_layout]")
 {
-    const std::vector<double> sizes = lay_out({1.0, 1.0}, {200.0, 200.0}, 100.0);
-    REQUIRE(sizes[0] == 200.0);
-    REQUIRE(sizes[1] == 200.0);
+    const std::vector<double> sizes = lay_out({1.0, 1.0}, {200.0, 300.0}, 255.0);
+    REQUIRE_THAT(sizes[0] + sizes[1], WithinAbs(250.0, 1e-9));
+    REQUIRE_THAT(sizes[1] / sizes[0], WithinAbs(1.5, 1e-9));
+
+    const std::vector<double> held =
+        lay_out({1.0, 1.0}, {22.0, 300.0}, 127.0, {true, false});
+    REQUIRE(held[0] == 22.0);
+    REQUIRE_THAT(held[1], WithinAbs(100.0, 1e-9));
 }
 
 // Rejects: a drag that trades past the neighbour's minimum.

@@ -174,6 +174,30 @@ using PaneMinimums = std::map<std::string, PaneSize, std::less<>>;
     for (std::size_t i = 0; i < count; ++i) {
         sizes[i] = std::max(sizes[i], minimums[i]);
     }
+
+    // Minimums that add up to more than the room, which happens when a
+    // minimum rises after the window was sized (a long RDS line arriving):
+    // the children that can give are squeezed in proportion rather than the
+    // split running past its own edge, where its last pane would be cut off
+    // and its strip's buttons out of reach.
+    const double over = std::accumulate(sizes.begin(), sizes.end(), 0.0) - room;
+    if (over > 0.0) {
+        double giving = 0.0;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (!is_fixed(i)) {
+                giving += sizes[i];
+            }
+        }
+        if (giving > 0.0) {
+            const double keep = std::max(0.0, giving - over) / giving;
+            for (std::size_t i = 0; i < count; ++i) {
+                if (!is_fixed(i)) {
+                    sizes[i] *= keep;
+                }
+            }
+        }
+    }
+
     bool all_fixed = true;
     for (std::size_t i = 0; i < count; ++i) {
         all_fixed = all_fixed && is_fixed(i);

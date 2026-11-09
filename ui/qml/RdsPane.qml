@@ -67,6 +67,26 @@ ColumnLayout {
     // chips wear that receiver's colour, as the detail and decode sections do.
     readonly property color tint: Theme.receiverColour(engineLink.focusedSlot)
 
+    // The PS and RadioText as last received whole. The decoder's own strings
+    // change segment by segment as a new message arrives, which flickered
+    // half-old, half-new text; these move only when every segment of a
+    // message has come in. Until the first whole one, the partial is shown
+    // with its count. A new station (PI) or receiver starts over.
+    property string heldPs: ""
+    property string heldRt: ""
+    readonly property bool psWhole: engineLink.rdsPsSegmentsTotal > 0
+                                    && engineLink.rdsPsSegments >= engineLink.rdsPsSegmentsTotal
+    readonly property bool rtWhole: engineLink.rdsRtSegmentsTotal > 0
+                                    && engineLink.rdsRtSegments >= engineLink.rdsRtSegmentsTotal
+    readonly property string livePs: psWhole ? engineLink.rdsPs : ""
+    readonly property string liveRt: rtWhole ? engineLink.rdsRadioText : ""
+    onLivePsChanged: if (livePs.length > 0) heldPs = livePs
+    onLiveRtChanged: if (liveRt.length > 0) heldRt = liveRt
+    readonly property string station: engineLink.rdsIdentity + "|" + engineLink.receiverId
+    onStationChanged: { heldPs = ""; heldRt = "" }
+    readonly property string psText: heldPs.length > 0 ? heldPs : engineLink.rdsPs
+    readonly property string rtText: heldRt.length > 0 ? heldRt : engineLink.rdsRadioText
+
     RowLayout {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
@@ -162,9 +182,10 @@ ColumnLayout {
         }
 
         Label {
-            visible: engineLink.rdsDecoding && engineLink.rdsPs.length > 0
-            text: "“" + engineLink.rdsPs + "”"
-                  + (engineLink.rdsPsSegments < engineLink.rdsPsSegmentsTotal
+            visible: engineLink.rdsDecoding && rds.psText.length > 0
+            text: "“" + rds.psText + "”"
+                  + (rds.heldPs.length === 0
+                     && engineLink.rdsPsSegments < engineLink.rdsPsSegmentsTotal
                      ? "  " + engineLink.rdsPsSegments + "/"
                        + engineLink.rdsPsSegmentsTotal + " segments"
                      : "")
@@ -236,7 +257,7 @@ ColumnLayout {
         Layout.minimumWidth: 0
         visible: engineLink.rdsDecoding
                  && (engineLink.rdsProgrammeType.length > 0 || engineLink.rdsPtynShown
-                     || engineLink.rdsRadioText.length > 0)
+                     || rds.rtText.length > 0)
         spacing: 8
 
         Label {
@@ -290,9 +311,10 @@ ColumnLayout {
         Label {
             Layout.fillWidth: true
             Layout.minimumWidth: 0
-            visible: engineLink.rdsRadioText.length > 0
-            text: engineLink.rdsRadioText
-                  + (engineLink.rdsRtSegments < engineLink.rdsRtSegmentsTotal
+            visible: rds.rtText.length > 0
+            text: rds.rtText
+                  + (rds.heldRt.length === 0
+                     && engineLink.rdsRtSegments < engineLink.rdsRtSegmentsTotal
                      ? "   (" + engineLink.rdsRtSegments + "/"
                        + engineLink.rdsRtSegmentsTotal + " segments)"
                      : "")
