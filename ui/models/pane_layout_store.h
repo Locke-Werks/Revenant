@@ -140,6 +140,18 @@ public:
         if (hidden_ == hidden) {
             return;
         }
+        // A pane coming or going is a real change in what it holds, so its
+        // measured height starts again; see setMinimum.
+        for (const QString& pane : hidden_) {
+            if (!hidden.contains(pane)) {
+                forget_height(pane.toStdString());
+            }
+        }
+        for (const QString& pane : hidden) {
+            if (!hidden_.contains(pane)) {
+                forget_height(pane.toStdString());
+            }
+        }
         hidden_ = hidden;
         rebuild_view();
         emit treeChanged();
@@ -305,13 +317,15 @@ public:
         if (const auto found = floors_.find(name); found != floors_.end()) {
             floor = found->second;
         }
-        // The widest seen, so a label that grows and shrinks as it reads does
-        // not move a border back and forth. Not the tallest: a section opening
-        // and closing is a real change in what the pane holds, and a height
-        // kept from it squeezed every other pane for the rest of the run.
+        // The largest seen, both ways, so content that grows and shrinks as it
+        // runs, a list of calls or a label, does not move a border back and
+        // forth. Every move re-lays out every pane and redraws the span at
+        // its new size, and with auto DV filling the sections that was every
+        // frame. The height starts again when the pane is hidden or shown
+        // (setHidden), which is when what it holds really changes.
         PaneSize& held = needs_[name];
         const PaneSize wanted{std::max({floor.width, held.width, std::ceil(width)}),
-                              std::max(floor.height, std::ceil(height))};
+                              std::max({floor.height, held.height, std::ceil(height)})};
         if (held.width == wanted.width && held.height == wanted.height) {
             return;
         }
@@ -355,6 +369,14 @@ private:
             const double scale = scale_of(pane);
             minimums_[pane] = PaneSize{std::ceil(need.width * scale),
                                        std::ceil(need.height * scale) + kPaneStrip};
+        }
+    }
+
+    void forget_height(const std::string& pane)
+    {
+        if (const auto found = needs_.find(pane); found != needs_.end()) {
+            const auto floor = floors_.find(pane);
+            found->second.height = floor == floors_.end() ? 0.0 : floor->second.height;
         }
     }
 

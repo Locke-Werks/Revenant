@@ -151,9 +151,13 @@
 #include <utility>
 #include <vector>
 
+#include <QAccessible>
 #include <QFont>
 #include <QGuiApplication>
 #include <QIcon>
+#include <private/qguiapplication_p.h>
+#include <qpa/qplatformaccessibility.h>
+#include <qpa/qplatformintegration.h>
 #include <QImage>
 #include <QQuickWindow>
 #include <QObject>
@@ -191,6 +195,41 @@
 namespace settings = revenant::ui::settings;
 
 namespace {
+
+// THE ACCESSIBILITY STORM. Once any program on the machine listens to UI
+// Automation, Qt raises an event for every change of a label's text or a
+// control's value, and to raise it Windows asks Qt for the item's runtime id,
+// which Qt answers by walking the item tree down from the window. With a rack
+// of fifty receivers each moving a meter, the calls list and the captions
+// changing, that walk ran thousands of times a second on the GUI thread and
+// took the waterfall from 48 rows a second to 12 (sampled with cdb on
+// 2026-11-09: QAccessible::updateAccessibility, then
+// UiaRaiseAutomationPropertyChangedEvent, then QAccessibleQuickWindow::child
+// recursing). So those per-value events are not raised. Focus, structure,
+// selection and the rest still are, so a screen reader can still move
+// through the window; it is not told every time a meter moves.
+void filter_accessibility_update(QAccessibleEvent* event)
+{
+    switch (event->type()) {
+    case QAccessible::NameChanged:
+    case QAccessible::DescriptionChanged:
+    case QAccessible::ValueChanged:
+    case QAccessible::TextUpdated:
+    case QAccessible::TextInserted:
+    case QAccessible::TextRemoved:
+    case QAccessible::TextCaretMoved:
+    case QAccessible::TextAttributeChanged:
+    case QAccessible::TextColumnChanged:
+    case QAccessible::LocationChanged:
+        return;
+    default:
+        break;
+    }
+    if (QPlatformAccessibility* platform =
+            QGuiApplicationPrivate::platformIntegration()->accessibility()) {
+        platform->notifyAccessibilityUpdate(event);
+    }
+}
 
 // USAGE at the top of this file, for --help and an unknown option.
 constexpr const char* kUsage =
@@ -428,6 +467,7 @@ int main(int argc, char* argv[])
     }
 
     QGuiApplication app(argc, argv);
+    QAccessible::installUpdateHandler(filter_accessibility_update);
     QGuiApplication::setApplicationName(QStringLiteral("Revenant"));
     QGuiApplication::setOrganizationName(QStringLiteral("Locke Werks"));
 

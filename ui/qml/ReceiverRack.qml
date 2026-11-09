@@ -185,8 +185,10 @@ ColumnLayout {
             // every delegate, and auto DV opening or handing back one receiver
             // then rebuilt all of them on the GUI thread, 40 to 120 ms with
             // thirty in the rack, which stalled the span displays.
+            // None while the rack shows pills, which otherwise kept all 64
+            // strips binding every update behind them.
             Repeater {
-                model: 64
+                model: rack.pills ? 0 : 64
 
                 ReceiverStrip {
                     required property int index
