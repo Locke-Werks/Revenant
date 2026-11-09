@@ -42,23 +42,31 @@ Item {
     readonly property double drawFloorDb: spectrum.drawFloorDb
     readonly property double drawCeilingDb: spectrum.drawCeilingDb
 
-    readonly property alias spectrumPane: spectrumPane
-    readonly property alias waterfallPane: waterfallPane
-
     visible: false
 
+    readonly property alias spanPane: spanPane
+
     PaneContent {
-        id: spectrumPane
+        id: spanPane
 
         anchors.fill: parent
-        title: "Spectrum"
+        title: "Spectrum and waterfall"
         needWidth: 240
-        needHeight: bandBar.height + 60 + spanRuler.implicitHeight
+        needHeight: bandBar.height + spanRuler.implicitHeight + timeShift.implicitHeight + 120
+
+        // The height the spectrum and the waterfall divide between them,
+        // and the spectrum's part of it, which the operator sets by dragging
+        // the ruler's top edge. Each keeps at least 60.
+        readonly property real shared: Math.max(0, height - bandBar.height - spanRuler.height
+                                                - timeShift.height)
+        readonly property real spectrumHeight:
+            Math.round(Math.max(60, Math.min(shared - 60, shared * mainLayout.spanShare)))
 
         ColumnLayout {
             anchors.fill: parent
-            // Flush, so the ruler touches the display it labels.
+            // Flush, so the ruler touches both of the displays it labels.
             spacing: 0
+
 
             // ------------------------------------------------------------------
             // The band bar
@@ -94,7 +102,7 @@ Item {
             // ------------------------------------------------------------------
             Item {
                 Layout.fillWidth: true
-                Layout.fillHeight: true
+                Layout.preferredHeight: spanPane.spectrumHeight
 
                 SpectrumItem {
                     id: spectrum
@@ -445,21 +453,54 @@ Item {
                 Layout.preferredHeight: implicitHeight
                 onPicked: (hz) => span.selection.takeTune(0, hz, 0.0, 0, 0, false, hz)
                 onAdded: (hz) => span.selection.takeAdd(0, hz, 0.0, hz)
+
+                // The border between the spectrum and the waterfall: the
+                // ruler's top edge, dragged up or down. Drawn only while
+                // hovered or held. A double click puts it back at a third.
+                MouseArea {
+                    id: spanBorder
+
+                    property real startY: 0
+                    property real startShare: 0
+
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.topMargin: -3
+                    height: 7
+                    z: 10
+                    hoverEnabled: true
+                    preventStealing: true
+                    cursorShape: Qt.SplitVCursor
+
+                    onPressed: mouseEvent => {
+                        startY = mapToItem(spanPane, 0, mouseEvent.y).y
+                        startShare = mainLayout.spanShare
+                    }
+                    onPositionChanged: mouseEvent => {
+                        if (!pressed || spanPane.shared <= 120)
+                            return
+                        const moved = mapToItem(spanPane, 0, mouseEvent.y).y - startY
+                        const lowest = 60 / spanPane.shared
+                        mainLayout.spanShare = Math.max(lowest, Math.min(1 - lowest,
+                            startShare + moved / spanPane.shared))
+                    }
+                    onReleased: mainLayout.commit()
+                    onDoubleClicked: {
+                        mainLayout.spanShare = 0.34
+                        mainLayout.commit()
+                    }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: 1
+                        visible: spanBorder.containsMouse || spanBorder.pressed
+                        color: spanBorder.pressed ? Theme.accent : Theme.border
+                    }
+                }
             }
-        }
-    }
-
-    PaneContent {
-        id: waterfallPane
-
-        anchors.fill: parent
-        title: "Waterfall"
-        needWidth: 240
-        needHeight: 60 + timeShift.implicitHeight
-
-        ColumnLayout {
-            anchors.fill: parent
-            spacing: 0
 
             // ------------------------------------------------------------------
             // The waterfall

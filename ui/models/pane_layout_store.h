@@ -52,6 +52,7 @@ class PaneLayoutStore : public QObject {
     Q_PROPERTY(QVariantMap scales READ scales NOTIFY revisionChanged)
     Q_PROPERTY(double strip READ strip CONSTANT)
     Q_PROPERTY(double collapsedBar READ collapsedBar CONSTANT)
+    Q_PROPERTY(double spanShare READ spanShare WRITE setSpanShare NOTIFY spanShareChanged)
 
 public:
     PaneLayoutStore(QString key, PaneNode fallback, std::vector<std::string> panes, bool persist,
@@ -73,6 +74,10 @@ public:
                 stored_ = std::move(*read);
             }
             read_panes(store.value(key_ + QStringLiteral("Panes")).toString());
+            const double share = store.value(key_ + QStringLiteral("Span"), span_share_).toDouble();
+            if (share > 0.05 && share < 0.95) {
+                span_share_ = share;
+            }
         }
         rebuild_view();
     }
@@ -96,6 +101,21 @@ public:
     [[nodiscard]] QStringList hidden() const { return hidden_; }
     [[nodiscard]] double strip() const { return kPaneStrip; }
     [[nodiscard]] double collapsedBar() const { return kPaneCollapsedBar; }
+
+    // The spectrum's share of the height it and the waterfall divide inside
+    // the span pane. Written when the drag ends, like a border's.
+    [[nodiscard]] double spanShare() const { return span_share_; }
+
+    void setSpanShare(double share)
+    {
+        share = std::clamp(share, 0.05, 0.95);
+        if (share == span_share_) {
+            return;
+        }
+        span_share_ = share;
+        dirty_ = true;
+        emit spanShareChanged();
+    }
 
     [[nodiscard]] QStringList collapsed() const
     {
@@ -203,9 +223,38 @@ public:
         return true;
     }
 
+    // pane against edge of the whole area the view node at path covers: "" is
+    // the window. See move_pane_beside_area.
+    Q_INVOKABLE bool moveBeside(const QString& pane, const QString& path, const QString& edge)
+    {
+        const auto side = pane_edge(edge.toStdString());
+        const PaneNode* area = view_node(path);
+        if (!side || area == nullptr) {
+            return false;
+        }
+        // The stored node the view's came from, hidden panes and all, since
+        // that is the area the stored tree has to find again.
+        const PaneNode* stored_area = node_at(stored_, area->source);
+        if (stored_area == nullptr) {
+            return false;
+        }
+        std::vector<std::string> held;
+        collect_panes(*stored_area, held);
+        if (!move_pane_beside_area(stored_, pane.toStdString(), {held.begin(), held.end()}, *side)) {
+            return false;
+        }
+        rebuild_view();
+        write();
+        emit treeChanged();
+        bump();
+        return true;
+    }
+
     Q_INVOKABLE void reset()
     {
         stored_ = fallback_;
+        span_share_ = kDefaultSpanShare;
+        emit spanShareChanged();
         collapsed_.clear();
         scales_.clear();
         needs_ = floors_;
@@ -247,8 +296,8 @@ public:
     }
 
     // What a pane's content needs at a scale of one, title strip excluded.
-    // Only ever raises the pane's minimum for the rest of the run; see the
-    // note inside. A reset of the layout starts the measuring again.
+    // The width only ever rises for the rest of the run; see the note inside.
+    // A reset of the layout starts the measuring again.
     Q_INVOKABLE void setMinimum(const QString& pane, double width, double height)
     {
         const std::string name = pane.toStdString();
@@ -256,11 +305,13 @@ public:
         if (const auto found = floors_.find(name); found != floors_.end()) {
             floor = found->second;
         }
-        // The largest seen, so a label that grows and shrinks as it reads
-        // does not move a border back and forth.
+        // The widest seen, so a label that grows and shrinks as it reads does
+        // not move a border back and forth. Not the tallest: a section opening
+        // and closing is a real change in what the pane holds, and a height
+        // kept from it squeezed every other pane for the rest of the run.
         PaneSize& held = needs_[name];
         const PaneSize wanted{std::max({floor.width, held.width, std::ceil(width)}),
-                              std::max({floor.height, held.height, std::ceil(height)})};
+                              std::max(floor.height, std::ceil(height))};
         if (held.width == wanted.width && held.height == wanted.height) {
             return;
         }
@@ -280,6 +331,7 @@ public:
 signals:
     void treeChanged();
     void revisionChanged();
+    void spanShareChanged();
 
 private:
     [[nodiscard]] double scale_of(const std::string& pane) const
@@ -412,6 +464,7 @@ private:
             QSettings store;
             store.setValue(key_, QString::fromStdString(write_pane_tree(stored_)));
             store.setValue(key_ + QStringLiteral("Panes"), write_panes());
+            store.setValue(key_ + QStringLiteral("Span"), span_share_);
         }
     }
 
@@ -429,6 +482,8 @@ private:
     QStringList hidden_;
     int revision_ = 0;
     bool dirty_ = false;
+    static constexpr double kDefaultSpanShare = 0.34;
+    double span_share_ = kDefaultSpanShare;
 };
 
 }  // namespace revenant::ui

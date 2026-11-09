@@ -38,6 +38,7 @@ Item {
         sourceComponent: PaneFrame {
             host: nodeItem.host
             pane: nodeItem.node ? nodeItem.node.pane : ""
+            path: nodeItem.node ? nodeItem.node.path : ""
         }
     }
 
@@ -76,5 +77,22 @@ Item {
             width: nodeItem.horizontal ? UiRules.paneHandle : nodeItem.width
             height: nodeItem.horizontal ? nodeItem.height : UiRules.paneHandle
         }
+    }
+
+    // The part of this area a pane dropped against it will take, while one
+    // is aimed at it: from the window's edge, or with Shift held.
+    Rectangle {
+        readonly property string edge: nodeItem.host && nodeItem.node
+                                       && nodeItem.host.areaPath === nodeItem.node.path
+                                       ? nodeItem.host.areaEdge : ""
+        visible: edge !== ""
+        z: 400
+        x: edge === "right" ? parent.width * 0.75 : 0
+        y: edge === "bottom" ? parent.height * 0.75 : 0
+        width: edge === "left" || edge === "right" ? parent.width * 0.25 : parent.width
+        height: edge === "top" || edge === "bottom" ? parent.height * 0.25 : parent.height
+        color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.22)
+        border.width: 2
+        border.color: Theme.accent
     }
 }

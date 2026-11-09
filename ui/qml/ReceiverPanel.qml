@@ -68,6 +68,11 @@ Item {
         // what it needs.
         property bool folded: true
         property real foldedWidth: 0
+
+        // How much shorter than its natural height the content can go: the
+        // preferred height of its log, table or image less that part's own
+        // minimum. Those scroll or scale; nothing else in the pane gives.
+        property real flex: 0
         property Item measure: null
         property real fallbackWidth: 240
 
@@ -78,7 +83,7 @@ Item {
 
         anchors.fill: parent
         needWidth: Math.max(fallbackWidth, foldedWidth) + 2 * panel.inset
-        needHeight: (measure ? measure.implicitHeight : 0) + 2 * panel.inset
+        needHeight: Math.max(0, (measure ? measure.implicitHeight : 0) - flex) + 2 * panel.inset
         onFoldedChanged: take()
 
         Connections {
@@ -143,6 +148,7 @@ Item {
         paneShown: decode.shown
         measure: decode
         folded: decode.compact
+        flex: decode.idle ? 0 : 176 - 72
         DecodePane { id: decode; anchors.fill: parent; fills: true }
     }
 
@@ -151,6 +157,7 @@ Item {
         title: "Images"
         paneShown: image.hasImages
         measure: image
+        flex: 260 - 180
         ImagePane { id: image; anchors.fill: parent }
     }
 
@@ -159,6 +166,7 @@ Item {
         title: "Calls"
         paneShown: calls.shown
         measure: calls
+        flex: 160 - 72
         CallsPane { id: calls; anchors.fill: parent }
     }
 
@@ -167,6 +175,7 @@ Item {
         title: "Trunking"
         paneShown: trunk.shown
         measure: trunk
+        flex: 140 - 60
         TrunkPanel { id: trunk; anchors.fill: parent }
     }
 

@@ -77,7 +77,7 @@ TEST_CASE("move_pane keeps every pane exactly once", "[pane_layout]")
     PaneNode tree = default_main_tree();
     REQUIRE(move_pane(tree, "audio", "detail", PaneEdge::Bottom));
     REQUIRE(holds_exactly(tree, main_tree_panes()));
-    REQUIRE(move_pane(tree, "rack", "spectrum", PaneEdge::Left));
+    REQUIRE(move_pane(tree, "rack", "span", PaneEdge::Left));
     REQUIRE(holds_exactly(tree, main_tree_panes()));
 }
 
@@ -100,10 +100,10 @@ TEST_CASE("move_pane folds a same-direction split into its parent", "[pane_layou
 TEST_CASE("move_pane puts a receiver pane beside the spectrum", "[pane_layout]")
 {
     PaneNode tree = default_main_tree();
-    REQUIRE(move_pane(tree, "rack", "spectrum", PaneEdge::Right));
+    REQUIRE(move_pane(tree, "rack", "span", PaneEdge::Right));
     const PaneNode& top = tree.children[0];
     REQUIRE(top.horizontal);
-    REQUIRE(top.children[0].pane == "spectrum");
+    REQUIRE(top.children[0].pane == "span");
     REQUIRE(top.children[1].pane == "rack");
 }
 
@@ -152,12 +152,10 @@ TEST_CASE("build_view drops hidden panes and collapses what they leave", "[pane_
     }
     const auto view = build_view(tree, hidden);
     REQUIRE(view.has_value());
-    REQUIRE(view->children.size() == 2);
-    REQUIRE(view->children[0].pane == "spectrum");
-    REQUIRE(view->kept == std::vector<std::size_t>{0, 1});
+    REQUIRE(view->leaf());
+    REQUIRE(view->pane == "span");
 
-    hidden.insert("spectrum");
-    hidden.insert("waterfall");
+    hidden.insert("span");
     REQUIRE_FALSE(build_view(tree, hidden).has_value());
 }
 
@@ -193,4 +191,19 @@ TEST_CASE("drag_border skips a collapsed neighbour", "[pane_layout]")
     REQUIRE(after[0] == 230.0);
     REQUIRE(after[1] == 20.0);
     REQUIRE(after[2] == 170.0);
+}
+
+// Rejects: a pane that can only split another pane, never go down the side
+// of everything, which is the nesting the owner asked for.
+TEST_CASE("move_pane_beside_area puts a pane full height beside the rest", "[pane_layout]")
+{
+    PaneNode tree = default_main_tree();
+    std::vector<std::string> all;
+    collect_panes(tree, all);
+    REQUIRE(move_pane_beside_area(tree, "rack", {all.begin(), all.end()}, PaneEdge::Left));
+    REQUIRE(holds_exactly(tree, main_tree_panes()));
+    REQUIRE(tree.horizontal);
+    REQUIRE(tree.children.size() == 2);
+    REQUIRE(tree.children[0].pane == "rack");
+    REQUIRE_FALSE(tree.children[1].leaf());
 }

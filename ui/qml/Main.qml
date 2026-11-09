@@ -232,8 +232,7 @@ ApplicationWindow {
             store: mainLayout
             contents: {
                 const out = Object.assign({}, receiverPanel.contents)
-                out["spectrum"] = spanView.spectrumPane
-                out["waterfall"] = spanView.waterfallPane
+                out["span"] = spanView.spanPane
                 return out
             }
         }
@@ -259,9 +258,14 @@ ApplicationWindow {
 
     // The window never gets smaller than every pane at its minimum plus the
     // chrome above them, so no pane is ever cut off.
-    minimumWidth: Math.max(mainLayout.minimumWidth, 480)
-    minimumHeight: mainLayout.minimumHeight + topBar.height + recordingStrip.height
-                   + controlRow.height
+    // Never more than the screen, though: a minimum the screen cannot hold
+    // has Windows and Qt fight over the window's size every frame. When the
+    // panes need more than the screen, a pane's own scale is the way down.
+    minimumWidth: Math.min(Math.max(mainLayout.minimumWidth, 480),
+                           Screen.desktopAvailableWidth - 16)
+    minimumHeight: Math.min(mainLayout.minimumHeight + topBar.height + recordingStrip.height
+                            + controlRow.height,
+                            Screen.desktopAvailableHeight - 48)
 
     // The spectrum and the waterfall, which the layout above draws.
     SpanView {

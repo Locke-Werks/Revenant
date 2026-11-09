@@ -154,6 +154,8 @@ ColumnLayout {
     Rectangle {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
+        // Taking what its pane has spare, now that it has a pane of its own.
+        Layout.fillHeight: true
         Layout.minimumHeight: 60
         Layout.preferredHeight: 140
         radius: Theme.radius

@@ -426,6 +426,72 @@ inline bool move_pane(PaneNode& root, std::string_view pane, std::string_view ta
     return true;
 }
 
+namespace pane_detail {
+
+inline PaneNode* find_holding(PaneNode& node, const std::set<std::string, std::less<>>& panes)
+{
+    std::vector<std::string> held;
+    collect_panes(node, held);
+    if (std::set<std::string, std::less<>>(held.begin(), held.end()) == panes) {
+        return &node;
+    }
+    for (PaneNode& child : node.children) {
+        if (PaneNode* found = find_holding(child, panes)) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace pane_detail
+
+// Puts pane against the given edge of the whole area that holds exactly the
+// panes in area, which may be a single pane, a split, or the root: dropping
+// on the window's edge or with Shift held. This is how a pane goes full
+// height down one side of everything else. area may name the moved pane
+// itself; it is left out before the area is looked for.
+inline bool move_pane_beside_area(PaneNode& root, std::string_view pane,
+                                  std::set<std::string, std::less<>> area, PaneEdge edge)
+{
+    if (root.leaf() || pane_detail::find_leaf(root, pane) == nullptr) {
+        return false;
+    }
+    area.erase(std::string(pane));
+    if (area.empty()) {
+        return false;
+    }
+    if (!pane_detail::remove_leaf(root, pane)) {
+        return false;
+    }
+    normalise(root);
+    PaneNode* spot = pane_detail::find_holding(root, area);
+    if (spot == nullptr) {
+        return false;
+    }
+    const bool horizontal = edge == PaneEdge::Left || edge == PaneEdge::Right;
+    const bool first = edge == PaneEdge::Left || edge == PaneEdge::Top;
+    PaneNode moved = pane_leaf(std::string(pane));
+    PaneNode kept = std::move(*spot);
+    // The moved pane starts at a quarter of the area when that area is more
+    // than one pane, half when it is one, so a pane put down the side of
+    // everything does not take half the window.
+    const double share = kept.leaf() ? 1.0 : 3.0;
+    std::vector<PaneNode> pair;
+    std::vector<double> weights;
+    if (first) {
+        pair.push_back(std::move(moved));
+        pair.push_back(std::move(kept));
+        weights = {1.0, share};
+    } else {
+        pair.push_back(std::move(kept));
+        pair.push_back(std::move(moved));
+        weights = {share, 1.0};
+    }
+    *spot = pane_split(horizontal, std::move(pair), std::move(weights));
+    normalise(root);
+    return true;
+}
+
 // Whether the tree holds exactly the expected panes, each once. A layout read
 // back from the settings that does not is from another version, and the
 // default is used instead.
@@ -632,8 +698,11 @@ inline void store_view_sizes(PaneNode& stored_split, const PaneNode& view_split,
 // The panes, and how the two trees start.
 // ---------------------------------------------------------------------------
 
-inline constexpr std::string_view kPaneSpectrum = "spectrum";
-inline constexpr std::string_view kPaneWaterfall = "waterfall";
+// The spectrum and the waterfall are one pane, the span, at the owner's word
+// on 2026-11-09: they share the frequency axis and the ruler between them,
+// and one without the other under it reads as two different radios. Their
+// split is inside the pane (PaneLayoutStore.spanShare).
+inline constexpr std::string_view kPaneSpan = "span";
 inline constexpr std::string_view kPaneRack = "rack";
 inline constexpr std::string_view kPaneDetail = "detail";
 inline constexpr std::string_view kPaneRds = "rds";
@@ -661,7 +730,7 @@ inline constexpr double kPaneScaleHigh = 2.0;
 
 [[nodiscard]] inline std::vector<std::string> main_tree_panes()
 {
-    std::vector<std::string> out = {std::string(kPaneSpectrum), std::string(kPaneWaterfall)};
+    std::vector<std::string> out = {std::string(kPaneSpan)};
     for (std::string& pane : receiver_tree_panes()) {
         out.push_back(std::move(pane));
     }
@@ -685,14 +754,12 @@ inline constexpr double kPaneScaleHigh = 2.0;
                       {0.24, 0.46, 0.30});
 }
 
-// Today's look: the spectrum over the waterfall at a third of the span, over
-// the receivers at the share the dock always started at.
+// Today's look: the span over the receivers at the share the dock always
+// started at.
 [[nodiscard]] inline PaneNode default_main_tree()
 {
-    return pane_split(false,
-                      {pane_leaf(std::string(kPaneSpectrum)), pane_leaf(std::string(kPaneWaterfall)),
-                       default_receiver_tree()},
-                      {0.20, 0.38, 0.42});
+    return pane_split(false, {pane_leaf(std::string(kPaneSpan)), default_receiver_tree()},
+                      {0.58, 0.42});
 }
 
 // The floors each pane keeps whatever its content says, in logical pixels at
@@ -701,8 +768,7 @@ inline constexpr double kPaneScaleHigh = 2.0;
 [[nodiscard]] inline PaneMinimums default_pane_minimums()
 {
     PaneMinimums out = {
-        {std::string(kPaneSpectrum), {240.0, 80.0}},
-        {std::string(kPaneWaterfall), {240.0, 80.0}},
+        {std::string(kPaneSpan), {240.0, 200.0}},
         {std::string(kPaneRack), {120.0, 40.0}},
         {std::string(kPaneDetail), {280.0, 120.0}},
     };

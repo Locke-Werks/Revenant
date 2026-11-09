@@ -31,6 +31,28 @@ Item {
     // The pane being dragged, empty when none is.
     property string dragging: ""
 
+    // Shift is held while dragging: a drop goes against the whole area the
+    // hovered pane sits in rather than the pane alone.
+    property bool dragShift: false
+
+    // Where an area drop will land, while one is aimed: the view path of the
+    // area ("" is the whole window) and the edge. PaneNode shades it.
+    property string areaPath: "-"
+    property string areaEdge: ""
+
+    function aimArea(path, edge) {
+        areaPath = path
+        areaEdge = edge
+    }
+
+    function dropOnArea(path, edge) {
+        const st = store
+        const moved = dragging
+        aimArea("-", "")
+        // Later: the move rebuilds the frames, the dragged one among them.
+        Qt.callLater(() => st.moveBeside(moved, path, edge))
+    }
+
     readonly property alias marker: marker
 
     function titleOf(pane) {
@@ -42,6 +64,36 @@ Item {
         anchors.fill: parent
         host: host
         node: host.store ? host.store.tree : null
+    }
+
+    // The window's own edges: a pane dropped on one goes down that whole
+    // side, full height or full width. Only there while a pane is dragged.
+    Repeater {
+        model: ["left", "right", "top", "bottom"]
+
+        DropArea {
+            required property string modelData
+
+            readonly property real band: 28
+            z: 500
+            enabled: host.dragging !== ""
+            keys: [host.dragKey]
+            x: modelData === "right" ? host.width - band : 0
+            y: modelData === "bottom" ? host.height - band : 0
+            width: modelData === "left" || modelData === "right" ? band : host.width
+            height: modelData === "top" || modelData === "bottom" ? band : host.height
+
+            onEntered: host.aimArea("", modelData)
+            onExited: if (host.areaPath === "" && host.areaEdge === modelData) host.aimArea("-", "")
+            onDropped: host.dropOnArea("", modelData)
+
+            Rectangle {
+                anchors.fill: parent
+                visible: host.dragging !== ""
+                color: parent.containsDrag ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.35)
+                                           : Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.08)
+            }
+        }
     }
 
     Rectangle {

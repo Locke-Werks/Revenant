@@ -28,6 +28,14 @@ Item {
     property var host: null
     property string pane: ""
 
+    // This pane's place in the drawn tree, and the area it sits in, which a
+    // drop with Shift held goes against.
+    property string path: ""
+    readonly property string areaPath: {
+        const at = path.lastIndexOf(".")
+        return path === "" ? "" : (at < 0 ? "" : path.slice(0, at))
+    }
+
     readonly property var store: host ? host.store : null
     readonly property Item content: host && host.contents ? (host.contents[pane] || null) : null
 
@@ -65,7 +73,21 @@ Item {
         report()
     }
 
+    // On the next tick rather than now. A minimum reported in the middle of a
+    // layout pass re-lays out every pane, which resizes this one, which can
+    // change what its content needs, all inside one binding evaluation: a
+    // loop Qt breaks only after the frame is lost.
     function report() {
+        if (!reportQueued) {
+            reportQueued = true
+            Qt.callLater(sendReport)
+        }
+    }
+
+    property bool reportQueued: false
+
+    function sendReport() {
+        reportQueued = false
         if (content && store && pane !== "")
             store.setMinimum(pane, content.needWidth, content.needHeight)
     }
@@ -148,13 +170,20 @@ Item {
                 if (drag.active)
                     frame.host.dragging = frame.pane
             }
+            onPositionChanged: mouseEvent => {
+                if (frame.host)
+                    frame.host.dragShift = (mouseEvent.modifiers & Qt.ShiftModifier) !== 0
+            }
             onReleased: {
                 const marker = frame.host.marker
                 if (frame.host.dragging !== "" && marker.Drag.target)
                     marker.Drag.drop()
                 frame.host.dragging = ""
             }
-            onCanceled: frame.host.dragging = ""
+            onCanceled: {
+                frame.host.dragging = ""
+                frame.host.aimArea("-", "")
+            }
             onDoubleClicked: frame.store.toggleCollapsed(frame.pane)
             onWheel: wheelEvent => {
                 if (!(wheelEvent.modifiers & Qt.ControlModifier) || frame.bar) {
@@ -239,13 +268,34 @@ Item {
             return sides[0][0]
         }
 
-        onEntered: dragEvent => edge = nearest(dragEvent.x, dragEvent.y)
-        onPositionChanged: dragEvent => edge = nearest(dragEvent.x, dragEvent.y)
-        onExited: edge = ""
+        readonly property bool toArea: frame.host !== null && frame.host.dragShift
+
+        function aim(x, y) {
+            edge = nearest(x, y)
+            if (toArea)
+                frame.host.aimArea(frame.areaPath, edge)
+            else if (frame.host.areaPath !== "-")
+                frame.host.aimArea("-", "")
+        }
+
+        onEntered: dragEvent => aim(dragEvent.x, dragEvent.y)
+        onPositionChanged: dragEvent => aim(dragEvent.x, dragEvent.y)
+        onToAreaChanged: if (containsDrag) aim(drag.x, drag.y)
+        onExited: {
+            edge = ""
+            if (toArea)
+                frame.host.aimArea("-", "")
+        }
 
         // Later rather than now: the move rebuilds the frames, this one and
         // the one whose strip is still handling the release among them.
         onDropped: dropEvent => {
+            if (toArea) {
+                const side = edge
+                edge = ""
+                frame.host.dropOnArea(frame.areaPath, side)
+                return
+            }
             const store = frame.store
             const moved = frame.host.dragging
             const target = frame.pane
@@ -257,7 +307,7 @@ Item {
 
     // The half the moved pane will take.
     Rectangle {
-        visible: drop.containsDrag && drop.edge !== ""
+        visible: drop.containsDrag && drop.edge !== "" && !drop.toArea
         z: 10
         x: drop.edge === "right" ? parent.width / 2 : 0
         y: drop.edge === "bottom" ? parent.height / 2 : 0

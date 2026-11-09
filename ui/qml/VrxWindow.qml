@@ -33,8 +33,11 @@ Window {
     width: Math.min(1040, Screen.desktopAvailableWidth - 40)
     height: Math.min(680, Screen.desktopAvailableHeight - 60)
     // Never smaller than its panes at their minimums.
-    minimumWidth: Math.max(360, receiverLayout.minimumWidth + 8)
-    minimumHeight: Math.max(320, receiverLayout.minimumHeight + 8)
+    // Held inside the screen for the reason Main.qml gives.
+    minimumWidth: Math.min(Math.max(360, receiverLayout.minimumWidth + 8),
+                           Screen.desktopAvailableWidth - 16)
+    minimumHeight: Math.min(Math.max(320, receiverLayout.minimumHeight + 8),
+                            Screen.desktopAvailableHeight - 48)
     color: Theme.background
     transientParent: null
     visible: false
