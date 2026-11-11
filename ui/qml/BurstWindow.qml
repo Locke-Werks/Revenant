@@ -251,6 +251,7 @@ Window {
 
             Flickable {
                 id: lanesView
+                SmoothWheel { flick: lanesView }
                 anchors.fill: parent
                 anchors.margins: 1
                 contentWidth: width

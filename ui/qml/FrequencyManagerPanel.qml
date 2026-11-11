@@ -398,6 +398,7 @@ Item {
 
             ListView {
                 id: list
+                SmoothWheel { flick: list }
 
                 Layout.fillWidth: true
                 Layout.preferredHeight: panel.rowHeight * 11
@@ -754,6 +755,8 @@ Item {
 
                     // What would be added.
                     ListView {
+                        id: wheelView1
+                        SmoothWheel { flick: wheelView1 }
                         Layout.fillWidth: true
                         Layout.preferredHeight: 180
                         clip: true
@@ -795,6 +798,8 @@ Item {
 
                     // Every entry that will not be added, with its line and why.
                     ListView {
+                        id: wheelView2
+                        SmoothWheel { flick: wheelView2 }
                         Layout.fillWidth: true
                         Layout.preferredHeight: 180
                         clip: true

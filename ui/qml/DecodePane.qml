@@ -200,6 +200,7 @@ ColumnLayout {
 
         ListView {
             id: logView
+            SmoothWheel { flick: logView }
 
             // Following the newest line. Set false by the operator scrolling
             // away from it and true again by scrolling back or by "newest".

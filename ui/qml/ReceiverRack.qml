@@ -164,6 +164,8 @@ ColumnLayout {
 
     // The strips, scrolled when eight do not fit the window's height.
     Flickable {
+        id: wheelView1
+        SmoothWheel { flick: wheelView1 }
         Layout.fillWidth: true
         Layout.fillHeight: true
         visible: !rack.pills
@@ -207,6 +209,8 @@ ColumnLayout {
     // short form; the full sentence is the ruler's tooltip.
     // The pills. A click focuses the receiver, as a click on its strip does.
     Flickable {
+        id: wheelView2
+        SmoothWheel { flick: wheelView2 }
         Layout.fillWidth: true
         Layout.fillHeight: true
         visible: rack.pills

@@ -118,6 +118,7 @@ Popup {
 
         ListView {
             id: list
+            SmoothWheel { flick: list }
 
             Layout.fillWidth: true
             Layout.preferredHeight: Math.min(count, 12) * commandPalette.rowHeight

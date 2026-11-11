@@ -323,6 +323,7 @@ Rectangle {
                     // would otherwise sit off the bottom where nothing reaches.
                     Flickable {
                         id: settingsFlick
+                        SmoothWheel { flick: settingsFlick }
 
                         Layout.preferredWidth: settingsView.implicitWidth + 14
                         Layout.preferredHeight: Math.min(

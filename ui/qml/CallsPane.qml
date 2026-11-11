@@ -123,6 +123,8 @@ ColumnLayout {
         }
 
         ListView {
+            id: wheelView1
+            SmoothWheel { flick: wheelView1 }
             anchors.fill: parent
             anchors.margins: 4
             clip: true

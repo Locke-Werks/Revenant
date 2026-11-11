@@ -729,6 +729,7 @@ RowLayout {
 
                 Flickable {
                     id: flick
+                    SmoothWheel { flick: flick }
 
                     Layout.fillWidth: true
                     Layout.fillHeight: true

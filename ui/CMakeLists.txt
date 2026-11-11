@@ -344,6 +344,7 @@ qt_add_qml_module(revenant_ui
     VERSION 1.0
     QML_FILES
         qml/Main.qml
+        qml/SmoothWheel.qml
         qml/dock/PaneHost.qml
         qml/dock/PaneContent.qml
         qml/dock/PaneNode.qml

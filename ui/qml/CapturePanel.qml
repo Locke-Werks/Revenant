@@ -250,6 +250,7 @@ ColumnLayout {
 
     ListView {
         id: list
+        SmoothWheel { flick: list }
 
         visible: engineLink.captureHits.length > 0
         Layout.preferredWidth: 640

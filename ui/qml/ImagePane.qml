@@ -124,6 +124,7 @@ ColumnLayout {
 
             ListView {
                 id: strip
+                SmoothWheel { flick: strip }
 
                 anchors.fill: parent
                 anchors.margins: 4

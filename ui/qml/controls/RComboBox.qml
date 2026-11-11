@@ -80,6 +80,8 @@ ComboBox {
         padding: 1
 
         contentItem: ListView {
+            id: wheelView1
+            SmoothWheel { flick: wheelView1 }
             clip: true
             implicitHeight: contentHeight
             model: control.popup.visible ? control.delegateModel : null
