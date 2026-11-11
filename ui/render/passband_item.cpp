@@ -493,6 +493,16 @@ void PassbandItem::takeFrame()
 
     reduce_peak(frame.power_db, columns_);
 
+    // The span trace's smoothing, at its settings. A resize restarts the
+    // averages, since smooth_trace starts again on a state of another width.
+    const double dt = smooth_clock_.isValid() ? smooth_clock_.restart() / 1000.0 : 0.0;
+    if (!smooth_clock_.isValid()) {
+        smooth_clock_.start();
+    }
+    smooth_trace(smooth_state_, columns_, std::min(dt, 1.0),
+                 scale_settings_ == nullptr ? 0.0 : scale_settings_->spectrumSmoothing(),
+                 scale_settings_ == nullptr || scale_settings_->spectrumFloorSmoothing());
+
     // No headroom correction. peak_reduction_headroom_db exists because the
     // span reduces tens of bins into one column and the peak of a group runs
     // above the percentile the ends were measured from. A passband frame is
@@ -528,9 +538,20 @@ void PassbandItem::takeStatus()
     update();
 }
 
+void PassbandItem::setScaleSettings(ScaleSettings* settings)
+{
+    if (scale_settings_ == settings) {
+        return;
+    }
+    scale_settings_ = settings;
+    smooth_state_.clear();
+    emit scaleSettingsChanged();
+}
+
 void PassbandItem::dropFrame()
 {
     have_frame_ = false;
+    smooth_state_.clear();
     columns_.clear();
     levels_.clear();
     reduced_bins_ = 0;

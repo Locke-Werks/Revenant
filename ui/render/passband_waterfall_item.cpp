@@ -143,7 +143,9 @@ void PassbandWaterfallItem::setScaleSettings(ScaleSettings* settings)
         connect(scale_settings_, &ScaleSettings::waterfallContrastChanged, this,
                 &PassbandWaterfallItem::recolourAll);
         connect(scale_settings_, &ScaleSettings::waterfallPivotChanged, this,
-                &PassbandWaterfallItem::recolourAll);
+                &PassbandWaterfallItem::onPivotChanged);
+        connect(scale_settings_, &ScaleSettings::waterfallAutoPivotChanged, this,
+                &PassbandWaterfallItem::onAutoPivotChanged);
         connect(scale_settings_, &ScaleSettings::waterfallThemeChanged, this,
                 &PassbandWaterfallItem::recolourAll);
     }
@@ -210,6 +212,31 @@ void PassbandWaterfallItem::recolourAll()
     update();
 }
 
+void PassbandWaterfallItem::onPivotChanged()
+{
+    // With auto pivot on, the span offers its own pivot every row, and this
+    // display draws through the one it reads off its own rows instead.
+    if (autoPivotInForce()) {
+        return;
+    }
+    recolourAll();
+}
+
+void PassbandWaterfallItem::onAutoPivotChanged()
+{
+    auto_pivot_.reset();
+    recolourAll();
+}
+
+void PassbandWaterfallItem::rebuildHistogram()
+{
+    histogram_ = LevelHistogram{};
+    for (const std::uint16_t code : codes_) {
+        histogram_.add(code);
+    }
+    histogram_stale_ = false;
+}
+
 void PassbandWaterfallItem::onConnectionChanged()
 {
     // A new engine, or none: the receiver the rows came from is gone either
@@ -254,6 +281,7 @@ void PassbandWaterfallItem::clearRows()
     write_row_ = std::max(history_.height() - 1, 0);
     filled_rows_ = 0;
     std::fill(codes_.begin(), codes_.end(), kNoLevel);
+    histogram_stale_ = true;
     marks_.clear();
     marker_labels_.clear();
     const int tiles = (history_.height() + kTileRows - 1) / kTileRows;
@@ -285,6 +313,7 @@ void PassbandWaterfallItem::resizeRows(int rows)
     marks_.remap(plan, old_tall, tall);
     history_ = std::move(fresh);
     codes_ = std::move(codes);
+    histogram_stale_ = true;
     row_scales_ = std::move(scales);
     write_row_ = plan.write_row;
     filled_rows_ = plan.rows_kept;
@@ -309,6 +338,7 @@ void PassbandWaterfallItem::shiftRows(int pixels)
         shift_row(codes_.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(wide),
                   wide, pixels, kNoLevel);
     }
+    histogram_stale_ = true;
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
 }
 
@@ -332,6 +362,7 @@ void PassbandWaterfallItem::rescaleRows(const HistoryAxis& to, int columns)
                      wide, to, kNoLevel);
     }
     codes_ = std::move(codes);
+    histogram_stale_ = true;
     axis_ = to;
     if (wide != old_wide) {
         history_ = QImage(wide, tall, QImage::Format_RGBX8888);
@@ -453,10 +484,40 @@ void PassbandWaterfallItem::takeFrame()
 
     std::uint16_t* codes =
         codes_.data() + static_cast<std::size_t>(write_row_) * static_cast<std::size_t>(wide);
+    const bool track_levels = autoPivotInForce();
+    if (track_levels && histogram_stale_) {
+        rebuildHistogram();
+    } else if (track_levels) {
+        histogram_.remove_row(codes, wide);
+    }
     for (int c = 0; c < wide; ++c) {
         codes[c] = encode_level(columns_[static_cast<std::size_t>(c)]);
     }
+    if (track_levels && !histogram_stale_) {
+        histogram_.add_row(codes, wide);
+    } else {
+        histogram_stale_ = true;
+    }
     row_scales_[static_cast<std::size_t>(write_row_)] = scale;
+
+    // The span's auto pivot rule on this display's own rows and this row's
+    // ends, eased the same way. The history is recoloured only once the
+    // pivot has moved far enough to see, as on the span.
+    if (track_levels) {
+        const double dt = pivot_clock_.isValid() ? pivot_clock_.restart() / 1000.0 : 0.0;
+        if (!pivot_clock_.isValid()) {
+            pivot_clock_.start();
+        }
+        if (const std::optional<float> target =
+                auto_pivot(histogram_, passband_ends(scale, contrastInForce()))) {
+            const bool first = !auto_pivot_.started();
+            const float eased = auto_pivot_.step(*target, dt);
+            if (first || std::abs(eased - drawn_auto_pivot_) >= kAutoPivotRecolourTolerance) {
+                drawn_auto_pivot_ = eased;
+                recolourAll();
+            }
+        }
+    }
     colour_passband_row(codes, wide, scale, contrastInForce(), pivotInForce(),
                         reinterpret_cast<std::uint32_t*>(history_.scanLine(write_row_)));
     marks_.write(write_row_, QDateTime::currentMSecsSinceEpoch(), time_marker_seconds_);

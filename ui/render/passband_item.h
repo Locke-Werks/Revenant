@@ -141,6 +141,11 @@ class PassbandItem : public QQuickItem {
 
     Q_PROPERTY(revenant::ui::EngineLink* link READ link WRITE setLink NOTIFY linkChanged)
 
+    // The span display's settings, for its trace smoothing only, so the two
+    // traces settle at the same rate. Null draws unsmoothed.
+    Q_PROPERTY(revenant::ui::ScaleSettings* scaleSettings READ scaleSettings WRITE
+                   setScaleSettings NOTIFY scaleSettingsChanged)
+
     // True while an edge or the band is being dragged, so the window can
     // show the readout and suppress anything that would move the pane.
     Q_PROPERTY(bool dragging READ dragging NOTIFY dragChanged)
@@ -203,6 +208,9 @@ public:
 
     [[nodiscard]] EngineLink* link() const { return link_; }
     void setLink(EngineLink* link);
+
+    [[nodiscard]] ScaleSettings* scaleSettings() const { return scale_settings_; }
+    void setScaleSettings(ScaleSettings* settings);
 
     [[nodiscard]] bool dragging() const { return grab_ != PassbandGrab::None; }
     [[nodiscard]] QString readout() const { return readout_; }
@@ -269,6 +277,7 @@ protected:
 
 signals:
     void linkChanged();
+    void scaleSettingsChanged();
     void dragChanged();
     void readoutChanged();
     void selectedEdgeChanged();
@@ -338,6 +347,12 @@ private:
     std::vector<float> columns_;
     std::vector<float> levels_;
     std::size_t reduced_bins_ = 0;
+
+    // smooth_trace's averages, and the wall time between frames it decays
+    // over. A passband frame carries no sample index to measure that by.
+    ScaleSettings* scale_settings_ = nullptr;
+    std::vector<float> smooth_state_;
+    QElapsedTimer smooth_clock_;
     MapEnds ends_{};
     bool have_frame_ = false;
 

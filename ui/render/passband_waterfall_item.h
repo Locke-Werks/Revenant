@@ -50,6 +50,7 @@
 #include <span>
 #include <vector>
 
+#include <QElapsedTimer>
 #include <QImage>
 #include <QQuickItem>
 #include <QSize>
@@ -175,11 +176,25 @@ private:
                    ? 0.0F
                    : static_cast<float>(scale_settings_->waterfallContrast());
     }
+    [[nodiscard]] bool autoPivotInForce() const
+    {
+        return scale_settings_ != nullptr && scale_settings_->waterfallAutoPivot();
+    }
+    // With auto pivot on, this display's own pivot, read off its own rows,
+    // since the span's is a fraction of the span's map and its noise. Off,
+    // the operator's pivot as the span uses it.
     [[nodiscard]] float pivotInForce() const
     {
+        if (autoPivotInForce() && auto_pivot_.started()) {
+            return drawn_auto_pivot_;
+        }
         return scale_settings_ == nullptr ? kDefaultCurvePivot
                                           : static_cast<float>(scale_settings_->waterfallPivot());
     }
+
+    void onPivotChanged();
+    void onAutoPivotChanged();
+    void rebuildHistogram();
 
     [[nodiscard]] QSize deviceSize() const;
     [[nodiscard]] int readRow() const;
@@ -199,6 +214,15 @@ private:
     std::vector<PassbandRowScale> row_scales_;
 
     ScaleSettings* scale_settings_ = nullptr;
+
+    // The levels of every stored row, for the automatic pivot. Kept row by
+    // row as the ring writes, and counted again after anything that moves
+    // the codes wholesale.
+    LevelHistogram histogram_;
+    bool histogram_stale_ = true;
+    AutoPivotFollower auto_pivot_;
+    float drawn_auto_pivot_ = kDefaultCurvePivot;
+    QElapsedTimer pivot_clock_;
 
     int time_marker_seconds_ = kDefaultTimeMarkerSeconds;
     TimeMarkerRing marks_;

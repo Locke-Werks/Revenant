@@ -766,6 +766,7 @@ ColumnLayout {
             id: passband
             anchors.fill: parent
             link: engineLink
+            scaleSettings: ScaleSettings
             scaleLabelHeight: passbandScaleMetrics.height
             // The requested slots rather than the frame's echo, so a band
             // drawn under a drag or a slider does not lag it by a frame.
