@@ -805,6 +805,45 @@ ColumnLayout {
     // The engine's rolling capture, as its own flags. Edited and then applied,
     // because applying restarts the engine; models/capture_settings.h. An
     // engine somebody else started keeps the flags they gave it.
+    // Under every setting that restarts the engine, not only at the end of
+    // the section, so a change is never left unapplied off screen. Every copy
+    // applies the whole draft.
+    component RestartRow: RowLayout {
+        spacing: 8
+        visible: captureSettings.engineOurs
+
+        RButton {
+            text: "apply and restart the engine"
+            enabled: captureSettings.canApply
+            onClicked: captureSettings.apply()
+        }
+
+        RButton {
+            flat: true
+            text: "revert"
+            iconName: "undo"
+            label: "revert"
+            ink: Theme.inkDim
+            enabled: captureSettings.changed
+            onClicked: captureSettings.revert()
+        }
+
+        Label {
+            Layout.fillWidth: true
+            Layout.maximumWidth: 420
+            wrapMode: Text.WordWrap
+            // The change is saved only on apply, so say so in the accent
+            // colour while one is waiting rather than leave it to be noticed.
+            color: captureSettings.changed ? Theme.accent : Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+            text: (captureSettings.changed
+                   ? "Not applied yet: the engine needs a restart to use this. "
+                   : "")
+                  + "Restarting closes the source and the receivers; the radio used last "
+                  + "reopens. A recording that was playing does not."
+        }
+    }
+
     component CaptureField: RowLayout {
         id: field
 
@@ -880,6 +919,8 @@ ColumnLayout {
               + "48 kHz. Off runs every receiver at 48 kHz."
     }
 
+    RestartRow {}
+
     RCheckBox {
         text: "keep a rolling capture of the raw stream"
         enabled: captureSettings.engineOurs
@@ -927,34 +968,6 @@ ColumnLayout {
         onEdited: (text) => captureSettings.maxAge = text
     }
 
-    RowLayout {
-        spacing: 8
-        visible: captureSettings.engineOurs
+    RestartRow {}
 
-        RButton {
-            text: "apply and restart the engine"
-            enabled: captureSettings.canApply
-            onClicked: captureSettings.apply()
-        }
-
-        RButton {
-            flat: true
-            text: "revert"
-            iconName: "undo"
-            label: "revert"
-            ink: Theme.inkDim
-            enabled: captureSettings.changed
-            onClicked: captureSettings.revert()
-        }
-
-        Label {
-            Layout.fillWidth: true
-            Layout.maximumWidth: 420
-            wrapMode: Text.WordWrap
-            color: Theme.inkDim
-            font.pixelSize: Theme.sizeSmall
-            text: "Restarting closes the source and the receivers; the radio used last "
-                  + "reopens. A recording that was playing does not."
-        }
-    }
 }
