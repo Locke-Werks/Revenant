@@ -264,6 +264,7 @@ inline constexpr QLatin1StringView kCaptureEnabled{"capture/enabled"};
 inline constexpr QLatin1StringView kCaptureFolder{"capture/folder"};
 inline constexpr QLatin1StringView kCaptureRetain{"capture/retain"};
 inline constexpr QLatin1StringView kCaptureMaxAge{"capture/maxAge"};
+inline constexpr QLatin1StringView kHighRateAudio{"engine/highRateAudio"};
 
 // The span's lower display, waterfall, persistence or 3D, and the
 // persistence picture's decay time. models/span_display_settings.h.

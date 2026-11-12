@@ -45,6 +45,18 @@ TEST_CASE("an engine started with the capture off gets none of its flags")
     CHECK(line ==
           L"\"C:\\Program Files\\Revenant\\revenant-engine.exe\" --no-source --pace 1 --port 17690");
     CHECK(line.find(L"--capture") == std::wstring::npos);
+    CHECK(line.find(L"--audio-rate") == std::wstring::npos);
+}
+
+TEST_CASE("an engine started with 96 kHz audio gets the rate on its line")
+{
+    CaptureChoice choice = capture_on();
+    choice.enabled = false;
+    choice.audio_rate = 96'000;
+    const std::wstring line = engine_command_line(kExe, 17690, {}, choice);
+    CHECK(line ==
+          L"\"C:\\Program Files\\Revenant\\revenant-engine.exe\" --no-source --pace 1 --port 17690"
+          L" --audio-rate 96000");
 }
 
 TEST_CASE("an engine started with the capture on gets the folder and its limits")

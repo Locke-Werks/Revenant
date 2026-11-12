@@ -12,7 +12,7 @@ namespace {
 bool same(const CaptureChoice& a, const CaptureChoice& b)
 {
     return a.enabled == b.enabled && a.folder == b.folder && a.retain == b.retain &&
-           a.max_age == b.max_age;
+           a.max_age == b.max_age && a.audio_rate == b.audio_rate;
 }
 
 std::string trimmed(const QString& text) { return text.trimmed().toStdString(); }
@@ -47,6 +47,8 @@ CaptureChoice CaptureSettings::saved()
                         ? trimmed(store.value(settings::kCaptureRetain).toString())
                         : std::string(kCaptureRetainDefault);
     choice.max_age = trimmed(store.value(settings::kCaptureMaxAge).toString());
+    choice.audio_rate =
+        store.value(settings::kHighRateAudio, false).toBool() ? kHighAudioRate : 0U;
     return choice;
 }
 
@@ -76,6 +78,16 @@ void CaptureSettings::setRetain(const QString& retain)
 void CaptureSettings::setMaxAge(const QString& age)
 {
     draft_.max_age = trimmed(age);
+    emit draftChanged();
+}
+
+void CaptureSettings::setHighRateAudio(bool on)
+{
+    const std::uint32_t rate = on ? kHighAudioRate : 0U;
+    if (rate == draft_.audio_rate) {
+        return;
+    }
+    draft_.audio_rate = rate;
     emit draftChanged();
 }
 
@@ -129,6 +141,7 @@ void CaptureSettings::apply()
     store.setValue(settings::kCaptureFolder, QString::fromStdWString(draft_.folder));
     store.setValue(settings::kCaptureRetain, QString::fromStdString(draft_.retain));
     store.setValue(settings::kCaptureMaxAge, QString::fromStdString(draft_.max_age));
+    store.setValue(settings::kHighRateAudio, draft_.audio_rate == kHighAudioRate);
     saved_ = draft_;
     emit draftChanged();
     emit restartWanted();

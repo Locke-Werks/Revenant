@@ -28,6 +28,12 @@ struct CaptureChoice {
     // Empty means no limit, which is the engine's own default for both.
     std::string retain;
     std::string max_age;
+
+    // Not capture, but carried here because this struct is every flag the
+    // operator sets on an engine the window starts. Zero leaves the engine's
+    // own default of 48000. 96000 is what the fast data modes need: VDL Mode 4
+    // wants three samples a bit at 19200 bit/s.
+    std::uint32_t audio_rate = 0;
 };
 
 struct CaptureProblems {
@@ -131,6 +137,10 @@ struct CaptureProblems {
     if (!token_file.empty()) {
         command += L" --token-file ";
         command += quote_argument(token_file.wstring());
+    }
+    if (capture.audio_rate > 0) {
+        command += L" --audio-rate ";
+        command += std::to_wstring(capture.audio_rate);
     }
     if (capture.enabled && !capture_problems(capture).any()) {
         command += L" --capture ";

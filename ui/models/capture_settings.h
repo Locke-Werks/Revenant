@@ -13,12 +13,18 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include <QObject>
 #include <QString>
 
 #include "models/capture_choice.h"
 
 namespace revenant::ui {
+
+// The engine audio rate the settings switch selects. Off leaves the engine's
+// default of 48000.
+inline constexpr std::uint32_t kHighAudioRate = 96'000;
 
 class CaptureSettings : public QObject {
     Q_OBJECT
@@ -27,6 +33,7 @@ class CaptureSettings : public QObject {
     Q_PROPERTY(QString folder READ folder WRITE setFolder NOTIFY draftChanged)
     Q_PROPERTY(QString retain READ retain WRITE setRetain NOTIFY draftChanged)
     Q_PROPERTY(QString maxAge READ maxAge WRITE setMaxAge NOTIFY draftChanged)
+    Q_PROPERTY(bool highRateAudio READ highRateAudio WRITE setHighRateAudio NOTIFY draftChanged)
 
     Q_PROPERTY(QString folderProblem READ folderProblem NOTIFY draftChanged)
     Q_PROPERTY(QString retainProblem READ retainProblem NOTIFY draftChanged)
@@ -56,6 +63,8 @@ public:
     void setFolder(const QString& folder);
     void setRetain(const QString& retain);
     void setMaxAge(const QString& age);
+    [[nodiscard]] bool highRateAudio() const { return draft_.audio_rate == kHighAudioRate; }
+    void setHighRateAudio(bool on);
 
     [[nodiscard]] QString folderProblem() const;
     [[nodiscard]] QString retainProblem() const;

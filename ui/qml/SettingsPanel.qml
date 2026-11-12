@@ -800,7 +800,7 @@ ColumnLayout {
 
     Rule {}
 
-    SectionTitle { text: "capture" }
+    SectionTitle { text: "engine" }
 
     // The engine's rolling capture, as its own flags. Edited and then applied,
     // because applying restarts the engine; models/capture_settings.h. An
@@ -853,9 +853,31 @@ ColumnLayout {
         wrapMode: Text.WordWrap
         color: Theme.inkDim
         font.pixelSize: Theme.sizeSmall
-        text: "This window did not start the engine it is connected to, so whether that engine "
-              + "captures is set by whoever started it, with the flags it was given. These "
-              + "settings apply to an engine this window starts."
+        text: "This window did not start the engine it is connected to, so its audio rate and "
+              + "whether it captures are set by whoever started it, with the flags it was "
+              + "given. These settings apply to an engine this window starts."
+    }
+
+    // --audio-rate 96000 on the engine this window starts. Applied with the
+    // capture settings below, because both are engine flags read at start.
+    RCheckBox {
+        text: "96 kHz audio on every receiver"
+        enabled: captureSettings.engineOurs
+        checked: captureSettings.highRateAudio
+        onToggled: {
+            captureSettings.highRateAudio = checked
+            checked = Qt.binding(() => captureSettings.highRateAudio)
+        }
+    }
+
+    Label {
+        Layout.fillWidth: true
+        Layout.maximumWidth: 640
+        wrapMode: Text.WordWrap
+        color: Theme.inkDim
+        font.pixelSize: Theme.sizeSmall
+        text: "Needed for high speed protocols such as VDL Mode 4, which cannot decode at "
+              + "48 kHz. Off runs every receiver at 48 kHz."
     }
 
     RCheckBox {
