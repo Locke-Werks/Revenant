@@ -11,6 +11,8 @@
 
 #include "core/dsp/synth/channel.h"
 
+#include <lwdsp/primitives.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -402,12 +404,9 @@ struct PreparedTap
 
 std::uint64_t derive_seed(std::uint64_t master_seed, std::uint64_t domain)
 {
-    // SplitMix64 finaliser. Unsigned overflow is defined, which is why the
-    // whole mixer is written on uint64_t.
-    std::uint64_t state = master_seed + domain * 0x9E3779B97F4A7C15ULL;
-    state = (state ^ (state >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    state = (state ^ (state >> 27)) * 0x94D049BB133111EBULL;
-    return state ^ (state >> 31);
+    // The SplitMix64 finaliser now lives in lw-radio-dsp, which was ported
+    // from this function; it is the same mixer bit for bit.
+    return lwdsp::Rng::derive_seed(master_seed, domain);
 }
 
 // ---------------------------------------------------------------------------
