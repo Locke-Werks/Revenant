@@ -340,6 +340,7 @@ target_link_libraries(revenant_core PUBLIC
     GPUOpen::VulkanMemoryAllocator
     Threads::Threads
     revenant_device_lock
+    lwdsp::lwdsp
 )
 
 # WIN32 only, because the Linux and macOS audio backends arrive later and

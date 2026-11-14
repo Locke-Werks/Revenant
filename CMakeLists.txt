@@ -43,6 +43,24 @@ include(EmbedVersion)
 find_package(Vulkan REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 
+# lw-radio-dsp, MIT, Locke Werks: the DSP primitives that were ported out of
+# this tree into a library other projects share. Pinned to a commit rather than
+# a branch so a push there cannot change what this tree builds. Set
+# REVENANT_LWDSP_PATH to a local checkout to develop both at once.
+set(REVENANT_LWDSP_PATH "" CACHE PATH "Local lw-radio-dsp checkout to build instead of the pinned commit")
+include(FetchContent)
+if(REVENANT_LWDSP_PATH)
+    set(FETCHCONTENT_SOURCE_DIR_LW_RADIO_DSP "${REVENANT_LWDSP_PATH}" CACHE PATH "" FORCE)
+else()
+    unset(FETCHCONTENT_SOURCE_DIR_LW_RADIO_DSP CACHE)
+endif()
+FetchContent_Declare(lw_radio_dsp
+    GIT_REPOSITORY https://github.com/Locke-Werks/lw-radio-dsp.git
+    GIT_TAG 470fc297857b7dded80425d0c868add0d3aa655c
+)
+set(LWDSP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(lw_radio_dsp)
+
 add_subdirectory(core)
 
 # The headless requirement, checked rather than asserted.
