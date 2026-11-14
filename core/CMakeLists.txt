@@ -225,7 +225,6 @@ add_library(revenant_core STATIC
     dsp/comb_spectrum.cpp
     dsp/complex_ops.cpp
     dsp/convert.cpp
-    dsp/denormal_mode.cpp
     dsp/front_end_correction.cpp
     dsp/front_end_correction_reference.cpp
     dsp/impulse_excision_reference.cpp

@@ -54,28 +54,21 @@
 
 #pragma once
 
+#include <lwdsp/primitives.h>
+
 namespace revenant::dsp {
 
 // Sets flush-to-zero and denormals-are-zero for the calling thread, restoring
-// the previous mode on destruction.
-class ScopedDenormalFlush {
-public:
-    ScopedDenormalFlush();
-    ~ScopedDenormalFlush();
-
-    ScopedDenormalFlush(const ScopedDenormalFlush&) = delete;
-    ScopedDenormalFlush& operator=(const ScopedDenormalFlush&) = delete;
-    ScopedDenormalFlush(ScopedDenormalFlush&&) = delete;
-    ScopedDenormalFlush& operator=(ScopedDenormalFlush&&) = delete;
-
-private:
-    unsigned int saved_state_ = 0;
-    bool restore_ = false;
-};
+// the previous mode on destruction. The implementation was ported from this
+// tree into lw-radio-dsp and is used from there. On x86 it is the same MXCSR
+// read-modify-write that lived here. On AArch64 it sets FPCR.FZ, where this
+// tree used to do nothing and report false; Revenant does not build for that
+// architecture yet, so the difference reaches no shipped binary.
+using lwdsp::ScopedDenormalFlush;
 
 // True when the calling thread is currently flushing denormals. Exposed so a
 // test can assert the policy is actually in force rather than trusting that a
 // guard somewhere up the stack did its job.
-[[nodiscard]] bool denormals_are_flushed();
+using lwdsp::denormals_are_flushed;
 
 }  // namespace revenant::dsp
