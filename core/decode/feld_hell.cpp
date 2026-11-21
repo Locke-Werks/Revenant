@@ -83,12 +83,6 @@ void FeldHellDecoder::process(ConstRealSpan audio, std::vector<FeldHellColumn>& 
         if (t < 0) {
             continue;
         }
-        std::complex<float> acc{0.0F, 0.0F};
-        std::size_t at = history_at_;
-        for (std::size_t i = 0; i < n; ++i) {
-            acc += history_[at] * taps_[i];
-            at = (at + 1) % n;
-        }
         const auto slot = static_cast<std::int64_t>(std::floor(static_cast<double>(t) / samples_per_slot_));
         if (slot != slot_) {
             const double fresh = slot_count_ > 0 ? slot_sum_ / slot_count_ : 0.0;
@@ -126,6 +120,16 @@ void FeldHellDecoder::process(ConstRealSpan audio, std::vector<FeldHellColumn>& 
         // carrier of amplitude A reads A.
         const double within = static_cast<double>(t) / samples_per_slot_ - static_cast<double>(slot);
         if (within >= 0.25 && within < 0.75) {
+            // The filter runs only for the samples integrated, oldest first
+            // as before, in two straight runs instead of wrapping per tap.
+            std::complex<float> acc{0.0F, 0.0F};
+            const std::size_t head = n - history_at_;
+            for (std::size_t i = 0; i < head; ++i) {
+                acc += history_[history_at_ + i] * taps_[i];
+            }
+            for (std::size_t i = head; i < n; ++i) {
+                acc += history_[i - head] * taps_[i];
+            }
             slot_sum_ += 2.0 * std::abs(acc);
             ++slot_count_;
         }
