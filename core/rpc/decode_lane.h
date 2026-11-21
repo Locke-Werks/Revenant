@@ -42,6 +42,7 @@
 #include <format>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <system_error>
@@ -143,9 +144,18 @@ public:
     DecodeLane(DecodeLane&&) = delete;
     DecodeLane& operator=(DecodeLane&&) = delete;
 
-    // The engine's completion thread, and nothing else: this is the producer
-    // half of two SPSC rings. Copies the chunk, queues `work` to run on it,
-    // and returns. `wait_when_full` is the caller's reading of WHAT FULL
+    // The producer half of two SPSC rings, so producers take producers_ for
+    // the read of a free job through the write of the queued one. Copies the
+    // chunk, queues `work` to run on it, and returns.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "The engine's completion thread, and
+    // nothing else". Every wideband tap posts from a worker thread of its
+    // own (ServerImpl::add_wideband_decoded), so two taps, or a tap and a
+    // receiver, on one lane were two producers on an SPSC ring: a job's
+    // sample buffer reassigned by both, found by the page heap as a
+    // corrupted block in this function on 2026-11-20, once the client held a
+    // cw_wide tap per CW carrier. The lock is uncontended on a lane with one
+    // producer and held for one chunk's copy otherwise. `wait_when_full` is the caller's reading of WHAT FULL
     // MEANS above: true for an unthrottled Demand source.
     //
     // Returns false for a dropped chunk, and for a lane already stopped.
@@ -153,6 +163,7 @@ public:
               bool wait_when_full)
     {
         Job* job = nullptr;
+        std::unique_lock<std::mutex> producing(producers_, std::defer_lock);
         for (;;) {
             // Snapshot first, for the reason Scheduler::Impl::loop gives: a
             // return that lands between the read and the wait moves the
@@ -161,9 +172,11 @@ public:
             if (stopping_.load(std::memory_order_acquire)) {
                 return false;
             }
+            producing.lock();
             if (free_->read(std::span<Job*>(&job, 1)) == 1) {
                 break;
             }
+            producing.unlock();
             if (!wait_when_full) {
                 dropped_.fetch_add(1, std::memory_order_relaxed);
                 return false;
@@ -185,6 +198,7 @@ public:
 
         // Cannot fail: the queue holds as many as there are jobs.
         static_cast<void>(queued_->write(std::span<Job* const>(&job, 1)));
+        producing.unlock();
         posted_.fetch_add(1, std::memory_order_relaxed);
         signal_.fetch_add(1, std::memory_order_release);
         signal_.notify_one();
@@ -308,6 +322,7 @@ private:
     std::vector<std::unique_ptr<Job>> jobs_;
     std::unique_ptr<engine::SpscRing<Job*>> queued_;
     std::unique_ptr<engine::SpscRing<Job*>> free_;
+    std::mutex producers_;  // post()'s side of both rings; see post()
     std::thread thread_;
 
     std::atomic<std::uint64_t> signal_{0};

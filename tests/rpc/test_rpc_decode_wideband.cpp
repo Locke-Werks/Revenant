@@ -131,6 +131,52 @@ TEST_CASE("a wideband decoder hears the source's stream over the wire",
     harness.client().unsubscribe_decoded(subscribed->key, "test_wideband");
 }
 
+// The client's CW captions hold a cw_wide tap per carrier and drop and add
+// them while the source runs. Every tap posts to a decode lane from a thread
+// of its own, so several at once are several producers on one lane: before
+// DecodeLane::post took a lock this corrupted the heap within seconds, which
+// the page heap (gflags /p /enable revenant_rpc_tests.exe /full) shows on
+// every run and an ordinary heap on about one in three.
+TEST_CASE("cw_wide taps come and go while the source runs", "[gpu][rpc][decode][wideband]") {
+    REVENANT_NEEDS_GPU();
+    HarnessOptions options;
+    options.pace = 1.0;
+    options.samples = test::kSourceRate * 6;
+    Harness harness;
+    const auto ready = harness.open(options);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    const std::string name = "cw_wide";
+    std::vector<std::uint64_t> keys;
+    const auto add = [&](std::int64_t offset) {
+        auto subscribed = harness.client().subscribe_wideband_decoded(
+            name, offset, [](const rpc::DecodedMessage&) {}, [](const std::string&) {});
+        INFO(test::message_of(subscribed));
+        REQUIRE(subscribed.has_value());
+        keys.push_back(subscribed->key);
+    };
+    for (std::int64_t k = 0; k < 6; ++k) {
+        add(-300'000 + k * 100'000);
+    }
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+
+    for (int round = 0; round < 8; ++round) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        harness.client().unsubscribe_decoded(keys.front(), name);
+        keys.erase(keys.begin());
+        add(-250'000 + round * 70'000);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(harness.client().running().has_value());
+    for (const std::uint64_t key : keys) {
+        harness.client().unsubscribe_decoded(key, name);
+    }
+    static_cast<void>(harness.stop_engine());
+}
+
 // Every registered wideband decoder builds at its floor and at a faster tap,
 // refuses a slower one, and eats a chunk of each. DAB alone is held to its
 // one rate. The server picks the tap's rate; this is what make() has to
