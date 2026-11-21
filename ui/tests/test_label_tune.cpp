@@ -86,6 +86,8 @@ TEST_CASE("an analogue label sets its own mode and attaches nothing", "[label-tu
     }
     CHECK(label_tune(labelled(LabelKind::AnalogModulation, "AM"), 6'000.0).mode == "am");
     CHECK(label_tune(labelled(LabelKind::AnalogModulation, "WFM"), 180'000.0).mode == "wfm");
+    CHECK(label_tune(labelled(LabelKind::AnalogModulation, "FM + HD hybrid"), 400'000.0).mode ==
+          "wfm");
     CHECK(label_tune(labelled(LabelKind::AnalogModulation, "CW"), 60.0).mode == "cw");
 }
 

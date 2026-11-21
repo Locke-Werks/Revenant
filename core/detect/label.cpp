@@ -84,7 +84,26 @@ const char* label_kind_name(LabelKind kind) {
     return "unknown";
 }
 
+namespace {
+
+[[nodiscard]] TrackLabel label_track_unmarked(const Track& track);
+
+}  // namespace
+
 TrackLabel label_track(const Track& track) {
+    TrackLabel out = label_track_unmarked(track);
+    if (track.hd_hybrid && out.kind == LabelKind::AnalogModulation && out.name == "WFM") {
+        out.name = kHdHybridName;
+        out.hd_hybrid = true;
+        out.hd_lower_dbc = track.hd_lower_dbc;
+        out.hd_upper_dbc = track.hd_upper_dbc;
+    }
+    return out;
+}
+
+namespace {
+
+TrackLabel label_track_unmarked(const Track& track) {
     // Ahead of the refinement, which would call a bare carrier CW: a spur is
     // a carrier with no keying, and the name says why it is being cancelled.
     if (track.spur) {
@@ -151,5 +170,7 @@ TrackLabel label_track(const Track& track) {
     out.may_drive = true;
     return out;
 }
+
+}  // namespace
 
 }  // namespace revenant::detect

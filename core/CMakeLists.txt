@@ -211,6 +211,7 @@ add_library(revenant_core STATIC
     detect/detector.cpp
     detect/front_end.cpp
     detect/groups.cpp
+    detect/hd_hybrid.cpp
     detect/label.cpp
     detect/refine.cpp
     detect/tier_two.cpp

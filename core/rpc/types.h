@@ -745,6 +745,12 @@ struct DetectionLabel {
     // Top of the tree first; the first confirmed_depth are confirmed.
     std::vector<LabelStep> path;
     std::uint32_t confirmed_depth = 0;
+
+    // Hybrid digital sidebands on a wideband FM station, each one's power
+    // against the analogue signal in dB. See the schema.
+    bool hd_hybrid = false;
+    double hd_lower_dbc = 0.0;
+    double hd_upper_dbc = 0.0;
 };
 
 // One thing the wideband detector is tracking. See the long note on the

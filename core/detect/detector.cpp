@@ -1930,11 +1930,47 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
                  refine::kEmitterMemorySeconds *
                  static_cast<double>(std::max<dsp::SampleRate>(1, config_.source_rate))));
     mark_spurs(now);
+    mark_hd_hybrids(now);
 
     tracks_.clear();
     for (const Track& track : all_) {
         if (track.state != TrackState::Pending) {
             tracks_.push_back(track);
+        }
+    }
+}
+
+void Detector::mark_hd_hybrids(dsp::SampleIndex now) {
+    // The smoothing on the two levels: enough that one decision's noise does
+    // not move a hover card's figure by a decibel, little enough that a
+    // station raising its sidebands shows within a few seconds.
+    constexpr double kLevelSmoothing = 0.3;
+    for (Track& track : all_) {
+        if (track.state != TrackState::Live || track.last_detected != now ||
+            track.bandwidth < kHdMinimumTrackBandwidthHz) {
+            continue;
+        }
+        const HdSidebandReading reading = measure_hd_sidebands(
+            average_, floor_, bin_zero_hz_, bin_width_hz_,
+            static_cast<double>(track.center - config_.source_center));
+        if (!reading.measured) {
+            continue;
+        }
+        if (reading.hybrid) {
+            track.hd_fails = 0;
+            const double weight = track.hd_passes == 0 && !track.hd_hybrid ? 1.0 : kLevelSmoothing;
+            track.hd_lower_dbc += weight * (reading.lower_dbc - track.hd_lower_dbc);
+            track.hd_upper_dbc += weight * (reading.upper_dbc - track.hd_upper_dbc);
+            ++track.hd_passes;
+            if (track.hd_passes >= kHdConfirmDecisions) {
+                track.hd_hybrid = true;
+            }
+        } else {
+            track.hd_passes = 0;
+            ++track.hd_fails;
+            if (track.hd_fails >= kHdReleaseDecisions) {
+                track.hd_hybrid = false;
+            }
         }
     }
 }

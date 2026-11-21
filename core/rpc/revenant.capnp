@@ -1794,6 +1794,15 @@ struct DetectionLabel {
     # How many leading entries of path are confirmed. The rest, zero or one,
     # is the candidate.
     confirmedDepth @7 :UInt32;
+
+    # Issue #6: the name is "FM + HD hybrid" because the track carries hybrid
+    # digital sidebands either side of its analogue signal, and the two levels
+    # are each sideband's power against the analogue signal, dB. False and
+    # zero otherwise, which is also what a server built before these fields
+    # sends. Measured from the averaged spectrum only; nothing is decoded.
+    hdHybrid @8 :Bool;
+    hdSidebandLowerDbc @9 :Float64;
+    hdSidebandUpperDbc @10 :Float64;
 }
 
 struct LabelStep {

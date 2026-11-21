@@ -90,10 +90,14 @@ inline constexpr std::array<Row, 12> kProtocols = {{
 }};
 
 // Analogue modulations, by the names core/detect/label.cpp gives.
-inline constexpr std::array<Row, 6> kAnalogue = {{
+// "FM + HD hybrid" is WFM with digital sidebands beside it (issue #6). The
+// sidebands are identified, never decoded, so the click opens the analogue
+// signal and nothing else.
+inline constexpr std::array<Row, 7> kAnalogue = {{
     {"AM", "am", ""},
     {"NFM", "nfm", ""},
     {"WFM", "wfm", ""},
+    {"FM + HD hybrid", "wfm", ""},
     {"CW", "cw", ""},
     {"USB", "usb", ""},
     {"LSB", "lsb", ""},
@@ -214,6 +218,10 @@ template <std::size_t N>
     std::string out = std::format("{}, {}, {:.2f}", label.name, kind, label.confidence);
     if (label.symbol_rate_hz > 0.0) {
         out += std::format(", {:.0f} Bd", label.symbol_rate_hz);
+    }
+    if (label.hd_hybrid) {
+        out += std::format(", HD sidebands {:.1f} / {:.1f} dBc", label.hd_lower_dbc,
+                           label.hd_upper_dbc);
     }
     out += label.may_drive ? ", sets the receiver" : ", does not set the receiver";
     if (const std::string path = label_path(label); !path.empty()) {

@@ -5038,7 +5038,10 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                              track.snr_2500_db, track.probes, track.probes == 1 ? " " : "s",
                              tier_two_text(row),
                              label.name.empty() ? std::string()
-                                                : std::format("  [label {}]", label.name),
+                             : label.hd_hybrid
+                                 ? std::format("  [label {}, sidebands {:.1f} / {:.1f} dBc]",
+                                               label.name, label.hd_lower_dbc, label.hd_upper_dbc)
+                                 : std::format("  [label {}]", label.name),
                              path.empty() ? std::string() : std::format("  ({})", path));
             }
         }

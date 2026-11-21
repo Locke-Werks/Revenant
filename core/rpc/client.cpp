@@ -815,6 +815,11 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
         // says: a display indexes the path by it.
         out.label.confirmed_depth = std::min<std::uint32_t>(
             label.getConfirmedDepth(), static_cast<std::uint32_t>(out.label.path.size()));
+        out.label.hd_hybrid = label.getHdHybrid();
+        if (out.label.hd_hybrid) {
+            out.label.hd_lower_dbc = label.getHdSidebandLowerDbc();
+            out.label.hd_upper_dbc = label.getHdSidebandUpperDbc();
+        }
     }
     return out;
 }

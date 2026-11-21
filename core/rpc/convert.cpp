@@ -783,6 +783,9 @@ void write_detection(schema::Detection::Builder out, const detect::Track& in) {
         step.setConfirmed(label.path[i].confirmed);
     }
     wire.setConfirmedDepth(static_cast<std::uint32_t>(label.confirmed_depth));
+    wire.setHdHybrid(label.hd_hybrid);
+    wire.setHdSidebandLowerDbc(label.hd_lower_dbc);
+    wire.setHdSidebandUpperDbc(label.hd_upper_dbc);
 }
 
 void write_rds_bits_status(schema::RdsHealth::Builder out, const decode::RdsBitsStatus& in) {

@@ -127,6 +127,16 @@ struct TrackLabel {
     std::array<LabelStep, kMaxLabelPath> path{};
     std::size_t path_size = 0;
     std::size_t confirmed_depth = 0;
+
+    // ISSUE #6: a WFM label on a track carrying hybrid digital sidebands
+    // (Track::hd_hybrid, core/detect/hd_hybrid.h) is named kHdHybridName
+    // instead, and these carry each sideband's power against the analogue
+    // signal, dB. False and zero on every other label. The path keeps its
+    // WFM step: the refinement confirmed the modulation, and the sidebands
+    // are a measurement beside it rather than a deeper level of it.
+    bool hd_hybrid = false;
+    double hd_lower_dbc = 0.0;
+    double hd_upper_dbc = 0.0;
 };
 
 // The rule, in this order: the refinement's deepest confirmed node when it

@@ -109,6 +109,7 @@
 
 #include "core/characterise/catalogue.h"
 #include "core/characterise/characterise.h"
+#include "core/detect/hd_hybrid.h"
 #include "core/detect/refine.h"
 #include "core/detect/shape.h"
 #include "core/dsp/types.h"
@@ -532,6 +533,21 @@ struct Track {
     // removes energy; nothing is decoded.
     bool spur = false;
     bool lo_spur = false;
+
+    // HYBRID DIGITAL SIDEBANDS beside a wideband FM signal, from core/detect/
+    // hd_hybrid.h, measured at each decision this track was detected in and
+    // is at least kHdMinimumTrackBandwidthHz wide. hd_hybrid is set after
+    // kHdConfirmDecisions passing decisions in a row and cleared after
+    // kHdReleaseDecisions failing ones, so a fade on one side for one
+    // decision does not flicker the label. The two levels are each block's
+    // power against the analogue signal, dB, lightly smoothed, and mean
+    // nothing until hd_hybrid has been true once. Identification only:
+    // nothing is demodulated.
+    bool hd_hybrid = false;
+    double hd_lower_dbc = 0.0;
+    double hd_upper_dbc = 0.0;
+    std::uint32_t hd_passes = 0;
+    std::uint32_t hd_fails = 0;
 
     // The fine bins of the candidate last assigned, and the track's level
     // over them in each frame since, in dB, as a running mean and sum of
@@ -1419,6 +1435,9 @@ private:
     // Sets Track::spur and Track::lo_spur on every track, and notes narrow
     // carriers in spur_book_. The rule is on Track::spur.
     void mark_spurs(dsp::SampleIndex now);
+
+    // Each wide track detected at this decision, into Track::hd_*.
+    void mark_hd_hybrids(dsp::SampleIndex now);
 
     // Whether a spur this detector named, and has not withdrawn, sits at
     // this frequency: one presumed cancelled, whose dropping out is not a

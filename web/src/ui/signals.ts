@@ -105,7 +105,17 @@ const PROTOCOL_TUNES: Record<string, readonly [string, string]> = {
   CW: ["cw", "cw"],
   RDS: ["wfm", ""],
 };
-const ANALOGUE_MODES: Record<string, string> = { AM: "am", NFM: "nfm", WFM: "wfm", CW: "cw", USB: "usb", LSB: "lsb" };
+// "FM + HD hybrid" is WFM with digital sidebands identified beside it (issue
+// #6); the sidebands are never decoded, so it tunes as WFM.
+const ANALOGUE_MODES: Record<string, string> = {
+  AM: "am",
+  NFM: "nfm",
+  WFM: "wfm",
+  "FM + HD hybrid": "wfm",
+  CW: "cw",
+  USB: "usb",
+  LSB: "lsb",
+};
 // ui::kFamilySidebandMaxHz: a digital family this narrow fits a USB voice
 // channel, where its tones reach the audio.
 export const FAMILY_SIDEBAND_MAX_HZ = 3_000;
