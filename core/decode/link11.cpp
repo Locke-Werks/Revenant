@@ -312,16 +312,28 @@ bool Link11Decoder::search() {
         if (energy <= 0.0) {
             return 0.0;
         }
-        std::vector<double> pw(static_cast<std::size_t>(2 * span + 1));
-        for (int o = -span; o <= span; ++o) {
-            const Cplx step = std::polar(1.0, -kTwoPi * (kLink11DopplerHz + 2.0 * o) / fs_);
-            Cplx ph{1.0, 0.0};
-            Cplx acc{};
-            for (int i = 0; i < n; ++i) {
-                acc += static_cast<double>(at(p + i)) * ph;
-                ph *= step;
+        // Goertzel over every offset at once: only the power is needed, and
+        // it costs one real multiply per sample and offset where the direct
+        // correlation took a complex multiply-add and a phasor turn.
+        const auto bins = static_cast<std::size_t>(2 * span + 1);
+        std::vector<double> pw(bins);
+        std::vector<double> coeff(bins);
+        std::vector<double> s1(bins, 0.0);
+        std::vector<double> s2(bins, 0.0);
+        for (std::size_t b = 0; b < bins; ++b) {
+            const double hz = kLink11DopplerHz + 2.0 * (static_cast<double>(b) - span);
+            coeff[b] = 2.0 * std::cos(kTwoPi * hz / fs_);
+        }
+        for (int i = 0; i < n; ++i) {
+            const auto v = static_cast<double>(at(p + i));
+            for (std::size_t b = 0; b < bins; ++b) {
+                const double x = v + coeff[b] * s1[b] - s2[b];
+                s2[b] = s1[b];
+                s1[b] = x;
             }
-            pw[static_cast<std::size_t>(o + span)] = std::norm(acc);
+        }
+        for (std::size_t b = 0; b < bins; ++b) {
+            pw[b] = s1[b] * s1[b] + s2[b] * s2[b] - coeff[b] * s1[b] * s2[b];
         }
         const auto it = std::max_element(pw.begin(), pw.end());
         const auto k = static_cast<int>(it - pw.begin());
