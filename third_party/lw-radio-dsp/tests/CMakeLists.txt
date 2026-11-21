@@ -1,0 +1,5 @@
+file(GLOB LWDSP_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+add_executable(lwdsp_tests ${LWDSP_TEST_SOURCES})
+target_link_libraries(lwdsp_tests PRIVATE lwdsp::lwdsp)
+target_include_directories(lwdsp_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
+add_test(NAME lwdsp_tests COMMAND lwdsp_tests)
