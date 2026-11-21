@@ -87,7 +87,9 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -95,6 +97,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <span>
 #include <string>
@@ -3637,6 +3640,25 @@ public:
         return std::unique_ptr<ChunkDecoder>(new CwChunkDecoder(config, std::move(*built)));
     }
 
+    // The same decoder handing a line over at the first word space after its
+    // first character is `line_seconds` of stream old, as well as on idle and
+    // length. cw_wide's,
+    // so a station keying without pause shows text in seconds rather than
+    // once eighty characters have gone by.
+    [[nodiscard]] static Expected<std::unique_ptr<CwChunkDecoder>> make_paced(
+        dsp::SampleRate rate, double line_seconds) {
+        decode::CwBandConfig config;
+        config.rate = rate;
+        auto built = decode::CwBand::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the cw decoder"));
+        }
+        std::unique_ptr<CwChunkDecoder> out(new CwChunkDecoder(config, std::move(*built)));
+        out->max_line_samples_ =
+            static_cast<std::uint64_t>(line_seconds * static_cast<double>(rate));
+        return out;
+    }
+
     [[nodiscard]] Status consume(const DecoderChunk& chunk,
                                  std::vector<DecodedMessage>& out) override {
         if (auto shape = decoders_detail::require_audio(kName, chunk, config_.rate); !shape) {
@@ -3741,6 +3763,11 @@ private:
                 if (state.line.characters > 0) {
                     state.line.add_text(" ", at);
                     state.code += " /";
+                    // make_paced's rule, at a word space so no word is split.
+                    if (max_line_samples_ > 0 &&
+                        at > state.line.first_sample + max_line_samples_) {
+                        emit(chunk, c.stream, state, LineEnd::Length, out);
+                    }
                 }
                 continue;
             }
@@ -3816,6 +3843,114 @@ private:
     decoders_detail::StreamEnd end_;
     std::vector<decode::CwCharacter> characters_;
     std::map<std::uint32_t, StreamLine> lines_;
+    std::uint64_t max_line_samples_ = 0;  // zero: lines end on idle and length only
+};
+
+// ---------------------------------------------------------------------------
+// CW on the source's own stream
+// ---------------------------------------------------------------------------
+//
+// The cw decoder above, fed from a wideband tap instead of a receiver, so a
+// client can put text beside every keyed carrier the detector finds without
+// opening a receiver for each. The tap's offset puts the carrier at DC; this
+// narrows the complex stream to about +/-170 Hz with four one-pole low-passes,
+// mixes it up by the cw receiver's 700 Hz sidetone and keeps the real part,
+// which is the audio a cw receiver would deliver. The low-pass is what keeps
+// a neighbour's image, folded onto the same audio pitch by taking the real
+// part, out of it: 1400 Hz away it is down by about 50 dB.
+//
+// Lines end on idle and length as cw's do, and also at the first word space
+// once kLineSeconds old, so continuous keying reaches the client every few
+// seconds without a word cut in two. Messages are cw's,
+// under this decoder's name.
+class CwWideChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "cw_wide";
+    static constexpr dsp::SampleRate kMinimumRate = 8000;
+    static constexpr double kLineSeconds = 4.0;
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        // wideband_at_least's words; it is declared further down.
+        if (build.rate < kMinimumRate) {
+            return fail(std::format("the {} decoder reads a wideband tap at {} S/s or more, and "
+                                    "was asked to run at {}",
+                                    kName, kMinimumRate, build.rate));
+        }
+        auto inner = CwChunkDecoder::make_paced(build.rate, kLineSeconds);
+        if (!inner) {
+            return std::unexpected(inner.error());
+        }
+        return std::unique_ptr<ChunkDecoder>(
+            new CwWideChunkDecoder(build.rate, std::move(*inner)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        const std::size_t frames = chunk.frames();
+        audio_.resize(frames);
+        for (std::size_t i = 0; i < frames; ++i) {
+            dsp::Complex32 x(chunk.samples[2 * i], chunk.samples[2 * i + 1]);
+            for (dsp::Complex32& stage : poles_) {
+                stage += alpha_ * (x - stage);
+                x = stage;
+            }
+            audio_[i] = x.real() * static_cast<float>(nco_.real()) -
+                        x.imag() * static_cast<float>(nco_.imag());
+            nco_ *= step_;
+            if (++since_renorm_ == 1024) {
+                nco_ /= std::abs(nco_);
+                since_renorm_ = 0;
+            }
+        }
+        const DecoderChunk audio{
+            .samples = audio_, .channels = 1, .rate = rate_, .start = chunk.start};
+        const std::size_t before = out.size();
+        auto consumed = inner_->consume(audio, out);
+        rename(out, before);
+        return consumed;
+    }
+
+    void flush(std::vector<DecodedMessage>& out) override {
+        const std::size_t before = out.size();
+        inner_->flush(out);
+        rename(out, before);
+    }
+
+    void reset() override {
+        inner_->reset();
+        poles_.fill(dsp::Complex32{});
+        nco_ = {1.0, 0.0};
+        since_renorm_ = 0;
+    }
+
+private:
+    static constexpr double kPitchHz = 700.0;
+    static constexpr double kPoleHz = 400.0;
+
+    CwWideChunkDecoder(dsp::SampleRate rate, std::unique_ptr<CwChunkDecoder> inner)
+        : rate_(rate),
+          inner_(std::move(inner)),
+          alpha_(static_cast<float>(
+              1.0 - std::exp(-2.0 * std::numbers::pi * kPoleHz / static_cast<double>(rate)))),
+          step_(std::polar(1.0, 2.0 * std::numbers::pi * kPitchHz / static_cast<double>(rate))) {}
+
+    static void rename(std::vector<DecodedMessage>& out, std::size_t from) {
+        for (std::size_t i = from; i < out.size(); ++i) {
+            out[i].decoder = std::string(kName);
+        }
+    }
+
+    dsp::SampleRate rate_;
+    std::unique_ptr<CwChunkDecoder> inner_;
+    float alpha_;
+    std::array<dsp::Complex32, 4> poles_{};
+    std::complex<double> nco_{1.0, 0.0};
+    std::complex<double> step_;
+    std::uint32_t since_renorm_ = 0;
+    std::vector<float> audio_;
 };
 
 // ---------------------------------------------------------------------------
@@ -8331,6 +8466,10 @@ private:
          "Cospas-Sarsat 406 MHz second-generation beacons, C/S T.018: hex ID, beacon type, "
          "country, identity and encoded position. Reads a raw tap at 76800 or 153600 S/s",
          &SgbChunkDecoder::make, decoders_detail::kRawModes},
+        {CwWideChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "CW as cw, on the source's stream through a wideband tap at 8000 S/s or more with the "
+         "offset on the carrier: a line of text every few seconds while it keys",
+         &CwWideChunkDecoder::make, {}, CwWideChunkDecoder::kMinimumRate},
         {HrptChunkDecoder::kName, DecoderInput::ComplexBaseband,
          "NOAA HRPT, 665.4 kbit/s split-phase AVHRR: images of all five channels and a frame "
          "message a second. Reads a wideband tap at 2661600 S/s or more",

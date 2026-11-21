@@ -9,14 +9,19 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <complex>
+#include <numbers>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/dsp/synth/cw_mod.h"
 #include "core/error.h"
 #include "core/rpc/client.h"
 #include "core/rpc/decoders.h"
@@ -162,6 +167,70 @@ TEST_CASE("every wideband decoder builds at the rates a tap can deliver", "[rpc]
         }
     }
     CHECK(wideband >= 22);
+}
+
+// cw_wide reads a keyed carrier the tap has put near DC, as the detector's
+// centre leaves it, a few tens of hertz off, and hands its text over in
+// lines a few seconds long rather than waiting for eighty characters.
+TEST_CASE("cw_wide decodes a keyed carrier near DC in short lines", "[rpc][decode][wideband]") {
+    constexpr dsp::SampleRate kRate = 8'000;
+    siggen::CwModConfig mod;
+    mod.rate = kRate;
+    mod.tone_hz = 40;
+    mod.wpm = 20.0;
+    mod.amplitude = 0.5;
+    const std::string sent = "CQ CQ DE N0CALL N0CALL TEST TEST PARIS PARIS K";
+    auto iq = siggen::cw_render_analytic(mod, sent);
+    REQUIRE(iq.has_value());
+
+    // A neighbour 1.4 kHz below, where taking the real part would fold it
+    // onto the same pitch without the low-pass.
+    // Rendered at the same 40 Hz and mixed down, since the keyer takes only
+    // a positive tone.
+    auto neighbour = siggen::cw_render_analytic(mod, "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE");
+    REQUIRE(neighbour.has_value());
+    const double down = -2.0 * std::numbers::pi * 1400.0 / static_cast<double>(kRate);
+
+    std::vector<float> interleaved(iq->size() * 2);
+    for (std::size_t i = 0; i < iq->size(); ++i) {
+        const dsp::Complex32 other =
+            i < neighbour->size()
+                ? (*neighbour)[i] * std::polar(1.0F, static_cast<float>(
+                                                         std::fmod(down * static_cast<double>(i),
+                                                                   2.0 * std::numbers::pi)))
+                : dsp::Complex32{};
+        interleaved[2 * i] = (*iq)[i].real() + other.real();
+        interleaved[2 * i + 1] = (*iq)[i].imag() + other.imag();
+    }
+
+    const rpc::DecoderSpec* spec = rpc::find_decoder("cw_wide");
+    REQUIRE(spec != nullptr);
+    auto built = spec->make(rpc::DecoderBuild{kRate, "raw"});
+    REQUIRE(built.has_value());
+
+    std::vector<rpc::DecodedMessage> out;
+    constexpr std::size_t kChunk = 400;
+    for (std::size_t at = 0; at < iq->size(); at += kChunk) {
+        const std::size_t frames = std::min(kChunk, iq->size() - at);
+        const std::span<const float> part(interleaved.data() + 2 * at, 2 * frames);
+        REQUIRE((*built)->consume(rpc::DecoderChunk{part, 2, kRate, at}, out).has_value());
+    }
+    (*built)->flush(out);
+
+    std::string text;
+    for (const rpc::DecodedMessage& message : out) {
+        CHECK(message.decoder == "cw_wide");
+        if (!text.empty()) {
+            text += ' ';
+        }
+        text += message.text;
+    }
+    INFO(text);
+    CHECK(text.find("N0CALL") != std::string::npos);
+    CHECK(text.find("PARIS") != std::string::npos);
+    // About 15 s of keying at 20 WPM, so the four second rule has to have
+    // split it.
+    CHECK(out.size() >= 3);
 }
 
 TEST_CASE("the raw-tap decoders take the rates they say", "[rpc][decode]") {
