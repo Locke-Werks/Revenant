@@ -232,6 +232,19 @@ private:
     std::vector<Cplx> y_;         // filtered baseband, absolute base_ + i
     std::int64_t base_ = 0;
     std::int64_t next_ = 0;       // next search position
+
+    // Per waveform, the preamble symbol instants relative to an integral
+    // start (whole samples and fraction) and the conjugate symbol phasors,
+    // so the per-sample search costs no trigonometry.
+    struct Taps {
+        std::vector<std::int64_t> whole;
+        std::vector<double> frac;
+        std::vector<Cplx> derot;
+    };
+    std::array<Taps, 2> pre_taps_;
+    int coarse_ = 1;              // samples between coarse search points
+    std::int64_t coarse_at_ = -1; // position of the cached coarse metric
+    double coarse_m_ = 0.0;
 };
 
 }  // namespace revenant::decode

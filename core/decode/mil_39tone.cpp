@@ -540,6 +540,40 @@ bool Tone39Decoder::search() {
         if (energy <= 0.0) {
             return 0.0;
         }
+        // Coarse pass first: each tone mixed to zero, summed in blocks short
+        // enough to pass the whole offset range (under 0.3 dB at the edge),
+        // and the offsets searched on a 2 Hz grid (under 0.5 dB off peak).
+        // Well short of the threshold there, the full search cannot reach it.
+        const int block = std::max(1, static_cast<int>(fs_ / (8.0 * std::max(1, span))));
+        if (block > 1) {
+            const int nb = (n + block - 1) / block;
+            std::vector<Cplx> z(static_cast<std::size_t>(nb));
+            std::vector<double> coarse(static_cast<std::size_t>(span + 1), 0.0);
+            for (const auto& t : kPart1) {
+                const Cplx step = std::polar(1.0, -kTwoPi * tone39_frequency(t.tone) / fs_);
+                Cplx ph{1.0, 0.0};
+                std::fill(z.begin(), z.end(), Cplx{});
+                for (int i = 0; i < n; ++i) {
+                    z[static_cast<std::size_t>(i / block)] += static_cast<double>(at(p + i)) * ph;
+                    ph *= step;
+                }
+                for (int o = -span, j = 0; o <= span; o += 2, ++j) {
+                    const Cplx bstep = std::polar(1.0, -kTwoPi * o * block / fs_);
+                    Cplx bph{1.0, 0.0};
+                    Cplx acc{};
+                    for (const Cplx& v : z) {
+                        acc += v * bph;
+                        bph *= bstep;
+                    }
+                    coarse[static_cast<std::size_t>(j)] += std::norm(acc);
+                }
+            }
+            const double peak = *std::max_element(coarse.begin(), coarse.end());
+            if (peak / (0.5 * n * energy) < 0.7 * config_.detect_threshold) {
+                best_off = 0.0;
+                return peak / (0.5 * n * energy);
+            }
+        }
         std::vector<double> power(static_cast<std::size_t>(2 * span + 1), 0.0);
         for (int o = -span; o <= span; ++o) {
             double sum = 0.0;

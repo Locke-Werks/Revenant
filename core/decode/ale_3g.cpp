@@ -442,6 +442,20 @@ Ale3gDecoder::Ale3gDecoder(const Ale3gConfig& config, std::vector<float> taps)
     : config_(config), taps_(std::move(taps)) {
     fs_ = static_cast<double>(config.rate);
     sps_ = fs_ / kAle3gSymbolRate;
+    for (const auto w : {Ale3gWaveform::Bw0, Ale3gWaveform::Bw1}) {
+        const auto pre = ale3g_preamble(w);
+        auto& tp = pre_taps_[w == Ale3gWaveform::Bw0 ? 0 : 1];
+        for (std::size_t k = 0; k < pre.size(); ++k) {
+            const double x = static_cast<double>(k) * sps_;
+            const double whole = std::floor(x);
+            tp.whole.push_back(static_cast<std::int64_t>(whole));
+            tp.frac.push_back(x - whole);
+            tp.derot.push_back(std::polar(1.0, -std::numbers::pi / 4.0 * pre[k]));
+        }
+    }
+    // The preamble metric of a real burst falls by about 5% a quarter
+    // symbol off its peak, so points that far apart cannot both miss it.
+    coarse_ = std::max(1, static_cast<int>(std::floor(sps_ / 4.0)));
 }
 
 void Ale3gDecoder::reset() {
@@ -450,6 +464,8 @@ void Ale3gDecoder::reset() {
     y_.clear();
     base_ = 0;
     next_ = 0;
+    coarse_at_ = -1;
+    coarse_m_ = 0.0;
 }
 
 Ale3gDecoder::Cplx Ale3gDecoder::sample(double t) const {
@@ -468,6 +484,21 @@ double Ale3gDecoder::metric(Ale3gWaveform w, double t, double* freq) const {
     // without phase, normalised by the segment energies: 1 for a clean
     // preamble, 1/8 on average for noise.
     const auto pre = ale3g_preamble(w);
+    const auto& tp = pre_taps_[w == Ale3gWaveform::Bw0 ? 0 : 1];
+    const bool integral = t == std::floor(t);
+    const std::int64_t origin = static_cast<std::int64_t>(t) - base_;
+    const auto ny = static_cast<std::int64_t>(y_.size());
+    const auto at = [&](std::size_t k) -> Cplx {
+        if (!integral) {
+            return sample(t + static_cast<double>(k) * sps_);
+        }
+        const std::int64_t i = origin + tp.whole[k];
+        if (i < 0 || i + 1 >= ny) {
+            return {};
+        }
+        const double a = tp.frac[k];
+        return (1.0 - a) * y_[static_cast<std::size_t>(i)] + a * y_[static_cast<std::size_t>(i + 1)];
+    };
     constexpr int kSeg = 8;
     double num = 0.0;
     double den = 0.0;
@@ -481,8 +512,8 @@ double Ale3gDecoder::metric(Ale3gWaveform w, double t, double* freq) const {
         const auto tally = [&](double v) { (s < pre.size() / 2 ? e_first : e_last) += v; };
         for (int j = 0; j < kSeg; ++j) {
             const std::size_t k = s + static_cast<std::size_t>(j);
-            const Cplx y = sample(t + static_cast<double>(k) * sps_);
-            acc += y * std::polar(1.0, -std::numbers::pi / 4.0 * pre[k]);
+            const Cplx y = at(k);
+            acc += y * tp.derot[k];
             e += std::norm(y);
         }
         tally(e);
@@ -584,6 +615,27 @@ bool Ale3gDecoder::step(std::vector<Ale3gBurst>& out) {
         return false;
     }
     const auto t = static_cast<double>(next_);
+    if (coarse_ > 1) {
+        // Coarse pass: when the metric at both ends of a stretch of coarse_
+        // samples is well under the threshold, no sample between reaches it.
+        const auto both = [&](std::int64_t p) {
+            if (p == coarse_at_) {
+                return coarse_m_;
+            }
+            const auto tp = static_cast<double>(p);
+            const double v = std::max(metric(Ale3gWaveform::Bw0, tp, nullptr), metric(Ale3gWaveform::Bw1, tp, nullptr));
+            coarse_at_ = p;
+            coarse_m_ = v;
+            return v;
+        };
+        const double gate = 0.8 * config_.detect_threshold;
+        const std::int64_t far = next_ + coarse_;
+        if (static_cast<double>(far) + look + longest + 2.0 <= static_cast<double>(have) && both(next_) < gate &&
+            both(far) < gate) {
+            next_ = far;
+            return true;
+        }
+    }
     const double m0 = metric(Ale3gWaveform::Bw0, t, nullptr);
     const double m1 = metric(Ale3gWaveform::Bw1, t, nullptr);
     if (std::max(m0, m1) < config_.detect_threshold) {
