@@ -1,7 +1,7 @@
 # Single source of truth for the version. Everything else derives from it:
 # project(), the VERSIONINFO resource, and installer.toml when there is one.
 set(REVENANT_VERSION_MAJOR 0)
-set(REVENANT_VERSION_MINOR 6)
+set(REVENANT_VERSION_MINOR 7)
 set(REVENANT_VERSION_PATCH 0)
 
 set(REVENANT_VERSION "${REVENANT_VERSION_MAJOR}.${REVENANT_VERSION_MINOR}.${REVENANT_VERSION_PATCH}")
