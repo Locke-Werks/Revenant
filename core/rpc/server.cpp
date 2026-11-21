@@ -1283,10 +1283,12 @@ struct DecodedNode : std::enable_shared_from_this<DecodedNode> {
 
 // One decoder attached to one receiver, shared by every subscriber to it.
 //
-// The shape of AudioRoute with a decoder inside it. The sink callable
-// co-owns it, so a dispatch already in flight when the sink comes off still
+// The shape of AudioRoute with a decoder inside it. Its entry in a
+// DecodeFanout (or a wideband tap's callable) co-owns it, so a dispatch already in flight when the sink comes off still
 // finds live memory, and `owner` is cleared under `lock` so that such a
 // dispatch finds null rather than a server that has gone.
+struct DecodeFanout;
+
 struct DecodeRoute {
     DecodeRoute(engine::VrxId which, const DecoderSpec& what, engine::Demod demod)
         : vrx(which), spec(what), mode(engine::demod_name(demod)) {}
@@ -1309,6 +1311,12 @@ struct DecodeRoute {
 
     // The decode lane this decoder runs on. Loop thread only.
     std::shared_ptr<DecodeLane> lane;
+
+    // For a receiver route: what the lane runs for it, and the fan-out that
+    // carries the receiver's chunks to it with the other decoders on that
+    // receiver and lane. Loop thread only.
+    std::shared_ptr<const LaneWork> work;
+    std::shared_ptr<DecodeFanout> fanout;
 
     // Everything below is under this lock. The decode lane writes the
     // decoder's state and the nodes' queues; the loop thread adds and removes
@@ -1348,6 +1356,63 @@ struct DecodeRoute {
     // the loop thread, so the lane never asks the engine per message.
     double freq_lower_hz = 0.0;
     double freq_upper_hz = 0.0;
+};
+
+// Every decoder route on one receiver pinned to one lane, behind a single
+// audio sink, so the lane takes one job per chunk instead of one per
+// decoder. The list is copy on write: the loop thread swaps in a new one,
+// and the lane copies the pointer under the lock and runs the routes
+// without it, so a decoder busy for most of a second never holds up an
+// attach or a removal. A route taken off may still see the chunk already
+// in hand; it finds owner null, exactly as a queued job of its own did.
+struct DecodeFanout {
+    struct Entry {
+        std::shared_ptr<const LaneWork> work;
+        std::shared_ptr<DecodeRoute> route;  // keeps work's target alive
+    };
+    using List = std::vector<Entry>;
+
+    engine::AudioSinkId sink = 0;  // loop thread only
+
+    void add(std::shared_ptr<const LaneWork> work, std::shared_ptr<DecodeRoute> route) {
+        const std::scoped_lock held(lock);
+        auto next = std::make_shared<List>(list != nullptr ? *list : List{});
+        next->push_back(Entry{std::move(work), std::move(route)});
+        list = std::move(next);
+    }
+
+    // Returns whether any route is left.
+    bool remove(const DecodeRoute* route) {
+        const std::scoped_lock held(lock);
+        auto next = std::make_shared<List>(list != nullptr ? *list : List{});
+        std::erase_if(*next, [route](const Entry& e) { return e.route.get() == route; });
+        const bool left = !next->empty();
+        list = std::move(next);
+        return left;
+    }
+
+    void clear() {
+        const std::scoped_lock held(lock);
+        list.reset();
+    }
+
+    void run(const engine::AudioChunk& chunk) const {
+        std::shared_ptr<const List> now;
+        {
+            const std::scoped_lock held(lock);
+            now = list;
+        }
+        if (now == nullptr) {
+            return;
+        }
+        for (const Entry& e : *now) {
+            (*e.work)(chunk);
+        }
+    }
+
+private:
+    mutable std::mutex lock;
+    std::shared_ptr<const List> list;
 };
 
 // One subscriber to one receiver's passband. Loop thread only, same as
@@ -2502,6 +2567,10 @@ private:
     std::map<std::pair<std::uint32_t, std::string>, std::shared_ptr<DecodeRoute>>
         decode_routes_;
     std::uint32_t next_wideband_route_ = 0;
+
+    // The receiver routes' fan-outs, keyed by receiver and lane. Loop thread.
+    std::map<std::pair<std::uint32_t, const DecodeLane*>, std::shared_ptr<DecodeFanout>>
+        decode_fanouts_;
 
     // Speech to text. The transcriber is made in start() when the options
     // carry a way to prepare a recogniser, and destroyed in stop() after
@@ -6931,22 +7000,39 @@ Status ServerImpl::add_decoded(std::shared_ptr<DecodedNode> node,
         route->lane = pick_event_lane();
         std::tie(route->freq_lower_hz, route->freq_upper_hz) =
             decoded_passband(engine_.info(), status);
-        auto attached = engine_.attach_audio_sink(
-            node->vrx,
-            lane_sink(route->lane, std::make_shared<const LaneWork>(
-                                       [route, load = load_](const engine::AudioChunk& chunk) {
-                                           const engine::LoadTimer timed(load->decode_ns);
-                                           load->decode_chunks.fetch_add(
-                                               1, std::memory_order_relaxed);
-                                           const std::scoped_lock owned(route->lock);
-                                           if (route->owner != nullptr) {
-                                               route->owner->on_decoded_chunk(*route, chunk);
-                                           }
-                                       })));
-        if (!attached) {
-            return std::unexpected(attached.error());
+        route->work = std::make_shared<const LaneWork>(
+            [route_ptr = route.get(), load = load_](const engine::AudioChunk& chunk) {
+                const engine::LoadTimer timed(load->decode_ns);
+                load->decode_chunks.fetch_add(1, std::memory_order_relaxed);
+                const std::scoped_lock owned(route_ptr->lock);
+                if (route_ptr->owner != nullptr) {
+                    route_ptr->owner->on_decoded_chunk(*route_ptr, chunk);
+                }
+            });
+
+        // One sink, and so one lane job, per receiver per lane, shared by
+        // every decoder on that receiver pinned to that lane. With a sink per
+        // decoder, usb auto put about twenty jobs on a lane for every chunk,
+        // and the lane's 512 jobs held under a second: an FT8 slot decode
+        // blocking for 700 ms overflowed it and every decoder there lost
+        // chunks. See issue 10.
+        const auto fan_key = std::make_pair(node->vrx.value, route->lane.get());
+        auto fan = decode_fanouts_.find(fan_key);
+        if (fan == decode_fanouts_.end()) {
+            auto made = std::make_shared<DecodeFanout>();
+            auto attached = engine_.attach_audio_sink(
+                node->vrx,
+                lane_sink(route->lane,
+                          std::make_shared<const LaneWork>(
+                              [made](const engine::AudioChunk& chunk) { made->run(chunk); })));
+            if (!attached) {
+                return std::unexpected(attached.error());
+            }
+            made->sink = *attached;
+            fan = decode_fanouts_.emplace(fan_key, std::move(made)).first;
         }
-        route->sink = *attached;
+        fan->second->add(route->work, route);
+        route->fanout = fan->second;
         existing = decode_routes_.emplace(std::move(key), std::move(route)).first;
     }
 
@@ -7063,8 +7149,13 @@ void ServerImpl::end_decoded(const std::shared_ptr<DecodedNode>& node) {
     // stop() has set its flag is the window three sinks were once left in.
     if (route->wideband_tap != 0) {
         static_cast<void>(engine_.detach_wideband_tap(route->wideband_tap));
-    } else {
-        static_cast<void>(engine_.detach_audio_sink(route->vrx, route->sink));
+    } else if (route->fanout != nullptr) {
+        // The shared sink comes off with the last decoder it carries.
+        if (!route->fanout->remove(route.get())) {
+            static_cast<void>(engine_.detach_audio_sink(route->vrx, route->fanout->sink));
+            decode_fanouts_.erase(std::make_pair(route->vrx.value, route->lane.get()));
+        }
+        route->fanout = nullptr;
     }
 
     // Taken last, which waits for a dispatch already inside the decoder; the
@@ -9876,8 +9967,14 @@ void ServerImpl::stop() {
     // And every event decoder. Clearing owner under the route's lock is what
     // makes a sink call already inside on_decoded_chunk finish before this
     // returns, and what makes a later one ring nothing.
+    for (const auto& entry : decode_fanouts_) {
+        static_cast<void>(
+            engine_.detach_audio_sink(engine::VrxId{entry.first.first}, entry.second->sink));
+        entry.second->clear();
+    }
+    decode_fanouts_.clear();
     for (const auto& entry : decode_routes_) {
-        static_cast<void>(engine_.detach_audio_sink(entry.second->vrx, entry.second->sink));
+        entry.second->fanout = nullptr;
         const std::scoped_lock owned(entry.second->lock);
         entry.second->owner = nullptr;
         entry.second->nodes.clear();
