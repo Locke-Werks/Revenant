@@ -312,6 +312,37 @@ bool Link11Decoder::search() {
         if (energy <= 0.0) {
             return 0.0;
         }
+        // Coarse pass first: the preamble tone mixed to zero and summed in
+        // blocks short enough to pass the whole offset range (under 0.1 dB
+        // at the edge). Well short of the threshold there, the full search
+        // cannot reach it.
+        const int block = std::max(1, static_cast<int>(fs_ / (16.0 * std::max(1.0, config_.max_offset_hz))));
+        if (block > 1) {
+            const int nb = (n + block - 1) / block;
+            std::vector<Cplx> z(static_cast<std::size_t>(nb));
+            const Cplx step = std::polar(1.0, -kTwoPi * kLink11DopplerHz / fs_);
+            Cplx ph{1.0, 0.0};
+            for (int i = 0; i < n; ++i) {
+                z[static_cast<std::size_t>(i / block)] += static_cast<double>(at(p + i)) * ph;
+                ph *= step;
+            }
+            double peak = 0.0;
+            for (int o = -span; o <= span; ++o) {
+                const Cplx bstep = std::polar(1.0, -kTwoPi * 2.0 * o * block / fs_);
+                Cplx bph{1.0, 0.0};
+                Cplx acc{};
+                for (const Cplx& v : z) {
+                    acc += v * bph;
+                    bph *= bstep;
+                }
+                peak = std::max(peak, std::norm(acc));
+            }
+            const double coarse = peak / (0.5 * n * energy);
+            if (coarse < 0.7 * config_.detect_threshold) {
+                off = 0.0;
+                return coarse;
+            }
+        }
         // Goertzel over every offset at once: only the power is needed, and
         // it costs one real multiply per sample and offset where the direct
         // correlation took a complex multiply-add and a phasor turn.
