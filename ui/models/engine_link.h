@@ -5277,6 +5277,57 @@ private:
     std::atomic<bool> calls_wake_pending_{false};
     std::atomic<int> call_feed_count_{0};
 
+    // CW CAPTIONS, models/cw_caption_link.cpp. Every detection labelled CW
+    // gets a cw_wide decoder on the source's own stream at its offset, with
+    // no receiver, and each line it decodes goes on captionFeed() beside the
+    // detection as a transcript does. The Qt thread says which detections
+    // are wanted after each detection list; the supervisor subscribes and
+    // drops; the loop thread hands the text back.
+    //
+    // A feed is a carrier, not a detection id: the tracker re-issues an id
+    // when a keyed carrier drops below the threshold between words, and a
+    // decoder rebuilt for each id would never finish a line. So a feed is
+    // matched to the wanted list by frequency and outlives a gap.
+    struct CwCaptionBand {
+        std::int64_t offset_hz = 0;
+        std::int64_t center_hz = 0;
+        std::int64_t low_hz = 0;
+        std::int64_t high_hz = 0;
+    };
+    struct CwCaptionFeed {
+        std::uint64_t key = 0;
+        CwCaptionBand band;
+        std::chrono::steady_clock::time_point last_wanted;
+    };
+    struct CwCaptionRefusal {
+        std::int64_t center_hz = 0;
+        std::chrono::steady_clock::time_point at;
+    };
+    struct CwCaptionLine {
+        CwCaptionBand band;
+        rpc::DecodedMessage message;
+    };
+
+    // Qt thread: after adopt_detections.
+    void want_cw_captions();
+    // Supervisor thread, every pass, after apply_call_feeds.
+    void apply_cw_captions();
+    // Supervisor thread, when the engine is gone: nothing is cancelled.
+    void forget_cw_captions();
+    // Cap'n Proto loop thread.
+    void on_cw_caption(const CwCaptionBand& band, const rpc::DecodedMessage& message);
+    void on_cw_caption_ended(std::int64_t center_hz);
+    // Qt thread.
+    void drain_cw_captions();
+
+    std::vector<CwCaptionFeed> cw_feeds_;              // supervisor thread
+    std::vector<CwCaptionRefusal> cw_refusals_;        // supervisor thread
+    std::mutex cw_caption_mutex_;
+    std::vector<CwCaptionBand> cw_wanted_;             // guarded by cw_caption_mutex_
+    std::vector<std::int64_t> cw_ended_;               // guarded by cw_caption_mutex_
+    std::vector<CwCaptionLine> cw_pending_lines_;      // guarded by cw_caption_mutex_
+    std::atomic<bool> cw_wake_pending_{false};
+
     // Qt thread only.
     DecodedLogModel decoded_log_;
     DecodedImageModel decoded_images_;

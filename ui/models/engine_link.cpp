@@ -439,6 +439,7 @@ void EngineLink::supervise()
             apply_audio_request();
             apply_decode_request();
             apply_call_feeds();
+            apply_cw_captions();
             poll_vocoder_plugins();
             poll_engine_plugins();
             apply_trunk();  // P25 trunk following
@@ -518,6 +519,7 @@ void EngineLink::supervise()
 
             // Every decoder subscription went with it, on the same terms.
             forget_decoded();
+            forget_cw_captions();
 
             // And the transcript subscription and every choice sent.
             forget_transcription();
@@ -585,6 +587,7 @@ void EngineLink::supervise()
             apply_audio_request();
             apply_decode_request();
             apply_call_feeds();
+            apply_cw_captions();
             poll_vocoder_plugins();
             poll_engine_plugins();
             apply_trunk();  // P25 trunk following
@@ -1368,6 +1371,7 @@ void EngineLink::adopt_detections()
     if (decided || resized || retuned) {
         emit detectionsChanged();
     }
+    want_cw_captions();
     // One reading per pass the engine decided, and only then: a repeat of the
     // same pass is the same reading.
     if (decided) {

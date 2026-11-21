@@ -1050,6 +1050,7 @@ void EngineLink::note_source_epoch(const rpc::EngineInfo& info)
     forget_held(QStringLiteral("the source was replaced, and its receivers went with it"));
     forget_audio();
     forget_decoded();
+    forget_cw_captions();
     clear_rds(QStringLiteral(
         "the source was replaced, so nothing is decoding RDS. The switch stays on and the "
         "decoder is rebuilt on the next receiver."));

@@ -192,6 +192,7 @@ qt_add_executable(revenant_ui
     models/decoded_image_model.cpp
     models/decoded_image_model.h
     models/decoded_images.h
+    models/cw_caption_link.cpp
     models/decoded_link.cpp
     models/decoded_log.h
     models/decoded_model.cpp
