@@ -1,6 +1,7 @@
 #include "core/decode/mfsk_demod.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <numbers>
@@ -33,9 +34,36 @@ std::complex<double> correlate(const float* x, std::size_t count, double hz, dou
 // scaled so a sinusoid of amplitude A on a bin reads A^2.
 void bank(const float* x, std::size_t length, double first_hz, double spacing_hz, int count,
           double rate, double* out) {
+    // Goertzel per bin, which needs only the magnitude and costs one real
+    // multiply per sample, against a complex multiply-add and a phasor turn
+    // for the direct correlation. Bins go in the inner loop in blocks so the
+    // compiler can run several at once.
     const double scale = 4.0 / (static_cast<double>(length) * static_cast<double>(length));
-    for (int k = 0; k < count; ++k) {
-        out[k] = std::norm(correlate(x, length, first_hz + spacing_hz * k, rate)) * scale;
+    constexpr int kBlock = 32;
+    std::array<double, kBlock> coeff{};
+    std::array<double, kBlock> s1{};
+    std::array<double, kBlock> s2{};
+    for (int first = 0; first < count; first += kBlock) {
+        const int nb = std::min(kBlock, count - first);
+        for (int k = 0; k < nb; ++k) {
+            coeff[static_cast<std::size_t>(k)] =
+                2.0 * std::cos(2.0 * std::numbers::pi * (first_hz + spacing_hz * (first + k)) / rate);
+            s1[static_cast<std::size_t>(k)] = 0.0;
+            s2[static_cast<std::size_t>(k)] = 0.0;
+        }
+        for (std::size_t n = 0; n < length; ++n) {
+            const auto v = static_cast<double>(x[n]);
+            for (int k = 0; k < nb; ++k) {
+                const auto i = static_cast<std::size_t>(k);
+                const double s = v + coeff[i] * s1[i] - s2[i];
+                s2[i] = s1[i];
+                s1[i] = s;
+            }
+        }
+        for (int k = 0; k < nb; ++k) {
+            const auto i = static_cast<std::size_t>(k);
+            out[first + k] = (s1[i] * s1[i] + s2[i] * s2[i] - coeff[i] * s1[i] * s2[i]) * scale;
+        }
     }
 }
 
