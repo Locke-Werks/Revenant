@@ -17,6 +17,10 @@ namespace {
 constexpr double kEnvelopeCutoffHz = 2200.0;
 constexpr double kEnvelopeTransitionHz = 500.0;
 
+// Lowest envelope rate the decimation aims for. The tests run at 11025 and
+// 20800 Hz, where it keeps every sample.
+constexpr double kEnvelopeRateHz = 11025.0;
+
 // Combined Sync A and Sync B normalised correlation, halved, that a line has
 // to reach to start an image and to stay tracked. Chosen from the round trip
 // in tests/decode/test_apt.cpp, not from the document.
@@ -139,11 +143,22 @@ Expected<AptDecoder> AptDecoder::create(const AptConfig& config, AptEvents event
     d.taps_ = design_lowpass(config.sample_rate);
     d.hist_i_.assign(2 * d.taps_.size(), 0.0F);
     d.hist_q_.assign(2 * d.taps_.size(), 0.0F);
-    d.phase_step_ = kAptSubcarrierHz / config.sample_rate;
-    d.sync_a_tmpl_ = sync_template(apt_sync_a(), config.sample_rate);
-    d.sync_b_tmpl_ = sync_template(apt_sync_b(), config.sample_rate);
+    const double step = 2.0 * std::numbers::pi * kAptSubcarrierHz / config.sample_rate;
+    d.rot_re_ = std::cos(step);
+    d.rot_im_ = std::sin(step);
+    // The low-pass leaves nothing above kEnvelopeCutoffHz, so the envelope
+    // only needs computing at a rate of about 11 kHz, not the receiver's 48:
+    // the filter runs once per kept output instead of once per input sample,
+    // and the sync search shrinks with it. No satellite is in view on an nfm
+    // receiver nearly all the time, and at the full rate this decoder cost
+    // 17 ms of CPU a second per receiver doing nothing (issue 7).
+    d.decim_ = std::max<std::size_t>(
+        1, static_cast<std::size_t>(std::floor(config.sample_rate / kEnvelopeRateHz)));
+    d.fs_ = config.sample_rate / static_cast<double>(d.decim_);
+    d.sync_a_tmpl_ = sync_template(apt_sync_a(), d.fs_);
+    d.sync_b_tmpl_ = sync_template(apt_sync_b(), d.fs_);
     // Table 4.2.2-1: 120 lines a minute.
-    d.nominal_period_ = config.sample_rate / 2.0;
+    d.nominal_period_ = d.fs_ / 2.0;
     d.period_ = d.nominal_period_;
     return d;
 }
@@ -152,16 +167,30 @@ void AptDecoder::push(std::span<const float> audio) {
     const std::size_t n = taps_.size();
     const std::size_t delay = (n - 1) / 2;
     for (const float x : audio) {
-        const double angle = 2.0 * std::numbers::pi * phase_;
-        phase_ += phase_step_;
-        phase_ -= std::floor(phase_);
-        const auto i = static_cast<float>(x * std::cos(angle));
-        const auto q = static_cast<float>(-x * std::sin(angle));
+        const auto i = static_cast<float>(x * osc_re_);
+        const auto q = static_cast<float>(-x * osc_im_);
+        const double re = osc_re_ * rot_re_ - osc_im_ * rot_im_;
+        osc_im_ = osc_re_ * rot_im_ + osc_im_ * rot_re_;
+        osc_re_ = re;
+        if (++renorm_ == 4096) {
+            renorm_ = 0;
+            const double mag = std::sqrt(osc_re_ * osc_re_ + osc_im_ * osc_im_);
+            osc_re_ /= mag;
+            osc_im_ /= mag;
+        }
         hist_i_[hist_pos_] = i;
         hist_i_[hist_pos_ + n] = i;
         hist_q_[hist_pos_] = q;
         hist_q_[hist_pos_ + n] = q;
         hist_pos_ = (hist_pos_ + 1) % n;
+        if (consumed_++ < delay) {
+            continue;
+        }
+        if (decim_count_ != 0) {
+            decim_count_ = decim_count_ + 1 == decim_ ? 0 : decim_count_ + 1;
+            continue;
+        }
+        decim_count_ = decim_ == 1 ? 0 : 1;
         // hist_[hist_pos_ .. hist_pos_ + n) is oldest to newest.
         float si = 0.0F;
         float sq = 0.0F;
@@ -169,10 +198,7 @@ void AptDecoder::push(std::span<const float> audio) {
             si += taps_[k] * hist_i_[hist_pos_ + k];
             sq += taps_[k] * hist_q_[hist_pos_ + k];
         }
-        if (consumed_ >= delay) {
-            env_.push_back(2.0F * std::sqrt(si * si + sq * sq));
-        }
-        ++consumed_;
+        env_.push_back(2.0F * std::sqrt(si * si + sq * sq));
     }
     process();
 }
@@ -249,14 +275,55 @@ bool AptDecoder::try_line() {
         // most of the peak's. The fine pass then searches a sample at a time
         // either side of the best coarse offset, which finds the same peak
         // the exhaustive search did.
-        const double step = std::max(1.0, std::floor(kCoarseStepWords * config_.sample_rate /
+        const double step = std::max(1.0, std::floor(kCoarseStepWords * fs_ /
                                                      kAptWordRate));
+        // The coarse pass takes each window's sum and sum of squares from
+        // prefix sums, leaving one multiply-add per template tap instead of
+        // four.
+        const auto first = static_cast<std::ptrdiff_t>(std::llround(s - env_base_));
+        const std::size_t span = env_.size() - static_cast<std::size_t>(std::max<std::ptrdiff_t>(first, 0));
+        prefix_sum_.assign(span + 1, 0.0);
+        prefix_sq_.assign(span + 1, 0.0);
+        if (first >= 0) {
+            const float* e = env_.data() + first;
+            for (std::size_t k = 0; k < span; ++k) {
+                prefix_sum_[k + 1] = prefix_sum_[k] + e[k];
+                prefix_sq_[k + 1] = prefix_sq_[k] + static_cast<double>(e[k]) * e[k];
+            }
+        }
+        const auto fast = [&](const std::vector<float>& tmpl, double tt, double at) {
+            const auto off = static_cast<std::ptrdiff_t>(std::llround(at - env_base_)) - first;
+            if (first < 0 || off < 0 || static_cast<std::size_t>(off) + tmpl.size() > span) {
+                return 0.0F;
+            }
+            const float* e = env_.data() + first + off;
+            float num = 0.0F;
+            for (std::size_t j = 0; j < tmpl.size(); ++j) {
+                num += tmpl[j] * e[j];
+            }
+            const auto o = static_cast<std::size_t>(off);
+            const double sum = prefix_sum_[o + tmpl.size()] - prefix_sum_[o];
+            const double sq = prefix_sq_[o + tmpl.size()] - prefix_sq_[o];
+            const double var = sq - sum * sum / static_cast<double>(tmpl.size());
+            if (var <= 1e-20 || tt <= 0.0) {
+                return 0.0F;
+            }
+            return static_cast<float>(num / std::sqrt(tt * var));
+        };
+        const auto energy = [](const std::vector<float>& t) {
+            double v = 0.0;
+            for (const float x : t) {
+                v += static_cast<double>(x) * x;
+            }
+            return v;
+        };
+        const double tt_a = energy(sync_a_tmpl_);
+        const double tt_b = energy(sync_b_tmpl_);
         double coarse_p = s;
         float coarse = -2.0F;
         for (double p = s; p < s + nominal_period_; p += step) {
-            float a = 0.0F;
-            float b = 0.0F;
-            const float sc = score_at(p, a, b);
+            const float sc = 0.5F * (fast(sync_a_tmpl_, tt_a, p) +
+                                     fast(sync_b_tmpl_, tt_b, p + period_ / 2.0));
             if (sc > coarse) {
                 coarse = sc;
                 coarse_p = p;
@@ -306,7 +373,7 @@ bool AptDecoder::try_line() {
         return true;
     }
 
-    const double window = std::ceil(kTrackWindowWords * config_.sample_rate / kAptWordRate);
+    const double window = std::ceil(kTrackWindowWords * fs_ / kAptWordRate);
     const double expected = last_start_ + period_;
     if (available < expected + window + period_ + 4.0) {
         return false;
@@ -386,8 +453,8 @@ void AptDecoder::emit_line(double start, float a, float b, bool free_running) {
     AptLine line;
     line.line = rows_;
     line.image_id = image_id_;
-    line.start_sample = start;
-    line.period_samples = period_;
+    line.start_sample = start * static_cast<double>(decim_);
+    line.period_samples = period_ * static_cast<double>(decim_);
     line.sync_a = a;
     line.sync_b = b;
     line.free_running = free_running;

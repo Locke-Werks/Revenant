@@ -166,15 +166,26 @@ private:
     std::vector<float> taps_;
     std::vector<float> hist_i_, hist_q_;
     std::size_t hist_pos_ = 0;
-    double phase_ = 0.0;
-    double phase_step_ = 0.0;
+    // Local oscillator as a rotating phasor, renormalised now and then.
+    double osc_re_ = 1.0, osc_im_ = 0.0;
+    double rot_re_ = 1.0, rot_im_ = 0.0;
+    std::uint32_t renorm_ = 0;
     std::uint64_t consumed_ = 0;  // input samples taken
 
-    // Envelope buffer: env_[k] is input sample env_base_ + k, delay removed.
+    // The envelope is computed at every decim_-th input sample, fs_ = input
+    // rate / decim_. Everything below works at fs_; AptLine reports input
+    // samples.
+    std::size_t decim_ = 1;
+    std::size_t decim_count_ = 0;
+    double fs_ = 0.0;
+
+    // Envelope buffer: env_[k] is envelope sample env_base_ + k, at fs_,
+    // delay removed.
     std::vector<float> env_;
     double env_base_ = 0.0;
 
     std::vector<float> sync_a_tmpl_, sync_b_tmpl_;
+    std::vector<double> prefix_sum_, prefix_sq_;  // coarse search scratch
     double nominal_period_ = 0.0;
 
     // Sync state.
